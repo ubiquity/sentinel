@@ -11,6 +11,36 @@ status, acceptance and write ownership here.
 
 ### Current checkpoint
 
+**The review pipeline is repaired and the runtime is refusing an incomplete
+candidate, which is the correct outcome.** The counter-granted retry was
+admitted at 09:14:16Z with a NEW reservation identity (task/base/attempt 3), the
+runtime's own model worker produced a corrected candidate (`ec27bf7d…`,
+published to PR 51), and review round 7 (09:38:39Z, review `5233650313`, key
+`review:51:ec27bf7d…:attempt-7`) returned another real Luna/max verdict: findings,
+P2 "The sanitizer can corrupt non-closing URLs." The merge gate therefore still
+holds — no merge, no release request, no acceptance claim, no fabricated receipt.
+
+- State at this entry: `issue-ubiquity-sentinel-48` is at `review` with counters
+  3/0/7, head `ec27bf7d…`, base `3dfb3402…`, no intent, no blocker and a bounded
+  `review_pending` wait; the hosted runtime is generation 10 (`80384fc3…`,
+  reviewer provenance) and idle.
+- The next ordinary execution (~10:14Z, hourly cadence) observes round 7, routes
+  the task to a correction and admits the next implementation attempt (counter 3
+  → 4, still inside the runtime's four-attempt bound) through its own model
+  worker; the changed candidate must then pass review round 8 before any merge.
+- All three deployed fixes are live and independently evidenced: the terminal
+  no-verdict recovery (generation 8), the review-step base-refresh
+  reconciliation (generation 9) and the reviewer provenance fix for the
+  installed 0.154 unified-exec sources (generation 10). Real reviews, real
+  executions (gpt-5.6-luna, max reasoning) and real findings are the proof; the
+  earlier rounds' twenty-to-thirty-second no-verdict refusals are gone.
+- Recorded boundary for the next round: the candidate content must satisfy the
+  reviewer's URL/non-closing-reference criterion, which two model corrections
+  have not yet achieved; the delivery, the supervisor's prior/candidate proofs,
+  the promotion and the live delivery evidence therefore remain outstanding, and
+  the goal stays active. `docs/build-status.md` remains the only authoritative
+  ledger and every charge, receipt, reservation and candidate is preserved.
+
 **The root cause of the "unreleasable self-repair" was a reviewer-provenance
 defect, and it is fixed and live.** Review rounds 3 (02:12:21Z) and 4
 (04:25:03Z) each ended about thirty seconds after their request with `verdict
@@ -70,7 +100,37 @@ its own model worker on PR 51; the changed candidate will be reviewed again
 proofs are unchanged. The lane promotion carrying the runtime-pinned operator
 (`9b06622…`) was published under local verification (10/10 operator tests, lint,
 `deno check`) with its own CI run in flight (35189179293) to meet the
-ordinary-execution window; its result is recorded in the next entry.
+ordinary-execution window; that run and the promotion merge both completed green
+afterwards.
+
+At07:30 the granted correction attempt ended WITHOUT a trusted candidate: the
+runtime blocked `issue-ubiquity-sentinel-48` with kind `other` and the exact
+reason "model run did not complete with a trusted candidate", consuming the one
+granted attempt (counters 4/0/6, head `430b9760…`, base `3dfb3402…`). That is a
+failed attempt, not substantive progress, so the same owner-directed bound is
+re-applied: the one-shot recovery now also clears that closed blocker, and the
+retry it arms is the subject of the two findings below.
+
+- A settled failed implementation cannot be retried under the runtime's current
+  reservation identity: the shared budget derives the identity from
+  (task, base, attempt, purpose), so the same base and counter reproduce the
+  settled attempt and the loop blocks with `model admission refused: duplicate`.
+  That is a genuine liveness gap in the accounting (a failed attempt's counter
+  unit is given back, but its identity is not), recorded here as the next
+  runtime defect to fix after this delivery.
+- Rebinding a preserved candidate to a newer base is NOT available to a state
+  writer: the frozen record contract requires a preserved candidate's base and
+  head to equal the target's ("never silently rebound"), so that attempt failed
+  as `snapshot_invalid` and was reverted immediately rather than kept.
+- The retry therefore uses the bounded counter grant only: the counter is
+  lowered by exactly one (3 → 2), so the next admission is
+  task/base/attempt 3 — an UNUSED identity at this unchanged base — and the
+  preserved candidate descriptor stays exactly as the runtime wrote it. Applied
+  at 08:25:57Z (`17eb286…`, lane `91b708e7…` then the counter-grant promotion);
+  the record is armed at `work` with counters 2/0/6, head `430b9760…`, base
+  `3dfb3402…` and no intent or blocker, waiting on the ordinary execution at
+  ~09:06Z. Every charge, receipt and reservation is preserved, nothing was
+  merged and no receipt was fabricated.
 
 **Live: the deadlock is broken and the runtime is recovering issue 48 on its own.**
 The fix below was activated by the owner's 2026-09-17 decision and is proven in

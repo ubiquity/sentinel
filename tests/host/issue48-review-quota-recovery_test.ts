@@ -33,7 +33,9 @@ import {
 } from "../../src/state/mod.ts";
 import {
   buildNextQuotaSnapshot,
+  ISSUE48_QUOTA_ADMISSION_BLOCKER_PREFIX,
   ISSUE48_QUOTA_BLOCKER_PREFIX,
+  ISSUE48_QUOTA_CANDIDATE_BLOCKER_PREFIX,
   runIssue48QuotaRecovery,
   targetPreconditionHolds,
   validateIssue48QuotaHostedIdentity,
@@ -42,7 +44,13 @@ import type {
   Issue48QuotaRecoveryBindingV1,
   Issue48QuotaRecoveryResultV1,
 } from "../../ops/issue48-review-quota-recovery.ts";
-import { makeRemoteCtx, REPO, reviewReceipt, SHA1 } from "../state/helpers.ts";
+import {
+  makeRemoteCtx,
+  REPO,
+  reservation,
+  reviewReceipt,
+  SHA1,
+} from "../state/helpers.ts";
 
 const T0 = 1_700_000_000_000;
 const SHA_A = "a".repeat(40) as GitSha;
@@ -132,6 +140,23 @@ function repairSnapshot(
     replays: [],
     releaseRequests: [],
     githubCooldowns: [],
+  });
+}
+
+function repairSnapshotWithReservations(
+  record: WorkRecordV1,
+  reservations: { id: string; outcome: string }[],
+): RepairStateSnapshotV1 {
+  const base = repairSnapshot(record);
+  return parseRepairStateSnapshotV1({
+    ...base,
+    reservations: reservations.map((item) =>
+      reservation(item.id, {
+        taskId: record.id,
+        head: record.target.head,
+        outcome: item.outcome,
+      })
+    ),
   });
 }
 
@@ -481,8 +506,54 @@ Deno.test(
       record?: Record<string, unknown>;
       binding?: Partial<Issue48QuotaRecoveryBindingV1>;
       runtime?: Partial<HostedRuntimeRecordV1>;
+      reservations?: { id: string; outcome: string }[];
       expected: string;
     }[] = [
+      {
+        name: "candidate-failure-blocker-is-cleared",
+        record: {
+          blocker: {
+            kind: "other",
+            message:
+              `${ISSUE48_QUOTA_CANDIDATE_BLOCKER_PREFIX}: implementation`,
+            since: T0 + 1000,
+          },
+        },
+        expected: "applied",
+      },
+      {
+        name: "admission-duplicate-blocker-is-cleared",
+        record: {
+          blocker: {
+            kind: "unavailable",
+            message: `${ISSUE48_QUOTA_ADMISSION_BLOCKER_PREFIX}`,
+            since: T0 + 1000,
+          },
+        },
+        expected: "applied",
+      },
+      {
+        name: "unrelated-unavailable-blocker",
+        record: {
+          blocker: {
+            kind: "unavailable",
+            message: "review transport failure",
+            since: T0 + 1000,
+          },
+        },
+        expected: "target_precondition_mismatch",
+      },
+      {
+        name: "unrelated-other-blocker",
+        record: {
+          blocker: {
+            kind: "other",
+            message: "candidate preservation descriptor unavailable",
+            since: T0 + 1000,
+          },
+        },
+        expected: "target_precondition_mismatch",
+      },
       {
         name: "granted-budget-outside-the-closed-set",
         binding: { grantedImplementationAttempts: 2 as unknown as 0 | 1 },
@@ -571,8 +642,9 @@ Deno.test(
     ];
     for (const item of cases) {
       const rig = await makeRig(`quota-refuse-${item.name}`, {
-        repair: repairSnapshot(
+        repair: repairSnapshotWithReservations(
           quotaWorkRecord(item.record ?? {}),
+          item.reservations ?? [],
         ),
         runtime: item.runtime === undefined
           ? undefined
@@ -580,6 +652,15 @@ Deno.test(
       });
       try {
         const result = await runRig(rig, { binding: item.binding });
+        if (item.expected === "applied") {
+          assert.equal(
+            result.status,
+            "applied",
+            `${item.name}: ${result.reason}`,
+          );
+          assert.equal(rig.writes, 1, item.name);
+          continue;
+        }
         assert.equal(result.status, "failed", `${item.name}: ${result.reason}`);
         assert.equal(result.reason, item.expected, item.name);
         assert.equal(rig.writes, 0, item.name);

@@ -13,9 +13,11 @@
  * next attempt through its own admission path.
  *
  * It is NOT a general maintenance framework and NOT a quota edit: it writes no
- * release state, reserves or refunds no budget, resets no counter, drops no
- * receipt, evidence, reservation or review, changes no policy and touches no
- * other record. Every historical charge and identity is preserved by reference.
+ * release state, reserves or refunds no budget, drops no receipt, evidence,
+ * reservation or review, changes no policy and touches no other record. The only
+ * counter it may lower is the single implementation attempt the binding grants
+ * as a closed 0-or-1 value. Every historical charge and identity is preserved by
+ * reference.
  *
  * Safety envelope:
  * - `runIssue48QuotaRecoveryMain` refuses to touch credentials or state unless
@@ -26,7 +28,9 @@
  *   work item still carries the exact counters, evidence, target and PR
  *   identity this binding pins, and only while the single hosted runtime is
  *   settled, healthy at its exact revision/generation and every hosted release
- *   is terminal.
+ *   is terminal. A leftover implementation intent is closed ONLY when the
+ *   reservation it names is provably settled, which is the proof that the
+ *   failed attempt can no longer publish a candidate.
  * - Exactly one `writeRepair` with the observed head as its expected parent is
  *   attempted; its typed disposition is preserved and never retried. An applied
  *   outcome is reported only after a full readback proves the returned head, the
@@ -91,6 +95,24 @@ export const ISSUE48_QUOTA_BLOCKER_PREFIX =
 export const ISSUE48_QUOTA_BUDGET_BLOCKER_PREFIX =
   "implementation attempt budget exhausted";
 
+/**
+ * Exact prefix of the third blocker this one-shot may clear: an implementation
+ * session that ended without a trusted candidate (kind `other`), which is a
+ * failed attempt rather than substantive progress and therefore also needs the
+ * one bounded retry the owner directed.
+ */
+export const ISSUE48_QUOTA_CANDIDATE_BLOCKER_PREFIX =
+  "model run did not complete with a trusted candidate";
+
+/**
+ * Exact prefix of the fourth blocker this one-shot may clear: the shared budget
+ * refusing a reservation whose (task, base, attempt, purpose) identity is
+ * already settled. The base advance below is what gives the next attempt a new
+ * identity, so this closed reason is the one the recovery exists to resolve.
+ */
+export const ISSUE48_QUOTA_ADMISSION_BLOCKER_PREFIX =
+  "model admission refused: duplicate";
+
 /** Fixed production binding of the reviewed one-shot recovery. */
 export interface Issue48QuotaRecoveryBindingV1 {
   /** Exact target work item id. */
@@ -121,16 +143,19 @@ export interface Issue48QuotaRecoveryBindingV1 {
 }
 
 /**
- * Reviewed production pins, read from the live state on 2026-09-17 05:10Z (the
- * head and base of review round 5, whose completed P2 finding requires one
- * bounded correction the exhausted implementation budget would refuse).
+ * Reviewed production pins, read from the live state on 2026-09-17 08:20Z:
+ * review round 6's P2 finding requires one bounded correction, the granted
+ * attempt ended without a trusted candidate, and the retry was refused because
+ * the settled attempt already owns this (task, base, attempt, purpose)
+ * reservation identity. The base advance is what makes the next attempt a new
+ * identity; no counter is given back.
  * The repair ref head is deliberately NOT pinned: it moves on every runtime
  * cycle, so the expected-head CAS plus the exact work-item preconditions and
  * the full readback are what authorize the single write.
  */
 export const ISSUE48_QUOTA_PRODUCTION_BINDING: Issue48QuotaRecoveryBindingV1 = {
   targetId: "issue-ubiquity-sentinel-48" as WorkItemId,
-  counters: { attempts: 4, retries: 0, reviewRounds: 5 },
+  counters: { attempts: 3, retries: 0, reviewRounds: 6 },
   grantedImplementationAttempts: 1,
   evidenceRef:
     "artifact:review-receipt/review-receipt:2e4e595978d5ca887abcad4a31b0ac94ea7d548227792f85b0d210078d3c1446",
@@ -138,8 +163,8 @@ export const ISSUE48_QUOTA_PRODUCTION_BINDING: Issue48QuotaRecoveryBindingV1 = {
     "review-receipt:2e4e595978d5ca887abcad4a31b0ac94ea7d548227792f85b0d210078d3c1446",
   ],
   pullRequestNumber: 51,
-  pullRequestHead: "ae6ff044280a04803958fcd1f6f9304bb894249e" as GitSha,
-  pullRequestBase: "f1b5a86b80ca4759ab37307484b223907bd1b1d6" as GitSha,
+  pullRequestHead: "430b9760e98d88d8e50b02c50a084300122335ba" as GitSha,
+  pullRequestBase: "3dfb3402c8a5155d6d9f023c72aaa52cf2b801e2" as GitSha,
   repository: ISSUE48_QUOTA_REPOSITORY,
   runtimeId: "ubiquity/sentinel:0:production",
   runtimeRevision: "80384fc3668c246297621aa1c588c0e49ea516c6" as GitSha,
@@ -253,8 +278,9 @@ function sameCounters(
 export function targetPreconditionHolds(
   record: WorkRecordV1,
   binding: Issue48QuotaRecoveryBindingV1,
+  /** Snapshot reservations; used to prove a failed attempt is fully settled. */
+  reservations: readonly { id: string; outcome: string }[] = [],
 ): boolean {
-  if (record.intent !== null) return false;
   if (!sameCounters(record, binding)) return false;
   if (
     record.target.pr !== binding.pullRequestNumber ||
@@ -272,12 +298,37 @@ export function targetPreconditionHolds(
   ) {
     return false;
   }
-  if (record.nextStep === "review") return true;
+  if (record.nextStep === "review") return record.intent === null;
   if (record.nextStep !== "blocked") return false;
   const blocker = record.blocker;
-  if (blocker === null || blocker.kind !== "review_quota") return false;
-  return blocker.message.startsWith(ISSUE48_QUOTA_BLOCKER_PREFIX) ||
-    blocker.message.startsWith(ISSUE48_QUOTA_BUDGET_BLOCKER_PREFIX);
+  if (blocker === null) return false;
+  if (blocker.kind === "review_quota") {
+    if (record.intent !== null) return false;
+    return blocker.message.startsWith(ISSUE48_QUOTA_BLOCKER_PREFIX) ||
+      blocker.message.startsWith(ISSUE48_QUOTA_BUDGET_BLOCKER_PREFIX);
+  }
+  if (blocker.kind === "unavailable") {
+    if (record.intent !== null) return false;
+    return blocker.message.startsWith(ISSUE48_QUOTA_ADMISSION_BLOCKER_PREFIX);
+  }
+  if (
+    blocker.kind !== "other" ||
+    !blocker.message.startsWith(ISSUE48_QUOTA_CANDIDATE_BLOCKER_PREFIX)
+  ) {
+    return false;
+  }
+  // A failed implementation attempt leaves its intent in place after the run
+  // settled it. That intent may only be closed when it is provably CLOSED: it
+  // names a reservation of this exact record that is settled (never reserved),
+  // which is what proves the attempt cannot still publish a candidate. Any
+  // other intent — including an unsettled or foreign one — refuses.
+  if (record.intent === null) return true;
+  if (record.intent.kind !== "implementation") return false;
+  const reservationId = record.intent.requestId;
+  if (reservationId === null || reservationId === "") return false;
+  return reservations.some((reservation) =>
+    reservation.id === reservationId && reservation.outcome !== "reserved"
+  );
 }
 
 /**
@@ -421,7 +472,7 @@ export async function runIssue48QuotaRecovery(
 
   const target = snapshot.work.find((record) => record.id === binding.targetId);
   if (target === undefined) return failed("target_missing", observedHead);
-  if (!targetPreconditionHolds(target, binding)) {
+  if (!targetPreconditionHolds(target, binding, snapshot.reservations)) {
     // A record that already moved on (the runtime re-armed it, another actor
     // advanced it, or the counters/identity drifted) is an ordinary zero-write
     // skip, never a failure this one-shot may push through.
