@@ -969,7 +969,7 @@ Deno.test("issue48 recovery: supervisor workflow dependency and locking contract
   assert.ok(maintenance.includes("ref: ${{ github.sha }}"));
   assert.ok(maintenance.includes("fetch-depth: 0"));
   assert.ok(maintenance.includes("persist-credentials: false"));
-  assert.ok(maintenance.includes("ops/issue48-recovery.ts"));
+  assert.ok(maintenance.includes("ops/issue48-review-quota-recovery.ts"));
   assert.ok(maintenance.includes("--no-lock"));
   assert.ok(maintenance.includes("--allow-run=git"));
   assert.ok(maintenance.includes("--allow-net=api.github.com"));

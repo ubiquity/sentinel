@@ -22,6 +22,15 @@ permissions:
 jobs:
   test-local:
     runs-on: ubuntu-latest
+    # Bounded like every other Sentinel job. The full harness takes ~15 minutes
+    # on a hosted Linux runner; without a bound a wedged runner keeps this
+    # REQUIRED check "in progress" for the six-hour workflow default, which
+    # silently blocks every development delivery and the owner-install
+    # verification that requires a completed successful check on an exact
+    # revision (observed 2026-09-17: one run sat in the harness step for 57
+    # minutes and had to be cancelled and re-run by hand). Three times the
+    # observed duration leaves no false timeout.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: denoland/setup-deno@v2
