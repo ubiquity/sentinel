@@ -508,6 +508,18 @@ export const OWNER_DEVELOPMENT_INSTALL_RUNTIME_RECOVERY_SUCCESSOR_REVISION =
   "275fee6dba74800b47e555f3f316b60be566ccb4" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_RUNTIME_RECOVERY_SUCCESSOR_GENERATION =
   55;
+/** Exact independently proven ordinary runtime installed at generation 56. */
+export const OWNER_DEVELOPMENT_INSTALL_CONCURRENCY_PRIOR_REVISION =
+  "0fcdb5505417798e3ec7626333d4621fff67c26d" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_CONCURRENCY_PRIOR_GENERATION = 56;
+/**
+ * Exact frozen concurrency and retirement-closure revision. Failure restores
+ * only the proven generation 56 predecessor once at generation 58, which is
+ * terminal.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_CONCURRENCY_REVISION =
+  "219971b4647224fb9d2b3232f761aa48336dd583" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_CONCURRENCY_GENERATION = 57;
 /** Monotonic rollback target the failed generation 45 candidate rolled to. */
 export const OWNER_DEVELOPMENT_INSTALL_ROLLBACK_TARGET_GENERATION =
   OWNER_DEVELOPMENT_INSTALL_ASSIGN_FIRST_GENERATION + 2;
@@ -2632,6 +2644,64 @@ export function planOwnerDevelopmentInstall(
     }
     return waiting(
       "the runtime recovery successor generation 55 healthy proof is not recorded",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_CONCURRENCY_PRIOR_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_CONCURRENCY_PRIOR_GENERATION
+  ) {
+    const settlement = runtime.lastExecutionProof;
+    if (
+      healthy === null || settlement === null ||
+      settlement.outcome !== "healthy" ||
+      settlement.execution.revision !== revision ||
+      settlement.execution.generation !== generation ||
+      settlement.observedAt < healthy.observedAt
+    ) {
+      return waiting(
+        "the current generation 56 healthy settlement is not recorded",
+      );
+    }
+    return movePlan(
+      "install",
+      runtime,
+      OWNER_DEVELOPMENT_INSTALL_CONCURRENCY_REVISION,
+      OWNER_DEVELOPMENT_INSTALL_CONCURRENCY_GENERATION,
+      healthy,
+      "install the concurrency revision after the generation 56 healthy proof",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_CONCURRENCY_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_CONCURRENCY_GENERATION
+  ) {
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_CONCURRENCY_PRIOR_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_CONCURRENCY_PRIOR_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded generation 56 healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_CONCURRENCY_PRIOR_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed concurrency candidate to its recorded proven predecessor",
+      );
+    }
+    if (healthy !== null) {
+      return noChange("the owner development installation is complete");
+    }
+    return waiting(
+      "the concurrency generation 57 healthy proof is not recorded",
     );
   }
 

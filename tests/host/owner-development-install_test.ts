@@ -67,7 +67,9 @@ import {
   ownerDevelopmentInstallCommitMessage,
   ownerDevelopmentInstallFiles,
   planOwnerDevelopmentInstall,
+  runOwnerDevelopmentInstallMain,
 } from "../../src/host/owner-development-install.ts";
+import { createReleaseStateStore, DenoGitRunner } from "../../src/state/mod.ts";
 
 const T0 = 1_700_000_000_000;
 const NOW = T0 + 10_000;
@@ -216,7 +218,409 @@ const RUNTIME54_REVISION = "a6c40a95ceb93fbdf1f85343409393c68d4fe13c" as GitSha;
 const RUNTIME54_GENERATION = 54;
 const RUNTIME55_REVISION = "275fee6dba74800b47e555f3f316b60be566ccb4" as GitSha;
 const RUNTIME55_GENERATION = 55;
+const CONCURRENCY_PRIOR_REVISION =
+  "0fcdb5505417798e3ec7626333d4621fff67c26d" as GitSha;
+const CONCURRENCY_REVISION =
+  "219971b4647224fb9d2b3232f761aa48336dd583" as GitSha;
 const ROLLBACK_TARGET_GENERATION = 46;
+
+/** Real production entrypoint, fake GitHub transport, real private Git objects. */
+async function concurrencyInstallerFixture(
+  snapshot: ReleaseStateSnapshotV1,
+  refusal?: "ancestry" | "ci" | "parent" | "readback" | "artifact",
+) {
+  const directory = await Deno.makeTempDir({
+    prefix: "sentinel-owner57-",
+    dir: Deno.cwd(),
+  });
+  const remote = `${directory}/remote.git`;
+  const originalCommand = Deno.Command;
+  const originalFetch = globalThis.fetch;
+  const originalLog = console.log;
+  const originalNow = Date.now;
+  const originalCwd = Deno.cwd();
+  const originalEnvironmentGet = Deno.env.get;
+  const environment: Record<string, string> = {
+    GITHUB_REPOSITORY: "ubiquity/sentinel",
+    GITHUB_REF: "refs/heads/sentinel-supervisor",
+    GITHUB_JOB: "prepare",
+    GITHUB_SHA: LAUNCHER,
+    GITHUB_WORKFLOW_SHA: LAUNCHER,
+    GITHUB_TOKEN: "offline-native-token",
+    SENTINEL_SUPERVISOR_TOKEN: "offline-app-token-value",
+  };
+  const gitEnvironment = {
+    PATH: Deno.env.get("PATH") ?? "/usr/bin:/bin",
+    HOME: directory,
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_CONFIG_SYSTEM: "/dev/null",
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_AUTHOR_NAME: "Offline fixture",
+    GIT_AUTHOR_EMAIL: "fixture@example.invalid",
+    GIT_COMMITTER_NAME: "Offline fixture",
+    GIT_COMMITTER_EMAIL: "fixture@example.invalid",
+  };
+  async function git(args: string[], input?: string, index?: string) {
+    const command = new originalCommand("git", {
+      args,
+      cwd: directory,
+      clearEnv: true,
+      env: {
+        ...gitEnvironment,
+        ...(index === undefined ? {} : { GIT_INDEX_FILE: index }),
+      },
+      stdin: input === undefined ? "null" : "piped",
+      stdout: "piped",
+      stderr: "piped",
+    });
+    const child = command.spawn();
+    if (input !== undefined) {
+      const writer = child.stdin.getWriter();
+      await writer.write(new TextEncoder().encode(input));
+      await writer.close();
+    }
+    const output = await child.output();
+    assert.equal(output.code, 0, new TextDecoder().decode(output.stderr));
+    return new TextDecoder().decode(output.stdout).trim();
+  }
+  const ref = "refs/heads/sentinel-state/release";
+  const gitArgs = ["--git-dir", remote];
+  try {
+    await git(["init", "--bare", remote]);
+    const store = createReleaseStateStore({
+      remoteUrl: remote,
+      scratchDir: `${directory}/seed-scratch`,
+      runner: new DenoGitRunner(`${directory}/seed-home`),
+    });
+    // Historical parsed fixtures are seeded as immutable Git objects, not
+    // passed through the live store's first-install transition authority.
+    const files = await ownerDevelopmentInstallFiles(
+      snapshot,
+      snapshot.stateHead!,
+    );
+    files.manifest.text = `${
+      canonicalStringify({
+        ...JSON.parse(files.manifest.text),
+        stateHead: null,
+      })
+    }\n`;
+    const seedFiles = [files.manifest, files.record];
+    for (const record of snapshot.hostedReleases) {
+      seedFiles.push({
+        path: `hostedReleases/${await rawSha256(record.id)}.json`,
+        text: `${canonicalStringify(record)}\n`,
+      });
+    }
+    for (const record of snapshot.githubCooldowns) {
+      seedFiles.push({
+        path: `githubCooldowns/${await rawSha256(
+          String(record.installationId),
+        )}.json`,
+        text: `${canonicalStringify(record)}\n`,
+      });
+    }
+    const seedIndex = `${directory}/seed-index`;
+    await git([...gitArgs, "read-tree", "--empty"], undefined, seedIndex);
+    for (const file of seedFiles) {
+      const blob = await git(
+        [...gitArgs, "hash-object", "-w", "--stdin"],
+        file.text,
+      );
+      await git(
+        [
+          ...gitArgs,
+          "update-index",
+          "--add",
+          "--cacheinfo",
+          "100644",
+          blob,
+          file.path,
+        ],
+        undefined,
+        seedIndex,
+      );
+    }
+    const seedTree = await git(
+      [...gitArgs, "write-tree"],
+      undefined,
+      seedIndex,
+    );
+    const initialHead = await git([
+      ...gitArgs,
+      "commit-tree",
+      seedTree,
+      "-m",
+      "fixed offline historical state",
+    ]) as GitSha;
+    await git([...gitArgs, "update-ref", ref, initialHead]);
+    await git([
+      ...gitArgs,
+      "update-ref",
+      "refs/heads/sentinel-state/repair",
+      initialHead,
+    ]);
+    if (refusal === "artifact") {
+      const blob = await git(
+        [...gitArgs, "hash-object", "-w", "--stdin"],
+        "unsafe",
+      );
+      const index = `${directory}/artifact-index`;
+      await git(
+        [...gitArgs, "read-tree", `${initialHead}^{tree}`],
+        undefined,
+        index,
+      );
+      const manifestBlob = await git(
+        [...gitArgs, "hash-object", "-w", "--stdin"],
+        `${
+          canonicalStringify({
+            ...JSON.parse(files.manifest.text),
+            stateHead: initialHead,
+          })
+        }\n`,
+      );
+      await git(
+        [
+          ...gitArgs,
+          "update-index",
+          "--add",
+          "--cacheinfo",
+          "100644",
+          manifestBlob,
+          "manifest.json",
+        ],
+        undefined,
+        index,
+      );
+      await git(
+        [
+          ...gitArgs,
+          "update-index",
+          "--add",
+          "--cacheinfo",
+          "100644",
+          blob,
+          "unexpected.txt",
+        ],
+        undefined,
+        index,
+      );
+      const tree = await git([...gitArgs, "write-tree"], undefined, index);
+      const commit = await git([
+        ...gitArgs,
+        "commit-tree",
+        tree,
+        "-p",
+        initialHead,
+        "-m",
+        "unsafe artifact fixture",
+      ]);
+      await git([...gitArgs, "update-ref", ref, commit, initialHead]);
+    }
+    const beforeHead = await git([...gitArgs, "rev-parse", ref]);
+    const requests: {
+      method: string;
+      path: string;
+      body: Record<string, unknown>;
+    }[] = [];
+    const reports: Record<string, unknown>[] = [];
+    let patches = 0;
+    let blobCount = 0;
+    let treeCount = 0;
+    let parentMoved = false;
+    let createdCommit: string | null = null;
+    const response = (value: unknown, status = 200) =>
+      new Response(JSON.stringify(value), { status });
+    // Only the fixed production Git remote is rewritten; all Git children are
+    // real and isolated, with the production runner's scrubbed environment.
+    Deno.Command = class extends originalCommand {
+      constructor(command: string | URL, options: Deno.CommandOptions = {}) {
+        if (command === "git") {
+          options = {
+            ...options,
+            args: [
+              "-c",
+              `url.${remote}.insteadOf=https://github.com/ubiquity/sentinel.git`,
+              ...(options.args ?? []),
+            ],
+          };
+        }
+        super(command, options);
+      }
+    };
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      assert.equal(url.origin, "https://api.github.com");
+      assert.ok(url.pathname.startsWith("/repos/ubiquity/sentinel/"));
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) : {};
+      requests.push({ method, path: url.pathname, body });
+      if (url.pathname.includes("/compare/")) {
+        assert.ok(
+          url.pathname.endsWith(`${CONCURRENCY_REVISION}...development`),
+        );
+        return response({
+          status: refusal === "ancestry" ? "diverged" : "ahead",
+          base_commit: { sha: CONCURRENCY_REVISION },
+          merge_base_commit: { sha: CONCURRENCY_REVISION },
+          ahead_by: 1,
+          behind_by: 0,
+          total_commits: 1,
+        });
+      }
+      if (url.pathname.includes("/check-runs")) {
+        return response({
+          total_count: 1,
+          check_runs: [{
+            name: "test-local",
+            status: "completed",
+            conclusion: refusal === "ci" ? "failure" : "success",
+            head_sha: CONCURRENCY_REVISION,
+          }],
+        });
+      }
+      if (method === "GET" && url.pathname.includes("/git/commits/")) {
+        return response({
+          tree: {
+            sha: await git([
+              ...gitArgs,
+              "rev-parse",
+              `${url.pathname.split("/").at(-1)}^{tree}`,
+            ]),
+          },
+        });
+      }
+      if (method === "POST" && url.pathname.endsWith("/git/blobs")) {
+        let text = atob(body.content);
+        if (refusal === "readback" && blobCount === 0) {
+          const manifest = JSON.parse(text);
+          text = `${
+            canonicalStringify({ ...manifest, sequence: manifest.sequence + 1 })
+          }\n`;
+        }
+        blobCount++;
+        return response({
+          sha: await git([...gitArgs, "hash-object", "-w", "--stdin"], text),
+        }, 201);
+      }
+      if (method === "POST" && url.pathname.endsWith("/git/trees")) {
+        const index = `${directory}/api-index-${treeCount++}`;
+        await git([...gitArgs, "read-tree", body.base_tree], undefined, index);
+        for (const entry of body.tree) {
+          await git(
+            [
+              ...gitArgs,
+              "update-index",
+              "--add",
+              "--cacheinfo",
+              entry.mode,
+              entry.sha,
+              entry.path,
+            ],
+            undefined,
+            index,
+          );
+        }
+        return response({
+          sha: await git([...gitArgs, "write-tree"], undefined, index),
+        }, 201);
+      }
+      if (method === "POST" && url.pathname.endsWith("/git/commits")) {
+        assert.equal(body.parents.length, 1);
+        createdCommit = await git([
+          ...gitArgs,
+          "commit-tree",
+          body.tree,
+          "-p",
+          body.parents[0],
+          "-m",
+          body.message,
+        ]);
+        return response({ sha: createdCommit }, 201);
+      }
+      if (method === "GET" && url.pathname.includes("/git/ref/")) {
+        if (refusal === "parent" && !parentMoved) {
+          parentMoved = true;
+          const tree = await git([
+            ...gitArgs,
+            "rev-parse",
+            `${beforeHead}^{tree}`,
+          ]);
+          const unrelated = await git([
+            ...gitArgs,
+            "commit-tree",
+            tree,
+            "-p",
+            beforeHead,
+            "-m",
+            "unrelated newer owner",
+          ]);
+          await git([...gitArgs, "update-ref", ref, unrelated, beforeHead]);
+        }
+        return response({
+          object: { sha: await git([...gitArgs, "rev-parse", ref]) },
+        });
+      }
+      if (method === "PATCH" && url.pathname.includes("/git/refs/")) {
+        assert.equal(
+          url.pathname,
+          "/repos/ubiquity/sentinel/git/refs/heads/sentinel-state/release",
+        );
+        assert.ok(createdCommit !== null);
+        assert.deepEqual(body, { sha: createdCommit, force: false });
+        patches++;
+        await git([...gitArgs, "update-ref", ref, body.sha, beforeHead]);
+        return response({ object: { sha: body.sha } });
+      }
+      throw new Error(`unexpected offline request: ${method} ${url.pathname}`);
+    };
+    console.log = (value: unknown) => reports.push(JSON.parse(String(value)));
+    Date.now = () => NOW;
+    Deno.env.get = (name) => {
+      if (Object.hasOwn(environment, name)) return environment[name];
+      assert.ok(name === "PATH" || name === "NODE_V8_COVERAGE");
+      return originalEnvironmentGet(name);
+    };
+    Deno.chdir(directory);
+    return {
+      initialHead,
+      beforeHead,
+      requests,
+      reports,
+      run: runOwnerDevelopmentInstallMain,
+      patches: () => patches,
+      head: () => git([...gitArgs, "rev-parse", ref]),
+      read: () => store.readRelease(),
+      message: () => git([...gitArgs, "log", "-1", "--format=%B", ref]),
+      close: async () => {
+        assert.equal(
+          await git([
+            ...gitArgs,
+            "rev-parse",
+            "refs/heads/sentinel-state/repair",
+          ]),
+          initialHead,
+        );
+        Deno.Command = originalCommand;
+        globalThis.fetch = originalFetch;
+        console.log = originalLog;
+        Date.now = originalNow;
+        Deno.chdir(originalCwd);
+        Deno.env.get = originalEnvironmentGet;
+        await Deno.remove(directory, { recursive: true });
+      },
+    };
+  } catch (error) {
+    Deno.Command = originalCommand;
+    globalThis.fetch = originalFetch;
+    console.log = originalLog;
+    Date.now = originalNow;
+    Deno.chdir(originalCwd);
+    Deno.env.get = originalEnvironmentGet;
+    await Deno.remove(directory, { recursive: true });
+    throw error;
+  }
+}
 
 function hostedProof(input: {
   runId: number;
@@ -5577,5 +5981,292 @@ Deno.test(
       ).status,
       "no_change",
     );
+  },
+);
+
+Deno.test(
+  "owner install runtime57: real installer saves healthy56, installs the exact pin once and leaves accepted57 terminal",
+  async () => {
+    const prior = healthyProof(CONCURRENCY_PRIOR_REVISION, 56, 37106475267);
+    const state = releaseSnapshot({
+      runtime: runtimeRecord({
+        revision: CONCURRENCY_PRIOR_REVISION,
+        generation: 56,
+        healthyProof: prior,
+        executionProof: prior,
+      }),
+      hostedReleases: [acceptedRelease()],
+      cooldowns: [cooldown(NOW - 1)],
+    });
+    const fixture = await concurrencyInstallerFixture(state);
+    try {
+      assert.equal(await fixture.run(), 0);
+      assert.equal(fixture.patches(), 1);
+      assert.equal(fixture.reports.at(-1)?.status, "installed");
+      assert.equal(
+        fixture.reports.at(-1)?.candidateRevision,
+        CONCURRENCY_REVISION,
+      );
+      assert.equal(fixture.reports.at(-1)?.candidateGeneration, 57);
+      const read = await fixture.read();
+      assert.equal(read.ok, true);
+      if (!read.ok || read.value.status !== "found") {
+        throw new Error("missing installed state");
+      }
+      const installed = read.value.snapshot;
+      const runtime = installed.hostedRuntimes[0];
+      assert.equal(runtime.activeRevision, CONCURRENCY_REVISION);
+      assert.equal(runtime.generation, 57);
+      assert.deepEqual(runtime.lastHealthyProof, prior);
+      assert.deepEqual(installed.hostedReleases, state.hostedReleases);
+      assert.deepEqual(installed.releases, state.releases);
+      assert.deepEqual(installed.githubCooldowns, state.githubCooldowns);
+      const message = await fixture.message();
+      const recorded = JSON.parse(message.trim().split("\n").at(-1)!);
+      assert.equal(recorded.stateHead, fixture.beforeHead);
+      assert.equal(recorded.priorRevision, CONCURRENCY_PRIOR_REVISION);
+      assert.equal(recorded.priorGeneration, 56);
+      assert.equal(recorded.nextRevision, CONCURRENCY_REVISION);
+      assert.equal(recorded.nextGeneration, 57);
+      assert.deepEqual(recorded.priorHealthyProof, prior);
+      assert.equal(await fixture.run(), 0);
+      assert.equal(fixture.reports.at(-1)?.status, "waiting");
+      assert.equal(fixture.patches(), 1);
+      const accepted = healthyProof(CONCURRENCY_REVISION, 57, 901);
+      assert.equal(
+        planOwnerDevelopmentInstall({
+          ...installed,
+          hostedRuntimes: [{
+            ...runtime,
+            lastHealthyProof: accepted,
+            lastExecutionProof: accepted,
+          }],
+        }, NOW).status,
+        "no_change",
+      );
+    } finally {
+      await fixture.close();
+    }
+  },
+);
+
+Deno.test(
+  "owner install runtime57: real installer rolls exact failed57 back only to saved0fc at terminal58 once",
+  async () => {
+    const prior = healthyProof(CONCURRENCY_PRIOR_REVISION, 56, 37106475267);
+    const runtime = runtimeRecord({
+      revision: CONCURRENCY_REVISION,
+      generation: 57,
+      healthyProof: prior,
+      executionProof: failedProof(CONCURRENCY_REVISION, 57, 902),
+    });
+    const state = releaseSnapshot({
+      runtime,
+      hostedReleases: [acceptedRelease()],
+    });
+    const fixture = await concurrencyInstallerFixture(state);
+    try {
+      assert.equal(await fixture.run(), 0);
+      assert.equal(fixture.reports.at(-1)?.status, "rolled_back");
+      assert.equal(
+        fixture.reports.at(-1)?.candidateRevision,
+        CONCURRENCY_PRIOR_REVISION,
+      );
+      assert.equal(fixture.reports.at(-1)?.candidateGeneration, 58);
+      assert.equal(fixture.patches(), 1);
+      assert.ok(
+        !fixture.requests.some((request) =>
+          request.path.includes("/compare/") ||
+          request.path.includes("/check-runs")
+        ),
+      );
+      const read = await fixture.read();
+      if (!read.ok || read.value.status !== "found") {
+        throw new Error("missing rollback state");
+      }
+      const restored = read.value.snapshot;
+      assert.deepEqual(restored.hostedReleases, state.hostedReleases);
+      assert.deepEqual(restored.hostedRuntimes[0].lastHealthyProof, prior);
+      assert.equal(await fixture.run(), 0);
+      assert.equal(fixture.reports.at(-1)?.status, "no_change");
+      assert.equal(fixture.patches(), 1);
+      const proven58 = healthyProof(CONCURRENCY_PRIOR_REVISION, 58, 903);
+      assert.equal(
+        planOwnerDevelopmentInstall({
+          ...restored,
+          hostedRuntimes: [{
+            ...restored.hostedRuntimes[0],
+            lastHealthyProof: proven58,
+            lastExecutionProof: proven58,
+          }],
+        }, NOW).status,
+        "no_change",
+      );
+    } finally {
+      await fixture.close();
+    }
+    for (
+      const proof of [
+        null,
+        healthyProof(UNRELATED, 56),
+        healthyProof(CONCURRENCY_PRIOR_REVISION, 55),
+        healthyProof(CONCURRENCY_REVISION, 57),
+      ]
+    ) {
+      assert.equal(
+        planOwnerDevelopmentInstall(
+          releaseSnapshot({ runtime: { ...runtime, lastHealthyProof: proof } }),
+          NOW,
+        ).status,
+        "waiting",
+      );
+    }
+    for (
+      const proof of [
+        null,
+        notStartedProof(CONCURRENCY_REVISION, 57),
+        failedProof(UNRELATED, 57),
+        failedProof(CONCURRENCY_REVISION, 56),
+      ]
+    ) {
+      assert.equal(
+        planOwnerDevelopmentInstall(
+          releaseSnapshot({
+            runtime: { ...runtime, lastExecutionProof: proof },
+          }),
+          NOW,
+        ).status,
+        "waiting",
+      );
+    }
+  },
+);
+
+Deno.test(
+  "owner install runtime57: real consumer refuses bad proof, active owner, release, source, CI, artifacts, changed parent and mismatched readback",
+  async () => {
+    const prior = healthyProof(CONCURRENCY_PRIOR_REVISION, 56, 37106475267);
+    const runtime = runtimeRecord({
+      revision: CONCURRENCY_PRIOR_REVISION,
+      generation: 56,
+      healthyProof: prior,
+      executionProof: prior,
+    });
+    const healthy = releaseSnapshot({ runtime });
+    const accepted57 = healthyProof(CONCURRENCY_REVISION, 57, 904);
+    const cases: {
+      state: ReleaseStateSnapshotV1;
+      refusal?: Parameters<typeof concurrencyInstallerFixture>[1];
+      status: string;
+      patches?: number;
+    }[] = [
+      {
+        state: releaseSnapshot({
+          runtime: { ...runtime, lastHealthyProof: null },
+        }),
+        status: "waiting",
+      },
+      {
+        state: releaseSnapshot({
+          runtime: {
+            ...runtime,
+            lastHealthyProof: healthyProof(CONCURRENCY_PRIOR_REVISION, 55),
+          },
+        }),
+        status: "waiting",
+      },
+      {
+        state: releaseSnapshot({
+          runtime: {
+            ...runtime,
+            lastExecutionProof: failedProof(CONCURRENCY_PRIOR_REVISION, 56),
+          },
+        }),
+        status: "waiting",
+      },
+      {
+        state: releaseSnapshot({
+          runtime: {
+            ...runtime,
+            lastExecutionProof: failedProof(UNRELATED, 57),
+          },
+        }),
+        status: "waiting",
+      },
+      {
+        state: releaseSnapshot({
+          runtime: {
+            ...runtime,
+            execution: executionIntent(CONCURRENCY_PRIOR_REVISION, 56),
+          },
+        }),
+        status: "waiting",
+      },
+      {
+        state: releaseSnapshot({
+          runtime,
+          hostedReleases: [requestedRelease()],
+        }),
+        status: "waiting",
+      },
+      {
+        state: releaseSnapshot({ runtime, cooldowns: [cooldown(null)] }),
+        status: "waiting",
+      },
+      {
+        state: releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: UNRELATED,
+            generation: 59,
+            healthyProof: healthyProof(UNRELATED, 59),
+          }),
+        }),
+        status: "no_change",
+      },
+      {
+        state: releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: CONCURRENCY_REVISION,
+            generation: 57,
+            healthyProof: accepted57,
+            executionProof: accepted57,
+          }),
+        }),
+        status: "no_change",
+      },
+      { state: healthy, refusal: "ancestry", status: "waiting" },
+      { state: healthy, refusal: "ci", status: "waiting" },
+      { state: healthy, refusal: "artifact", status: "waiting" },
+      { state: healthy, refusal: "parent", status: "failed" },
+      { state: healthy, refusal: "readback", status: "failed", patches: 1 },
+    ];
+    for (const entry of cases) {
+      const fixture = await concurrencyInstallerFixture(
+        entry.state,
+        entry.refusal,
+      );
+      try {
+        assert.equal(await fixture.run(), 0);
+        assert.equal(
+          fixture.reports.at(-1)?.status,
+          entry.status,
+          entry.refusal,
+        );
+        assert.equal(fixture.patches(), entry.patches ?? 0, entry.refusal);
+        if (entry.refusal !== "parent" && entry.refusal !== "readback") {
+          assert.equal(await fixture.head(), fixture.beforeHead);
+        }
+        if (entry.refusal === undefined || entry.refusal === "artifact") {
+          assert.equal(fixture.requests.length, 0);
+        }
+        if (entry.refusal === "ancestry" || entry.refusal === "ci") {
+          assert.ok(
+            fixture.requests.every((request) => request.method === "GET"),
+          );
+        }
+      } finally {
+        await fixture.close();
+      }
+    }
   },
 );

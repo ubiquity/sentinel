@@ -34,6 +34,7 @@ import {
 } from "../../src/contracts/review-receipt.ts";
 import type { ReviewReceiptV1 } from "../../src/contracts/review-receipt.ts";
 import {
+  parseReleaseStateSnapshotV1,
   parseRepairStateSnapshotV1,
   type RepairStateSnapshotV1,
 } from "../../src/contracts/state-snapshots.ts";
@@ -543,6 +544,29 @@ Deno.test("hosted supervisor core: ordinary cadence advances on each dispatch wi
     );
     rig.evidence.settlements.set(ordinary.id, runProof(ordinary, "healthy"));
     assert.equal((await rig.finalize(identity)).status, "idle");
+    // A legacy one-hour due timestamp cannot restore a retired cadence limit.
+    // Keep the exact settled proof and pointer while writing that old schema
+    // value through the real Git state store, then dispatch before one minute.
+    const current = await rig.release.readRelease();
+    assert.ok(current.ok && current.value.status === "found");
+    if (!current.ok || current.value.status !== "found") {
+      throw new Error("missing legacy cadence fixture state");
+    }
+    rig.clock.advance(1);
+    const legacy = parseReleaseStateSnapshotV1({
+      ...current.value.snapshot,
+      stateHead: current.value.head,
+      sequence: current.value.snapshot.sequence + 1,
+      updatedAt: rig.clock.now(),
+      hostedRuntimes: current.value.snapshot.hostedRuntimes.map((runtime) => ({
+        ...runtime,
+        nextOrdinaryAt: ordinary.createdAt + 3_600_000,
+        updatedAt: rig.clock.now(),
+      })),
+    });
+    const written = await rig.release.writeRelease(legacy, current.value.head);
+    assert.ok(written.ok && written.value.status === "applied");
+    assert.ok(rig.clock.now() < ordinary.createdAt + 60_000);
     // Same run/attempt cannot start a second execution even when due.
     assert.equal((await rig.prepare(identity)).status, "idle");
     assert.equal(requireRun(await rig.prepare(run(3))).purpose, "ordinary");
