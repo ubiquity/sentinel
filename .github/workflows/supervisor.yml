@@ -36,7 +36,7 @@ jobs:
   maintenance:
     if: github.ref == 'refs/heads/sentinel-supervisor'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
     # `issues: write` is what the autonomy pass needs to close an issue once its
     # exact reviewed head has an ACCEPTED hosted release, and `actions: write`
     # is what it needs to approve the credential-free deterministic check that
@@ -116,9 +116,9 @@ jobs:
           deno run --no-lock
           --allow-read
           --allow-write
-          --allow-run=git
+          --allow-run
           --allow-net="api.github.com,*.blob.core.windows.net"
-          --allow-env=HOME,PATH,GITHUB_TOKEN,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_REPOSITORY,GITHUB_REF,GITHUB_SHA,GITHUB_WORKFLOW_SHA,GITHUB_WORKFLOW_REF,GITHUB_JOB,SENTINEL_SUPERVISOR_TOKEN,SENTINEL_COOLDOWN_MODE
+          --allow-env=HOME,PATH,NODE_V8_COVERAGE,GITHUB_TOKEN,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_REPOSITORY,GITHUB_REF,GITHUB_SHA,GITHUB_WORKFLOW_SHA,GITHUB_WORKFLOW_REF,GITHUB_JOB,SENTINEL_SUPERVISOR_TOKEN,SENTINEL_COOLDOWN_MODE
           ops/hosted-autonomy.ts
 
   prepare:

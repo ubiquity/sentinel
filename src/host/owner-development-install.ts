@@ -55,6 +55,11 @@ import type { ReleaseStateSnapshotV1 } from "../contracts/state-snapshots.ts";
 import { tryParse } from "../contracts/validation.ts";
 import { createReleaseStateStore, DenoGitRunner } from "../state/mod.ts";
 import { ensurePrivateDir, githubGitAuthEnv, joinPath } from "./local.ts";
+import {
+  CLOSED_C_WAVE,
+  type ClosedCWaveBindingV1,
+  closedCWaveChargeReadbackVerified,
+} from "./modern-matrix-recovery.ts";
 
 /** The only repository this operation may touch; fixed, never configurable. */
 export const OWNER_DEVELOPMENT_INSTALL_REPOSITORY =
@@ -535,8 +540,24 @@ export const OWNER_DEVELOPMENT_INSTALL_CONCURRENCY_RETRY_GENERATION = 59;
  * at generation 61; the earlier 0fc generation 60 rollback remains terminal.
  */
 export const OWNER_DEVELOPMENT_INSTALL_CONCURRENCY_PLANNER_REVISION =
-  "ee9aa0c010148af8d08bca637523ebfbc1988e21" as GitSha;
+  "ddc98af7062b63e2b6b0f1e6b877e32f4675d442" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_CONCURRENCY_PLANNER_GENERATION = 60;
+/** Root stages this exact reviewed and published revision; null grants no rung. */
+export const OWNER_DEVELOPMENT_INSTALL_MATRIX_RECOVERY_REVISION: GitSha | null =
+  "37a66d790eff29e9d946fe0df127bda42f986ada" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_MATRIX_RECOVERY_GENERATION = 61;
+export interface OwnerMatrixRecoveryEvidenceV1 {
+  candidate: GitSha;
+  repairHead: GitSha;
+  releaseHead: GitSha;
+  ownHealthyProof: HostedRunProofV1;
+  failedOrdinaryProof: HostedRunProofV1;
+  nativeQuiescent: true;
+  artifactCustody: true;
+  chargesVerified: true;
+  /** In-process deterministic fixture binding; production uses the fixed C tuple. */
+  binding?: ClosedCWaveBindingV1;
+}
 /** Monotonic rollback target the failed generation 45 candidate rolled to. */
 export const OWNER_DEVELOPMENT_INSTALL_ROLLBACK_TARGET_GENERATION =
   OWNER_DEVELOPMENT_INSTALL_ASSIGN_FIRST_GENERATION + 2;
@@ -590,6 +611,7 @@ export type OwnerDevelopmentInstallPlanV1 =
 export function planOwnerDevelopmentInstall(
   snapshot: ReleaseStateSnapshotV1,
   now: number,
+  recovery?: OwnerMatrixRecoveryEvidenceV1,
 ): OwnerDevelopmentInstallPlanV1 {
   const parsed = tryParse(parseReleaseStateSnapshotV1, snapshot);
   if (!parsed.ok) {
@@ -626,6 +648,80 @@ export function planOwnerDevelopmentInstall(
   const generation = runtime.generation;
   const healthy = healthyProofFor(runtime, revision, generation);
   const failed = failedSettlementFor(runtime, revision, generation);
+
+  if (recovery !== undefined) {
+    const binding = recovery.binding ?? CLOSED_C_WAVE;
+    const prior = tryParse(parseHostedRunProofV1, recovery.ownHealthyProof);
+    const originalFailure = tryParse(
+      parseHostedRunProofV1,
+      recovery.failedOrdinaryProof,
+    );
+    if (
+      !isGitSha(recovery.candidate) ||
+      recovery.candidate === binding.runtimeSha ||
+      !isGitSha(recovery.repairHead) || !isGitSha(recovery.releaseHead) ||
+      recovery.nativeQuiescent !== true || recovery.artifactCustody !== true ||
+      recovery.chargesVerified !== true || !prior.ok || !originalFailure.ok ||
+      prior.value.outcome !== "healthy" ||
+      prior.value.execution.revision !== binding.runtimeSha ||
+      prior.value.execution.generation !== binding.generation ||
+      originalFailure.value.outcome !== "failed" ||
+      originalFailure.value.execution.purpose !== "ordinary" ||
+      originalFailure.value.execution.revision !== binding.runtimeSha ||
+      originalFailure.value.execution.generation !== binding.generation ||
+      originalFailure.value.execution.runId !== binding.run.runId ||
+      originalFailure.value.execution.runAttempt !== binding.run.runAttempt ||
+      originalFailure.value.execution.launcherSha !== binding.run.launcherSha ||
+      prior.value.finishedAt > originalFailure.value.startedAt
+    ) return waiting("closed matrix recovery authority is unavailable");
+    if (revision === binding.runtimeSha && generation === binding.generation) {
+      if (
+        healthy === null || failed === null ||
+        canonicalStringify(healthy) !== canonicalStringify(prior.value) ||
+        canonicalStringify(failed) !== canonicalStringify(originalFailure.value)
+      ) {
+        return waiting(
+          "the exact C generation 60 health and later ordinary failure are unavailable",
+        );
+      }
+      return movePlan(
+        "install",
+        runtime,
+        recovery.candidate,
+        generation + 1,
+        healthy,
+        "install the exact matrix recovery after authenticated C-wave ingestion",
+      );
+    }
+    if (
+      revision === recovery.candidate && generation === binding.generation + 1
+    ) {
+      if (failed !== null) {
+        return movePlan(
+          "rollback",
+          runtime,
+          binding.runtimeSha,
+          generation + 1,
+          prior.value,
+          "restore exact C after failed matrix recovery bootstrap or ordinary execution",
+        );
+      }
+      return healthy === null
+        ? waiting(
+          "the matrix recovery generation 61 needs its own bootstrap health",
+        )
+        : noChange("the matrix recovery installation is complete");
+    }
+    if (
+      revision === binding.runtimeSha && generation === binding.generation + 2
+    ) {
+      return healthy === null
+        ? waiting(
+          "the restored C generation 62 needs its own health; recovery cannot reinstall",
+        )
+        : noChange("the matrix recovery rollback is terminal");
+    }
+  }
 
   if (
     revision === OWNER_DEVELOPMENT_INSTALL_ORIGINAL_REVISION &&
@@ -2907,6 +3003,7 @@ export function buildOwnerDevelopmentInstallSnapshot(
   head: GitSha,
   move: OwnerDevelopmentInstallMoveV1,
   now: number,
+  recovery?: OwnerMatrixRecoveryEvidenceV1,
 ): ReleaseStateSnapshotV1 {
   const parsed = tryParse(parseReleaseStateSnapshotV1, snapshot);
   if (!parsed.ok || !isGitSha(head)) throw new Error(STATIC_PLAN);
@@ -2916,14 +3013,26 @@ export function buildOwnerDevelopmentInstallSnapshot(
     ? state.hostedRuntimes[0]
     : null;
   if (runtime === null) throw new Error(STATIC_PLAN);
+  const binding = recovery?.binding ?? CLOSED_C_WAVE;
+  const recoveryPlan = recovery === undefined
+    ? undefined
+    : planOwnerDevelopmentInstall(state, now, recovery);
+  const heldMatrixRollback = recovery !== undefined &&
+    recovery.releaseHead === head &&
+    move.action === "rollback" && move.priorRevision === recovery.candidate &&
+    move.priorGeneration === binding.generation + 1 &&
+    move.nextRevision === binding.runtimeSha &&
+    move.nextGeneration === binding.generation + 2 &&
+    recoveryPlan?.status === "rollback" &&
+    canonicalStringify(recoveryPlan.move) === canonicalStringify(move);
   if (
     runtime.activeRevision !== move.priorRevision ||
     runtime.generation !== move.priorGeneration ||
     runtime.generation + 1 !== move.nextGeneration ||
     runtime.activeRevision === move.nextRevision ||
-    runtime.lastHealthyProof === null ||
-    canonicalStringify(runtime.lastHealthyProof) !==
-      canonicalStringify(move.priorHealthyProof)
+    (!heldMatrixRollback && (runtime.lastHealthyProof === null ||
+      canonicalStringify(runtime.lastHealthyProof) !==
+        canonicalStringify(move.priorHealthyProof)))
   ) {
     throw new Error(STATIC_PLAN);
   }
@@ -3085,7 +3194,11 @@ interface OwnerDevelopmentInstallApiResponseV1 {
  * reported and exit zero so the unchanged supervisor is never blocked by this
  * one-shot; only invalid identity or credentials exit nonzero.
  */
-export async function runOwnerDevelopmentInstallMain(): Promise<number> {
+export async function runOwnerDevelopmentInstallMain(input?: {
+  /** Trusted in-process fixture seam; the workflow always uses the source pin. */
+  matrixRecoveryRevision?: GitSha;
+  matrixRecoveryBinding?: ClosedCWaveBindingV1;
+}): Promise<number> {
   const repository = Deno.env.get("GITHUB_REPOSITORY");
   const ref = Deno.env.get("GITHUB_REF");
   const job = Deno.env.get("GITHUB_JOB");
@@ -3128,7 +3241,55 @@ export async function runOwnerDevelopmentInstallMain(): Promise<number> {
     );
   }
 
-  const plan = planOwnerDevelopmentInstall(current.snapshot, now);
+  const recoveryRevision = input?.matrixRecoveryRevision ??
+    OWNER_DEVELOPMENT_INSTALL_MATRIX_RECOVERY_REVISION;
+  let recovery: OwnerMatrixRecoveryEvidenceV1 | undefined;
+  const recoveryBinding = input?.matrixRecoveryBinding ?? CLOSED_C_WAVE;
+  const pointer = current.snapshot.hostedRuntimes[0];
+  const closedExecution = [
+    pointer?.execution,
+    pointer?.lastExecutionProof?.execution,
+  ].some((execution) =>
+    execution !== null && execution !== undefined &&
+    execution.id ===
+      `${recoveryBinding.run.runId}:${recoveryBinding.run.runAttempt}:repair` &&
+    execution.runId === recoveryBinding.run.runId &&
+    execution.runAttempt === recoveryBinding.run.runAttempt &&
+    execution.launcherSha === recoveryBinding.run.launcherSha &&
+    execution.revision === recoveryBinding.runtimeSha &&
+    execution.generation === recoveryBinding.generation &&
+    execution.purpose === "ordinary" && execution.releaseId === null
+  );
+  if (
+    recoveryRevision !== null && pointer !== undefined &&
+    ((pointer.activeRevision === recoveryBinding.runtimeSha &&
+      ((pointer.generation === recoveryBinding.generation && closedExecution) ||
+        pointer.generation === recoveryBinding.generation + 2)) ||
+      (pointer.activeRevision === recoveryRevision &&
+        pointer.generation === recoveryBinding.generation + 1))
+  ) {
+    try {
+      recovery = await readOwnerMatrixRecoveryEvidence(
+        state,
+        nativeToken,
+        current,
+        recoveryRevision,
+        recoveryBinding,
+      );
+    } catch {
+      recovery = undefined;
+    }
+    if (recovery === undefined) {
+      return report(
+        waitingResult(
+          "closed matrix recovery custody or charge readback is unavailable",
+          current.snapshot,
+          current.head,
+        ),
+      );
+    }
+  }
+  const plan = planOwnerDevelopmentInstall(current.snapshot, now, recovery);
   if (plan.status === "waiting" || plan.status === "no_change") {
     return report({
       ...waitingResult(plan.detail, current.snapshot, current.head),
@@ -3148,6 +3309,24 @@ export async function runOwnerDevelopmentInstallMain(): Promise<number> {
       );
     }
   }
+  if (recovery !== undefined) {
+    const repair = await state.readRepair();
+    if (
+      !repair.ok || repair.value.status !== "found" ||
+      repair.value.head !== recovery.repairHead ||
+      repair.value.snapshot.githubCooldowns.some((row) =>
+        row.retryNotBefore === null || Date.now() < row.retryNotBefore
+      )
+    ) {
+      return report(
+        waitingResult(
+          "closed matrix recovery repair head changed before movement",
+          current.snapshot,
+          current.head,
+        ),
+      );
+    }
+  }
 
   let planned: ReleaseStateSnapshotV1;
   let files: OwnerDevelopmentInstallFilesV1;
@@ -3158,6 +3337,7 @@ export async function runOwnerDevelopmentInstallMain(): Promise<number> {
       current.head,
       move,
       now,
+      recovery,
     );
     files = await ownerDevelopmentInstallFiles(planned, current.head);
     message = ownerDevelopmentInstallCommitMessage({
@@ -3230,6 +3410,201 @@ async function createOwnerDevelopmentInstallState(
     remoteUrl: OWNER_DEVELOPMENT_INSTALL_REMOTE_URL,
     runner: new DenoGitRunner(gitHome, githubGitAuthEnv(appToken)),
   });
+}
+
+/** Metadata never substitutes for bytes: the durable real consumer readback supplies ingestion. */
+async function readOwnerMatrixRecoveryEvidence(
+  state: StateReadView,
+  token: string,
+  current: Extract<OwnerDevelopmentInstallStateReadV1, { status: "found" }>,
+  candidate: GitSha,
+  binding: ClosedCWaveBindingV1,
+): Promise<OwnerMatrixRecoveryEvidenceV1 | undefined> {
+  if (!state.readRepairAt || !state.readReleaseAt) return undefined;
+  const repair = await state.readRepair();
+  if (
+    !repair.ok || repair.value.status !== "found" ||
+    repair.value.snapshot.githubCooldowns.some((row) =>
+      row.retryNotBefore === null || Date.now() < row.retryNotBefore
+    )
+  ) return undefined;
+  const pointer = current.snapshot.hostedRuntimes[0];
+  const initialInstall = pointer?.activeRevision === binding.runtimeSha &&
+    pointer.generation === binding.generation;
+  const witness = await state.readReleaseAt({
+    commit: binding.releaseCommit,
+    expectedHead: current.head,
+  });
+  if (!witness.ok || witness.value.status !== "found") return undefined;
+  if (initialInstall) {
+    const original = await state.readRepairAt({
+      commit: binding.repairCommit,
+      expectedHead: repair.value.head,
+    });
+    if (
+      !original.ok || original.value.status !== "found" ||
+      !closedCWaveChargeReadbackVerified(
+        original.value.snapshot,
+        repair.value.snapshot,
+        binding,
+      )
+    ) return undefined;
+  }
+  const runtime = witness.value.snapshot.hostedRuntimes[0];
+  if (
+    !runtime?.lastHealthyProof || !runtime.lastExecutionProof ||
+    runtime.lastExecutionProof.outcome !== "failed"
+  ) return undefined;
+  if (
+    initialInstall &&
+    !await ownerMatrixNativeCustody(
+      token,
+      runtime.lastExecutionProof,
+      binding,
+      true,
+    )
+  ) return undefined;
+  const liveFailure = current.snapshot.hostedRuntimes[0]?.lastExecutionProof;
+  if (
+    pointer?.activeRevision === candidate &&
+    pointer.generation === binding.generation + 1 &&
+    liveFailure?.outcome === "failed" &&
+    liveFailure.execution.revision === candidate &&
+    !await ownerMatrixNativeCustody(token, liveFailure, binding, false)
+  ) return undefined;
+  const [freshRepair, freshRelease] = await Promise.all([
+    state.readRepair(),
+    state.readRelease(),
+  ]);
+  if (
+    !freshRepair.ok || freshRepair.value.status !== "found" ||
+    freshRepair.value.head !== repair.value.head || !freshRelease.ok ||
+    freshRepair.value.snapshot.githubCooldowns.some((row) =>
+      row.retryNotBefore === null || Date.now() < row.retryNotBefore
+    ) ||
+    freshRelease.value.status !== "found" ||
+    freshRelease.value.head !== current.head
+  ) return undefined;
+  return {
+    candidate,
+    repairHead: repair.value.head,
+    releaseHead: current.head,
+    ownHealthyProof: runtime.lastHealthyProof,
+    failedOrdinaryProof: runtime.lastExecutionProof,
+    nativeQuiescent: true,
+    artifactCustody: true,
+    chargesVerified: true,
+    binding,
+  };
+}
+
+async function ownerMatrixNativeCustody(
+  token: string,
+  proof: HostedRunProofV1,
+  binding: ClosedCWaveBindingV1,
+  artifacts: boolean,
+): Promise<boolean> {
+  const root =
+    `/repos/${OWNER_DEVELOPMENT_INSTALL_REPOSITORY}/actions/runs/${proof.execution.runId}`;
+  const run = await ownerDevelopmentInstallApi(
+    token,
+    "GET",
+    `${root}/attempts/${proof.execution.runAttempt}`,
+  );
+  if (!run.ok || run.value.status !== 200 || !isRecord(run.value.value)) {
+    return false;
+  }
+  const native = run.value.value;
+  if (
+    native.id !== proof.execution.runId ||
+    native.run_attempt !== proof.execution.runAttempt ||
+    native.head_sha !== proof.execution.launcherSha ||
+    native.workflow_id !== proof.workflowId ||
+    native.head_branch !== "sentinel-supervisor" ||
+    native.status !== "completed"
+  ) return false;
+  const jobs = await ownerMatrixMetadataList(
+    token,
+    `${root}/attempts/${proof.execution.runAttempt}/jobs`,
+    "jobs",
+  );
+  if (
+    !jobs || jobs.length === 0 || !jobs.some((row) => row.id === proof.jobId) ||
+    jobs.some((row) => row.status !== "completed")
+  ) return false;
+  if (!artifacts) return true;
+  const rows = await ownerMatrixMetadataList(
+    token,
+    `${root}/artifacts`,
+    "artifacts",
+  );
+  if (!rows) return false;
+  const planName =
+    `sentinel-matrix-plan-${binding.run.runId}-${binding.run.runAttempt}`;
+  const required = [
+    planName,
+    ...binding.cells.map((cell) =>
+      `sentinel-matrix-cell-${binding.run.runId}-${binding.run.runAttempt}-${cell.cellId}`
+    ),
+  ];
+  if (
+    binding.cells.some((cell) => cell.cellId === undefined) ||
+    new Set(rows.map((row) => row.name)).size !== rows.length
+  ) return false;
+  return required.every((name) => {
+    const row = rows.find((item) => item.name === name);
+    return row !== undefined && row.expired === false &&
+      typeof row.digest === "string" &&
+      /^sha256:[0-9a-f]{64}$/.test(row.digest) &&
+      (name !== planName || binding.planZipDigest === undefined ||
+        row.digest === `sha256:${binding.planZipDigest}`);
+  });
+}
+
+async function ownerMatrixMetadataList(
+  token: string,
+  path: string,
+  key: "jobs" | "artifacts",
+): Promise<Record<string, unknown>[] | null> {
+  const rows: Record<string, unknown>[] = [];
+  let total: number | null = null;
+  for (let page = 1; page <= 20; page++) {
+    const response = await ownerDevelopmentInstallApi(
+      token,
+      "GET",
+      `${path}?per_page=100&page=${page}`,
+    );
+    if (
+      !response.ok || response.value.status !== 200 ||
+      !isRecord(response.value.value)
+    ) return null;
+    const value = response.value.value;
+    if (
+      !Number.isSafeInteger(value.total_count) ||
+      (value.total_count as number) < 0 || !Array.isArray(value[key]) ||
+      (total !== null && total !== value.total_count)
+    ) return null;
+    total = value.total_count as number;
+    const batch = value[key] as unknown[];
+    if (
+      batch.length > 100 ||
+      batch.some((row) =>
+        !isRecord(row) || !Number.isSafeInteger(row.id) ||
+        (row.id as number) <= 0
+      )
+    ) return null;
+    rows.push(...batch as Record<string, unknown>[]);
+    if (
+      new Set(rows.map((row) => row.id)).size !== rows.length ||
+      rows.length > total
+    ) return null;
+    if (rows.length === total) return rows;
+    if (batch.length !== 100) return null;
+  }
+  return null;
+}
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 async function readOwnerDevelopmentInstallState(

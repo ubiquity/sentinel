@@ -142,6 +142,7 @@ export function createActionsMatrixArtifactTransport(options: {
   clock: Clock;
   artifactRoot: string;
 }): MatrixArtifactTransportV1 {
+  let repositoryId: number | null = null;
   type RecoveryInput = Parameters<MatrixArtifactTransportV1["recover"]>[0] & {
     rejectionProof?: HostedRunProofV1;
     completedExecution?: HostedExecutionIntentV1;
@@ -185,14 +186,30 @@ export function createActionsMatrixArtifactTransport(options: {
           release.value.status !== "found"
         ) refuse();
         const snapshot = repair.value.snapshot;
+        const completionCustody = input.completedExecution
+          ? canonicalStringify({
+            head: release.value.head,
+            runtime: release.value.snapshot.hostedRuntimes.find((row) =>
+              row.id === HOSTED_RUNTIME_ID
+            ),
+          })
+          : null;
         if (input.completedExecution) {
-          const current = release.value.snapshot.hostedRuntimes.find((row) =>
+          const runtime = release.value.snapshot.hostedRuntimes.find((row) =>
             row.id === HOSTED_RUNTIME_ID
-          )?.execution;
+          );
+          const current = runtime?.execution ??
+            runtime?.lastExecutionProof?.execution;
           if (
             !current ||
             canonicalStringify(current) !==
-              canonicalStringify(input.completedExecution)
+              canonicalStringify(input.completedExecution) ||
+            (!runtime?.execution &&
+              !["bootstrap", "prior", "candidate", "rollback"].includes(
+                current.purpose,
+              ) &&
+              (runtime?.activeRevision !== current.revision ||
+                runtime.generation !== current.generation))
           ) refuse();
         }
         if (input.rejectionProof) {
@@ -356,10 +373,33 @@ export function createActionsMatrixArtifactTransport(options: {
             items.push(...body[key].map(record));
             if (items.length > total) refuse();
             const link = response.headers.get("link");
-            const next = link?.match(/<([^>]+)>;\s*rel="next"/);
+            const nextLinks = [
+              ...(link?.matchAll(/<([^>]+)>;\s*rel="next"/g) ?? []),
+            ];
+            if (nextLinks.length > 1) refuse();
+            const next = nextLinks[0];
             if (
               next && next[1] !== `${API}${path}?per_page=100&page=${page + 1}`
-            ) refuse();
+            ) {
+              if (!next[1].startsWith("https://api.github.com/repositories/")) {
+                refuse();
+              }
+              if (repositoryId === null) {
+                const repository = await json(
+                  `https://api.github.com/repos/${REPOSITORY}`,
+                );
+                if (repository.full_name !== REPOSITORY) refuse();
+                repositoryId = positive(repository.id);
+              }
+              if (
+                next[1] !==
+                  `https://api.github.com/repositories/${repositoryId}/actions${path}?per_page=100&page=${
+                    page + 1
+                  }`
+              ) {
+                refuse();
+              }
+            }
             if (!next && items.length === total) {
               const ids = items.map((row) => positive(row.id));
               if (new Set(ids).size !== ids.length) refuse();
@@ -390,9 +430,10 @@ export function createActionsMatrixArtifactTransport(options: {
           ) refuse();
           positive(repo.id);
           positive(headRepo.id);
+          const start = instant(attempt.run_started_at);
           const end = instant(attempt.updated_at);
           if (
-            end < instant(attempt.run_started_at) ||
+            end < start ||
             end < execution.createdAt ||
             end > options.clock.now() + TOLERANCE
           ) refuse();
@@ -409,12 +450,32 @@ export function createActionsMatrixArtifactTransport(options: {
               typeof job.conclusion !== "string" || job.conclusion.length === 0
             ) refuse();
             const finished = instant(job.completed_at);
+            const started = job.started_at === null
+              ? null
+              : instant(job.started_at);
+            // Skipped GitHub placeholders without runners have metadata times,
+            // rather than an execution interval; both must remain in the attempt.
+            const skippedWithoutRunner = job.conclusion === "skipped" &&
+              job.runner_id === null && job.runner_name === null;
             if (
               finished > end + TOLERANCE ||
               finished > options.clock.now() + TOLERANCE ||
-              (job.started_at !== null && finished < instant(job.started_at))
+              (skippedWithoutRunner
+                ? started === null || started < start || started > end ||
+                  finished < start || finished > end
+                : started !== null && finished < started)
             ) refuse();
           }
+          const fresh = await options.state.readRelease();
+          if (
+            !fresh.ok || fresh.value.status !== "found" ||
+            canonicalStringify({
+                head: fresh.value.head,
+                runtime: fresh.value.snapshot.hostedRuntimes.find((row) =>
+                  row.id === HOSTED_RUNTIME_ID
+                ),
+              }) !== completionCustody
+          ) refuse();
           return { recovered: [], rejected: [], completed: true };
         }
         const download = async (

@@ -110,6 +110,17 @@ function sameRepository(
  * inherit that trust, so the projection is re-checked here and any mismatch
  * refuses the result before a state update.
  */
+function receiptIdentityMatches(
+  receipt: ModelRunReceiptV1,
+  request: { model: string; reasoning: string },
+  expectedProvider: string,
+): boolean {
+  return receipt.actual.evidenceKind === "request-runtime" &&
+    receipt.actual.observedModel === request.model &&
+    receipt.actual.observedReasoning === request.reasoning &&
+    receipt.actual.provider === expectedProvider;
+}
+
 export function verifyMatrixReceiptV1(
   receipt: ModelRunReceiptV1,
   request: {
@@ -120,10 +131,7 @@ export function verifyMatrixReceiptV1(
   },
   expectedProvider: string,
 ): boolean {
-  if (receipt.actual.evidenceKind !== "request-runtime") return false;
-  if (receipt.actual.observedModel !== request.model) return false;
-  if (receipt.actual.observedReasoning !== request.reasoning) return false;
-  if (receipt.actual.provider !== expectedProvider) return false;
+  if (!receiptIdentityMatches(receipt, request, expectedProvider)) return false;
   if (receipt.actual.durationMs > request.maxDurationMs) return false;
   if (receipt.actual.outputChars > request.maxOutputChars) return false;
   if (receipt.outcome === "completed") {
@@ -133,6 +141,36 @@ export function verifyMatrixReceiptV1(
       receipt.candidate.head !== null;
   }
   return receipt.candidate === null;
+}
+
+/** A correlated terminal with no candidate can prove failure, never success. */
+function interruptedOutputFailure(
+  result: MatrixCellResultV1,
+  cell: MatrixCellPlanV1,
+  expectedProvider: string,
+): boolean {
+  const receipt = result.receipt;
+  if (
+    result.status !== "completed" || receipt === null ||
+    receipt.outcome !== "interrupted" || receipt.candidate !== null ||
+    result.bundle !== null ||
+    !receiptIdentityMatches(receipt, cell.request, expectedProvider)
+  ) return false;
+  const actual = receipt.actual;
+  return actual.terminalOrigin === "runtime" &&
+    actual.observedTerminalStatus === "interrupted" &&
+    typeof receipt.invocationId === "string" &&
+    receipt.invocationId.length > 0 &&
+    typeof actual.threadId === "string" && actual.threadId.length > 0 &&
+    typeof actual.turnId === "string" && actual.turnId.length > 0 &&
+    Number.isSafeInteger(actual.durationMs) && actual.durationMs >= 0 &&
+    Number.isSafeInteger(cell.request.maxDurationMs) &&
+    cell.request.maxDurationMs > 0 &&
+    actual.durationMs <= cell.request.maxDurationMs &&
+    Number.isSafeInteger(actual.outputChars) &&
+    Number.isSafeInteger(cell.request.maxOutputChars) &&
+    cell.request.maxOutputChars > 0 &&
+    actual.outputChars > cell.request.maxOutputChars;
 }
 
 /** Identical duplicate bytes for one cell are a replay; different bytes conflict. */
@@ -855,7 +893,34 @@ export async function ingestMatrixResults(
       });
       continue;
     }
-    if (result.status === "completed" && result.receipt !== null) {
+    if (interruptedOutputFailure(result, cell, options.expectedProvider)) {
+      if (
+        reservation.outcome === "ambiguous" && reservation.settledAt !== null &&
+        record.nextStep === "blocked"
+      ) {
+        entries.push({
+          cellId: cell.cellId,
+          disposition: "duplicate",
+          detail: "authenticated interrupted output failure already accounted",
+        });
+        continue;
+      }
+      const step = await settleFailedImplementation(
+        deps,
+        context,
+        record,
+        cell.reservationId,
+        "model run did not complete with a trusted candidate: interrupted output bound exceeded",
+      );
+      if (step.kind === "state_error") {
+        entries.push({
+          cellId: cell.cellId,
+          disposition: "state_error",
+          detail: step.detail,
+        });
+        continue;
+      }
+    } else if (result.status === "completed" && result.receipt !== null) {
       if (
         !verifyMatrixReceiptV1(
           result.receipt,

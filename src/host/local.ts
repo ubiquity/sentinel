@@ -275,6 +275,7 @@ export function createLocalRepositoryConfig(): RepositoryConfigV1 {
       "src/host/matrix-actions.ts",
       "src/host/matrix-artifact-port.ts",
       "src/host/matrix-artifacts.ts",
+      "src/host/modern-matrix-recovery.ts",
       "src/host/hosted-cooldown.ts",
       "src/host/hosted-runtime.ts",
       "src/host/local-release.ts",
