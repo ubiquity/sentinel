@@ -33,6 +33,7 @@ import {
 } from "../../src/adapters/gateway/store.ts";
 import { RollingStartBudget } from "../../src/budget/mod.ts";
 import type { GitSha } from "../../src/contracts/brands.ts";
+import { portOk } from "../../src/contracts/ports.ts";
 import type { PortResultV1 } from "../../src/contracts/ports.ts";
 import type { ReleaseRecordV1 } from "../../src/contracts/release.ts";
 import type {
@@ -41,6 +42,7 @@ import type {
 } from "../../src/contracts/state-snapshots.ts";
 import { parseRepositoryConfigV1 } from "../../src/contracts/repository-config.ts";
 import type { RepositoryConfigV1 } from "../../src/contracts/repository-config.ts";
+import type { RepositoryIdentityV1 } from "../../src/contracts/shared.ts";
 import type { ReleaseCycleResultV1 } from "../../src/release/controller.ts";
 import { DenoReleaseRESTClient } from "../../src/release/port.ts";
 import type { BuildReceiptResolverV1 } from "../../src/release/resolver.ts";
@@ -51,6 +53,7 @@ import {
 import { runRepairEntrypoint } from "../../src/main.ts";
 import { runReleaseEntrypoint } from "../../src/release-main.ts";
 import { DurableGitHubCooldownGate } from "../../src/repair/github-cooldown.ts";
+import { candidatePreservationRef } from "../../src/repair/keys.ts";
 import type { GitCtxV1 } from "../release/helpers.ts";
 import {
   acceptedEvent,
@@ -71,6 +74,7 @@ import {
 import {
   FakeClock,
   FakeGithub,
+  type FakeGithubCandidateLifecycleV1,
   FakeIncidents,
   FakeModel,
   FakeReplay,
@@ -157,6 +161,85 @@ export function evidenceFixture(): ReturnType<typeof incidentEvidence> {
       reproducedAt: T0,
     },
   });
+}
+
+// ---------------------------------------------------------------------------
+// Explicit candidate-lifecycle fixture (opt-in only).
+// ---------------------------------------------------------------------------
+
+/** One exact produced-candidate identity the fake GitHub lifecycle serves. */
+export interface CandidateLifecycleExpectationV1 {
+  /** Exact expected candidate base; defaults to the fixture base SHA1. */
+  base?: GitSha;
+  /**
+   * Exact expected candidate head. A thunk is allowed for fixtures whose
+   * candidate SHA is resolved only after the fake port was constructed.
+   */
+  head: GitSha | (() => GitSha);
+  /** Exact expected repository identity; defaults to the fixture REPO. */
+  repository?: RepositoryIdentityV1;
+}
+
+function expectedCandidateHead(
+  expectation: CandidateLifecycleExpectationV1,
+): GitSha {
+  return typeof expectation.head === "function"
+    ? expectation.head()
+    : expectation.head;
+}
+
+/**
+ * Opt-in exact candidate lifecycle for the repair fake: it enables the exact
+ * branch/PR observation maps and supplies the preservation capability. The
+ * callback asserts the expected base/head and the exact deterministic
+ * `candidatePreservationRef(repository, taskId, operationKey)` BEFORE it
+ * returns fake success over the port. It is a fake capability only: real
+ * preservation storage proof remains the destructive host fixture.
+ *
+ * `prepareBaseRefresh` is present but deliberately throws: an unchanged-base
+ * positive must never request a refresh. A moved-base fixture supplies its own
+ * explicit preparation callback instead.
+ */
+export function exactCandidateLifecycle(
+  ...expectations: CandidateLifecycleExpectationV1[]
+): FakeGithubCandidateLifecycleV1 {
+  assert.ok(expectations.length > 0, "at least one candidate expectation");
+  return {
+    prepareBaseRefresh: () => {
+      throw new Error("a base refresh must never run for an unchanged base");
+    },
+    preserveCandidate: async (request) => {
+      const matches = expectations.filter((expectation) =>
+        expectedCandidateHead(expectation) === request.candidate.head
+      );
+      assert.equal(
+        matches.length,
+        1,
+        `unexpected candidate head ${request.candidate.head}`,
+      );
+      const expectation = matches[0]!;
+      assert.equal(
+        request.candidate.head,
+        expectedCandidateHead(expectation),
+        "exact candidate head",
+      );
+      assert.equal(
+        request.candidate.base,
+        expectation.base ?? SHA1,
+        "exact candidate base",
+      );
+      assert.equal(
+        request.candidate.ref,
+        await candidatePreservationRef(
+          expectation.repository ?? REPO,
+          request.taskId,
+          request.candidate.operationKey,
+        ),
+        "exact candidate preservation ref",
+      );
+      return portOk(undefined);
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------

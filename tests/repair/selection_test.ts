@@ -9,6 +9,7 @@ import type { GitSha } from "../../src/contracts/brands.ts";
 import type { RepairStateSnapshotV1 } from "../../src/contracts/state-snapshots.ts";
 import type { WorkRecordV1 } from "../../src/contracts/work-record.ts";
 import {
+  isEligible,
   MAX_UNFINISHED_PRS,
   rankEligibleWork,
 } from "../../src/repair/selection.ts";
@@ -64,6 +65,25 @@ Deno.test("selection: delivery bookkeeping outranks new incident work", () => {
     NOW,
   );
   assert.deepEqual(ranked.ordered, [delivery.id, incident.id]);
+});
+
+Deno.test("selection: delivery updates use numeric ordering across digit boundaries", () => {
+  const updatedNine = work("delivery-9", {
+    nextStep: "delivery",
+    createdAt: 0,
+    updatedAt: 9,
+  });
+  const updatedTen = work("delivery-10", {
+    nextStep: "delivery",
+    createdAt: 0,
+    updatedAt: 10,
+  });
+  const ranked = rankEligibleWork(
+    snapshot([updatedTen, updatedNine]),
+    repairConfigs(),
+    NOW,
+  );
+  assert.deepEqual(ranked.ordered, [updatedNine.id, updatedTen.id]);
 });
 
 Deno.test("selection: active incidents by severity then oldest first seen", () => {
@@ -148,6 +168,36 @@ Deno.test("selection: numeric priority descending, missing priority last", () =>
     NOW,
   );
   assert.deepEqual(ranked.ordered, [high.id, low.id, none.id]);
+});
+
+Deno.test("selection: priority ordering supports contract-safe values above one million", () => {
+  const maximum = work("issue-maximum", {
+    classification: { severity: "P2", priority: Number.MAX_SAFE_INTEGER },
+  });
+  const aboveMillion = work("issue-1000002", {
+    classification: { severity: "P2", priority: 1_000_002 },
+  });
+  const millionAndOne = work("issue-1000001", {
+    classification: { severity: "P2", priority: 1_000_001 },
+  });
+  const minimum = work("issue-minimum", {
+    classification: { severity: "P2", priority: 1 },
+  });
+  const none = work("issue-missing", {
+    classification: { severity: "P2", priority: null },
+  });
+  const ranked = rankEligibleWork(
+    snapshot([none, millionAndOne, maximum, minimum, aboveMillion]),
+    repairConfigs(),
+    NOW,
+  );
+  assert.deepEqual(ranked.ordered, [
+    maximum.id,
+    aboveMillion.id,
+    millionAndOne.id,
+    minimum.id,
+    none.id,
+  ]);
 });
 
 Deno.test("selection: stable repository/source tie-break, never selection by list order", () => {
@@ -276,4 +326,152 @@ Deno.test("selection: an existing-PR correction is never WIP-skipped", () => {
     "the correction of an already-owned PR remains eligible at the cap",
   );
   assert.equal(ranked.skipped[correction.id], undefined);
+});
+
+// ---------------------------------------------------------------------------
+// M15 V1 candidate state: candidate presence alone never excludes a record.
+// WIP, dependency, terminal/blocked and wait rules still apply to candidates.
+// ---------------------------------------------------------------------------
+
+const CANDIDATE_REF = `refs/heads/sentinel-candidates/${"ab".repeat(32)}`;
+const PRODUCING_RESERVATION = "cd".repeat(32);
+
+function candidateStateFor(
+  base: GitSha,
+  head: GitSha | null,
+): Record<string, unknown> {
+  return head === null ? { preserved: null, publishedHead: null } : {
+    preserved: {
+      operationKey: `impl:${PRODUCING_RESERVATION}`,
+      base,
+      head,
+      ref: CANDIDATE_REF,
+    },
+    publishedHead: head,
+  };
+}
+
+function candidateTarget(
+  head: GitSha | null,
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    base: SHA1,
+    branch: "sentinel/repair/candidate",
+    checkpoint: null,
+    head,
+    pr: head === null ? null : 7,
+    candidateState: candidateStateFor(SHA1, head),
+    ...overrides,
+  };
+}
+
+function candidateWork(id: string, overrides: Record<string, unknown> = {}) {
+  return workRecord(id, {
+    source: { kind: "issue", id, revision: SHA2 },
+    related: { incidentId: null, issueNumber: 1 },
+    ...overrides,
+  });
+}
+
+Deno.test("selection: candidate state alone never excludes an eligible record", () => {
+  const workPhase = candidateWork("candidate-work", {
+    nextStep: "work",
+    target: candidateTarget(SHA2),
+  });
+  const reviewElapsed = candidateWork("candidate-review", {
+    nextStep: "review",
+    wait: { reason: "review_pending", since: T0, until: NOW - 1 },
+    target: candidateTarget(SHA2, { pr: 8 }),
+  });
+  const delivery = candidateWork("candidate-delivery", {
+    nextStep: "delivery",
+    target: candidateTarget(SHA2, { pr: 9 }),
+  });
+  // A null-preserved descriptor is not "no candidate state": the record is a
+  // normal eligible record and its lifecycle step performs the safe deferral.
+  const nullPreserved = candidateWork("candidate-null", {
+    nextStep: "work",
+    target: candidateTarget(SHA2, {
+      branch: "sentinel/repair/candidate-null",
+      pr: 11,
+      candidateState: { preserved: null, publishedHead: null },
+    }),
+  });
+  const legacy = workRecord("legacy", {
+    classification: { severity: "P2", priority: 5 },
+    target: { base: SHA1, branch: "b", checkpoint: null, head: SHA2, pr: 10 },
+  });
+  const records = [workPhase, reviewElapsed, delivery, nullPreserved, legacy];
+  const snap = snapshot(records);
+  const ranked = rankEligibleWork(snap, repairConfigs(), NOW);
+  assert.equal(ranked.ordered.length, records.length);
+  for (const record of records) {
+    assert.equal(ranked.skipped[record.id], undefined, record.id);
+    assert.equal(isEligible(record, snap, NOW), true, record.id);
+    assert.ok(ranked.ordered.includes(record.id), record.id);
+  }
+});
+
+Deno.test("selection: candidate records still obey WIP, dependency, wait and terminal rules", () => {
+  const candidatePrs = Array.from(
+    { length: MAX_UNFINISHED_PRS },
+    (_, index) =>
+      candidateWork(`candidate-pr-${index}`, {
+        source: { kind: "issue", id: `p${index}`, revision: SHA2 },
+        related: { incidentId: null, issueNumber: 10 + index },
+        nextStep: "review",
+        wait: { reason: "review_pending", since: T0, until: NOW + 100000 },
+        target: candidateTarget(SHA2, { pr: 20 + index }),
+      }),
+  );
+  const fresh = workRecord("fresh", {
+    classification: { severity: "P2", priority: 9 },
+  });
+  const dependent = workRecord("dependent", {
+    dependencies: ["candidate-pr-0"],
+    classification: { severity: "P1", priority: null },
+  });
+  const waiting = candidateWork("candidate-waiting", {
+    nextStep: "work",
+    wait: { reason: "unavailable", since: T0, until: NOW + 1000 },
+    target: candidateTarget(SHA2, { pr: 30 }),
+  });
+  const done = candidateWork("candidate-done", {
+    nextStep: "done",
+    target: candidateTarget(SHA2, { pr: 31 }),
+  });
+  const blocked = candidateWork("candidate-blocked", {
+    nextStep: "blocked",
+    blocker: { kind: "missing_evidence", message: "blocked", since: T0 },
+    target: candidateTarget(null, {
+      branch: "sentinel/repair/candidate-blocked",
+    }),
+  });
+  const snap = snapshot([
+    ...candidatePrs,
+    fresh,
+    dependent,
+    waiting,
+    done,
+    blocked,
+  ]);
+  const ranked = rankEligibleWork(snap, repairConfigs(), NOW);
+  assert.deepEqual(ranked.ordered, []);
+  for (const record of candidatePrs) {
+    assert.equal(ranked.skipped[record.id], "waiting", record.id);
+  }
+  assert.equal(
+    ranked.skipped[fresh.id],
+    "wip",
+    "three unfinished candidate PRs still occupy the cap",
+  );
+  assert.equal(
+    ranked.skipped[dependent.id],
+    "dependency",
+    "an unfinished candidate dependency still gates its dependent",
+  );
+  assert.equal(ranked.skipped[waiting.id], "waiting");
+  assert.equal(ranked.skipped[done.id], "terminal");
+  assert.equal(ranked.skipped[blocked.id], "blocked");
 });

@@ -82,7 +82,10 @@ import type { GitSha } from "../../src/contracts/brands.ts";
 import type { CommandId, WorkItemId } from "../../src/contracts/brands.ts";
 import type {
   MergeOutcomeV1,
+  MergeRequestV1,
   PortResultV1,
+  PullRequestCreateV1,
+  PullRequestPublishV1,
 } from "../../src/contracts/ports.ts";
 import { portOk } from "../../src/contracts/ports.ts";
 import type { RepositoryConfigV1 } from "../../src/contracts/repository-config.ts";
@@ -140,6 +143,7 @@ import {
   sha256hex,
 } from "../adapters/gateway/helpers.ts";
 import {
+  exactCandidateLifecycle,
   FakeClock,
   FakeGithub,
   makeIntegrationCtx,
@@ -816,41 +820,31 @@ class ScriptedCandidateRegistry {
 }
 
 /** Exact-head fake GitHub: each head gets its own PR number, and a merge
- * returns the EXACT requested head/merge sha (never a stale shortcut). */
+ * returns the EXACT requested head/merge sha (never a stale shortcut). The
+ * inherited lifecycle maps own the PR/ref observations, so create and merge
+ * delegate to super and every read observes the same exact objects. */
 class ExactHeadFakeGithub extends FakeGithub {
-  private prByHead = new Map<GitSha, number>();
-  private nextPr = 7;
   readonly mergedHeads: GitSha[] = [];
 
-  override createPullRequest(_request: unknown): Promise<
-    PortResultV1<{
-      outcome: "applied" | "ambiguous";
-      number: number | null;
-      head: GitSha | null;
-    }>
-  > {
-    const request = _request as { expectedHeadRef: GitSha };
-    const head = request.expectedHeadRef;
-    let number = this.prByHead.get(head);
-    if (number === undefined) {
-      number = this.nextPr++;
-      this.prByHead.set(head, number);
+  override async createPullRequest(
+    request: PullRequestCreateV1,
+  ): Promise<PortResultV1<PullRequestPublishV1>> {
+    const published = await super.createPullRequest(request);
+    // Keep the exact per-head PR allocation in the call recording; the
+    // inherited lifecycle fake already allocated it deterministically.
+    if (published.ok && published.value.number !== null) {
+      this.calls.push(`createPr:${published.value.number}`);
     }
-    this.calls.push(`createPr:${number}`);
-    return Promise.resolve(portOk({ outcome: "applied", number, head }));
+    return published;
   }
 
-  override mergePullRequest(_request: unknown): Promise<
-    PortResultV1<MergeOutcomeV1>
-  > {
-    const request = _request as { expectedHead: GitSha };
-    const head = request.expectedHead;
-    this.mergedHeads.push(head);
-    return Promise.resolve(portOk({
-      outcome: "merged",
-      head,
-      mergeSha: head,
-    }));
+  override async mergePullRequest(
+    request: MergeRequestV1,
+  ): Promise<PortResultV1<MergeOutcomeV1>> {
+    this.mergedHeads.push(request.expectedHead);
+    // The inherited lifecycle merge closes the exact requested PR on the exact
+    // requested head; the merge receipt is never the global last push.
+    return await super.mergePullRequest(request);
   }
 }
 
@@ -996,7 +990,14 @@ async function makeRepairRig(
         createdAt: T0,
       },
     ],
-    pullRequest: null,
+    // Both produced candidates must be preserved before publication: the
+    // explicit lifecycle asserts each exact base/head and the deterministic
+    // preservation ref. No intentionally-missing-PR override in the positive
+    // setup, so every read observes the same exact created PRs.
+    candidateLifecycle: exactCandidateLifecycle(
+      { base: toy.originalSha, head: PRODUCER_COMMIT },
+      { base: toy.originalSha, head: toy.candidateSha },
+    ),
   });
   const keyBytes = hexToBytes(
     JSON.parse(
@@ -1927,7 +1928,7 @@ Deno.test(
       // Every interaction stayed on the injected fake ports/transports.
       assert.ok(
         rig.github.calls.every((call) =>
-          /^listOpenIssues$|^readRef:|^readIssue:|^push:|^createPr:|^observeReview$|^requestReview$|^closeIssue:/
+          /^listOpenIssues$|^readRef:|^readIssue:|^findPr:|^readPr:|^push:|^createPr(?::\d+)?$|^observeReview$|^requestReview$|^merge$|^closeIssue:/
             .test(call)
         ),
         `unexpected github calls: ${rig.github.calls.join(", ")}`,

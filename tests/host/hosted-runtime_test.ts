@@ -6,12 +6,19 @@
  */
 import assert from "node:assert/strict";
 
+import { asWorkItemId } from "../../src/contracts/brands.ts";
 import type { GitSha } from "../../src/contracts/brands.ts";
 import { canonicalStringify } from "../../src/contracts/canonical.ts";
 import { parseHostedRuntimeTerminalV1 } from "../../src/contracts/hosted-execution.ts";
 import { parseHostedExecutionIntentV1 } from "../../src/contracts/hosted-supervisor.ts";
 import { HOSTED_RUNTIME_ID } from "../../src/contracts/hosted-supervisor.ts";
 import type { HostedExecutionIntentV1 } from "../../src/contracts/hosted-supervisor.ts";
+import { portError, portOk } from "../../src/contracts/ports.ts";
+import type {
+  ModelRunReceiptV1,
+  ModelRunRequestV1,
+  PortResultV1,
+} from "../../src/contracts/ports.ts";
 import type { Clock } from "../../src/contracts/ports.ts";
 import { parseReleaseStateSnapshotV1 } from "../../src/contracts/state-snapshots.ts";
 import { DenoReplayRuntime } from "../../src/replay/runtime.ts";
@@ -36,6 +43,10 @@ import type {
   HostedRuntimeLauncherInputV1,
   HostedRuntimeLauncherResultV1,
 } from "../../src/host/hosted-runtime.ts";
+import {
+  localCheckoutKey,
+  writeLocalModelResult,
+} from "../../src/host/local.ts";
 import { createReleaseStateStore } from "../../src/state/mod.ts";
 import type { ReleaseGitStateStore } from "../../src/state/mod.ts";
 import { gitRun, makeRemoteCtx, T0, testGitEnv } from "../state/helpers.ts";
@@ -152,6 +163,45 @@ function childLine(
     ...overrides,
   });
 }
+
+const DIAGNOSTIC_TASK_KEY = "c".repeat(64);
+
+/** One real serialized advisory summary exactly as the local host emits it. */
+function diagnosticLine(overrides: Record<string, unknown> = {}): string {
+  return JSON.stringify({
+    version: "v1",
+    kind: "sentinel_model_diagnostic",
+    taskKey: DIAGNOSTIC_TASK_KEY,
+    base: OBSERVED_BASE,
+    observedAt: T0,
+    outcome: "failed",
+    reason: "runtime_error",
+    errorKind: null,
+    terminalOrigin: "runtime",
+    observedTerminalStatus: "completed",
+    durationMs: 1_234,
+    outputChars: 100,
+    candidatePresent: true,
+    ...overrides,
+  });
+}
+
+/** The exact safe diagnostic carried by {@link diagnosticLine}. */
+const SAFE_DIAGNOSTIC = {
+  version: "v1",
+  kind: "sentinel_model_diagnostic",
+  taskKey: DIAGNOSTIC_TASK_KEY,
+  base: OBSERVED_BASE,
+  observedAt: T0,
+  outcome: "failed",
+  reason: "runtime_error",
+  errorKind: null,
+  terminalOrigin: "runtime",
+  observedTerminalStatus: "completed",
+  durationMs: 1_234,
+  outputChars: 100,
+  candidatePresent: true,
+} as const;
 
 async function makeCheckout(
   dir: string,
@@ -315,8 +365,62 @@ async function pathExists(path: string): Promise<boolean> {
   }
 }
 
-/** Real fixture child that writes a marker, leaves a descendant, then a record. */
-function validFixtureScript(): string {
+// Synthetic private fixture inputs for the real owned-group child: the actual
+// local host writes these through its real projection and advisory paths.
+const HOSTED_FIXTURE_TASK_ID = "hosted-fixture-issue";
+const HOSTED_FIXTURE_ISSUE_BODY = "hosted-fixture-issue-body-marker";
+const HOSTED_FIXTURE_EVIDENCE_REF = "hosted-fixture-evidence-ref-marker";
+const HOSTED_FIXTURE_RAW_ERROR = "hosted-fixture-raw-error-marker";
+const HOSTED_FIXTURE_CHANGED_PATH = "src/hosted-fixture-changed-path-marker.ts";
+const HOSTED_FIXTURE_INVOCATION = "hosted-fixture-invocation-marker";
+const HOSTED_FIXTURE_PROVIDER = "hosted-fixture-provider-marker";
+const HOSTED_FIXTURE_THREAD = "hosted-fixture-thread-marker";
+const HOSTED_FIXTURE_TURN = "hosted-fixture-turn-marker";
+const HOSTED_FIXTURE_MODEL = "hosted-fixture-observed-model-marker";
+const HOSTED_FIXTURE_REASONING = "hosted-fixture-observed-reasoning-marker";
+
+/** One valid Luna/max request bound to the observed base with marker inputs. */
+function hostedFixtureRequest(): ModelRunRequestV1 {
+  return {
+    taskId: asWorkItemId(HOSTED_FIXTURE_TASK_ID),
+    repository: { owner: "ubiquity", name: "sentinel", installationId: 0 },
+    base: OBSERVED_BASE,
+    issue: { number: 53, title: "fixture", body: HOSTED_FIXTURE_ISSUE_BODY },
+    evidence: [{ kind: "replay_result", ref: HOSTED_FIXTURE_EVIDENCE_REF }],
+    model: "gpt-5.6-luna",
+    reasoning: "max",
+    maxDurationMs: 1_200_000,
+    maxOutputChars: 400_000,
+  };
+}
+
+/** Synthetic failed host-timeout receipt carrying private marker identity. */
+function hostedFixtureReceipt(): PortResultV1<ModelRunReceiptV1> {
+  return portOk({
+    invocationId: HOSTED_FIXTURE_INVOCATION,
+    outcome: "failed",
+    actual: {
+      evidenceKind: "request-runtime",
+      provider: HOSTED_FIXTURE_PROVIDER,
+      threadId: HOSTED_FIXTURE_THREAD,
+      turnId: HOSTED_FIXTURE_TURN,
+      terminalOrigin: "host-timeout",
+      observedTerminalStatus: null,
+      observedModel: HOSTED_FIXTURE_MODEL,
+      observedReasoning: HOSTED_FIXTURE_REASONING,
+      durationMs: 4_321,
+      outputChars: 99,
+    },
+    candidate: null,
+    error: HOSTED_FIXTURE_RAW_ERROR,
+  });
+}
+
+/**
+ * Real fixture child that writes a marker, prints the exact captured advisory
+ * stdout, leaves a descendant, then a record.
+ */
+function validFixtureScript(diagnosticStdout: string): string {
   return `const decoder = new TextDecoder();
 const runId = Number(Deno.env.get("GITHUB_RUN_ID"));
 const runAttempt = Number(Deno.env.get("GITHUB_RUN_ATTEMPT"));
@@ -337,6 +441,9 @@ const execution = {
   createdAt: ${T0},
 };
 Deno.writeTextFileSync("child-ran.txt", "ran\\n");
+// The exact advisory stdout captured from actual local model-result writes,
+// embedded as one safe JavaScript string literal.
+console.log(${JSON.stringify(diagnosticStdout)});
 // A descendant that outlives the leader holds the captured pipe: settlement
 // must span the whole owned group, not just the direct child exit.
 new Deno.Command("sleep", { args: ["0.3"] }).spawn();
@@ -824,6 +931,181 @@ Deno.test("hosted runtime: a settled timeout is an objective failure and a backw
   }
 });
 
+Deno.test("hosted runtime: advisory summaries are wrapper-stamped, bounded and never change health or terminal", async () => {
+  const rig = await makeRig();
+  try {
+    await seedRelease(rig);
+    const healthy = childLine(rig.execution);
+    const safe = diagnosticLine();
+
+    // One valid child summary beside a healthy child record: the summary is
+    // copied only through the strict allow-list and stamped with the exact
+    // verified launch execution.
+    rig.process.child = exited(`${safe}\n${healthy}\n`);
+    let result = await launch(rig);
+    assert.equal(result.status, "healthy", JSON.stringify(result));
+    assert.equal(result.terminal?.outcome, "healthy");
+    assert.equal(result.terminal?.baseSha, OBSERVED_BASE);
+    assert.equal(result.diagnostics.length, 1);
+    const advisory = result.diagnostics[0];
+    assert.ok(advisory !== undefined);
+    if (advisory === undefined) throw new Error("unreachable");
+    assert.deepEqual(Object.keys(advisory).sort(), [
+      "advisory",
+      "diagnostic",
+      "execution",
+      "kind",
+      "version",
+    ]);
+    assert.equal(advisory.version, "v1");
+    assert.equal(advisory.kind, "hosted_model_diagnostic");
+    assert.equal(advisory.advisory, true);
+    assert.equal(
+      canonicalStringify(advisory.execution),
+      canonicalStringify(rig.execution),
+    );
+    assert.deepEqual(advisory.diagnostic, SAFE_DIAGNOSTIC);
+    const serialized = JSON.stringify(result.diagnostics);
+    for (
+      const marker of [
+        "local_model_result",
+        "sentinel_model_result",
+        "provider",
+        "threadId",
+        "turnId",
+        "errorDetail",
+        "observedModel",
+        "invocationId",
+        'errorKind":"unavailable',
+      ]
+    ) {
+      assert.equal(serialized.includes(marker), false, marker);
+    }
+
+    // A settled nonzero exit keeps its existing failed terminal and still
+    // carries the advisory; the advisory never rewrites the failure.
+    rig.process.child = exited(`${safe}\n`, 3);
+    result = await launch(rig);
+    assert.equal(result.status, "failed");
+    assert.equal(result.terminal?.outcome, "failed");
+    assert.equal(result.terminal?.startupReady, false);
+    assert.equal(result.terminal?.baseSha, null);
+    assert.equal(result.diagnostics.length, 1);
+
+    // A settled timeout beside a valid child record is unchanged and keeps its
+    // observed startup flag and base while the advisory is still attached.
+    rig.process.child = exited(
+      `${safe}\n${
+        childLine(rig.execution, {
+          outcome: { status: "source_error", detail: "source unavailable" },
+        })
+      }\n`,
+      0,
+      { outcome: "timed_out", exitCode: null, settled: true },
+    );
+    result = await launch(rig);
+    assert.equal(result.status, "failed");
+    assert.equal(result.terminal?.startupReady, true);
+    assert.equal(result.terminal?.baseSha, OBSERVED_BASE);
+    assert.equal(result.diagnostics.length, 1);
+
+    // Absent diagnostics keep the bounded empty default.
+    rig.process.child = exited(`${healthy}\n`);
+    result = await launch(rig);
+    assert.equal(result.status, "healthy");
+    assert.deepEqual(result.diagnostics, []);
+
+    // The accepted list is bounded at 64 summaries.
+    rig.process.child = exited(
+      `${Array.from({ length: 70 }, () => safe).join("\n")}\n${healthy}\n`,
+    );
+    result = await launch(rig);
+    assert.equal(result.status, "healthy");
+    assert.equal(result.diagnostics.length, 64);
+  } finally {
+    await rig.cleanup();
+  }
+});
+
+Deno.test("hosted runtime: malformed, oversized, unknown-field or forged advisory inputs are ignored", async () => {
+  const rig = await makeRig();
+  try {
+    await seedRelease(rig);
+    const healthy = childLine(rig.execution);
+    const forgedWrapper = JSON.stringify({
+      version: "v1",
+      kind: "hosted_model_diagnostic",
+      advisory: true,
+      execution: rig.execution,
+      diagnostic: JSON.parse(diagnosticLine()),
+    });
+    const oversized = diagnosticLine().replace("{", `{${" ".repeat(2_100)}`);
+    assert.ok(oversized.length > 2_048);
+    for (
+      const bad of [
+        '{"kind":"sentinel_model_diagnostic"}',
+        diagnosticLine({ provider: "private-marker" }),
+        diagnosticLine({ execution: rig.execution }),
+        diagnosticLine({ kind: "model_diagnostic" }),
+        diagnosticLine({ outcome: "port_error" }),
+        diagnosticLine({ errorKind: "unavailable" }),
+        diagnosticLine({ reason: "made_up" }),
+        oversized,
+        forgedWrapper,
+      ]
+    ) {
+      rig.process.child = exited(`${bad}\n${healthy}\n`);
+      const result = await launch(rig);
+      assert.equal(result.status, "healthy", bad.slice(0, 80));
+      assert.equal(result.terminal?.outcome, "healthy", bad.slice(0, 80));
+      assert.deepEqual(result.diagnostics, [], bad.slice(0, 80));
+    }
+
+    // A malformed object-looking line is never ignored beside a complete
+    // record: the unchanged status scan refuses it as uncertain, so even a
+    // following healthy record can never create terminal proof or an advisory.
+    rig.process.child = exited(
+      `{"kind":"sentinel_model_diagnostic","version":"v1"\n${healthy}\n`,
+    );
+    const malformed = await launch(rig);
+    assert.equal(malformed.status, "unavailable");
+    assert.equal(malformed.terminal, null);
+    assert.deepEqual(malformed.diagnostics, []);
+
+    // An unrecognized line alone never creates terminal proof or an advisory.
+    rig.process.child = exited(`${diagnosticLine({ extra: "x" })}\n`, 0);
+    const alone = await launch(rig);
+    assert.equal(alone.status, "unavailable");
+    assert.equal(alone.terminal, null);
+    assert.deepEqual(alone.diagnostics, []);
+
+    // Truncated, unsettled or unspawned captures yield no advisory at all and
+    // cannot improve or create terminal proof.
+    for (
+      const run of [
+        exited(`${diagnosticLine()}\n${healthy}\n`, 0, { truncated: true }),
+        exited(`${diagnosticLine()}\n${healthy}\n`, 0, { settled: false }),
+        exited(`${diagnosticLine()}\n`, 0, {
+          outcome: "timed_out",
+          exitCode: null,
+          settled: false,
+        }),
+        exited(`${diagnosticLine()}\n`, 0, {
+          outcome: "spawn_failed",
+          exitCode: null,
+        }),
+      ]
+    ) {
+      rig.process.child = run;
+      const result = await launch(rig);
+      assert.equal(result.terminal, null, JSON.stringify(run));
+      assert.deepEqual(result.diagnostics, [], JSON.stringify(run));
+    }
+  } finally {
+    await rig.cleanup();
+  }
+});
+
 Deno.test("hosted runtime: a real owned-group child cannot forge the wrapper terminal", async () => {
   const forged = await makeRig({
     runtimeFiles: {
@@ -837,6 +1119,7 @@ Deno.test("hosted runtime: a real owned-group child cannot forge the wrapper ter
     const result = await launch(forged);
     assert.equal(result.status, "unavailable");
     assert.equal(result.terminal, null);
+    assert.deepEqual(result.diagnostics, []);
     assert.equal(forged.process.childCalls().length, 1);
     assert.equal(
       await pathExists(`${forged.runtimeDir}/child-ran.txt`),
@@ -847,9 +1130,72 @@ Deno.test("hosted runtime: a real owned-group child cannot forge the wrapper ter
     await forged.cleanup();
   }
 
+  const fixtureRequest = hostedFixtureRequest();
+  const fixtureTaskKey = await localCheckoutKey(fixtureRequest.taskId);
+  const privateRoot = await Deno.makeTempDir({
+    prefix: "sentinel-hosted-model-results-",
+    dir: ROOT,
+  });
+  let diagnosticStdout = "";
+  try {
+    const emitted: string[] = [];
+    const originalLog = console.log;
+    let firstPath = "";
+    let secondPath = "";
+    try {
+      console.log = ((...args: unknown[]) => {
+        emitted.push(
+          args.map((arg) => typeof arg === "string" ? arg : String(arg)).join(
+            " ",
+          ),
+        );
+      }) as typeof console.log;
+      firstPath = await writeLocalModelResult(
+        privateRoot,
+        fixtureRequest,
+        hostedFixtureReceipt(),
+        T0,
+      );
+      secondPath = await writeLocalModelResult(
+        privateRoot,
+        fixtureRequest,
+        portError("unavailable", HOSTED_FIXTURE_RAW_ERROR),
+        T0,
+      );
+    } finally {
+      console.log = originalLog;
+    }
+    assert.equal(emitted.length, 2, "one advisory per written result");
+    diagnosticStdout = emitted.join("\n");
+
+    // Both private files are real 0600 projections inside 0700 directories and
+    // never retain the raw error.
+    for (const path of [firstPath, secondPath]) {
+      assert.equal((await Deno.stat(path)).mode! & 0o777, 0o600);
+      assert.equal(
+        (await Deno.stat(path.slice(0, path.lastIndexOf("/")))).mode! & 0o777,
+        0o700,
+      );
+      const privateText = await Deno.readTextFile(path);
+      const privateRecord = JSON.parse(privateText) as Record<string, unknown>;
+      assert.equal(privateRecord.version, "v1");
+      assert.equal(privateRecord.kind, "local_model_result");
+      assert.equal(privateRecord.taskId, fixtureRequest.taskId);
+      assert.equal(privateText.includes(HOSTED_FIXTURE_RAW_ERROR), false);
+    }
+    const firstPrivate = await Deno.readTextFile(firstPath);
+    assert.equal(
+      firstPrivate.includes(HOSTED_FIXTURE_PROVIDER),
+      true,
+      "the private projection keeps the acknowledged provider",
+    );
+  } finally {
+    await Deno.remove(privateRoot, { recursive: true }).catch(() => {});
+  }
+
   const valid = await makeRig({
     runtimeFiles: {
-      "src/host/actions.ts": validFixtureScript(),
+      "src/host/actions.ts": validFixtureScript(diagnosticStdout),
       ".gitignore": ".sentinel/\n",
     },
   });
@@ -868,11 +1214,78 @@ Deno.test("hosted runtime: a real owned-group child cannot forge the wrapper ter
       canonicalStringify(terminal.execution),
       canonicalStringify(valid.execution),
     );
+    // The real fixture child stdout crosses the actual owned-group border; the
+    // two advisories written by the actual local host are reconstructed and
+    // wrapper-stamped here.
+    assert.equal(result.diagnostics.length, 2);
+    const timeoutAdvisory = result.diagnostics[0];
+    const portAdvisory = result.diagnostics[1];
+    assert.ok(timeoutAdvisory !== undefined && portAdvisory !== undefined);
+    if (timeoutAdvisory === undefined || portAdvisory === undefined) {
+      throw new Error("unreachable");
+    }
+    for (const advisory of result.diagnostics) {
+      assert.equal(advisory.kind, "hosted_model_diagnostic");
+      assert.equal(advisory.advisory, true);
+      assert.equal(
+        canonicalStringify(advisory.execution),
+        canonicalStringify(valid.execution),
+      );
+      assert.equal(advisory.diagnostic.taskKey, fixtureTaskKey);
+      assert.equal(advisory.diagnostic.base, OBSERVED_BASE);
+      assert.equal(advisory.diagnostic.observedAt, T0);
+    }
+    assert.deepEqual(timeoutAdvisory.diagnostic, {
+      version: "v1",
+      kind: "sentinel_model_diagnostic",
+      taskKey: fixtureTaskKey,
+      base: OBSERVED_BASE,
+      observedAt: T0,
+      outcome: "failed",
+      reason: "host_timeout",
+      errorKind: null,
+      terminalOrigin: "host-timeout",
+      observedTerminalStatus: null,
+      durationMs: 4_321,
+      outputChars: 99,
+      candidatePresent: false,
+    });
+    assert.deepEqual(portAdvisory.diagnostic, {
+      version: "v1",
+      kind: "sentinel_model_diagnostic",
+      taskKey: fixtureTaskKey,
+      base: OBSERVED_BASE,
+      observedAt: T0,
+      outcome: "port_error",
+      reason: "runtime_error",
+      errorKind: "unavailable",
+      terminalOrigin: null,
+      observedTerminalStatus: null,
+      durationMs: null,
+      outputChars: null,
+      candidatePresent: false,
+    });
+    const serialized = JSON.stringify(result.diagnostics);
+    for (
+      const marker of [
+        HOSTED_FIXTURE_ISSUE_BODY,
+        HOSTED_FIXTURE_EVIDENCE_REF,
+        HOSTED_FIXTURE_RAW_ERROR,
+        HOSTED_FIXTURE_CHANGED_PATH,
+        HOSTED_FIXTURE_INVOCATION,
+      ]
+    ) {
+      assert.equal(serialized.includes(marker), false, marker);
+    }
     assert.equal(
       await pathExists(`${valid.runtimeDir}/child-ran.txt`),
       true,
       "the real fixture child must have executed",
     );
+    // Synthetic fixture evidence for the existing CI job log only.
+    for (const advisory of result.diagnostics) {
+      console.log(`SENTINEL_DIAGNOSTIC_FIXTURE ${JSON.stringify(advisory)}`);
+    }
   } finally {
     await valid.cleanup();
   }

@@ -18,6 +18,7 @@ import { CodexStructuredReviewer } from "../../src/github/codex-reviewer.ts";
 import {
   GitHubCodexReviewTransport,
   type GitReviewSnapshotCaptureV1,
+  REVIEW_TRANSPORT_TOTAL_MS,
 } from "../../src/github/codex-review-transport.ts";
 import {
   isJournalBoundExceeded,
@@ -62,7 +63,7 @@ const HEAD: GitSha = asGitSha("b".repeat(40));
 const OP_KEY = "review:work-1:head-b";
 const REQUEST_ID = `review-${OP_KEY}`.slice(0, 256);
 const LATEST_START = T0 + 60_000;
-const SETTLE_BY = T0 + 600_000;
+const SETTLE_BY = T0 + REVIEW_TRANSPORT_TOTAL_MS;
 
 const ACCOUNT_CONTENT =
   "export function deposit(balance: number, amount: number) {\n" +
@@ -314,6 +315,7 @@ class RecordingSession implements CodexSessionV1 {
         model: REVIEW_MODEL,
         modelProvider: PROVIDER,
         reasoningEffort: REVIEW_REASONING,
+        activePermissionProfile: { id: "sentinel-review" },
       });
     }
     if (method === "turn/start") {
@@ -405,11 +407,14 @@ async function snapshotFixture(
     base: BASE,
     head: HEAD,
     mergeBase: BASE,
-    diff: "diff --git a/account.ts b/account.ts\n",
     files: [{
       path: "account.ts",
       kind: "modified",
-      content: ACCOUNT_CONTENT,
+      oldBlob: "1".repeat(40),
+      newBlob: "2".repeat(40),
+      oldMode: "100644",
+      newMode: "100644",
+      candidateLines: 4,
     }],
     digest: "",
     ...overrides,
@@ -440,6 +445,7 @@ function makeReviewer(
     provider: PROVIDER,
     openSession: () => session,
     sessionCwd: "/tmp/sentinel-review-transport",
+    permissionProfile: "sentinel-review",
     now: () => clock.now(),
   });
 }
@@ -601,7 +607,7 @@ async function settle(
   interrupt = false,
 ): Promise<void> {
   const drain = await transport.drain({
-    deadline: T0 + 600_000,
+    deadline: T0 + REVIEW_TRANSPORT_TOTAL_MS,
     interrupt,
   });
   assert.equal(drain.ok, true, drain.faults.join(","));
@@ -1299,7 +1305,7 @@ Deno.test(
     const submitted = await h.transport.submitReview(submission());
     assert.equal(submitted.ok, true);
     const report = await h.transport.drain({
-      deadline: T0 + 600_000,
+      deadline: T0 + REVIEW_TRANSPORT_TOTAL_MS,
       interrupt: true,
     });
     assert.equal(report.ok, true);

@@ -28,6 +28,7 @@ import type {
   ReleaseStateSnapshotV1,
   RepairStateSnapshotV1,
 } from "./state-snapshots.ts";
+import type { CandidatePreservationV1 } from "./work-record.ts";
 import type {
   DeploymentIdentityV1,
   EvidenceRefV1,
@@ -391,6 +392,51 @@ export interface MergeRequestV1 {
 
 export type IssueCloseOutcomeV1 = "closed" | "already_closed";
 
+/**
+ * Trusted candidate-preservation request.
+ *
+ * `candidate` is the exact operation-bound descriptor the trusted host derived
+ * from durable state: its `base`/`head` are the exact candidate commits, its
+ * `operationKey` is the producing operation identity and its `ref` is the
+ * deterministic create-only destination derived from repository/task/operation.
+ * `publishedHead` is the exact previously verified task-branch head, or null.
+ * The repository identity is fixed by the port instance, never by the request.
+ */
+export interface CandidatePreservationRequestV1 {
+  taskId: WorkItemId;
+  candidate: CandidatePreservationV1;
+  publishedHead: GitSha | null;
+}
+
+/**
+ * Transient proof of ONE exact scoped legacy candidate loss.
+ *
+ * It binds the durable task/repository identity, the authoritative state head
+ * the proof was established at (`StateReadResultV1.head`, NEVER the snapshot's
+ * prior `stateHead` — a moved state head refuses the proof) and the exact
+ * commits: `lostHead` H1 was recorded as the produced candidate, `predecessor`
+ * H0 is the exact task-branch/PR head that still exists, and `lostBase` B0 is
+ * the original validated target base the lost candidate was produced against.
+ * The proof is a runtime value only: it is never serialized into state, and it
+ * does not claim global remote-object absence.
+ */
+export interface LegacyBaseRefreshLossProofV1 {
+  taskId: WorkItemId;
+  repository: RepositoryIdentityV1;
+  stateHead: GitSha;
+  shape: "legacy_base_refresh";
+  lostBase: GitSha;
+  lostHead: GitSha;
+  predecessorHead: GitSha;
+  branch: string;
+  /** Exact PR that owned the historical reviewed predecessor head. */
+  pr: number;
+  /** Original unprepared base-refresh intent key bound to pr/H1/observedBase. */
+  intentKey: string;
+  /** Deterministic id of the historical completed H0 correction review. */
+  reviewId: string;
+}
+
 export interface GitHubPort {
   /**
    * Exact trusted review publisher identity configured for this port. The
@@ -450,6 +496,41 @@ export interface GitHubPort {
     request: MergeRequestV1,
   ): Promise<PortResultV1<MergeOutcomeV1>>;
   closeIssue(issueNumber: number): Promise<PortResultV1<IssueCloseOutcomeV1>>;
+  /**
+   * Required trusted candidate-preservation capability.
+   *
+   * It revalidates the exact durable operation binding, stores the exact
+   * candidate objects in a create-only deterministic remote ref and proves a
+   * fresh empty object store can retrieve them, all through this SAME port
+   * instance (repository identity is fixed here, never by the request).
+   * Success means validated candidate plus exact create-only remote ref and
+   * independently fetched objects in a new empty object store. A generic
+   * transport/auth/CAS/permission/read failure is `unavailable`, never proof
+   * of permanent loss; an existing different ref SHA is `conflict`. A port
+   * without a composed preservation capability returns a static `unavailable`
+   * for every call — it never reports success and never writes.
+   */
+  preserveCandidate(
+    request: CandidatePreservationRequestV1,
+  ): Promise<PortResultV1<void>>;
+  /**
+   * Optional trusted legacy candidate-loss proof capability.
+   *
+   * It answers only whether ONE exact scoped legacy record has a provable
+   * missing candidate: the durable legacy record and its submitted
+   * reservation, the scoped source issue, the exact task branch/PR at the
+   * predecessor head, the historical completed correction review and a fresh
+   * empty object store fetched from the fixed remote must all line up, and the
+   * recorded lost head must be absent there as both a commit and an object.
+   * `null` is an explicit "this record is not a legacy-loss case" (new-format
+   * candidate state, another intent, ineligible lifecycle); every unreadable,
+   * moved, mismatched or otherwise unprovable input is a typed error, never an
+   * absence and never a null. It writes no state or remote ref, starts no
+   * model, runs no candidate-controlled code and creates no review.
+   */
+  proveLegacyBaseRefreshLoss?(
+    taskId: WorkItemId,
+  ): Promise<PortResultV1<LegacyBaseRefreshLossProofV1 | null>>;
   /**
    * Bounded lifecycle finalization forwarded to the SAME review-service
    * transport instance the port submits through: admission stops, owned

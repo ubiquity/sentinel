@@ -84,6 +84,7 @@ import { DurableGitHubCooldownGate } from "../../src/repair/github-cooldown.ts";
 import {
   DEP_2,
   evidenceFixture,
+  exactCandidateLifecycle,
   FakeClock,
   FakeGithub,
   FakeIncidents,
@@ -211,7 +212,11 @@ Deno.test(
 Deno.test(
   "lifecycle: actual entrypoints drive discovery, work, review, merge, release promotion/acceptance and closure",
   async () => {
-    const rig = await makeRepairRig("lifecycle");
+    const rig = await makeRepairRig("lifecycle", {
+      github: {
+        candidateLifecycle: exactCandidateLifecycle({ head: SHA3 }),
+      },
+    });
     try {
       // Run 1: intake -> evidence -> intended before-failure -> model ->
       // after-pass regression -> deterministic PR -> review request ->
@@ -770,8 +775,15 @@ async function trustedSnapshot(
     base,
     head,
     mergeBase: base,
-    diff: "diff --git a/src/app.ts b/src/app.ts\n",
-    files: [],
+    files: [{
+      path: "src/app.ts",
+      kind: "modified",
+      oldBlob: "1".repeat(40),
+      newBlob: "2".repeat(40),
+      oldMode: "100644",
+      newMode: "100644",
+      candidateLines: 3,
+    }],
     digest: "",
   };
   return { ...draft, digest: await reviewSnapshotDigest(draft) };
@@ -926,7 +938,11 @@ function secondIncidentEvidence(): ReturnType<typeof incidentEvidence> {
 Deno.test(
   "entrypoint: mandatory drain settles a delayed clean review through the concrete transport port",
   async () => {
-    const rig = await makeRepairRig("drain-concrete-transport");
+    const rig = await makeRepairRig("drain-concrete-transport", {
+      github: {
+        candidateLifecycle: exactCandidateLifecycle({ head: SHA3 }),
+      },
+    });
     try {
       const store = new ReviewRestStore();
       const preparedSessions: PreparedStructuredReviewV1[] = [];
@@ -1012,7 +1028,7 @@ Deno.test(
     // (1) Successful cycle + successful drain: the original outcome returns.
     const rig = await makeRepairRig("drain-preserve-outcome");
     try {
-      const outcome = await rig.run(30 * 60_000);
+      const outcome = await rig.run(40 * 60_000);
       assert.equal(outcome.status, "idle", JSON.stringify(outcome));
       assert.equal(rig.github.drains.length, 1);
       assert.equal(rig.github.drains[0].interrupt, true);
@@ -1061,7 +1077,7 @@ Deno.test(
         interrupted: true,
         completedAt: T0,
       });
-      await assert.rejects(() => rig.run(30 * 60_000), (error: unknown) => {
+      await assert.rejects(() => rig.run(40 * 60_000), (error: unknown) => {
         assert.ok(error instanceof RepairReviewDrainError);
         assert.equal(error.message, REPAIR_REVIEW_DRAIN_ERROR_MESSAGE);
         assert.equal(error.report?.ok, false);
@@ -1095,7 +1111,11 @@ Deno.test(
 Deno.test(
   "entrypoint: drain receives the original hard deadline and the loop keeps its five-minute reserve and model cutoff",
   async () => {
-    const rig = await makeRepairRig("drain-hard-deadline");
+    const rig = await makeRepairRig("drain-hard-deadline", {
+      github: {
+        candidateLifecycle: exactCandidateLifecycle({ head: SHA3 }),
+      },
+    });
     try {
       const start = rig.clock.now();
       const bounds: { latestStartAt: number; settleBy: number }[] = [];
@@ -1176,13 +1196,19 @@ Deno.test(
   "entrypoint: a second implementation task advances while the first review is pending with one writer",
   async () => {
     const rig = await makeRepairRig("dual-task-progress", {
+      github: {
+        candidateLifecycle: exactCandidateLifecycle(
+          { head: SHA3 },
+          { head: SECOND_HEAD },
+        ),
+      },
       model: { heads: [SHA3, SECOND_HEAD] },
     });
     try {
       rig.incidents.setSummaries([summaryFixture(), secondIncidentSummary()]);
       rig.incidents.setEvidence([evidenceFixture(), secondIncidentEvidence()]);
 
-      const first = await rig.run(30 * 60_000);
+      const first = await rig.run(40 * 60_000);
       assert.equal(first.status, "idle", JSON.stringify(first));
       const afterFirst = await rig.snapshot();
       assert.equal(afterFirst.work.length, 2, "two work records");
@@ -1215,7 +1241,7 @@ Deno.test(
       // reviews still pending adds no start, no duplicate review request and
       // no new budget reservation.
       rig.clock.advance(15 * 60_000 + 1);
-      const second = await rig.run(30 * 60_000);
+      const second = await rig.run(40 * 60_000);
       assert.equal(second.status, "idle", JSON.stringify(second));
       assert.equal(rig.model.requests.length, 2, "no duplicate model start");
       const afterSecond = await rig.snapshot();

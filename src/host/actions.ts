@@ -187,6 +187,7 @@ export async function runActionsRepairHost(): Promise<
     token: githubToken,
     login: ACTIONS_LOGIN,
     invocationId: crypto.randomUUID(),
+    stateRoot,
     sourcePath,
     scratch,
     reviewCheckout,

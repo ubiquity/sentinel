@@ -4,6 +4,15 @@ Owner planning session: 2026-09-06 America/New_York; created across 2026-09-07 0
 
 ## 1. Outcome and scope
 
+Owner development policy update, 2026-09-15: use 120 shared Luna model starts
+per rolling hour and no rolling-seven-day cap during development, including
+supervised GitHub Actions runs. This supersedes all earlier 60/hour and
+168/seven-day limits below for development. Preserve every historical charge,
+shared accounting for implementation/review/retry/continuation, Luna/max,
+exclusive runtime ownership and reviewed installation. A source change alone
+does not establish the effective hosted policy.
+The owner reaffirmed that Sentinel is a cron-triggered GitHub Actions job.
+
 Owner policy update, 2026-09-14 14:17 UTC: raise the shared Luna model-start
 cap from one to 60 per rolling hour. This supersedes the one-start hourly cap
 below. Keep gpt-5.6-luna with max reasoning, 168 starts per rolling seven days,
@@ -143,6 +152,15 @@ No GitHub remote was created. `gh repo view ubiquity/sentinel` did not resolve u
 This is a new goal, not the embedded prototype's goal. Do not repurpose its branch, merge PR251 here, or change its pending work. The old ai.ubq.fi lane remains `/Users/nv/repos/ubiquity/ai.ubq.fi/.codex-worktrees/issue-throughput-handoff-2026-09-06-g5a02cbbad3`; reconcile its owner and pending changes before any target-side module or runtime cutover.
 
 ## 3. Review policy: concentrate Codex at acceptance
+
+Owner update, 2026-09-16 05:51 UTC: stop all development pull requests and
+Codex reviews. Make changes, immediately test, and deliver directly. This
+supersedes development acceptance rounds, fresh-Astra audit gates and PR
+delivery requirements in this plan and repository instructions. The owner
+explicitly clarified that autonomous repairs retain their PRs and reviews.
+Preserve those runtime gates, exact source identity, state, admission charges
+and rollback. Direct owner-authorized development installation must be recorded
+as such and must not fabricate a model review or autonomous release receipt.
 
 During module development use focused deterministic tests and primary-agent diff inspection. Do not spend Codex reviews on module commits, internal ancestry merges, scaffolding, or every small adjustment. The first Codex review covers the complete integrated, locally accepted candidate. Batch relevant fixes; a materially changed candidate needs a fresh acceptance review, not a recycled clean verdict. At most three review rounds per acceptance cycle; unresolved substantive P0/P1 after that means blocked, never automatic merge. Review failure/no verdict is unavailable, not passed.
 
