@@ -190,7 +190,7 @@ Do not claim uninterrupted protection from GitHub Actions: a lost runner or dela
 
 Continue post-acceptance checks through the existing scheduled deterministic controller if ongoing stability supervision is enabled, using the same owner-set thresholds and exact revision ownership. Once another authorized release changes production, the previous receipt cannot roll back that newer release. Before any rollback, verify that the failed candidate is still the controlled current revision. No automatic roll-forward after rollback and no oscillation between builds; leave the failed candidate blocked pending a new reviewed fix.
 
-Do not automatically close an issue merely because GitHub merged the PR; avoid auto-closing keywords until verified delivery. A review or publication failure never restarts successful code generation unnecessarily.
+An issue-backed repair pull request now publishes exactly `Resolves #N` as its body (owner directive, 2026-09-23, `docs/DECISIONS.md`), so GitHub links the pull request to the issue and the merge closes it; the earlier temporary rule against auto-closing keywords is retired. A review or publication failure never restarts successful code generation unnecessarily.
 
 ## Sentinel self-improvement: preserve the option, defer recursion
 

@@ -34,7 +34,7 @@ import type {
 import type { RepositoryConfigV1 } from "../contracts/repository-config.ts";
 import type { RepositoryIdentityV1 } from "../contracts/shared.ts";
 import type { RepairCycleOutcomeV1 } from "../repair/loop.ts";
-import { portError } from "../contracts/ports.ts";
+import { portError, portOk } from "../contracts/ports.ts";
 import { parseRepairStateSnapshotV1 } from "../contracts/state-snapshots.ts";
 import { RollingStartBudget } from "../budget/mod.ts";
 import type { BudgetControllerV1 } from "../budget/mod.ts";
@@ -105,6 +105,8 @@ const STATIC_DEADLINE =
   "hosted repair host reached its run deadline before addressing any target";
 const STATIC_TARGET_UNKNOWN =
   "hosted repair host rejected: the requested repository is not a committed target";
+const STATIC_BASE_REFRESH =
+  "hosted repair host rejected: the exact requested base could not be fetched into its target mirror";
 
 /**
  * The App installation scope of `ubiquity-sentinel`. Every committed target
@@ -619,6 +621,39 @@ export async function runActionsRepairHost(): Promise<
     resolveSourcePath: (repository) =>
       sourcePathBySlug.get(`${repository.owner}/${repository.name}`) ??
         sourcePath,
+    // A target branch can move while this run is still cycling. A record the
+    // intake pinned to the moved head then cannot be checked out from a mirror
+    // fetched before the move, so the exact requested base is fetched into
+    // THAT target's own mirror on demand, through the same bounded, gated
+    // trusted fetch its cycle start already uses. An unknown target, a gate
+    // refusal or a failed fetch stays a refusal: the checkout is never
+    // prepared from an unproved object.
+    ensureBaseObject: async (input) => {
+      const config = targetConfigs.find((candidate) =>
+        candidate.repository.owner === input.repository.owner &&
+        candidate.repository.name === input.repository.name &&
+        candidate.repository.installationId ===
+          input.repository.installationId
+      );
+      if (config === undefined) {
+        return portError("invalid", STATIC_TARGET_UNKNOWN);
+      }
+      const remoteUrl =
+        `https://github.com/${config.repository.owner}/${config.repository.name}.git`;
+      try {
+        await refreshDevelopment(
+          mirrorPathFor(config),
+          { ...hostInput, githubToken: writeToken },
+          scratch,
+          gate,
+          config.repository.installationId,
+          { remoteUrl, baseBranch: config.baseBranch },
+        );
+      } catch {
+        return portError("unavailable", STATIC_BASE_REFRESH);
+      }
+      return portOk(undefined);
+    },
   });
 
   // The hosted self release path reads the protected supervisor's persisted

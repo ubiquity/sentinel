@@ -1928,7 +1928,7 @@ Deno.test(
       // Every interaction stayed on the injected fake ports/transports.
       assert.ok(
         rig.github.calls.every((call) =>
-          /^listOpenIssues$|^readRef:|^readIssue:|^findPr:|^readPr:|^push:|^createPr(?::\d+)?$|^observeReview$|^requestReview$|^merge$|^closeIssue:/
+          /^listOpenIssues$|^readRef:|^readIssue:|^findPr:|^readPr:|^push:|^assignIssue:\d+$|^createPr(?::\d+)?$|^observeReview$|^requestReview$|^merge$|^closeIssue:/
             .test(call)
         ),
         `unexpected github calls: ${rig.github.calls.join(", ")}`,

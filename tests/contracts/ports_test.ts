@@ -639,6 +639,9 @@ const _githubFake: GitHubPort = {
   closeIssue() {
     return resolved(portOk("already_closed"));
   },
+  assignIssue() {
+    return resolved(portOk(undefined));
+  },
   drainReviews() {
     return resolved(portOk({
       ok: true,

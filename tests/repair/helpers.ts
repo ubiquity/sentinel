@@ -213,6 +213,8 @@ export interface FakeGithubOptionsV1 {
   mergeFailNext?: boolean;
   closeOutcome?: "closed" | "already_closed";
   closeFailNext?: boolean;
+  /** One transient failure of the next issue-assignment call. */
+  assignFailNext?: boolean;
 }
 
 /** Recording fake GitHubPort; product logic never lives here. */
@@ -498,9 +500,11 @@ export class FakeGithub implements GitHubPort {
       }));
     }
     // One deterministic head ref owns exactly one open PR: a repeated create
-    // for the same branch reuses the tracked PR instead of allocating another.
+    // for the same branch reuses the tracked open PR instead of allocating
+    // another. A closed or merged PR is never reused — the real adapter
+    // publishes a replacement for the same head ref — so the fake matches it.
     const existing = [...this.candidatePullRequests.values()].find((pr) =>
-      pr.headRef === request.headRef
+      pr.headRef === request.headRef && pr.state === "open"
     );
     if (existing !== undefined) {
       this.prNumber = existing.number;
@@ -686,6 +690,15 @@ export class FakeGithub implements GitHubPort {
         mergeSha: this.releasedHead ?? SHA1,
       },
     ));
+  }
+
+  assignIssue(issueNumber: number): Promise<PortResultV1<void>> {
+    this.calls.push(`assignIssue:${issueNumber}`);
+    if (this.options.assignFailNext) {
+      this.options.assignFailNext = false;
+      return Promise.resolve(portError("unavailable", "assign failed"));
+    }
+    return Promise.resolve(portOk(undefined));
   }
 
   closeIssue(

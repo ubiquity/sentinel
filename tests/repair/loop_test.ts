@@ -471,6 +471,13 @@ Deno.test(
       );
       assert.equal(rig.github.pushes.length, 1);
       assert.ok(rig.github.calls.includes("createPr"));
+      const published = [...rig.github.candidatePullRequests.values()];
+      assert.equal(published.length, 1, "one published pull request");
+      assert.equal(
+        published[0].body,
+        `Sentinel repair for incident ${work.source.id}`,
+        "an incident task keeps a non-closing descriptive body",
+      );
       assert.ok(rig.github.calls.includes("requestReview"));
 
       // Unchanged wait exit: no new model call, no state write.
@@ -1778,6 +1785,13 @@ Deno.test("closure failure retries closure only", async () => {
     assert.ok(seeded.ok && seeded.value.status === "applied");
 
     await rig.run();
+    const published = [...rig.github.candidatePullRequests.values()];
+    assert.equal(published.length, 1, "one published pull request");
+    assert.equal(
+      published[0].body,
+      "Resolves #1",
+      "an issue task publishes exactly the GitHub closing keyword",
+    );
     rig.clock.advance(15 * 60_000 + 1);
     rig.github.completeReview([], rig.clock.now());
     await rig.run();
@@ -2183,6 +2197,94 @@ Deno.test("existing-PR corrections are not blocked by the unfinished-PR cap", as
     await rig.ctx.cleanup();
   }
 });
+
+Deno.test(
+  "fresh publication: trusted retired PRs do not consume the unfinished-PR cap",
+  async () => {
+    const id = asWorkItemId("issue-1");
+    const rig = await makeRig("retired-publish-cap", {
+      summaries: false,
+      github: {
+        candidateLifecycle: {
+          ...positiveLifecycle(),
+          refs: {},
+          pullRequests: [exactOpenPr(7, SHA2, "sentinel/repair/issue-100")],
+        },
+      },
+    });
+    try {
+      const retired = [61, 120].map((number) =>
+        workRecord(`issue-${number}`, {
+          source: { kind: "issue", id: `${number}`, revision: SHA1 },
+          related: { incidentId: null, issueNumber: number },
+          nextStep: "blocked",
+          blocker: {
+            kind: "other",
+            message: "source issue is closed; the repair no longer exists",
+            since: T0,
+          },
+          target: {
+            base: SHA1,
+            branch: `sentinel/repair/issue-${number}`,
+            checkpoint: null,
+            head: SHA2,
+            pr: 500 + number,
+          },
+        })
+      );
+      const live = workRecord("issue-100", {
+        source: { kind: "issue", id: "100", revision: SHA1 },
+        related: { incidentId: null, issueNumber: 100 },
+        nextStep: "review",
+        wait: { reason: "review_pending", since: T0, until: T0 + 3600_000 },
+        target: {
+          base: SHA1,
+          branch: "sentinel/repair/issue-100",
+          checkpoint: null,
+          head: SHA2,
+          pr: 7,
+        },
+      });
+      const fresh = preservedIssueWork("issue-1", H1, {
+        pr: null,
+        publishedHead: null,
+      });
+      const written = await rig.store.writeRepair(
+        seededSnapshot([...retired, live, fresh]),
+        null,
+      );
+      assert.ok(written.ok && written.value.status === "applied");
+
+      const outcome = await rig.run();
+      assert.equal(outcome.status, "idle", JSON.stringify(outcome));
+      const state = await rig.snapshot();
+      const published = state.work.find((record) => record.id === id);
+      assert.ok(published, "the fresh record exists");
+      assert.equal(
+        published?.nextStep,
+        "review",
+        "the fresh candidate publishes past two trusted retirements",
+      );
+      assert.equal(published?.wait?.reason, "review_pending");
+      assert.equal(
+        rig.github.pushes.length,
+        1,
+        "exactly one fresh candidate push",
+      );
+      assert.equal(
+        rig.github.calls.filter((call) => call === "createPr").length,
+        1,
+        "exactly one fresh PR",
+      );
+      assert.equal(
+        rig.github.calls.filter((call) => call === "requestReview").length,
+        1,
+      );
+    } finally {
+      await rig.ctx.cleanup();
+    }
+  },
+);
 
 // ---------------------------------------------------------------------------
 // Local activation branch: the explicit local Sentinel scope (installationId
@@ -3419,7 +3521,8 @@ function preservedIssueWork(
   head: GitSha,
   options: {
     base?: GitSha;
-    publishedHead?: GitSha;
+    /** Explicit null models a preserved-but-never-published candidate. */
+    publishedHead?: GitSha | null;
     pr?: number | null;
     nextStep?: WorkRecordV1["nextStep"];
     counters?: WorkRecordV1["counters"];
@@ -3443,7 +3546,9 @@ function preservedIssueWork(
           head,
           ref: CANDIDATE_REF,
         },
-        publishedHead: options.publishedHead ?? head,
+        publishedHead: options.publishedHead === undefined
+          ? head
+          : options.publishedHead,
       },
     },
     nextStep: options.nextStep ?? "work",
@@ -3588,6 +3693,333 @@ Deno.test(
         rig.github.calls.filter((call) => call === "requestReview").length,
         0,
       );
+    } finally {
+      await rig.ctx.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "candidate lifecycle: a positively missing candidate returns to a fresh attempt instead of retrying forever",
+  async () => {
+    const id = asWorkItemId("issue-1");
+    const branch = candidateBranch(id);
+    const operationKey = implementationIntentKey(PRODUCING_RESERVATION);
+    const ref = await candidatePreservationRef(REPO, id, operationKey);
+    const lifecycle = positiveLifecycle();
+    const positivePreserve = lifecycle.preserveCandidate!;
+    let preservations = 0;
+    const rig = await makeRig("candidate-preserve-missing", {
+      github: {
+        issues: [{ number: 1, title: "reproducible failure", body: "body" }],
+        candidateLifecycle: {
+          ...lifecycle,
+          refs: { [`refs/heads/${branch}`]: H1 },
+          pullRequests: [exactOpenPr(7, H1, branch)],
+          preserveCandidate: (request) => {
+            preservations++;
+            if (preservations === 1) {
+              // The host loader's exact positive-absence classification: no
+              // trusted store or remote ref holds the produced candidate.
+              return Promise.resolve(
+                portError(
+                  "not_found",
+                  "candidate is not available in the trusted local store",
+                ),
+              );
+            }
+            return positivePreserve(request);
+          },
+        },
+      },
+    });
+    try {
+      const record = workRecord("issue-1", {
+        source: { kind: "issue", id: "1", revision: SHA1 },
+        related: { incidentId: null, issueNumber: 1 },
+        target: {
+          base: SHA1,
+          branch,
+          checkpoint: null,
+          head: H0,
+          pr: 7,
+          candidateState: { preserved: null, publishedHead: H1 },
+        },
+        nextStep: "work",
+        intent: {
+          kind: "candidate_preservation",
+          key: operationKey,
+          startedAt: T0,
+          branch: ref,
+          expectedHead: H0,
+          observedBase: SHA1,
+          pr: null,
+          requestId: PRODUCING_RESERVATION,
+          resultId: null,
+        },
+        counters: { attempts: 1, retries: 0, reviewRounds: 0 },
+      });
+      const written = await rig.store.writeRepair(
+        seededSnapshot([record]),
+        null,
+      );
+      assert.ok(written.ok && written.value.status === "applied");
+
+      // Run 1: the missing candidate is never reconciled and the record never
+      // parks on it. It returns to the legacy work shape bound to the published
+      // branch head with its charged attempt history preserved, and the same
+      // cycle buys exactly one fresh implementation attempt whose candidate is
+      // preserved under a new operation identity.
+      const first = await rig.run();
+      assert.equal(first.status, "idle", JSON.stringify(first));
+      const state = await rig.snapshot();
+      const work = state.work[0]!;
+      assert.ok(
+        rig.model.requests.length >= 1,
+        "the recovery buys a fresh run",
+      );
+      assert.equal(work.target.head, SHA3, "the fresh candidate head");
+      assert.equal(work.counters.attempts, 2, "one charged fresh attempt");
+      assert.notEqual(
+        work.target.candidateState?.preserved?.operationKey ?? null,
+        operationKey,
+        "the lost operation identity is retired",
+      );
+      assert.equal(
+        work.target.candidateState?.preserved?.head ?? null,
+        SHA3,
+        "the fresh candidate is preserved",
+      );
+      assert.equal(work.target.candidateState?.publishedHead, SHA3);
+      assert.equal(
+        work.nextStep,
+        "review",
+        "the record advances past the loss",
+      );
+      assert.equal(work.wait?.reason, "review_pending");
+      assert.ok(
+        state.reservations.some((entry) =>
+          entry.attempt === 2 && entry.purpose === "retry" &&
+          entry.outcome === "submitted"
+        ),
+        "the fresh attempt is charged as a retry",
+      );
+      assert.ok(preservations >= 2, "one refused and one durable preservation");
+    } finally {
+      await rig.ctx.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "candidate lifecycle: a closed-unmerged own PR republishes the preserved candidate once",
+  async () => {
+    const id = asWorkItemId("issue-1");
+    const branch = candidateBranch(id);
+    // GitHub freezes a closed pull request's head forever, so both shapes are
+    // recoverable: the exact published head and a head that predates the
+    // refreshed candidate now on the task branch (the live issue-138 shape).
+    for (const closedHead of [H1, H0]) {
+      const rig = await makeRig(
+        `candidate-closed-pr-${closedHead.slice(0, 6)}`,
+        {
+          summaries: false,
+          github: {
+            candidateLifecycle: {
+              ...positiveLifecycle(),
+              refs: { [`refs/heads/${branch}`]: H1 },
+              pullRequests: [{
+                ...exactOpenPr(7, closedHead, branch),
+                state: "closed" as const,
+              }],
+            },
+          },
+        },
+      );
+      try {
+        const written = await rig.store.writeRepair(
+          seededSnapshot([preservedIssueWork("issue-1", H1)]),
+          null,
+        );
+        assert.ok(written.ok && written.value.status === "applied");
+
+        const outcome = await rig.run();
+        assert.equal(outcome.status, "idle", JSON.stringify(outcome));
+        const state = await rig.snapshot();
+        const work = state.work[0]!;
+        assert.equal(work.target.head, H1, "the exact candidate is retained");
+        assert.equal(work.target.pr, 8, "one replacement pull request");
+        assert.equal(work.nextStep, "review");
+        assert.equal(work.wait?.reason, "review_pending");
+        const replaced = rig.github.candidatePullRequests.get(8);
+        assert.equal(
+          replaced?.head,
+          H1,
+          "the replacement carries the candidate",
+        );
+        assert.equal(
+          replaced?.body,
+          "Resolves #1",
+          "the closing keyword body",
+        );
+        assert.equal(
+          rig.model.requests.length,
+          0,
+          "recovering a closed publication starts no model run",
+        );
+        assert.equal(rig.github.pushes.length, 0, "no additional push");
+        const assignIndex = rig.github.calls.indexOf("assignIssue:1");
+        const createIndex = rig.github.calls.indexOf("createPr");
+        assert.ok(
+          assignIndex !== -1 && createIndex !== -1 && assignIndex < createIndex,
+          "the source issue is assigned before the pull request exists",
+        );
+      } finally {
+        await rig.ctx.cleanup();
+      }
+    }
+  },
+);
+
+Deno.test(
+  "candidate lifecycle: a refused issue assignment still publishes from the preserved candidate",
+  async () => {
+    const id = asWorkItemId("issue-1");
+    const branch = candidateBranch(id);
+    const rig = await makeRig("candidate-assign-failed", {
+      summaries: false,
+      github: {
+        assignFailNext: true,
+        candidateLifecycle: {
+          ...positiveLifecycle(),
+          refs: { [`refs/heads/${branch}`]: H1 },
+          pullRequests: [],
+        },
+      },
+    });
+    try {
+      const written = await rig.store.writeRepair(
+        seededSnapshot([preservedIssueWork("issue-1", H1, { pr: null })]),
+        null,
+      );
+      assert.ok(written.ok && written.value.status === "applied");
+
+      const outcome = await rig.run();
+      const state = await rig.snapshot();
+      const work = state.work[0]!;
+      assert.equal(work.target.pr, 7, "the replacement was published anyway");
+      assert.equal(work.target.head, H1, "the candidate is retained");
+      assert.equal(work.nextStep, "review");
+      assert.ok(
+        rig.github.calls.includes("assignIssue:1"),
+        "the assignment was attempted first",
+      );
+      const assignIndex = rig.github.calls.indexOf("assignIssue:1");
+      const createIndex = rig.github.calls.indexOf("createPr");
+      assert.ok(
+        assignIndex !== -1 && createIndex !== -1 && assignIndex < createIndex,
+        "the assignment attempt precedes the pull request",
+      );
+      assert.equal(rig.model.requests.length, 0);
+      assert.equal(outcome.status, "idle", JSON.stringify(outcome));
+    } finally {
+      await rig.ctx.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "candidate lifecycle: a review-phase record whose own PR was closed unmerged republishes once",
+  async () => {
+    const id = asWorkItemId("issue-1");
+    const branch = candidateBranch(id);
+    const rig = await makeRig("candidate-review-closed-pr", {
+      summaries: false,
+      github: {
+        candidateLifecycle: {
+          ...positiveLifecycle(),
+          refs: { [`refs/heads/${branch}`]: H1 },
+          pullRequests: [{
+            ...exactOpenPr(7, H1, branch),
+            state: "closed" as const,
+          }],
+        },
+      },
+    });
+    try {
+      const written = await rig.store.writeRepair(
+        seededSnapshot([
+          preservedIssueWork("issue-1", H1, { nextStep: "review", pr: 7 }),
+        ]),
+        null,
+      );
+      assert.ok(written.ok && written.value.status === "applied");
+
+      const outcome = await rig.run();
+      assert.equal(outcome.status, "idle", JSON.stringify(outcome));
+      const state = await rig.snapshot();
+      const work = state.work[0]!;
+      assert.equal(work.target.head, H1, "the exact candidate is retained");
+      assert.equal(work.target.pr, 8, "one replacement pull request");
+      assert.equal(work.nextStep, "review");
+      assert.equal(work.wait?.reason, "review_pending");
+      assert.equal(
+        rig.github.candidatePullRequests.get(8)?.body,
+        "Resolves #1",
+      );
+      assert.equal(rig.model.requests.length, 0, "no model runs to recover");
+    } finally {
+      await rig.ctx.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "candidate lifecycle: a review-phase record whose own PR was merged outside the path is terminal",
+  async () => {
+    const id = asWorkItemId("issue-1");
+    const branch = candidateBranch(id);
+    const rig = await makeRig("candidate-review-merged-pr", {
+      summaries: false,
+      github: {
+        candidateLifecycle: {
+          ...positiveLifecycle(),
+          refs: { [`refs/heads/${branch}`]: H1 },
+          pullRequests: [{
+            ...exactOpenPr(7, H1, branch),
+            state: "merged" as const,
+            mergeSha: SHA2,
+          }],
+        },
+      },
+    });
+    try {
+      const written = await rig.store.writeRepair(
+        seededSnapshot([
+          preservedIssueWork("issue-1", H1, { nextStep: "review", pr: 7 }),
+        ]),
+        null,
+      );
+      assert.ok(written.ok && written.value.status === "applied");
+
+      const outcome = await rig.run();
+      assert.equal(outcome.status, "idle", JSON.stringify(outcome));
+      const state = await rig.snapshot();
+      const work = state.work[0]!;
+      assert.equal(work.nextStep, "blocked");
+      assert.equal(
+        work.blocker?.message,
+        "pull request was merged outside the trusted review path",
+      );
+      assert.equal(work.target.pr, 7, "the merged PR identity is retained");
+      assert.equal(work.intent, null);
+      assert.equal(work.wait, null);
+      assert.equal(
+        rig.github.calls.filter((call) => call === "createPr").length,
+        0,
+        "a merged repair is never republished",
+      );
+      assert.equal(rig.model.requests.length, 0);
     } finally {
       await rig.ctx.cleanup();
     }
@@ -3963,10 +4395,9 @@ Deno.test(
   async () => {
     const id = asWorkItemId("issue-1");
     const branch = candidateBranch(id);
-    const closedPr = {
-      ...exactOpenPr(7, H1, branch),
-      state: "closed" as const,
-    };
+    // NOTE: a closed-unmerged own PR is no longer a refusal. It recovers by
+    // retiring the publication identity, asserted by the dedicated
+    // "a closed-unmerged own PR republishes the preserved candidate once" case.
     const wrongBranchPr = { ...exactOpenPr(7, H1, branch), headRef: "other" };
     const wrongBasePr = { ...exactOpenPr(7, H1, branch), baseRef: "main" };
     let prepareCalls = 0;
@@ -4049,15 +4480,6 @@ Deno.test(
           refs: { [`refs/heads/${branch}`]: H1 },
           pullRequests: [exactOpenPr(7, H1, branch)],
         },
-      },
-      {
-        name: "closed PR",
-        lifecycle: {
-          ...positiveLifecycle(),
-          refs: { [`refs/heads/${branch}`]: H1 },
-          pullRequests: [closedPr],
-        },
-        expectPrObservation: true,
       },
       {
         name: "wrong PR branch",
