@@ -65,7 +65,6 @@ import type { GitHubAuthProviderV1 } from "./auth.ts";
 import { GitHubApiClient } from "./client.ts";
 import type { GitExecutorV1 } from "./git-executor.ts";
 import type { HttpTransportV1 } from "./http.ts";
-import { sanitizeAutoCloseKeywords } from "./text.ts";
 import {
   completedReviewMatchesReceipt,
   normalizeReviewObservation,
@@ -443,14 +442,15 @@ export class GitHubPortImpl implements GitHubPort {
         head: owned.head,
       });
     }
-    // 3. Publish with the auto-close keywords removed (source body preserved
-    // otherwise), then reconcile a duplicate response against authoritative
-    // state instead of guessing from the HTTP status.
+    // 3. Publish the requested body byte-for-byte: the loop builds the exact
+    // closing-keyword body for an issue-backed repair. Then reconcile a
+    // duplicate response against authoritative state instead of guessing from
+    // the HTTP status.
     const created = await this.client.createPull({
       title: request.title,
       headRef: request.headRef,
       baseRef: request.baseRef,
-      body: sanitizeAutoCloseKeywords(request.body),
+      body: request.body,
     });
     if (!created.ok) return created;
     if (created.value.status === "created") {
@@ -879,6 +879,27 @@ export class GitHubPortImpl implements GitHubPort {
       return portError("conflict", "issue closure was not applied");
     }
     return portOk("closed");
+  }
+
+  // -------------------------------------------------------------------------
+  // assignIssue
+  // -------------------------------------------------------------------------
+
+  /**
+   * Assigns the trusted publication identity to the source issue. The issue
+   * must exist and be open; a closed or missing issue is a typed refusal, not
+   * a successful assignment. The remote call is idempotent.
+   */
+  async assignIssue(issueNumber: number): Promise<PortResultV1<void>> {
+    const current = await this.client.readIssue(issueNumber);
+    if (!current.ok) return current;
+    if (current.value === null) {
+      return portError("not_found", "issue not found");
+    }
+    if (current.value.state !== "open") {
+      return portError("conflict", "issue is not open");
+    }
+    return await this.client.assignIssue(issueNumber, this.trustedPrAuthor);
   }
 
   // -------------------------------------------------------------------------

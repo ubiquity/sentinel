@@ -83,9 +83,11 @@ import {
   reviewReceiptId,
 } from "./keys.ts";
 import {
+  countUnfinishedPullRequests,
   isWaiting,
   MAX_UNFINISHED_PRS,
   rankEligibleWork,
+  RETIRED_MERGED_MESSAGE,
 } from "./selection.ts";
 import {
   advanceToCorrection,
@@ -2955,6 +2957,31 @@ async function executeCandidatePreservation(
   });
   const at = deps.clock.now();
   if (!preserved.ok) {
+    // A positively proven absent candidate can never be reconciled: the
+    // producing checkout lived only inside that run's private scratch, no
+    // trusted store or remote ref holds the object, and every retry repeats
+    // the same refusal forever while the record keeps a shared publication
+    // slot. The attempt stays charged (its reservation is already settled) and
+    // the record returns to the legacy work shape whose retained identity is
+    // the published branch head, so the next cycle buys a fresh implementation
+    // attempt under the existing attempt ceiling instead of retrying a
+    // candidate that can never appear.
+    if (preserved.error.kind === "not_found") {
+      const recovered: WorkRecordV1 = {
+        ...record,
+        intent: null,
+        target: {
+          base: record.target.base,
+          branch: record.target.branch,
+          checkpoint: null,
+          head: candidateState.publishedHead,
+          pr: record.target.pr,
+        },
+        wait: null,
+        updatedAt: at,
+      };
+      return persistWork(deps, context, recovered);
+    }
     // A generic transport/CAS/permission failure is not permanent loss: keep
     // the same intent/head/accounting and reconcile the same operation later.
     return persistWork(
@@ -3099,10 +3126,7 @@ async function executePublishStep(
   // an existing PR does not open another unfinished PR — it updates the branch
   // this task already owns — so it must never be blocked by the cap (matching
   // the selection rule, which caps only records with target.pr === null).
-  const openPrs =
-    context.snapshot.work.filter((work) =>
-      work.target.pr !== null && work.nextStep !== "done"
-    ).length;
+  const openPrs = countUnfinishedPullRequests(context.snapshot.work);
   if (record.target.pr === null && openPrs >= MAX_UNFINISHED_PRS) {
     return persistWork(
       deps,
@@ -3313,6 +3337,17 @@ async function createPullRequestFor(
   if (cooling.kind === "deferred") {
     return { kind: "deferred", detail: cooling.detail };
   }
+  // The organization's anti-spam policy expects the pull request author to be
+  // assigned to the source issue first: the trusted publication identity is
+  // assigned BEFORE the pull_request intent is written and before any create
+  // or replacement publication. The call is idempotent and best-effort — the
+  // observed policy exempts an organization-owned author, and GitHub refuses
+  // to assign a GitHub App at all — so a refusal never blocks publication and
+  // never fabricates an assignment.
+  const issueNumber = record.related.issueNumber;
+  if (issueNumber !== null) {
+    await deps.github.assignIssue(issueNumber);
+  }
   const intent = {
     kind: "pull_request" as const,
     key: pullRequestIntentKey(head),
@@ -3341,15 +3376,18 @@ async function createPullRequestFor(
   const title = record.source.kind === "incident"
     ? `Sentinel repair: ${record.source.id}`
     : `Sentinel repair: issue ${record.related.issueNumber}`;
-  // No auto-close keywords anywhere in the title or body ("Refs" is inert).
+  // Owner directive, 2026-09-23 (docs/DECISIONS.md): an issue-backed repair
+  // publishes exactly the GitHub closing keyword as its whole body, so the
+  // pull request is linked to the source issue and the merge closes it. A
+  // record with no issue reference keeps a non-closing descriptive body.
+  const body = record.related.issueNumber === null
+    ? `Sentinel repair for ${record.source.kind} ${record.source.id}`
+    : `Resolves #${record.related.issueNumber}`;
   const created = await deps.github.createPullRequest({
     title: title.slice(0, 200),
     headRef: branch,
     baseRef: config.baseBranch,
-    body:
-      `Sentinel repair for ${record.source.kind} ${record.source.id}. Refs: ${
-        record.related.issueNumber ?? ""
-      }`.trim(),
+    body,
     expectedBase: record.target.base,
     expectedHeadRef: head,
   });
@@ -3411,7 +3449,7 @@ async function ensureReviewFreshness(
   context: LoopContextV1,
   record: WorkRecordV1,
   prNumber: number,
-): Promise<StepResultV1 | null> {
+): Promise<StepResultV1 | "closed_unmerged" | null> {
   const config = configFor(deps, record.repository);
   const head = record.target.head;
   const branch = record.target.branch;
@@ -3451,10 +3489,25 @@ async function ensureReviewFreshness(
     return { kind: "deferred", detail: "review PR observation unavailable" };
   }
   if (
-    pr.value === null || pr.value.state !== "open" ||
-    pr.value.head !== head || pr.value.headRef !== branch ||
+    pr.value === null ||
+    pr.value.headRef !== branch ||
     pr.value.baseRef !== config.baseBranch
   ) {
+    return { kind: "deferred", detail: "review PR identity mismatch" };
+  }
+  // The task's own pull request closed unmerged is recoverable even when its
+  // frozen head predates the refreshed candidate now published on the task
+  // branch: one replacement publication recovers the round, and the caller
+  // retires the closed publication identity instead of refusing this review
+  // forever. The identity checks above already bound the observation to this
+  // task's exact branch and base; a merged close is a different disposition
+  // and is never treated as recoverable here.
+  if (pr.value.state === "closed") {
+    return pr.value.mergeSha === null
+      ? "closed_unmerged"
+      : { kind: "deferred", detail: "review PR was merged" };
+  }
+  if (pr.value.head !== head) {
     return { kind: "deferred", detail: "review PR identity mismatch" };
   }
   // Actual candidate branch observation.
@@ -3480,6 +3533,24 @@ async function ensureReviewFreshness(
     return await ensureBaseRefreshIntent(deps, context, record);
   }
   return null;
+}
+
+/**
+ * Retire one closed-unmerged own publication identity. The exact preserved
+ * candidate stays published on the task branch and the next publish step
+ * creates its replacement; no counter, base, head or descriptor changes.
+ */
+function retireClosedPublication(
+  record: WorkRecordV1,
+  now: number,
+  nextStep: WorkRecordV1["nextStep"] = record.nextStep,
+): WorkRecordV1 {
+  return {
+    ...record,
+    nextStep,
+    target: { ...record.target, pr: null },
+    updatedAt: now,
+  };
 }
 
 async function requestReviewFor(
@@ -3538,6 +3609,17 @@ async function requestReviewFor(
     record,
     prNumber,
   );
+  if (freshness === "closed_unmerged") {
+    // Only the publication identity is retired: the preserved candidate, the
+    // target head, the base and every counter stay exactly as they were, so
+    // the next publish step creates the replacement pull request for the same
+    // reviewed bytes. No model, review or merge effect happens here.
+    return persistWork(
+      deps,
+      context,
+      retireClosedPublication(record, deps.clock.now()),
+    );
+  }
   if (freshness !== null) return freshness;
   // The cooling check was awaited wall-clock work and only guards the total
   // deadline: recheck the 90-minute model cutoff (and the deadline) at the
@@ -4100,6 +4182,34 @@ async function observeReview(
   }
   if (cooling.kind === "deferred") {
     return { kind: "deferred", detail: cooling.detail };
+  }
+  // The record's own pull request is observed BEFORE the review: a closed
+  // unmerged pull request can never produce another verdict, and a pull
+  // request merged outside the trusted review path is a human disposition the
+  // runtime must never treat as its own delivery. Foreign or unreadable
+  // observations change nothing and fall through to the standing review.
+  const pull = await deps.github.readPullRequest(pr);
+  if (!pull.ok) {
+    return { kind: "deferred", detail: "review PR observation unavailable" };
+  }
+  if (pull.value !== null && pull.value.headRef === record.target.branch) {
+    if (pull.value.state === "closed" && pull.value.mergeSha === null) {
+      // The review phase has no pull request to review: the record returns to
+      // work so the next publish step creates the replacement for the same
+      // preserved candidate.
+      return persistWork(
+        deps,
+        context,
+        retireClosedPublication(record, now, "work"),
+      );
+    }
+    if (pull.value.state === "merged") {
+      return persistWork(
+        deps,
+        context,
+        markBlocked(record, "other", RETIRED_MERGED_MESSAGE, now),
+      );
+    }
   }
   const observed = await observeStandingReview(deps, record, pr, head);
   if (!observed.ok) {

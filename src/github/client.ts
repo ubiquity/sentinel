@@ -740,6 +740,29 @@ export class GitHubApiClient {
     return portError(...this.mapError(response));
   }
 
+  /**
+   * Assign one exact login to an issue. Idempotent: GitHub answers a created
+   * response whether or not the login was already assigned, so the caller's
+   * post-condition is "the identity is assigned". No other issue field is
+   * touched.
+   */
+  async assignIssue(
+    issueNumber: number,
+    login: string,
+  ): Promise<PortResultV1<void>> {
+    const response = await this.send(
+      "POST",
+      `/repos/${repoPath(this.repository)}/issues/${issueNumber}/assignees`,
+      {},
+      { assignees: [login] },
+    );
+    if (!response.ok) return response;
+    if (response.value.status === 200 || response.value.status === 201) {
+      return portOk(undefined);
+    }
+    return portError(...this.mapError(response.value));
+  }
+
   async closeIssue(issueNumber: number): Promise<PortResultV1<GitHubIssueV1>> {
     const response = await this.send(
       "PATCH",

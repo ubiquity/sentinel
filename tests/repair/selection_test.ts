@@ -9,9 +9,11 @@ import type { GitSha } from "../../src/contracts/brands.ts";
 import type { RepairStateSnapshotV1 } from "../../src/contracts/state-snapshots.ts";
 import type { WorkRecordV1 } from "../../src/contracts/work-record.ts";
 import {
+  countUnfinishedPullRequests,
   isEligible,
   MAX_UNFINISHED_PRS,
   rankEligibleWork,
+  RETIRED_MERGED_MESSAGE,
 } from "../../src/repair/selection.ts";
 import {
   applyHostedRetirements,
@@ -615,5 +617,42 @@ Deno.test(
     assert.equal(ranked.skipped[genericBlocked.id], "blocked");
     assert.equal(ranked.skipped[unavailableBlocked.id], "blocked");
     assert.equal(ranked.skipped[openWaiting.id], "waiting");
+  },
+);
+
+Deno.test(
+  "selection: a repair whose own PR was merged outside the trusted path stops consuming the WIP cap",
+  () => {
+    const merged = work("issue-77", {
+      target: {
+        base: SHA1,
+        branch: "sentinel/repair/issue-77",
+        checkpoint: null,
+        head: SHA2,
+        pr: 7,
+      },
+      nextStep: "blocked",
+      blocker: { kind: "other", message: RETIRED_MERGED_MESSAGE, since: T0 },
+      intent: null,
+      wait: null,
+    });
+    assert.equal(countUnfinishedPullRequests([merged]), 0);
+    // Control: the identical record with only its durable blocker message
+    // changed still consumes one slot.
+    const open = work("issue-78", {
+      target: {
+        base: SHA1,
+        branch: "sentinel/repair/issue-78",
+        checkpoint: null,
+        head: SHA2,
+        pr: 8,
+      },
+      nextStep: "blocked",
+      blocker: { kind: "other", message: "some other refusal", since: T0 },
+      intent: null,
+      wait: null,
+    });
+    assert.equal(countUnfinishedPullRequests([open]), 1);
+    assert.equal(countUnfinishedPullRequests([merged, open]), 1);
   },
 );
