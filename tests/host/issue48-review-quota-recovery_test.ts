@@ -33,6 +33,7 @@ import {
 } from "../../src/state/mod.ts";
 import {
   buildNextQuotaSnapshot,
+  isHardRecoveryFailure,
   ISSUE48_QUOTA_ADMISSION_BLOCKER_PREFIX,
   ISSUE48_QUOTA_BLOCKER_PREFIX,
   ISSUE48_QUOTA_CANDIDATE_BLOCKER_PREFIX,
@@ -485,7 +486,9 @@ Deno.test(
       assert.ok(after.ok && after.value.status === "found");
       if (!after.ok || after.value.status !== "found") return;
       const recovered = after.value.snapshot.work[0]!;
-      assert.equal(recovered.nextStep, "work");
+      // An unobserved review step is preserved so the runtime records the
+      // latest finding before it corrects; the wait and blocker are cleared.
+      assert.equal(recovered.nextStep, "review");
       assert.equal(recovered.wait, null, "the wait is cleared with the block");
       assert.deepEqual(after.value.snapshot.work[0]!.counters, {
         attempts: rig.binding.counters.attempts - 1,
@@ -556,7 +559,7 @@ Deno.test(
       },
       {
         name: "granted-budget-outside-the-closed-set",
-        binding: { grantedImplementationAttempts: 2 as unknown as 0 | 1 },
+        binding: { grantedImplementationAttempts: 4 as unknown as 0 | 1 },
         expected: "target_precondition_mismatch",
       },
       {
@@ -672,6 +675,69 @@ Deno.test(
       } finally {
         await cleanup(rig);
       }
+    }
+  },
+);
+
+Deno.test(
+  "issue48 review quota recovery: only identity and unexpected failures exit nonzero",
+  () => {
+    // A one-shot that reports a drifted precondition, a moved head, a
+    // non-terminal release or a lost CAS must not fail the supervisor workflow.
+    for (
+      const reason of [
+        "target_precondition_mismatch",
+        "already_recovered",
+        "runtime_mismatch",
+        "release_not_terminal",
+        "clock_invalid",
+        "write_conflict",
+        "write_ambiguous",
+        "readback_unverified",
+      ] as const
+    ) {
+      assert.equal(isHardRecoveryFailure(reason), false, reason);
+    }
+    assert.equal(isHardRecoveryFailure("identity_rejected"), true);
+    assert.equal(isHardRecoveryFailure("unexpected_failure"), true);
+  },
+);
+
+Deno.test(
+  "issue48 review quota recovery: the production-shaped binding applies from the blocked state",
+  async () => {
+    // Regression: the closed grant set must accept the production value (2)
+    // for a blocked record whose budget blocker is the runtime's exact reason.
+    const rig = await makeRig("quota-production-shape", {
+      repair: repairSnapshot(
+        quotaWorkRecord({
+          counters: { attempts: 4, retries: 0, reviewRounds: 8 },
+        }),
+      ),
+    });
+    try {
+      const binding = {
+        ...rig.binding,
+        counters: { attempts: 4, retries: 0, reviewRounds: 8 },
+        grantedImplementationAttempts: 2 as const,
+      };
+      const result = await runRig(rig, { binding });
+      assert.equal(result.status, "applied", JSON.stringify(result));
+      const after = await rig.repair.readRepair();
+      assert.ok(after.ok && after.value.status === "found");
+      if (!after.ok || after.value.status !== "found") return;
+      const record = after.value.snapshot.work[0]!;
+      // Exactly two units are given back: the next admission is attempt 3.
+      assert.deepEqual(record.counters, {
+        attempts: 2,
+        retries: 0,
+        reviewRounds: 8,
+      });
+      assert.equal(record.nextStep, "work", "a blocked step returns to work");
+      assert.equal(record.blocker, null);
+      assert.equal(record.intent, null);
+    } finally {
+      await cleanup(rig);
     }
   },
 );

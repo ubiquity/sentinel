@@ -4,8 +4,8 @@
  * This fixed trusted operation performs at most one pointer movement in the
  * hosted release state: original generation 5 -> reader generation 6 ->
  * aggregate generation 7 -> review recovery generation 8 -> review-step
- * reconciliation generation 9 -> reviewer provenance generation 10, plus a
- * one-time
+ * reconciliation generation 9 -> reviewer provenance generation 10 ->
+ * one-shot exit contract generation 11, plus a one-time
  * rollback of an exact failed candidate to its recorded previously healthy
  * revision. It is NOT a runtime redesign and NOT a recurring global gate: every other state is a zero-write
  * waiting/no-change outcome so the unchanged protected supervisor continues
@@ -103,6 +103,22 @@ export const OWNER_DEVELOPMENT_INSTALL_REVIEW_STEP_GENERATION = 9;
 export const OWNER_DEVELOPMENT_INSTALL_REVIEWER_REVISION =
   "80384fc3668c246297621aa1c588c0e49ea516c6" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_REVIEWER_GENERATION = 10;
+/**
+ * Exact revision carrying the one-shot exit contract, installed only after the
+ * reviewer provenance generation 10 healthy proof. Its install is also what
+ * gives the runtime an immediate health-gap execution after a bounded grant.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_EXIT_CONTRACT_REVISION =
+  "3f500514f464c7c1ae66cc02bfe6fc4963387d04" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_EXIT_CONTRACT_GENERATION = 11;
+/**
+ * Exact revision carrying the corrected closed grant set; its install is also
+ * what gives the runtime an immediate health-gap execution that consumes the
+ * grant in the same run the maintenance job applies it.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_ROUND8_REVISION =
+  "800b4bd1b2fb3778cc96b0292ee673c07ca73302" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_ROUND8_GENERATION = 12;
 
 const API_BASE = "https://api.github.com";
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -388,10 +404,88 @@ export function planOwnerDevelopmentInstall(
       );
     }
     if (healthy !== null) {
-      return noChange("the owner development installation is complete");
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_EXIT_CONTRACT_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_EXIT_CONTRACT_GENERATION,
+        healthy,
+        "install the one-shot exit contract after the reviewer provenance healthy proof",
+      );
     }
     return waiting(
       "the reviewer provenance generation 10 healthy proof is not recorded",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_EXIT_CONTRACT_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_EXIT_CONTRACT_GENERATION
+  ) {
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_REVIEWER_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_REVIEWER_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded reviewer provenance healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_REVIEWER_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed exit contract candidate to its recorded prior",
+      );
+    }
+    if (healthy !== null) {
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_ROUND8_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_ROUND8_GENERATION,
+        healthy,
+        "install the corrected grant revision after the exit-contract healthy proof",
+      );
+    }
+    return waiting(
+      "the exit contract generation 11 healthy proof is not recorded",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_ROUND8_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_ROUND8_GENERATION
+  ) {
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_EXIT_CONTRACT_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_EXIT_CONTRACT_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded exit-contract healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_EXIT_CONTRACT_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed corrected grant candidate to its recorded prior",
+      );
+    }
+    if (healthy !== null) {
+      return noChange("the owner development installation is complete");
+    }
+    return waiting(
+      "the corrected grant generation 12 healthy proof is not recorded",
     );
   }
 
