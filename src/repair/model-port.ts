@@ -586,18 +586,17 @@ export class LocalCandidateCommitter implements CandidateCommitterV1 {
     ]);
     if (ancestry === null || ancestry.code !== 0) return false;
 
-    // The model may have created its own commit when the host permits it.
-    // Leave that exact descendant untouched; the resolver will bind it to the
-    // requested base and changed paths below.
-    if (beforeSha !== base) return true;
-
     const status = await this.run([
       "status",
       "--porcelain=v1",
       "-z",
       "--untracked-files=all",
     ]);
-    if (status === null || status.length === 0) return false;
+    if (status === null) return false;
+    // Preserve a model-created descendant only when its checkout is clean;
+    // otherwise the resolver would omit the pending edits from the receipt.
+    if (beforeSha !== base) return status.length === 0;
+    if (status.length === 0) return false;
     // Unmerged entries cannot be made into a trusted candidate by guessing at
     // conflict resolution. Keep every other path under the host's normal
     // protected-path and review gates.

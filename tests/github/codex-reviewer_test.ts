@@ -21,7 +21,6 @@ import {
 import {
   MAX_JOURNAL_BYTES,
   MAX_RESULT_SUMMARY,
-  REVIEW_RESULT_OUTPUT_SCHEMA,
 } from "../../src/github/review-journal.ts";
 import {
   reviewSnapshotDigest,
@@ -319,6 +318,43 @@ function submittedPrompt(session: ScriptedCodexSession): string {
   return params.input[0].text;
 }
 
+function assertStrictObjectFields(schema: unknown): void {
+  if (schema === null || typeof schema !== "object") return;
+  if (Array.isArray(schema)) {
+    for (const child of schema) assertStrictObjectFields(child);
+    return;
+  }
+  const node = schema as Record<string, unknown>;
+  if (node.properties !== undefined) {
+    assert.ok(node.properties !== null && typeof node.properties === "object");
+    assert.ok(!Array.isArray(node.properties));
+    assert.ok(Array.isArray(node.required));
+    assert.deepEqual(
+      [...node.required].sort(),
+      Object.keys(node.properties).sort(),
+      "every submitted object property must be required",
+    );
+    assert.equal(node.additionalProperties, false);
+  }
+  for (const child of Object.values(node)) assertStrictObjectFields(child);
+}
+
+function assertStrictSubmittedSchema(session: ScriptedCodexSession): void {
+  const params = session.params[session.sent.indexOf("turn/start")] as {
+    outputSchema: {
+      type: unknown;
+      properties: { taskAcceptance: { type: unknown } };
+    };
+  };
+  assert.equal(params.outputSchema.type, "object");
+  assertStrictObjectFields(params.outputSchema);
+  assert.deepEqual(
+    params.outputSchema.properties.taskAcceptance.type,
+    ["object", "null"],
+    "no assessment must be expressible as explicit null",
+  );
+}
+
 async function startReview(
   session: ScriptedCodexSession,
   snapshot: ReviewSnapshotV1,
@@ -398,10 +434,13 @@ Deno.test(
 );
 
 Deno.test(
-  "reviewer: exactly one start after the caller gate and bounded clean completion",
+  "reviewer: exactly one start submits a strict schema and accepts explicit null without a task",
   async () => {
     const session = new ScriptedCodexSession();
+    const result = { ...CLEAN_RESULT, taskAcceptance: null };
+    let now = Date.now();
     session.live = (scripted) => {
+      now += 1;
       scripted.emit(
         "item/started",
         agentMessage(scripted.turnId, "item-1", ""),
@@ -411,20 +450,20 @@ Deno.test(
         agentMessage(
           scripted.turnId,
           "item-1",
-          JSON.stringify(CLEAN_RESULT),
+          JSON.stringify(result),
         ),
       );
       scripted.emit("turn/completed", turnCompleted(scripted.turnId));
     };
     const snapshot = await snapshotFixture();
-    const reviewer = makeReviewer(session);
+    const reviewer = makeReviewer(session, { now: () => now });
     const prepared = await reviewer.prepare(prepareRequest(snapshot));
     if (!prepared.ok) assert.fail(prepared.error.detail);
     const review = prepared.value;
     const outcome = await review.start();
     if (!outcome.ok) assert.fail(outcome.error.detail);
     assert.equal(outcome.value.status, "clean");
-    assert.deepEqual(outcome.value.result, CLEAN_RESULT);
+    assert.deepEqual(outcome.value.result, result);
     assert.equal(outcome.value.resultId, "item-1");
     assert.equal(outcome.value.execution?.turnId, "turn-1");
     assert.equal(session.turnStarts(), 1);
@@ -444,7 +483,7 @@ Deno.test(
     assert.equal(turnParams.model, "gpt-reserve");
     assert.equal(turnParams.effort, "max");
     assert.equal(turnParams.permissions, REVIEW_PROFILE);
-    assert.deepEqual(turnParams.outputSchema, REVIEW_RESULT_OUTPUT_SCHEMA);
+    assertStrictSubmittedSchema(session);
     const prompt = turnParams.input[0].text;
     contains(prompt, `Base ${BASE}; head ${HEAD};`);
     contains(prompt, snapshot.digest);
@@ -504,6 +543,11 @@ Deno.test(
         "structured review unavailable: the result omitted the required task acceptance for a supplied task statement",
       ],
       [
+        "null acceptance",
+        { ...CLEAN_RESULT, taskAcceptance: null },
+        "structured review unavailable: the result omitted the required task acceptance for a supplied task statement",
+      ],
+      [
         "acceptance for another task",
         {
           ...CLEAN_RESULT,
@@ -526,7 +570,9 @@ Deno.test(
     ];
     for (const [label, result, detail] of cases) {
       const session = new ScriptedCodexSession();
+      let now = Date.now();
       session.live = (scripted) => {
+        now += 1;
         scripted.emit(
           "item/started",
           agentMessage(scripted.turnId, "item-1", ""),
@@ -538,13 +584,14 @@ Deno.test(
         scripted.emit("turn/completed", turnCompleted(scripted.turnId));
       };
       const snapshot = await snapshotFixture();
-      const reviewer = makeReviewer(session);
+      const reviewer = makeReviewer(session, { now: () => now });
       const prepared = await reviewer.prepare(
         prepareRequest(snapshot, { task }),
       );
       if (!prepared.ok) assert.fail(prepared.error.detail);
       const outcome = await prepared.value.start();
       if (!outcome.ok) assert.fail(outcome.error.detail);
+      assertStrictSubmittedSchema(session);
       // The single turn/start carries the bound task statement as data.
       const prompt = (session.params[2] as { input: { text: string }[] })
         .input[0].text;

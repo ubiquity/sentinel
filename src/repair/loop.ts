@@ -442,6 +442,7 @@ export async function runRepairCycle(
   // is attached to its record BEFORE cap enforcement, so a real PR is never
   // skipped as over-cap.
   const orphanAttempted = new Set<string>();
+  const missingTaskReviewAttempted = new Set<string>();
   // Intake is polled exactly once per run. A deferred (cooldown or bound)
   // iteration must never re-poll the sources: subsequent loop iterations reuse
   // the run-local deferral tracking instead of repeating intake reads.
@@ -588,6 +589,21 @@ export async function runRepairCycle(
         steps++;
         continue;
       }
+    }
+
+    const missingTaskReview = await recoverBlockedMissingTaskReview(
+      deps,
+      context,
+      missingTaskReviewAttempted,
+      deferred,
+    );
+    if (missingTaskReview?.kind === "state_error") {
+      return { status: "state_error", detail: missingTaskReview.detail };
+    }
+    if (missingTaskReview?.kind === "progress") {
+      didWork = true;
+      steps++;
+      continue;
     }
 
     const rank = rankEligibleWork(
@@ -4639,6 +4655,31 @@ async function observeReview(
     );
   }
   const value = observed.value.observation;
+  const intent = record.intent;
+  if (
+    record.counters.reviewRounds >= 1 &&
+    intent?.kind === "review_request" &&
+    intent.key === observed.value.operationKey &&
+    intent.key ===
+      reviewOperationKey(pr, head, record.counters.reviewRounds + 1)
+  ) {
+    if (
+      isUnboundReviewObservation(value) || value.observedHead !== head ||
+      value.observedBase !== record.target.base
+    ) {
+      return {
+        kind: "deferred",
+        detail: "review intent has no exact bound journal",
+      };
+    }
+    // The separately charged journal binds the ambiguous submission. Count it
+    // once before ordinary observation; never submit or settle another charge.
+    return persistWork(
+      deps,
+      context,
+      countReviewRound(clearIntent(record, now), now),
+    );
+  }
   if (value.status === "pending") {
     // A healthy review that simply has not posted yet stays on the ordinary
     // bounded poll; it is transient and never blocks by itself.
@@ -4717,14 +4758,25 @@ async function observeStandingReview(
   head: GitSha,
 ): Promise<PortResultV1<StandingReviewObservationV1>> {
   const attempt = standingReviewAttempt(record);
-  const primaryKey = reviewOperationKey(pr, head, attempt);
+  const intent = record.intent;
+  const pendingKey = reviewOperationKey(
+    pr,
+    head,
+    record.counters.reviewRounds + 1,
+  );
+  const savedRequest = record.counters.reviewRounds >= 1 &&
+    intent?.kind === "review_request" && intent.pr === pr &&
+    intent.expectedHead === head && intent.key === pendingKey;
+  const primaryKey = savedRequest
+    ? intent.key
+    : reviewOperationKey(pr, head, attempt);
   const primary = await deps.github.observeReview({
     operationKey: primaryKey,
     prNumber: pr,
     head,
   });
   if (!primary.ok) return primary;
-  if (attempt === 1) {
+  if (attempt === 1 || savedRequest) {
     return portOk({ observation: primary.value, operationKey: primaryKey });
   }
   if (!isUnboundReviewObservation(primary.value)) {
@@ -4799,6 +4851,194 @@ async function recoverFromNoVerdictReview(
       now,
     ),
   );
+}
+
+/** Re-observe only the exact legacy missing-acceptance blocker, once per run. */
+async function recoverBlockedMissingTaskReview(
+  deps: RepairCycleDepsV1,
+  context: LoopContextV1,
+  attempted: Set<string>,
+  deferred: Set<string>,
+): Promise<StepResultV1 | null> {
+  for (const record of context.snapshot.work) {
+    if (
+      record.nextStep !== "blocked" ||
+      record.blocker?.message !== TASK_ACCEPTANCE_MISSING_DETAIL ||
+      record.source.kind !== "issue" || record.intent !== null ||
+      record.wait !== null || record.target.pr === null ||
+      record.target.head === null ||
+      record.counters.reviewRounds < 1 ||
+      record.counters.reviewRounds >= MAX_REVIEW_ROUNDS ||
+      !legacyDependenciesDone(context.snapshot, record) ||
+      attempted.has(record.id)
+    ) continue;
+    attempted.add(record.id);
+    const cooling = await checkGithubCooldown(
+      deps,
+      record.repository,
+      context.bounds,
+    );
+    if (cooling.kind === "state_error") return cooling;
+    if (cooling.kind === "deferred") continue;
+    const observed = await observeStandingReview(
+      deps,
+      record,
+      record.target.pr,
+      record.target.head,
+    );
+    if (
+      !observed.ok || observed.value.observation.status !== "completed" ||
+      (observed.value.observation.taskAcceptance ?? null) !== null ||
+      observed.value.observation.findings.some((finding) => !finding?.resolved)
+    ) continue;
+    const result = await applyObservedReview(
+      deps,
+      context,
+      record,
+      observed.value.observation,
+      observed.value.operationKey,
+    );
+    if (result.kind === "deferred") {
+      deferred.add(record.id);
+      continue;
+    }
+    return result;
+  }
+  return null;
+}
+
+/** Missing acceptance permits another review, never delivery or receipt rewriting. */
+async function recoverMissingTaskReview(
+  deps: RepairCycleDepsV1,
+  context: LoopContextV1,
+  record: WorkRecordV1,
+  receipt: ReviewReceiptV1,
+  observedOperationKey: string,
+): Promise<StepResultV1 | null> {
+  const issueNumber = record.related.issueNumber;
+  const config = configFor(deps, record.repository);
+  if (
+    record.source.kind !== "issue" || issueNumber === null ||
+    record.source.id !== String(issueNumber) ||
+    record.related.incidentId !== null ||
+    record.counters.reviewRounds < 1 ||
+    record.counters.reviewRounds >= MAX_REVIEW_ROUNDS ||
+    receipt.taskAcceptance !== null || receipt.outcome !== "completed" ||
+    receipt.resultId === null || receipt.completedAt === null ||
+    !sameRepositoryIdentity(receipt.repository, record.repository) ||
+    receipt.pullRequest.number !== record.target.pr ||
+    receipt.pullRequest.head !== record.target.head ||
+    receipt.pullRequest.base !== record.target.base ||
+    receipt.expectedReviewer !== deps.github.reviewerIdentity ||
+    receipt.observedReviewer !== deps.github.reviewerIdentity ||
+    receipt.findingsUncounted !== 0 || receipt.unresolvedSeverities.length !== 0
+  ) return null;
+  if (
+    config === null || config.liveStartLimits === null ||
+    config.sessionBound === null
+  ) {
+    return {
+      kind: "deferred",
+      detail:
+        "missing task acceptance recovery requires enabled model admission",
+    };
+  }
+  if (
+    record.intent !== null &&
+    (record.intent.kind !== "review_request" ||
+      record.intent.key !== observedOperationKey ||
+      record.intent.expectedHead !== record.target.head ||
+      record.intent.pr !== record.target.pr)
+  ) return null;
+  if (await readIssueForModel(deps, record) === "unavailable") {
+    return {
+      kind: "deferred",
+      detail:
+        "missing task acceptance recovery requires an eligible live issue",
+    };
+  }
+  const nextKey = reviewOperationKey(
+    record.target.pr!,
+    record.target.head!,
+    record.counters.reviewRounds + 1,
+  );
+  if (
+    context.snapshot.reservations.some((charge) =>
+      sameRepositoryIdentity(charge.repository, record.repository) &&
+      charge.taskId === record.id && charge.head === record.target.head &&
+      charge.purpose === "review_request" &&
+      charge.attempt > record.counters.reviewRounds
+    ) || context.snapshot.reviews.some((review) =>
+      sameRepositoryIdentity(review.repository, record.repository) &&
+      review.pullRequest.number === record.target.pr &&
+      review.pullRequest.head === record.target.head &&
+      review.completedAt === null
+    )
+  ) {
+    return {
+      kind: "deferred",
+      detail: "missing task acceptance recovery has an outstanding review",
+    };
+  }
+  const next = await deps.github.observeReview({
+    operationKey: nextKey,
+    prNumber: record.target.pr!,
+    head: record.target.head!,
+  });
+  if (!next.ok || !isUnboundReviewObservation(next.value)) {
+    return {
+      kind: "deferred",
+      detail:
+        "missing task acceptance recovery requires an unused review attempt",
+    };
+  }
+  const existing = context.snapshot.reviews.find((review) =>
+    review.id === receipt.id
+  );
+  if (
+    existing !== undefined && (
+      existing.requestId !== receipt.requestId ||
+      existing.resultId !== receipt.resultId ||
+      existing.outcome !== "completed" ||
+      (existing.taskAcceptance ?? null) !== null ||
+      existing.pullRequest.head !== receipt.pullRequest.head ||
+      existing.pullRequest.base !== receipt.pullRequest.base ||
+      existing.pullRequest.number !== receipt.pullRequest.number ||
+      !sameRepositoryIdentity(existing.repository, receipt.repository) ||
+      existing.expectedReviewer !== receipt.expectedReviewer ||
+      existing.observedReviewer !== receipt.observedReviewer ||
+      existing.findingsUncounted !== 0 ||
+      existing.unresolvedSeverities.length !== 0
+    )
+  ) {
+    return {
+      kind: "deferred",
+      detail: "missing task acceptance recovery receipt identity changed",
+    };
+  }
+  const now = deps.clock.now();
+  const ready = advanceToReview(
+    clearIntent(record, now),
+    {
+      pr: record.target.pr!,
+      head: record.target.head!,
+    },
+    { reason: "review_quota", since: now, until: now },
+    now,
+  );
+  const retained = {
+    ...ready,
+    evidence: mergeEvidence(ready.evidence, [{
+      kind: "review_receipt" as const,
+      ref: reviewEvidenceRef(receipt.id),
+    }]),
+  };
+  const saved = await persistTransition(deps, context, (draft) => {
+    replaceWorkMutation(retained)(draft);
+    if (existing === undefined) draft.reviews.push(receipt);
+  });
+  if (saved.kind !== "progress") return saved;
+  return await requestReviewFor(deps, context, retained, retained.target.pr!);
 }
 
 /**
@@ -4931,6 +5171,16 @@ async function applyObservedReview(
     }
     const refusal = taskAcceptanceRefusal(receipt, record, task);
     if (refusal !== null) {
+      if (refusal === TASK_ACCEPTANCE_MISSING_DETAIL) {
+        const recovered = await recoverMissingTaskReview(
+          deps,
+          context,
+          record,
+          receipt,
+          observedOperationKey,
+        );
+        if (recovered !== null) return recovered;
+      }
       return persistWork(
         deps,
         context,
@@ -5591,11 +5841,68 @@ async function executeMerge(
   // authorization predicate (exact repository/PR/head/base, trusted reviewer,
   // zero uncounted findings, no unresolved P0/P1). A completed-but-unclean
   // receipt is authoritative disposition, never a blind resubmission.
-  const completed = context.snapshot.reviews.find((review) =>
-    review.pullRequest.number === record.target.pr &&
-    review.pullRequest.head === record.target.head &&
-    review.outcome === "completed"
+  const currentRound = standingReviewAttempt(record);
+  const currentReviewId = await reviewReceiptId(
+    reviewOperationKey(
+      record.target.pr!,
+      record.target.head!,
+      currentRound,
+    ),
+    record.target.head!,
   );
+  const currentReview = context.snapshot.reviews.find((review) =>
+    review.id === currentReviewId
+  );
+  const legacyReviewId = await reviewReceiptId(
+    reviewOperationKey(record.target.pr!, record.target.head!),
+    record.target.head!,
+  );
+  const attemptedReviews = context.snapshot.reservations.filter((charge) =>
+    sameRepositoryIdentity(charge.repository, record.repository) &&
+    charge.taskId === record.id && charge.head === record.target.head &&
+    charge.purpose === "review_request" &&
+    charge.outcome !== "confirmed_not_submitted"
+  );
+  if (
+    record.intent?.kind === "review_request" ||
+    attemptedReviews.some((charge) => charge.attempt > currentRound)
+  ) {
+    return { kind: "state_error", detail: MERGE_WITHOUT_REVIEW_DETAIL };
+  }
+  if (currentReview === undefined) {
+    // Legacy fallback requires absence of every exact newer attempt receipt,
+    // including pending/unavailable/refused outcomes without a saved charge.
+    for (let round = currentRound + 1; round <= MAX_REVIEW_ROUNDS; round++) {
+      const newerId = await reviewReceiptId(
+        reviewOperationKey(record.target.pr!, record.target.head!, round),
+        record.target.head!,
+      );
+      if (
+        context.snapshot.reviews.some((review) =>
+          review.id === newerId &&
+          sameRepositoryIdentity(review.repository, record.repository) &&
+          review.pullRequest.number === record.target.pr &&
+          review.pullRequest.head === record.target.head &&
+          review.pullRequest.base === record.target.base
+        )
+      ) {
+        return { kind: "state_error", detail: MERGE_WITHOUT_REVIEW_DETAIL };
+      }
+    }
+  }
+  // A retained legacy verdict cannot shadow the exact new attempt. A present
+  // current-round refusal never falls back to an older completed receipt.
+  const completed = currentReview === undefined &&
+      !attemptedReviews.some((charge) => charge.attempt >= currentRound)
+    ? context.snapshot.reviews.find((review) =>
+      review.id === legacyReviewId &&
+      review.pullRequest.number === record.target.pr &&
+      review.pullRequest.head === record.target.head &&
+      review.outcome === "completed"
+    )
+    : currentReview?.outcome === "completed"
+    ? currentReview
+    : undefined;
   if (config === null || completed === undefined) {
     return { kind: "state_error", detail: MERGE_WITHOUT_REVIEW_DETAIL };
   }

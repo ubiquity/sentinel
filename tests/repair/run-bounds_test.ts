@@ -27,7 +27,11 @@ import {
 } from "../../src/repair/loop.ts";
 import { runRepairEntrypoint } from "../../src/main.ts";
 import { DurableGitHubCooldownGate } from "../../src/repair/github-cooldown.ts";
-import { candidatePreservationRef } from "../../src/repair/keys.ts";
+import {
+  candidatePreservationRef,
+  reviewOperationKey,
+  reviewReceiptId,
+} from "../../src/repair/keys.ts";
 import type { FakeGithubOptionsV1, FakeReplayOptionsV1 } from "./helpers.ts";
 import {
   AdvancingFakeGithub,
@@ -1108,7 +1112,10 @@ Deno.test(
     await seed(
       rig,
       seededSnapshot([record], {
-        reviews: [completedReceipt(7, SHA3, SHA1)],
+        reviews: [parseReviewReceiptV1({
+          ...completedReceipt(7, SHA3, SHA1),
+          id: await reviewReceiptId(reviewOperationKey(7, SHA3, 1), SHA3),
+        })],
       }),
     );
     const first = await rig.run();

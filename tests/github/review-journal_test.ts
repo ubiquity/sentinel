@@ -1155,7 +1155,12 @@ Deno.test(
 
     assert.equal(root.type, "object");
     assert.equal(root.additionalProperties, false);
-    assert.deepEqual(root.required, ["verdict", "summary", "findings"]);
+    assert.deepEqual(root.required, [
+      "verdict",
+      "summary",
+      "findings",
+      "taskAcceptance",
+    ]);
     assert.deepEqual(verdict.enum, ["clean", "findings", "unavailable"]);
     assert.equal(summary.minLength, 1);
     assert.equal(summary.maxLength, MAX_RESULT_SUMMARY);

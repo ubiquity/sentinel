@@ -18,8 +18,11 @@ import { parseGatewayReplayManifestV1 } from "../../../src/adapters/gateway/wire
 import {
   b64Url,
   CAPTURE_ID_A,
+  CAPTURE_ID_B,
+  FakeClock,
   FINGERPRINT_A,
   INCIDENT_A,
+  INCIDENT_B,
   makeCapture,
   sha256hex,
   syntheticBytes,
@@ -60,7 +63,7 @@ async function putCapture(
     ref,
     digest: await sha256hex(ciphertext),
     ciphertext,
-    incidentId: INCIDENT_A,
+    incidentId: parseArtifactRefIdentity(ref)?.incidentId ?? INCIDENT_A,
     captureId,
     fingerprint: FINGERPRINT_A,
     caseGroupDigest: "c".repeat(64),
@@ -350,6 +353,209 @@ Deno.test("store: capacity exhaustion blocks without deleting active evidence", 
     );
   } finally {
     await removeTemp(root);
+  }
+});
+
+Deno.test("store: capacity admission reclaims expired evidence across incidents", async (t) => {
+  for (const restart of [false, true]) {
+    await t.step(restart ? "after restart" : "without reopening", async () => {
+      const limits = {
+        totalMaxBytes: 400,
+        artifactMaxBytes: 200,
+        retentionMaxAgeMs: 1_000,
+      };
+      const initial = await makeStore(limits);
+      let store = initial.store;
+      const { root } = initial;
+      const clock = new FakeClock(T0);
+      const refB = `artifact://sentinel/${INCIDENT_B}/${CAPTURE_ID_B}`;
+      const nextRefB = `artifact://sentinel/${INCIDENT_B}/cap-next`;
+      const activeBytes = ciphertextFor(72, 200);
+      const nextBytes = ciphertextFor(73, 200);
+      try {
+        const first = await putCapture(
+          store,
+          ciphertextFor(71, 200),
+          REF_A,
+          clock.now(),
+        );
+        assert.ok(first.ok, JSON.stringify(first));
+        clock.advance(500);
+        const active = await putCapture(store, activeBytes, refB, clock.now());
+        assert.ok(active.ok, JSON.stringify(active));
+        clock.advance(499);
+        const full = await putCapture(store, nextBytes, nextRefB, clock.now());
+        assert.ok(!full.ok && full.error.kind === "full", JSON.stringify(full));
+        const beforeExpiry = await store.get(REF_A, clock.now());
+        assert.ok(beforeExpiry.ok && beforeExpiry.value !== null);
+        clock.advance(1);
+        if (restart) {
+          store = new LocalArtifactStore({ root, limits });
+          const opened = await store.open();
+          assert.ok(opened.ok, JSON.stringify(opened));
+        }
+        const listed = await store.listByIncident(INCIDENT_B, clock.now());
+        assert.ok(listed.ok, JSON.stringify(listed));
+        if (listed.ok) {
+          assert.deepEqual(listed.value.map((artifact) => artifact.ref), [
+            refB,
+          ]);
+        }
+        const admitted = await putCapture(
+          store,
+          nextBytes,
+          nextRefB,
+          clock.now(),
+        );
+        assert.ok(
+          admitted.ok,
+          `expired incident A must not block incident B: ${
+            JSON.stringify(admitted)
+          }`,
+        );
+        const expiredKey = await sha256hex(new TextEncoder().encode(REF_A));
+        for (const suffix of ["json", "bin"]) {
+          await assert.rejects(
+            Deno.lstat(`${root}/entries/${expiredKey}.${suffix}`),
+            Deno.errors.NotFound,
+          );
+        }
+        const stats = await store.stats();
+        assert.ok(
+          stats.ok && stats.value.totalBytes === 400 && stats.value.count === 2,
+          JSON.stringify(stats),
+        );
+        const preserved = await store.get(refB, clock.now());
+        assert.ok(
+          preserved.ok && preserved.value !== null,
+          JSON.stringify(preserved),
+        );
+        if (preserved.ok && preserved.value) {
+          assert.deepEqual(preserved.value.ciphertext, activeBytes);
+        }
+        const absent = await store.get(REF_A, clock.now());
+        assert.ok(absent.ok && absent.value === null);
+        // Advance again on the same instance: reclamation is not confined to open().
+        clock.advance(500);
+        const later = await putCapture(
+          store,
+          ciphertextFor(74, 200),
+          REF_A,
+          clock.now(),
+        );
+        assert.ok(later.ok, JSON.stringify(later));
+        const newest = await store.get(nextRefB, clock.now());
+        assert.ok(newest.ok && newest.value !== null, JSON.stringify(newest));
+        if (newest.ok && newest.value) {
+          assert.deepEqual(newest.value.ciphertext, nextBytes);
+        }
+        const final = await store.stats();
+        assert.ok(
+          final.ok && final.value.totalBytes === 400 && final.value.count === 2,
+          JSON.stringify(final),
+        );
+      } finally {
+        await removeTemp(root);
+      }
+    });
+  }
+});
+
+Deno.test("store: capacity reclamation fails closed on invalid metadata and failed removal", async (t) => {
+  for (const failure of ["metadata", "removal"] as const) {
+    await t.step(failure, async () => {
+      const { store, root } = await makeStore({
+        totalMaxBytes: 400,
+        artifactMaxBytes: 200,
+        retentionMaxAgeMs: 1_000,
+      });
+      const refB = `artifact://sentinel/${INCIDENT_B}/${CAPTURE_ID_B}`;
+      const nextRefB = `artifact://sentinel/${INCIDENT_B}/cap-next`;
+      const activeBytes = ciphertextFor(82, 200);
+      try {
+        assert.ok((await putCapture(store, ciphertextFor(81, 200))).ok);
+        assert.ok((await putCapture(store, activeBytes, refB, T0 + 500)).ok);
+        const key = await sha256hex(new TextEncoder().encode(REF_A));
+        const metaPath = `${root}/entries/${key}.json`;
+        const binPath = `${root}/entries/${key}.bin`;
+        if (failure === "metadata") {
+          const metadata = JSON.parse(await Deno.readTextFile(metaPath));
+          metadata.incidentId = INCIDENT_B;
+          await Deno.writeTextFile(metaPath, JSON.stringify(metadata));
+        } else {
+          // A nonempty directory at the bytes path makes actual deletion fail.
+          await Deno.remove(binPath);
+          await Deno.mkdir(binPath);
+          await Deno.writeFile(`${binPath}/blocked`, ciphertextFor(81, 200));
+        }
+        const rejected = await putCapture(
+          store,
+          ciphertextFor(83, 200),
+          nextRefB,
+          T0 + 1_000,
+        );
+        assert.ok(!rejected.ok, JSON.stringify(rejected));
+        if (!rejected.ok) {
+          assert.equal(
+            rejected.error.kind,
+            failure === "metadata" ? "corrupt" : "unavailable",
+          );
+        }
+        const preserved = await store.get(refB, T0 + 1_000);
+        assert.ok(
+          preserved.ok && preserved.value !== null,
+          JSON.stringify(preserved),
+        );
+        if (preserved.ok && preserved.value) {
+          assert.deepEqual(preserved.value.ciphertext, activeBytes);
+        }
+        const absent = await store.get(nextRefB, T0 + 1_000);
+        assert.ok(absent.ok && absent.value === null);
+        if (failure === "removal") {
+          // Partial deletion must not free accounting while the bytes remain.
+          const retry = await putCapture(
+            store,
+            ciphertextFor(83, 200),
+            nextRefB,
+            T0 + 1_000,
+          );
+          assert.ok(
+            !retry.ok && retry.error.kind === "unavailable",
+            JSON.stringify(retry),
+          );
+          assert.equal(
+            (await Deno.readFile(`${binPath}/blocked`)).byteLength,
+            200,
+          );
+          const restarted = new LocalArtifactStore({
+            root,
+            limits: store.limits,
+          });
+          const opened = await restarted.open();
+          if (opened.ok) {
+            const afterRestart = await putCapture(
+              restarted,
+              ciphertextFor(83, 200),
+              nextRefB,
+              T0 + 1_000,
+            );
+            assert.ok(
+              !afterRestart.ok,
+              `restart must not forget unremoved ciphertext: ${
+                JSON.stringify(afterRestart)
+              }`,
+            );
+          } else {
+            assert.equal(opened.error.kind, "corrupt");
+          }
+          assert.ok((await Deno.lstat(metaPath)).isFile);
+        } else {
+          assert.equal((await Deno.readFile(binPath)).byteLength, 200);
+        }
+      } finally {
+        await removeTemp(root);
+      }
+    });
   }
 });
 
