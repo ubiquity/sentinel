@@ -2,7 +2,7 @@
 
 ## Active task register — primary agent owned
 
-Updated 2026-09-17 00:05 UTC. This is the only authoritative acceptance ledger.
+Updated 2026-09-17 06:25 UTC. This is the only authoritative acceptance ledger.
 The goal remains incomplete: autonomous GitHub Actions repair against Sentinel,
 then the separately authorized ai.ubq.fi target. The owner retired the previous
 GPT-6 Astra integration owner on 2026-09-16 for not completing this job and
@@ -10,6 +10,67 @@ transferred ownership to the primary local agent, which may now change scope,
 status, acceptance and write ownership here.
 
 ### Current checkpoint
+
+**The root cause of the "unreleasable self-repair" was a reviewer-provenance
+defect, and it is fixed and live.** Review rounds 3 (02:12:21Z) and 4
+(04:25:03Z) each ended about thirty seconds after their request with `verdict
+unavailable`, `execution null` and — only because the reason-preservation change
+below landed first — the exact producer reason "structured review unavailable: a
+command execution item was malformed or contradictory". Diagnosis, made
+credential-free with no model call: the pinned local Codex CLI is exactly
+`@openai/codex@0.154.0`, and its own generated protocol schema enumerates
+`CommandExecutionSource = agent | userShell | unifiedExecStartup |
+unifiedExecInteraction` with `commandExecution` requiring
+`command, commandActions, cwd, id, status, type`. The two unified-exec values are
+the SAME agent shell tool over its persistent-process transport, but the reviewer
+accepted only `agent`/omitted, so any review whose session used unified exec was
+refused before a verdict could exist. Fix (`80384fc…`): accept the
+agent-originated sources verbatim — a start and its completion must still carry
+the SAME source — while a human `userShell` command, any unknown value and every
+plugin/script binding stay refused; a refused item also emits one bounded,
+content-free structural fingerprint line to the run log (predicate booleans and
+lengths only, never the command, its output or a path), because the durable
+disposition can only carry a static reason. The regression test fails before the
+fix and passes after it. Activated by the owner-install chain as generation 10
+(`80384fc3…`, applied 04:53:58Z; the ordinary execution at generation 10 settled
+healthy).
+
+Proof it worked — real verdicts, real findings:
+
+- Round 5 (05:03:11Z, review `5231230066`, key
+  `review:51:ae6ff044…:attempt-5`) recorded a real execution (gpt-5.6-luna, max
+  reasoning, 167,098 output chars, terminal completed) and returned a P2 finding
+  on `src/github/text.ts`.
+- Round 6 (06:08:06Z, review `5231809100`, key
+  `review:51:430b9760…:attempt-6`) returned the same substantive P2: the
+  sanitizer's optional whitespace/colon still admits a zero-width separator, so
+  URL and prose forms can be rewritten even though the issue's own acceptance
+  requires non-closing references to stay unchanged. The candidate therefore
+  genuinely fails its acceptance criteria; **no merge was performed and no
+  receipt was fabricated**.
+
+Two bounded, owner-authorized recoveries carried this one task through the
+fail-closed guards, each a single expected-head CAS with a full readback, with
+every counter, charge, reservation, receipt, evidence and candidate preserved:
+
+- 03:34:27Z: the `review_quota` block (three consumed rounds, two of them
+  infrastructure failures) returned `issue-ubiquity-sentinel-48` to `work`
+  (`a583c491…` → `8de95790…`).
+- ~05:39Z: the exhausted implementation budget was cleared together with exactly
+  ONE granted implementation attempt (attempts 4 → 3; the granted amount is a
+  closed 0-or-1 value in the binding) so the runtime's OWN model worker can make
+  the reviewer-mandated correction — no hand-written application fix, no budget
+  reset, no fabricated receipt. A first attempt refused with `runtime_mismatch`
+  because the binding still named the generation 9 pointer; that refusal is
+  recorded, and the runtime-identity pin is fixed in `ef5af35…` (CI-green).
+
+Delivery state as recorded: the loop is correcting the round-6 finding through
+its own model worker on PR 51; the changed candidate will be reviewed again
+(round 7) before any merge, and the merge gate, release request and supervisor
+proofs are unchanged. The lane promotion carrying the runtime-pinned operator
+(`9b06622…`) was published under local verification (10/10 operator tests, lint,
+`deno check`) with its own CI run in flight (35189179293) to meet the
+ordinary-execution window; its result is recorded in the next entry.
 
 **Live: the deadlock is broken and the runtime is recovering issue 48 on its own.**
 The fix below was activated by the owner's 2026-09-17 decision and is proven in

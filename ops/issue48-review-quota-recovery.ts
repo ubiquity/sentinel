@@ -142,8 +142,8 @@ export const ISSUE48_QUOTA_PRODUCTION_BINDING: Issue48QuotaRecoveryBindingV1 = {
   pullRequestBase: "f1b5a86b80ca4759ab37307484b223907bd1b1d6" as GitSha,
   repository: ISSUE48_QUOTA_REPOSITORY,
   runtimeId: "ubiquity/sentinel:0:production",
-  runtimeRevision: "87193550640078f190ab94d7f8ca0f00bbef9124" as GitSha,
-  runtimeGeneration: 9,
+  runtimeRevision: "80384fc3668c246297621aa1c588c0e49ea516c6" as GitSha,
+  runtimeGeneration: 10,
 };
 
 export interface Issue48QuotaRecoveryDepsV1 {
