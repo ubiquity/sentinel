@@ -11,6 +11,42 @@ status, acceptance and write ownership here.
 
 ### Current checkpoint
 
+**The correction loop is now informed, and the only remaining work is the
+candidate content itself.** Four consecutive review rounds (7, 8, 9, 10)
+rejected the candidate for four separate punctuation cases of one over-broad
+keyword boundary, and the runtime was re-implementing without ever seeing them:
+the correction path sent the model the rejected candidate and an opaque list of
+evidence refs, while the reviewer's finding text lives inside the recorded
+receipt in state. Live proof of the stalemate: the round-8 and round-9
+candidates carried a byte-identical sanitizer regex.
+
+- Fixed `664a52d…` (generation 13, installed): `ModelRunRequestV1` carries a
+  bounded `reviewFindings` list (severity/path/message) derived from the exact
+  completed receipt of the rejected head, and the runtime prompt renders it.
+  The very next informed correction changed the sanitizer's left boundary for
+  the first time in five rounds.
+- Fixed `4c209dd…` (generation 14, installed): a correction also carries the
+  unresolved findings of the most recent earlier rejections of the same pull
+  request (at most three receipts, deduped, inside the existing bounds), so the
+  model can converge on the rule rather than the last reported character.
+- Bounded grants keep working: the round-10 rejection was met by a two-unit
+  grant (counter 4 → 2, so the next admission is task/base/attempt 3, an unused
+  reservation identity at base `0b2f389…`), a closed 0..3 value, with every
+  charge, receipt, reservation and candidate preserved. The grant applied at
+  13:52:16Z and the record is armed at its unobserved `review` step.
+- Open observation for the next round: the first generation-14 execution
+  (run `35230194237`, settled healthy) did not process the record — the repair
+  state stayed at sequence 339 — so the loop's next ordinary execution
+  (`nextOrdinaryAt` 14:56Z) must be checked for an armed-but-skipped record
+  before any further grant is considered.
+
+Remaining boundary: the candidate must pass the reviewer's byte-preservation
+criterion, and only then may the merge, release request, supervisor
+prior/candidate proofs, promotion, acceptance and issue closure follow. No
+merge, release, closure or receipt has been fabricated at any point, and the
+goal stays active.
+
+
 **Bounded grants now work, and the reviewer keeps refusing an incomplete
 candidate — which is the correct, fail-closed outcome.** Review round 8
 (10:50:11Z) returned another real P2 ("Dotted references are corrupted by the

@@ -126,6 +126,20 @@ export const OWNER_DEVELOPMENT_INSTALL_ROUND8_GENERATION = 12;
 export const OWNER_DEVELOPMENT_INSTALL_FINDINGS_REVISION =
   "664a52ddeb4f23eafa58a32e8394754f3303f0c4" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_FINDINGS_GENERATION = 13;
+/**
+ * Exact revision folding earlier rejections into a correction prompt; its
+ * install also gives the runtime an immediate health-gap execution.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_HISTORY_REVISION =
+  "4c209ddaf21a94be2c226d1ce31060dca8543f68" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_HISTORY_GENERATION = 14;
+/**
+ * Exact revision building a settled review receipt from its durable request
+ * reservation; its install also triggers an immediate health-gap execution.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_RECEIPT_REVISION =
+  "3b78061f0cab84a85af1f4a84dadbb80ce5a2a14" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_RECEIPT_GENERATION = 15;
 
 const API_BASE = "https://api.github.com";
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -528,10 +542,88 @@ export function planOwnerDevelopmentInstall(
       );
     }
     if (healthy !== null) {
-      return noChange("the owner development installation is complete");
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_HISTORY_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_HISTORY_GENERATION,
+        healthy,
+        "install the rejection-history revision after the findings-feedback healthy proof",
+      );
     }
     return waiting(
       "the findings-feedback generation 13 healthy proof is not recorded",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_HISTORY_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_HISTORY_GENERATION
+  ) {
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_FINDINGS_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_FINDINGS_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded findings-feedback healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_FINDINGS_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed rejection-history candidate to its recorded prior",
+      );
+    }
+    if (healthy !== null) {
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_RECEIPT_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_RECEIPT_GENERATION,
+        healthy,
+        "install the receipt-submission revision after the rejection-history healthy proof",
+      );
+    }
+    return waiting(
+      "the rejection-history generation 14 healthy proof is not recorded",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_RECEIPT_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_RECEIPT_GENERATION
+  ) {
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_HISTORY_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_HISTORY_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded rejection-history healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_HISTORY_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed receipt-submission candidate to its recorded prior",
+      );
+    }
+    if (healthy !== null) {
+      return noChange("the owner development installation is complete");
+    }
+    return waiting(
+      "the receipt-submission generation 15 healthy proof is not recorded",
     );
   }
 

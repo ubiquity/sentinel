@@ -2013,21 +2013,51 @@ function headRejectedByReview(
 export const MAX_CORRECTION_FINDINGS = 8;
 /** Bound of one finding message carried into the correction prompt. */
 export const MAX_CORRECTION_FINDING_CHARS = 2_000;
+/** Bound of earlier rejection receipts folded into one correction prompt. */
+export const MAX_CORRECTION_HISTORY_RECEIPTS = 3;
 
 function correctionFindings(
   snapshot: RepairStateSnapshotV1,
   record: WorkRecordV1,
 ): { severity: string; path: string | null; message: string }[] | null {
-  const receipt = rejectedReceipt(snapshot, record);
-  if (receipt === null) return null;
-  const findings = receipt.findings
-    .filter((finding) => !finding.resolved)
-    .slice(0, MAX_CORRECTION_FINDINGS)
-    .map((finding) => ({
-      severity: finding.severity,
-      path: finding.path,
-      message: finding.message.slice(0, MAX_CORRECTION_FINDING_CHARS),
-    }));
+  const current = rejectedReceipt(snapshot, record);
+  if (current === null) return null;
+  // The candidate that rejected this attempt FIRST, then the unresolved
+  // findings of the most recent earlier rejections of the SAME pull request:
+  // one receipt is not enough evidence when the task has been refused several
+  // times for different cases of the same rule, which is exactly how a
+  // correction converges on the rule instead of the last reported case.
+  const history = snapshot.reviews
+    .filter((review) =>
+      review.pullRequest.number === current.pullRequest.number &&
+      review.outcome === "completed" &&
+      review.unresolvedSeverities.length > 0 &&
+      review.id !== current.id
+    )
+    .sort((a, b) => b.observedAt - a.observedAt)
+    .slice(0, MAX_CORRECTION_HISTORY_RECEIPTS);
+  const seen = new Set<string>();
+  const findings: { severity: string; path: string | null; message: string }[] =
+    [];
+  for (const review of [current, ...history]) {
+    for (const finding of review.findings) {
+      if (finding.resolved) continue;
+      const message = finding.message.slice(0, MAX_CORRECTION_FINDING_CHARS);
+      const key = `${finding.severity}\u0000${
+        finding.path ?? ""
+      }\u0000${message}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      findings.push({
+        severity: finding.severity,
+        path: finding.path,
+        message,
+      });
+      if (findings.length >= MAX_CORRECTION_FINDINGS) {
+        return findings;
+      }
+    }
+  }
   return findings.length === 0 ? null : findings;
 }
 
@@ -4273,7 +4303,7 @@ async function applyObservedReview(
       // may report several findings at one severity; passing duplicates makes
       // the strict receipt parser reject an otherwise valid result.
       unresolvedSeverities: deriveUnresolvedSeverities(value.findings),
-      submittedAt: reviewWaitSince(record, now),
+      submittedAt: reviewSubmittedAt(record, value.completedAt, now),
       completedAt: value.completedAt,
       observedAt: value.receivedAt,
     });
@@ -5634,6 +5664,29 @@ function reviewWaitSince(record: WorkRecordV1, fallback: number): number {
     return record.intent.startedAt;
   }
   return Math.min(record.updatedAt, fallback);
+}
+
+/**
+ * Submission instant recorded on one settled review receipt.
+ *
+ * The loop normally knows the transport's OWN reported submission instant from
+ * the pending wait, and that exact value is preserved. A bounded recovery can
+ * clear the wait, however, and the record's remaining instants then POST-DATE a
+ * completion that already happened; the strict receipt parser refuses such an
+ * inversion (live deadlock: the round-10 review was re-armed forever and never
+ * recorded). The derived instant is therefore capped at the observed completion,
+ * so the receipt can never invert while the transport's own value stands
+ * whenever it is still available.
+ */
+function reviewSubmittedAt(
+  record: WorkRecordV1,
+  observedCompletedAt: number | null,
+  fallback: number,
+): number {
+  const derived = reviewWaitSince(record, fallback);
+  return observedCompletedAt === null
+    ? derived
+    : Math.min(derived, observedCompletedAt);
 }
 
 function mergeEvidence(
