@@ -28,6 +28,7 @@ import { DenoGitExecutor } from "../../src/github/git-executor.ts";
 import type { BaseRefreshObserverV1 } from "../../src/host/local.ts";
 import { createPrepareBaseRefresh } from "../../src/host/local.ts";
 import { DurableGitHubCooldownGate } from "../../src/repair/github-cooldown.ts";
+import { baseRefreshIntentKey } from "../../src/repair/keys.ts";
 import { runRepairCycle } from "../../src/repair/loop.ts";
 import { REPO, SHA1, SHA2, SHA3, T0, workRecord } from "../state/helpers.ts";
 import {
@@ -772,6 +773,79 @@ Deno.test(
     assert.equal(fake.pushCalls.length, 0, "no push for an unprepared intent");
     assert.equal(rig.model.requests.length, 0);
     assert.equal(state.reservations.length, 0);
+  },
+);
+
+Deno.test(
+  "base refresh: an intent persisted by the review freshness gate is reconciled at the review step",
+  async () => {
+    // The freshness gate persists the refresh intent INSTEAD of spending a
+    // review on a stale base, so the record stays at `review` with that intent
+    // pending. The review step must complete the refresh it created rather than
+    // wait on a review the same gate keeps refusing.
+    const newer = "c".repeat(40) as GitSha;
+    const next = "d".repeat(40) as GitSha;
+    const fake = new RefreshGithub(newer, PREPARED);
+    const github: GitHubPort = fake;
+    const rig = makeRig(github);
+    github.prepareBaseRefresh = (request) => {
+      fake.prepareCalls.push(request);
+      return Promise.resolve(portOk(next));
+    };
+    await rig.seed([
+      workRecord("issue-1", {
+        repository: REPO,
+        source: { kind: "issue", id: "1", revision: SHA1 },
+        related: { incidentId: null, issueNumber: 1 },
+        target: {
+          base: SHA2,
+          branch: BRANCH,
+          checkpoint: null,
+          head: PREPARED,
+          pr: 7,
+        },
+        nextStep: "review",
+        counters: { attempts: 2, retries: 1, reviewRounds: 2 },
+        firstSeenAt: T0 - 5000,
+        createdAt: T0 - 4000,
+        updatedAt: T0,
+        intent: {
+          kind: "base_refresh",
+          key: baseRefreshIntentKey(7, PREPARED, newer),
+          startedAt: T0,
+          branch: BRANCH,
+          expectedHead: PREPARED,
+          observedBase: newer,
+          pr: 7,
+          requestId: null,
+          resultId: null,
+        },
+      }),
+    ]);
+
+    const outcome = await rig.run();
+    assert.equal(outcome.status, "idle", JSON.stringify(outcome));
+    const state = await rig.snapshot();
+    const work = state.work[0];
+    assert.equal(work.intent, null, "the pending refresh intent is settled");
+    assert.equal(work.target.base, newer, "the refreshed base is recorded");
+    assert.equal(
+      work.target.head,
+      next,
+      "the refreshed candidate is published",
+    );
+    assert.equal(
+      fake.prepareCalls.length,
+      1,
+      "the review step executed exactly one refresh",
+    );
+    assert.equal(fake.prepareCalls[0]!.expectedHead, PREPARED);
+    assert.equal(fake.prepareCalls[0]!.expectedBase, newer);
+    // The refreshed candidate still needs its own review: the old head is gone
+    // and the record continues from the work step, never straight into a
+    // review of the replaced candidate.
+    assert.notEqual(work.target.head, PREPARED);
+    assert.equal(work.nextStep, "review");
   },
 );
 

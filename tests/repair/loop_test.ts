@@ -23,6 +23,7 @@ import type {
   GitHubPullRequestV1,
   LegacyBaseRefreshLossProofV1,
   PortResultV1,
+  ReviewObservationV1,
 } from "../../src/contracts/ports.ts";
 import { portError, portOk } from "../../src/contracts/ports.ts";
 import { parseReviewReceiptV1 } from "../../src/contracts/review-receipt.ts";
@@ -41,6 +42,7 @@ import {
   candidatePreservationRef,
   implementationIntentKey,
   pushIntentKey,
+  reviewReceiptId,
   workItemIdForIncident,
 } from "../../src/repair/keys.ts";
 import { DurableGitHubCooldownGate } from "../../src/repair/github-cooldown.ts";
@@ -5351,5 +5353,254 @@ Deno.test(
     assert.equal(rig.state.repairWrites, writesBefore + 1);
     assert.equal(rig.model.requests.length, 0);
     assert.equal(state.reservations.length, 1);
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Review attempt recovery: a review that concluded without an accepted verdict
+// is a bounded, observable disposition — never an eternal pending poll.
+// ---------------------------------------------------------------------------
+
+/** Terminal no-verdict observation for the exact published head. */
+function noVerdictObservation(
+  head: GitSha,
+  summary: string,
+  at: number,
+): ReviewObservationV1 {
+  return {
+    status: "unavailable",
+    requestId: "review-req-1",
+    reviewer: null,
+    resultId: null,
+    completedAt: at,
+    observedHead: head,
+    observedBase: SHA1,
+    findings: [],
+    summary,
+    receivedAt: at + 1,
+  };
+}
+
+/** Drive one task to its first review wait through the real lifecycle. */
+async function rigAtReviewWait(prefix: string) {
+  const rig = await makeRig(prefix, {
+    github: { candidateLifecycle: positiveLifecycle() },
+  });
+  const first = await rig.run();
+  assert.equal(first.status, "idle", JSON.stringify(first));
+  const state = await rig.snapshot();
+  const work = state.work[0]!;
+  assert.equal(work.nextStep, "review");
+  assert.equal(work.wait?.reason, "review_pending");
+  assert.equal(work.counters.reviewRounds, 1);
+  return { rig, work };
+}
+
+Deno.test(
+  "review no-verdict: one bounded re-attempt is requested under its own attempt identity",
+  async () => {
+    const { rig, work } = await rigAtReviewWait("review-no-verdict-retry");
+    try {
+      const reason =
+        "structured review unavailable: the runtime terminal was not completed";
+      rig.clock.advance(15 * 60_000 + 1);
+      rig.github.reviewStatus = "unavailable";
+      rig.github.reviewObservations = noVerdictObservation(
+        work.target.head!,
+        reason,
+        rig.clock.now() - 1000,
+      );
+      const second = await rig.run();
+      assert.equal(second.status, "idle", JSON.stringify(second));
+      const state = await rig.snapshot();
+      const record = state.work[0]!;
+      // A fresh round is a fresh bounded attempt of the SAME head: charged,
+      // recorded and awaiting its own review.
+      assert.equal(record.nextStep, "review");
+      assert.equal(record.wait?.reason, "review_pending");
+      assert.equal(record.counters.reviewRounds, 2);
+      assert.equal(record.target.head, work.target.head);
+      assert.equal(record.blocker, null);
+      assert.equal(
+        rig.github.reviewRequestIdentities.length,
+        2,
+        "the rejected head keeps exactly one request per attempt",
+      );
+      assert.equal(
+        rig.github.reviewRequestIdentities[0]!.operationKey,
+        `review:7:${work.target.head}`,
+      );
+      assert.equal(
+        rig.github.reviewRequestIdentities[1]!.operationKey,
+        `review:7:${work.target.head}:attempt-2`,
+      );
+      const reviewCharges = state.reservations.filter((reservation) =>
+        reservation.purpose === "review_request"
+      );
+      assert.equal(reviewCharges.length, 2);
+      // State reservation order is not a chronology; the durable attempt
+      // identity is what proves each round was charged on its own.
+      assert.deepEqual(
+        reviewCharges.map((reservation) => reservation.attempt).sort(),
+        [1, 2],
+        "each attempt carries its own durable charge identity",
+      );
+      assert.ok(
+        reviewCharges.every((reservation) =>
+          reservation.outcome === "submitted"
+        ),
+      );
+
+      // The re-attempt is a REAL review of the same head: when it completes
+      // with an accepted verdict, the recorded receipt is bound to the exact
+      // identity it was read under, so a later delivery can never be
+      // authorized by the earlier attempt's receipt.
+      const attemptKey = `review:7:${work.target.head}:attempt-2`;
+      const completedAt = rig.clock.now() + 1000;
+      rig.github.reviewObservationsByKey.set(attemptKey, {
+        status: "completed",
+        requestId: `review-${attemptKey}`,
+        reviewer: rig.github.reviewerIdentity,
+        resultId: "result-attempt-2",
+        completedAt,
+        observedHead: work.target.head!,
+        observedBase: record.target.base,
+        findings: [],
+        summary: "No actionable defects found in the supplied change.",
+        receivedAt: completedAt + 1,
+      });
+      rig.clock.advance(15 * 60_000 + 1);
+      await rig.run();
+      const delivered = await rig.snapshot();
+      const deliveredRecord = delivered.work[0]!;
+      const receiptId = await reviewReceiptId(
+        attemptKey,
+        work.target.head!,
+      );
+      assert.ok(
+        deliveredRecord.evidence.some((ref) =>
+          ref.ref === `artifact:review-receipt/${receiptId}`
+        ),
+        "the accepted verdict is recorded under the identity it was read at",
+      );
+      const receipt = delivered.reviews.find((review) =>
+        review.id === receiptId
+      );
+      assert.ok(receipt !== undefined, "the receipt is durable");
+      assert.equal(receipt.requestId, `review-${attemptKey}`);
+      assert.equal(receipt.outcome, "completed");
+      assert.equal(receipt.resultId, "result-attempt-2");
+      assert.equal(receipt.completedAt, completedAt);
+      assert.deepEqual(receipt.unresolvedSeverities, []);
+      assert.equal(receipt.pullRequest.head, work.target.head);
+      assert.equal(receipt.pullRequest.base, record.target.base);
+      assert.equal(deliveredRecord.nextStep, "delivery");
+    } finally {
+      await rig.ctx.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "review no-verdict: the round allowance blocks the task with the observed reason",
+  async () => {
+    const { rig, work } = await rigAtReviewWait("review-no-verdict-blocked");
+    try {
+      const reason =
+        "structured review unavailable: the review reported insufficient evidence";
+      // The plan's three review rounds are already consumed for this head.
+      rig.clock.advance(15 * 60_000 + 1);
+      for (let round = 0; round < 2; round += 1) {
+        rig.github.reviewStatus = "unavailable";
+        rig.github.reviewObservations = noVerdictObservation(
+          work.target.head!,
+          reason,
+          rig.clock.now() - 1000,
+        );
+        await rig.run();
+        rig.clock.advance(15 * 60_000 + 1);
+      }
+      let state = await rig.snapshot();
+      assert.equal(state.work[0]!.counters.reviewRounds, 3);
+      const requestsBefore = rig.github.reviewRequestIdentities.length;
+      const chargesBefore = state.reservations.length;
+
+      const blocked = await rig.run();
+      assert.equal(blocked.status, "idle", JSON.stringify(blocked));
+      state = await rig.snapshot();
+      const record = state.work[0]!;
+      // No fourth round exists: the task is blocked with the exact reason
+      // instead of polling a terminal disposition forever.
+      assert.equal(record.nextStep, "blocked");
+      assert.equal(record.blocker?.kind, "review_quota");
+      assert.ok(
+        record.blocker?.message.includes(reason),
+        `blocker names the observed reason: ${record.blocker?.message}`,
+      );
+      assert.equal(record.wait, null);
+      assert.equal(rig.github.reviewRequestIdentities.length, requestsBefore);
+      assert.equal(state.reservations.length, chargesBefore);
+    } finally {
+      await rig.ctx.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "review no-verdict: a first-attempt journal stays observable under its legacy identity",
+  async () => {
+    const { rig, work } = await rigAtReviewWait("review-no-verdict-legacy");
+    try {
+      const head = work.target.head!;
+      const reason =
+        "structured review unavailable: the owned session was closed before completion";
+      // The persisted record of a review requested BEFORE attempt identities
+      // existed: round two is already consumed while its one durable journal
+      // is bound only under the original first-attempt key.
+      const read = await rig.store.readRepair();
+      assert.ok(read.ok && read.value.status === "found");
+      if (!read.ok || read.value.status !== "found") return;
+      const legacyRecord = {
+        ...read.value.snapshot.work[0]!,
+        counters: { ...work.counters, reviewRounds: 2 },
+        wait: null,
+      };
+      const rewritten = await rig.store.writeRepair({
+        ...read.value.snapshot,
+        stateHead: read.value.head,
+        sequence: read.value.snapshot.sequence + 1,
+        updatedAt: rig.clock.now(),
+        work: [legacyRecord],
+      }, read.value.head);
+      assert.ok(
+        rewritten.ok && rewritten.value.status === "applied",
+        JSON.stringify(rewritten),
+      );
+      rig.clock.advance(15 * 60_000 + 1);
+      rig.github.reviewStatus = "unavailable";
+      rig.github.unboundReviewKeys.add(`review:7:${head}:attempt-2`);
+      rig.github.reviewObservationsByKey.set(
+        `review:7:${head}`,
+        noVerdictObservation(head, reason, rig.clock.now() - 1000),
+      );
+      const second = await rig.run();
+      assert.equal(second.status, "idle", JSON.stringify(second));
+      const state = await rig.snapshot();
+      const record = state.work[0]!;
+      // The legacy journal was observed, so exactly one re-attempt was
+      // requested instead of waiting forever on an unobservable identity.
+      assert.deepEqual(rig.github.observedReviewKeys, [
+        `review:7:${head}:attempt-2`,
+        `review:7:${head}`,
+      ]);
+      assert.equal(record.counters.reviewRounds, 3);
+      assert.equal(record.nextStep, "review");
+      assert.equal(
+        rig.github.reviewRequestIdentities[1]!.operationKey,
+        `review:7:${head}:attempt-3`,
+      );
+    } finally {
+      await rig.ctx.cleanup();
+    }
   },
 );

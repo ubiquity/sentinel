@@ -69,6 +69,8 @@ import { sanitizeAutoCloseKeywords } from "./text.ts";
 import {
   completedReviewMatchesReceipt,
   normalizeReviewObservation,
+  operationKeyOfReviewRequest,
+  reviewOperationKeyBindsHead,
 } from "./review-normalize.ts";
 import { reviewOperationKey } from "../repair/keys.ts";
 import type { ReviewNormalizationV1 } from "./review-normalize.ts";
@@ -959,10 +961,25 @@ export class GitHubPortImpl implements GitHubPort {
     if (!comments.ok) {
       return { ok: false, error: comments.error };
     }
-    // The service must answer for the EXACT submission this receipt records:
-    // derive the operation key from the exact PR/head, never by reversing the
-    // opaque storage receipt id (which does not encode the operation key).
-    const operationKey = reviewOperationKey(prNumber, merge.expectedHead);
+    // The service must answer for the EXACT submission this receipt records.
+    // The receipt names its durable request id; when that id is the transport's
+    // own record identity for one operation key (`review-` + key) the key is
+    // recovered from it exactly, so a bounded LATER attempt of the SAME head
+    // binds just like the first attempt. A receipt that names no such identity
+    // (the pre-attempt convention) keeps the original PR/head key — the only
+    // identity that existed then — and a recovered key that binds another pull
+    // request, head or scope is never accepted. The record must additionally be
+    // the exact one the receipt names, so one attempt's clean verdict can never
+    // authorize a merge on another attempt's record.
+    const namedKey = operationKeyOfReviewRequest(merge.review.requestId);
+    const firstAttemptKey = reviewOperationKey(prNumber, merge.expectedHead);
+    const operationKey = namedKey !== null &&
+        reviewOperationKeyBindsHead(namedKey, prNumber, merge.expectedHead)
+      ? namedKey
+      : firstAttemptKey;
+    if (service.value.requestId !== merge.review.requestId) {
+      return { ok: true, normalized: null };
+    }
     const observation = await normalizeReviewObservation({
       request: {
         operationKey,

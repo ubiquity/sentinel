@@ -31,7 +31,7 @@ import type {
   StateReadView,
   StateWriteResultV1,
 } from "../contracts/ports.ts";
-import { BASE_REFRESH_CONFLICT_DETAIL } from "../contracts/ports.ts";
+import { BASE_REFRESH_CONFLICT_DETAIL, portOk } from "../contracts/ports.ts";
 import type { RepositoryConfigV1 } from "../contracts/repository-config.ts";
 import type { IncidentEvidenceV1 } from "../contracts/incident.ts";
 import { parseMergeRequestV1 } from "../contracts/merge-request.ts";
@@ -94,6 +94,7 @@ import {
   applyIncidentSummary,
   assignTarget,
   clearIntent,
+  clearWait,
   countReviewRound,
   createIncidentWork,
   createIssueWork,
@@ -136,12 +137,18 @@ const ISSUE_PREREQUISITE_RETRY_MS = 60 * 60_000;
  */
 export const OPERATION_MARGIN_MS = 5 * 60_000;
 const DEFAULT_STEP_LIMIT = 32;
-
 /** Fixed repair job ceiling (plan §4): 120 minutes. */
 export const REPAIR_RUN_CEILING_MS = 120 * 60_000;
 /** No NEW model work may start after 90 minutes of one run (plan §4). */
 export const REPAIR_MODEL_CUTOFF_MS = 90 * 60_000;
 const MAX_IMPLEMENTATION_ATTEMPTS = 4;
+/**
+ * Plan §"Development and review": at most three review rounds per acceptance
+ * cycle. Rounds bound every review attempt for one exact head, including a
+ * re-attempt after an attempt concluded without an accepted verdict; past the
+ * allowance the task is blocked with the recorded reason, never merged.
+ */
+const MAX_REVIEW_ROUNDS = 3;
 const MAX_OUTPUT_LIMIT_BYTES = 4096;
 const MODEL_ID = "gpt-5.6-luna" as const;
 const REASONING = "max" as const;
@@ -3390,7 +3397,14 @@ async function requestReviewFor(
     };
   }
   const head = record.target.head!;
-  const operationKey = reviewOperationKey(prNumber, head);
+  // The round this request consumes is the attempt's durable identity: round
+  // one is the original request for this head, and a later round is a distinct
+  // operation with its own key, reservation and journal.
+  const operationKey = reviewOperationKey(
+    prNumber,
+    head,
+    record.counters.reviewRounds + 1,
+  );
 
   // A cooling installation never reserves a review request: the shared gate is
   // checked immediately before the admission (the only awaited prerequisite is
@@ -3956,6 +3970,15 @@ async function observeReview(
   if (pr === null || head === null) {
     return { kind: "state_error", detail: "review without PR/head identity" };
   }
+  // A saved candidate-base refresh is reconciled WHEREVER it is observed — the
+  // work and delivery steps already do — and the review step is where that
+  // intent is created: the freshness gate persists it instead of spending a
+  // review on a stale base. Without this reconciliation the record would wait
+  // at `review` on a request the gate must keep refusing, so the refresh is
+  // completed first and the refreshed candidate is reviewed afterwards.
+  if (record.intent !== null && record.intent.kind === "base_refresh") {
+    return executeBaseRefreshIntent(deps, context, record);
+  }
   // Review observation is a GitHub read: gate before the external call. A
   // cooldown deferral mutates nothing (the pending wait and review intent stay
   // durable) so the next run observes the exact remote state once.
@@ -3970,11 +3993,7 @@ async function observeReview(
   if (cooling.kind === "deferred") {
     return { kind: "deferred", detail: cooling.detail };
   }
-  const observed = await deps.github.observeReview({
-    operationKey: reviewOperationKey(pr, head),
-    prNumber: pr,
-    head,
-  });
+  const observed = await observeStandingReview(deps, record, pr, head);
   if (!observed.ok) {
     const since = reviewWaitSince(record, now);
     return persistWork(
@@ -3987,8 +4006,8 @@ async function observeReview(
       ),
     );
   }
-  const value = observed.value;
-  if (value.status === "pending" || value.status === "unavailable") {
+  const value = observed.value.observation;
+  if (value.status === "pending") {
     const since = reviewWaitSince(record, now);
     return persistWork(
       deps,
@@ -4004,7 +4023,170 @@ async function observeReview(
       ),
     );
   }
-  return applyObservedReview(deps, context, record, value);
+  if (value.status === "unavailable") {
+    // A bound terminal record is an attempt that concluded WITHOUT an accepted
+    // verdict; only a non-terminal one is a pending wait. The two were
+    // previously indistinguishable here, so a terminal disposition was polled
+    // forever and the task could never move again.
+    if (value.completedAt === null) {
+      const since = reviewWaitSince(record, now);
+      return persistWork(
+        deps,
+        context,
+        setWait(
+          record,
+          {
+            reason: "review_pending",
+            since,
+            until: Math.max(now, since) + REVIEW_POLL_MS,
+          },
+          now,
+        ),
+      );
+    }
+    return await recoverFromNoVerdictReview(deps, context, record, pr, value);
+  }
+  // The receipt of an accepted verdict is derived from the identity the record
+  // was actually READ under, so two attempts of the same head can never share
+  // one receipt identity.
+  return applyObservedReview(
+    deps,
+    context,
+    record,
+    value,
+    observed.value.operationKey,
+  );
+}
+
+/** One standing review observation bound to the identity it was read under. */
+interface StandingReviewObservationV1 {
+  observation: ReviewObservationV1;
+  /** Exact operation key the observation is bound to; never re-derived. */
+  operationKey: string;
+}
+
+/**
+ * Read the one standing review record for this exact head.
+ *
+ * The current round's attempt key is authoritative. When it binds no durable
+ * record at all, the first-attempt key is read once more: a request created
+ * before attempt identities existed is bound only there, and abandoning it
+ * would leave that task waiting on a review nobody can observe. A bound record
+ * of any phase is final — the legacy key is never consulted over it.
+ */
+async function observeStandingReview(
+  deps: RepairCycleDepsV1,
+  record: WorkRecordV1,
+  pr: number,
+  head: GitSha,
+): Promise<PortResultV1<StandingReviewObservationV1>> {
+  const attempt = standingReviewAttempt(record);
+  const primaryKey = reviewOperationKey(pr, head, attempt);
+  const primary = await deps.github.observeReview({
+    operationKey: primaryKey,
+    prNumber: pr,
+    head,
+  });
+  if (!primary.ok) return primary;
+  if (attempt === 1) {
+    return portOk({ observation: primary.value, operationKey: primaryKey });
+  }
+  if (!isUnboundReviewObservation(primary.value)) {
+    return portOk({ observation: primary.value, operationKey: primaryKey });
+  }
+  const legacyKey = reviewOperationKey(pr, head);
+  const legacy = await deps.github.observeReview({
+    operationKey: legacyKey,
+    prNumber: pr,
+    head,
+  });
+  if (!legacy.ok || isUnboundReviewObservation(legacy.value)) {
+    return portOk({ observation: primary.value, operationKey: primaryKey });
+  }
+  return portOk({ observation: legacy.value, operationKey: legacyKey });
+}
+
+/**
+ * Review round of the request this record is waiting on. Round one is the
+ * original identity; every later round is its own attempt.
+ */
+function standingReviewAttempt(record: WorkRecordV1): number {
+  const rounds = record.counters.reviewRounds;
+  return rounds >= 1 ? rounds : 1;
+}
+
+/**
+ * True only when the transport bound NO durable record to the asked identity:
+ * no journal base, no terminal instant and no reviewer. A bound record that is
+ * merely not terminal yet carries its own base, so it is never mistaken for an
+ * absent one.
+ */
+function isUnboundReviewObservation(value: ReviewObservationV1): boolean {
+  return value.status === "unavailable" && value.completedAt === null &&
+    value.observedBase === null && value.reviewer === null;
+}
+
+/**
+ * One bounded recovery step for an attempt that produced no accepted verdict.
+ *
+ * A no-verdict attempt is not a pass and not a rejection: the exact head stays
+ * recorded, the bounded static reason stays observable, and — while the plan's
+ * review-round allowance remains — one fresh attempt is requested for the same
+ * head as a new, separately charged operation. At the allowance the item is
+ * blocked with that exact reason instead of polling a terminal disposition
+ * forever.
+ */
+async function recoverFromNoVerdictReview(
+  deps: RepairCycleDepsV1,
+  context: LoopContextV1,
+  record: WorkRecordV1,
+  pr: number,
+  value: ReviewObservationV1,
+): Promise<StepResultV1> {
+  const now = deps.clock.now();
+  if (record.counters.reviewRounds < MAX_REVIEW_ROUNDS) {
+    return await requestReviewFor(deps, context, clearWait(record, now), pr);
+  }
+  return persistWork(
+    deps,
+    context,
+    markBlocked(
+      record,
+      "review_quota",
+      `review rounds exhausted without an accepted verdict (${
+        boundedReviewReason(value.summary)
+      })`,
+      now,
+    ),
+  );
+}
+
+/**
+ * Bounded single-line rendering of one observed no-verdict reason. The
+ * observation carries an already-sanitized static string; this only enforces
+ * the durable blocker's own single-line and length discipline. Control
+ * characters are collapsed to one space (no regex: the durable reason must
+ * never be able to carry them at all).
+ */
+function boundedReviewReason(summary: string | null): string {
+  if (summary === null) return "no reason reported";
+  let single = "";
+  let collapsed = false;
+  for (const char of summary) {
+    const code = char.codePointAt(0) ?? 0;
+    if (code < 0x20 || code === 0x7f) {
+      collapsed = single.length > 0;
+      continue;
+    }
+    if (collapsed) {
+      single += " ";
+      collapsed = false;
+    }
+    single += char;
+  }
+  const trimmed = single.trim();
+  if (trimmed.length === 0) return "no reason reported";
+  return trimmed.length > 200 ? `${trimmed.slice(0, 197)}...` : trimmed;
 }
 
 async function applyObservedReview(
@@ -4012,6 +4194,8 @@ async function applyObservedReview(
   context: LoopContextV1,
   record: WorkRecordV1,
   value: ReviewObservationV1,
+  /** Exact identity this observation was read under; the receipt is bound to it. */
+  observedOperationKey: string,
 ): Promise<StepResultV1> {
   const now = deps.clock.now();
   if (value.observedHead !== record.target.head) {
@@ -4028,11 +4212,10 @@ async function applyObservedReview(
       ),
     );
   }
-  const operationKey = reviewOperationKey(
-    record.target.pr!,
-    record.target.head!,
+  const id = await reviewReceiptId(
+    observedOperationKey,
+    value.observedHead!,
   );
-  const id = await reviewReceiptId(operationKey, value.observedHead!);
   let receipt: ReviewReceiptV1;
   try {
     receipt = parseReviewReceiptV1({

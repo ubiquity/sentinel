@@ -242,8 +242,11 @@ function blockedReason(
   return result.value.reason;
 }
 
-function mergeCall(port: ReturnType<typeof makePort>["port"]) {
-  return port.mergePullRequest(mergeRequest());
+function mergeCall(
+  port: ReturnType<typeof makePort>["port"],
+  request: MergeRequestV1 = mergeRequest(),
+) {
+  return port.mergePullRequest(request);
 }
 
 function putCount(transport: ScriptedHttpTransport): number {
@@ -525,6 +528,116 @@ Deno.test("mergePullRequest: the opaque canonical receipt id is not the operatio
   assert.equal(blockedReason(blocked), "review_required");
   assert.equal(putCount(wrong.transport), 0);
 });
+
+Deno.test(
+  "mergePullRequest: a bounded later attempt of the same head authorizes the merge",
+  async () => {
+    // The durable loop may consume more than one review round for one exact
+    // head (a round that concluded without an accepted verdict is recovered as
+    // its own bounded attempt). The receipt of the attempt that actually
+    // produced the verdict names its own record identity, and the merge gate
+    // must bind to exactly that record — never to the first attempt's identity
+    // and never to another attempt's record.
+    const attemptKey = `${CLEAN_OPERATION_KEY}:attempt-2`;
+    const completion = await structuredCompletedFixture({
+      operationKey: attemptKey,
+      requestId: `review-${attemptKey}`,
+    });
+    const service = new FakeReviewService();
+    service.readResult = completion.service;
+    const { port, transport } = makePort({
+      clock: CLOCK,
+      script: [
+        pullEntry(),
+        pullEntry(),
+        reviewsRead([completion.review]),
+        commentsRead([]),
+        ...rulesRead(),
+        ...checksRead([checkRunWire()]),
+        {
+          ...httpRespond(
+            "POST",
+            "/graphql",
+            200,
+            reviewDecisionGraphqlWire("APPROVED"),
+          ),
+          repeat: true,
+        },
+        httpRespond(
+          "PUT",
+          "/repos/ubiquity/sentinel/pulls/1/merge",
+          200,
+          mergeResponseWire(SHA3),
+        ),
+      ],
+      review: service,
+    });
+    const merged = await mergeCall(
+      port,
+      mergeRequest({
+        review: completedCleanReceipt({
+          id: await reviewReceiptId(attemptKey, SHA1),
+          requestId: `review-${attemptKey}`,
+        }),
+      }),
+    );
+    assert.ok(merged.ok, JSON.stringify(merged));
+    if (!merged.ok) return;
+    assert.equal(merged.value.outcome, "merged");
+    assert.equal(
+      putCount(transport),
+      1,
+      "the accepted later attempt authorized exactly one PUT",
+    );
+
+    // The same receipt against the FIRST attempt's standing record: the round
+    // identity differs, so nothing authorizes the merge.
+    const staleService = new FakeReviewService();
+    staleService.readResult = CLEAN_COMPLETION.service;
+    const stale = makePort({
+      clock: CLOCK,
+      script: happyScript(),
+      review: staleService,
+    });
+    const staleResult = await mergeCall(
+      stale.port,
+      mergeRequest({
+        review: completedCleanReceipt({
+          id: await reviewReceiptId(attemptKey, SHA1),
+          requestId: `review-${attemptKey}`,
+        }),
+      }),
+    );
+    assert.equal(blockedReason(staleResult), "review_required");
+    assert.equal(putCount(stale.transport), 0);
+
+    // A record identity that binds ANOTHER head never authorizes this head,
+    // even when the standing record answers for it exactly.
+    const foreignKey = `review:1:${SHA3}:attempt-2`;
+    const foreignService = new FakeReviewService();
+    foreignService.readResult = completedServiceRead({
+      operationKey: foreignKey,
+      requestId: `review-${foreignKey}`,
+      expectedHead: SHA1,
+    });
+    const foreign = makePort({
+      clock: CLOCK,
+      script: happyScript(),
+      review: foreignService,
+    });
+    const foreignResult = await mergeCall(
+      foreign.port,
+      mergeRequest({
+        review: completedCleanReceipt({
+          id: await reviewReceiptId(foreignKey, SHA1),
+          requestId: `review-${foreignKey}`,
+        }),
+      }),
+    );
+    assert.equal(blockedReason(foreignResult), "review_required");
+    assert.equal(putCount(foreign.transport), 0);
+  },
+);
 
 Deno.test("mergePullRequest: human resolution requires the trusted authenticated resolver", async () => {
   // The authoritative GitHub evidence is one structured journal carrying the

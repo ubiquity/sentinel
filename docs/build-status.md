@@ -1,13 +1,176 @@
 # Build status
 
-## Active task register — Astra owned
+## Active task register — primary agent owned
 
-Updated 2026-09-16 06:25 UTC. This is the only authoritative acceptance ledger.
+Updated 2026-09-17 00:05 UTC. This is the only authoritative acceptance ledger.
 The goal remains incomplete: autonomous GitHub Actions repair against Sentinel,
-then the separately authorized ai.ubq.fi target. Only the current GPT-6 Astra
-integration owner may change scope, status, acceptance or write ownership here.
+then the separately authorized ai.ubq.fi target. The owner retired the previous
+GPT-6 Astra integration owner on 2026-09-16 for not completing this job and
+transferred ownership to the primary local agent, which may now change scope,
+status, acceptance and write ownership here.
 
 ### Current checkpoint
+
+**The self-repair review-gate contradiction is resolved: it is not a gate
+contradiction at all, and no gate was weakened.** The owner's 2026-09-16 update
+removes DEVELOPMENT pull requests and Codex reviews ("Make the scoped change,
+test it immediately, then deliver it directly") and in the same instruction
+retains them for autonomous repairs ("Autonomous target repairs retain their
+existing PR, review and merge gates"). `MASTER-PLAN.md` §3 states the same
+distinction directly: "Development reviews and the product's runtime review
+policy are distinct. Runtime target PRs still require a verified completed
+current-head Codex review with no unresolved P0/P1 plus passing deterministic CI
+and branch protections", and the owner "explicitly clarified that autonomous
+repairs retain their PRs and reviews". Issue 48 is an autonomous self-repair, so
+`reviewAuthorizes` (`src/host/actions-supervisor.ts:644`, completed receipt bound
+to the exact PR/head/base with result id, completion instant, matching
+observed/expected reviewer, zero uncounted findings, no unresolved P0/P1) is the
+plan's own retained runtime rule, not a contradiction. No policy, admission or
+review rule was changed and no receipt was fabricated.
+
+**The real blocker was a runtime liveness defect, and it is fixed.** A review
+attempt that concluded WITHOUT an accepted verdict was indistinguishable from a
+pending wait, so the loop re-armed `review_pending` forever and the gate could
+never be satisfied for that head. Live evidence on PR 51:
+
+- Work item `issue-ubiquity-sentinel-48`: `nextStep review`, attempts 4,
+  reviewRounds 2, `wait.reason review_pending` since `1789580733437`
+  (2026-09-16T17:45:33.437Z), re-armed by every later run to `now + 15min`
+  (last re-arm 22:56:51 → until 23:11:51); it has been re-polling the same
+  terminal record ever since.
+- Review `5226239354` (github-actions[bot], COMMENTED 2026-09-16T17:46:23Z)
+  carries a phase-ready journal for operationKey
+  `review:51:2789ba07e3f87944b465f7a44632578a88a7e89a`, expectedHead
+  `2789ba07…`, expectedBase `2d834946…`, `verdict unavailable`, `execution null`,
+  summary "structured review unavailable: the review did not produce a validated
+  result", completedAt `1789580768966` (17:46:08.966Z). The attempt's charge is
+  reservation purpose `review_request` attempt 2, submitted 17:45:14.030Z — kept,
+  never reset.
+- Run `35129449055` (sentinel-supervisor, workflow_dispatch, created 17:38:33Z at
+  head `f46bdd1`) reached conclusion `cancelled` at 17:46:00Z while its repair job
+  held that review: the request was submitted at 17:45:33, no turn was ever
+  started, and the disposition was published at 17:46:23. The cancellation issuer
+  is not recorded (actor and triggering actor are `github-actions[bot]`, and both
+  supervisor concurrency groups are `cancel-in-progress: false`), so this is
+  recorded as a cancelled execution, not a producer defect.
+- Consequence: because the same-head review identity was already bound to that
+  terminal journal, no new attempt could be requested, so no completed receipt
+  could ever exist for head `2789ba07` and `reviewAuthorizes` could never
+  authorize a release for PR 51. That is the previously recorded
+  "unreleasable" self-repair; its cause is liveness, not the review gate.
+
+Fix (focused, no gate/admission change): `src/repair/keys.ts` gives a later
+attempt of the same head its own durable identity (`:attempt-N`; attempt one
+keeps the original PR/head key); `src/repair/loop.ts` detects a TERMINAL
+no-verdict observation from the transport's own bound completion instant, reads
+the current attempt identity first with the first-attempt key consulted only
+when the current one binds no durable record, then either requests one bounded
+fresh attempt (new key, new reservation, new journal; the shared 120/hour
+admission gate charges it normally) or, at the plan's three-round allowance,
+blocks with `review_quota` carrying the bounded observed reason instead of
+polling a terminal disposition forever; the receipt of an accepted verdict is
+derived from the identity the observation was actually read under, so an earlier
+attempt's receipt can never authorize a later delivery;
+`src/github/review-normalize.ts` carries the bound completion instant and static
+reason into the observation and exposes the exact operation key a durable review
+request id names; `src/github/impl.ts` therefore binds the merge gate to the
+record identity the receipt itself names — never to the first attempt's identity
+by habit — and still refuses any key that does not bind this exact PR/head or any
+record other than the one the receipt names, so an earlier clean round, another
+attempt's record or another head's identity can never authorize a merge;
+`src/github/codex-review-transport.ts` keeps a settled start refusal's exact
+bounded static reason in the durable disposition (`staticUnavailableSummary`,
+≤256 printable-ASCII single-line) and refuses anything else. Focused coverage:
+three loop cases (bounded re-attempt under its own identity including the receipt
+identity and `nextStep delivery`, the round-allowance block with the observed
+reason, the legacy first-attempt journal), two transport cases (the settled
+refusal keeps its exact static reason and is read back terminal; nothing
+unfiltered can reach a disposition) and one merge case (a bounded later attempt
+of the same head authorizes exactly one merge write, while the first attempt's
+standing record and another head's record identity both fail closed with zero
+merge writes; the existing 18-case merge suite stays green). Invariants
+preserved: runtime model gpt-5.6-luna/max, the shared durable 120/hour start gate
+with no reset or refund of the original charge, no credential/state/promotion
+authority in any model worker, and no review-gate relaxation.
+
+Remaining boundary and the owner's decision (2026-09-17): the hosted runtime
+executes the PROMOTED pointer (`92f3a87…`, generation 7), so this fix changes
+repair behavior only once the runtime revision carries it. The loop cannot move
+the pointer by itself while it is deadlocked on PR 51, every other work item
+(`61`, `21`) is `blocked` and the loop never retries a blocked record, no
+eligible `<!-- sentinel:repair -->` issue is open, and the M17 owner-install
+chain is inert at generation 7. Asked whether to install the tested fix and let
+the bot finish issue 48, the owner answered yes on 2026-09-17. The activation is
+therefore the fixed owner-development-install chain extended by one step:
+aggregate generation 7 -> review recovery generation 8
+(`4e8245de734683c7d4bda22a221bb28f52ebcfac`, the CI-verified development
+revision carrying this fix), authorized by the recorded aggregate generation 7
+healthy proof, with the same one-time rollback to that recorded prior and the
+same completion no-op afterwards (`src/host/owner-development-install.ts`, plan
+tests extended). The movement is the existing owner-install record in the state
+commit: it claims no review, release or autonomous receipt, and it changes no
+admission, quota, reviewer or model policy. Once the pointer moves, the
+supervisor's health-gap path starts an ordinary execution at generation 8 and
+the runtime recovers issue 48 through its own reviewed path: one bounded fresh
+review attempt of head `2789ba07…` under its own identity, then the exact-head
+merge, release request, prior/candidate proofs and promotion, whose live
+evidence is recorded here after it settles.
+
+Continuation state, verified facts, next work and local environment traps are in
+`docs/implementation-handoff-2026-09-16.md`. Read it with this register; it is
+not a second task register and does not change scope, status or acceptance.
+
+- At23:10 the observer repair is complete and the continuation handoff is
+  written. No outstanding source change from this session. The next work items
+  are, in order: the live issue-48 `review` work item and its open PR 51; the
+  `reviewAuthorizes` self-repo release gate that contradicts the owner's
+  2026-09-16 no-development-review instruction and currently makes autonomous
+  self-repair unreleasable; the two blocked work items (61, 21) with no recorded
+  blocker reason; the fact that the observer now runs but retains zero
+  ciphertexts with five of six incidents source-lost; and the stale duplicate
+  PRs 74/75 whose only un-integrated commit `f18ac8e` is superseded by da08c9f.
+
+- At21:50 the scheduled observer is repaired and proved live. Exact cause: one
+  incident whose replay export exceeded the contract artifact-count bound made
+  `readIncident` return `invalid`, and `observe-main.ts` aborted the whole pass
+  on the first such incident. Every one of the 200 preceding observe runs had
+  failed, and the run log carried only `{"status":"blocked","reason":"invalid"}`
+  because the entrypoint discarded the typed detail. Fixes, all CI-green on
+  `test-local` and verified against the live VPS gateway at revision
+  `07ee77b9aa241f516b44ced5340e814e08a8825a`: da08c9f reports the blocked
+  detail; b56294b counts a per-incident `invalid` in `blockedIncidents` and
+  continues while auth/rate-limit/transport/index faults still abort; fdb0d92
+  makes only a retainable capture consume the artifact-count bound, since the
+  expiry filter ran inside `visit` after the bound check and source-expired
+  captures were consuming it. Live result, stable across three scheduled runs:
+  `pages1 incidents6 evidenceRecords1 blockedIncidents0 retainedCiphertexts0`.
+  The remaining five incidents return `null` evidence (source-lost before
+  ingestion), which is the honest fail-closed outcome, not a pass failure.
+  Primary-run local full-suite is not evidence here: only `test-local` on the
+  exact pushed commits was accepted. No model call, credential write or target
+  write was made. Next: none outstanding for this repair.
+
+- At21:15 the running hosted supervisor now reports its idle reason.
+  `actions-supervisor.ts` collapsed an `idle` outcome to the bare word `idle`,
+  discarding `STATIC_IDLE_WAITING`/`STATIC_IDLE_NONE`, so "the supervisor does
+  nothing" was equally undiagnosable. Fixed on development in b56294b and
+  promoted to the `sentinel-supervisor` lane by fast-forward
+  `f46bdd1..2a31d27` (ancestry-preserving merge of development, CI-green on
+  `test-local` for the exact merge commit, no force, no ruleset change). Live
+  prepare output is now `{"job":"prepare","status":"idle","run":false,
+  "detail":"no eligible hosted supervisor work"}` — establishing that the
+  supervisor is healthy and simply has no queued release/repair work, rather
+  than blocked. The `sentinel-release` workflow remains `disabled_manually` by
+  the owner; its failures predate 2026-09-11 15:19 and are not current.
+
+- At21:05 `sentinel-observe` had never once succeeded: 200 of 200 runs failed,
+  the earliest listed 2026-09-09T12:33:58Z. Only `development` (ruleset
+  23197426, required `test-local`) and `sentinel-state/release` (ruleset
+  23197448) carry rulesets; `sentinel-supervisor` carries none. A direct push to
+  `development` needs the required check to be green on that exact commit, so
+  each delivery went through a temporary `codex/*` branch whose check was
+  allowed to pass before the same commit was pushed to `development`; the
+  temporary branches and the promotion branch were deleted afterwards.
 
 - At06:25 M17 owner installer is committed asb5f69101 after DSH corrections
   settled with exit0/completed and no descendants. Focused capture04f2fc8e
@@ -1100,7 +1263,10 @@ This is one delivery; reader/storage infrastructure is not an additional canary.
 Open issues last verified: 3, 6, 7, 8, 9, 10, 13, 14, 15, 16, 40, 48, 61, 69.
 Issue40's full authenticated-request coverage includes unresolved token/checkout/
 Git-transport authority seams; do not infer closure from REST-only coverage.
-Gateway ai.ubq.fi runs on VPS revision `8bf9daad…`; Deno is retired. The scoped
+Gateway ai.ubq.fi runs on the VPS at verified revision
+`07ee77b9aa241f516b44ced5340e814e08a8825a` (live `/health`, 2026-09-16 17:25
+deploy); the earlier `8bf9daad…` record is superseded, and Deno is retired. The
+local ai.ubq.fi checkout is only a development copy. The scoped
 observer/replay credentials and release-authority choices are unanswered.
 Existing gateway owner remains authoritative. Do not repeat questions, infer
 approval or let those separate choices stop Sentinel self-repair.

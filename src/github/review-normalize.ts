@@ -205,12 +205,20 @@ export async function normalizeReviewObservation(
     resultId: string | null,
     summary: string | null,
     findings: ParsedFindingV1[] = [],
+    /**
+     * Terminal instant of a STANDING durable journal that carries no accepted
+     * verdict, or null while nothing terminal is bound to this operation. A
+     * non-null value is the only evidence that distinguishes "this attempt is
+     * over with no verdict" from "this attempt has not concluded yet", and it
+     * is derived exclusively from the transport's own bound record.
+     */
+    terminalAt: number | null = null,
   ): Promise<ReviewObservationV1> => ({
     status: "unavailable",
     requestId,
     reviewer: null,
     resultId,
-    completedAt: null,
+    completedAt: terminalAt,
     observedHead,
     observedBase: reviewedBase,
     findings: await toReviewFindings(findings),
@@ -245,7 +253,18 @@ export async function normalizeReviewObservation(
     });
   }
   if (service.status === "unavailable") {
-    return portOk(await unavailable(null, null));
+    // The transport reports `unavailable` both for a standing durable journal
+    // that carries no accepted verdict and for an operation with no terminal
+    // record at all. Only the bound record's own completion instant can prove
+    // the former; its static reason is the bound summary and is preserved.
+    return portOk(
+      await unavailable(
+        service.resultId,
+        service.summary,
+        [],
+        service.completedAt,
+      ),
+    );
   }
 
   // The service claims completion; verify every machine-verifiable part.
@@ -494,8 +513,45 @@ export interface ReviewSubmissionRecordV1 {
   expectedReviewer: string;
 }
 
+/** Fixed prefix of the transport's durable per-operation review record id. */
+export const REVIEW_RECORD_PREFIX = "review-";
+
 export function reviewRecordId(operationKey: string): string {
-  return `review-${operationKey}`.slice(0, 256);
+  return `${REVIEW_RECORD_PREFIX}${operationKey}`.slice(0, 256);
+}
+
+/**
+ * Exact operation key named by one durable review request id.
+ *
+ * The transport's request id IS its durable record identity: the fixed prefix
+ * plus the operation key the record was created for. A consumer that must bind
+ * to the exact submission a receipt records (the merge gate) recovers the key
+ * from that evidence instead of guessing it from the pull request, so a bounded
+ * later attempt of the same head is bound exactly like the first one. Anything
+ * that does not carry the exact prefix is not a review record identity and
+ * yields null, and every consumer then fails closed.
+ */
+export function operationKeyOfReviewRequest(
+  requestId: string | null | undefined,
+): string | null {
+  if (typeof requestId !== "string") return null;
+  if (!requestId.startsWith(REVIEW_RECORD_PREFIX)) return null;
+  const key = requestId.slice(REVIEW_RECORD_PREFIX.length);
+  return key.length === 0 ? null : key;
+}
+
+/**
+ * True only when one recovered operation key names the SAME pull request and
+ * head: the first-attempt identity or a later attempt of that exact head. A key
+ * naming another pull request or another head is never accepted.
+ */
+export function reviewOperationKeyBindsHead(
+  operationKey: string,
+  pullRequestNumber: number,
+  head: GitSha,
+): boolean {
+  const first = `review:${pullRequestNumber}:${head}`;
+  return operationKey === first || operationKey.startsWith(`${first}:`);
 }
 
 /**
