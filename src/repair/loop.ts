@@ -84,11 +84,17 @@ import {
 } from "./keys.ts";
 import {
   countUnfinishedPullRequests,
+  hasPublishedIdentity,
   isWaiting,
   MAX_UNFINISHED_PRS,
   rankEligibleWork,
+  rankReviewDrain,
   RETIRED_MERGED_MESSAGE,
 } from "./selection.ts";
+import {
+  authorizingReceipt,
+  MERGE_WITHOUT_REVIEW_DETAIL,
+} from "./review-gate.ts";
 import {
   advanceToCorrection,
   advanceToDelivery,
@@ -102,7 +108,9 @@ import {
   createIssueWork,
   markBlocked,
   markDone,
+  markTerminalBlocked,
   noteCandidate,
+  noteExecution,
   setCandidateState,
   setIntent,
   setWait,
@@ -151,6 +159,13 @@ const MAX_IMPLEMENTATION_ATTEMPTS = 4;
  * allowance the task is blocked with the recorded reason, never merged.
  */
 const MAX_REVIEW_ROUNDS = 3;
+/**
+ * Bounded review-drain attempts per run: the retroactive pass releases at most
+ * this many transient `review_quota` records, highest-priority/oldest first,
+ * once each per run. The shared model-start budget still bounds the actual
+ * starts; this only bounds the pass's own bookkeeping.
+ */
+const MAX_REVIEW_DRAIN_PER_RUN = 8;
 const MAX_OUTPUT_LIMIT_BYTES = 4096;
 /**
  * Frozen gateway default model id. It is used ONLY when neither the trusted
@@ -335,6 +350,13 @@ interface LoopContextV1 {
   head: GitSha | null;
   /** Run-relative bounds for every start decision in this run. */
   bounds: RunBoundsV1;
+  /**
+   * The record one in-flight execution was planned against, or null outside an
+   * execution. Every write that execution performs is compared with THIS
+   * baseline, so the per-record no-progress budget is counted once per
+   * execution instead of once per bookkeeping write.
+   */
+  executionBaseline: WorkRecordV1 | null;
 }
 
 /** Effective run bounds: caller deadline clamped by the fixed ceiling. */
@@ -399,6 +421,15 @@ export async function runRepairCycle(
   // One run-local attempt per task and legacy-loss phase: a phase is never
   // proved twice in the same run, even after a state reload.
   const legacyLossAttempted = new Set<string>();
+  // One run-local release per transient review-quota record: each iteration
+  // releases the next-highest-priority drain candidate and the ordinary
+  // lifecycle retries it, so the pass is bounded and never re-attempts the same
+  // record within one run.
+  const reviewDrainAttempted = new Set<string>();
+  // One run-local discovery per orphan publication record: an existing live PR
+  // is attached to its record BEFORE cap enforcement, so a real PR is never
+  // skipped as over-cap.
+  const orphanAttempted = new Set<string>();
   // Intake is polled exactly once per run. A deferred (cooldown or bound)
   // iteration must never re-poll the sources: subsequent loop iterations reuse
   // the run-local deferral tracking instead of repeating intake reads.
@@ -499,6 +530,54 @@ export async function runRepairCycle(
       continue;
     }
 
+    // Orphan-publication reconciliation (issue-141 / PR 433): a durable
+    // publication intent that names the deterministic branch but has not yet
+    // persisted its PR number must have the existing live PR discovered and
+    // attached BEFORE ranking so cap enforcement sees the real identity.
+    const orphan = await reconcileOrphanPublication(
+      deps,
+      context,
+      orphanAttempted,
+    );
+    if (orphan !== null) {
+      if (orphan.kind === "state_error") {
+        return { status: "state_error", detail: orphan.detail };
+      }
+      if (orphan.kind === "margin") {
+        return { status: "margin", detail: orphan.detail };
+      }
+      if (orphan.kind === "progress") {
+        didWork = true;
+        steps++;
+        continue;
+      }
+    }
+
+    // Review-drain pass (owner rule, 2026-09-29): a transient `review_quota`
+    // record keeps producing/updating its publication and must be retroactively
+    // reviewed when quota returns, oldest/highest-priority first. Releasing its
+    // wait makes the ordinary lifecycle attempt it on this iteration; if quota
+    // is still exhausted the step re-arms the same transient wait, so the pass
+    // is self-scheduling and never terminally blocks.
+    const drained = await releaseReviewQuotaWait(
+      deps,
+      context,
+      reviewDrainAttempted,
+    );
+    if (drained !== null) {
+      if (drained.kind === "state_error") {
+        return { status: "state_error", detail: drained.detail };
+      }
+      if (drained.kind === "margin") {
+        return { status: "margin", detail: drained.detail };
+      }
+      if (drained.kind === "progress") {
+        didWork = true;
+        steps++;
+        continue;
+      }
+    }
+
     const rank = rankEligibleWork(
       context.snapshot,
       deps.configs,
@@ -544,7 +623,9 @@ export async function runRepairCycle(
       };
     }
 
+    context.executionBaseline = selected;
     const result = await executeStep(deps, context, selected);
+    context.executionBaseline = null;
     if (result.kind === "deferred") {
       deferred.add(selected.id);
       continue;
@@ -569,6 +650,107 @@ export async function runRepairCycle(
   }
 }
 
+/**
+ * Release the next transient review-quota record's wait so the ordinary
+ * ranking selects it on a following iteration. The drain order is highest
+ * priority first, then oldest first (pure `rankReviewDrain`), and each record is
+ * released at most once per run. Returns null when there is nothing left to
+ * drain or the next candidate cannot fit the remaining run bounds.
+ */
+async function releaseReviewQuotaWait(
+  deps: RepairCycleDepsV1,
+  context: LoopContextV1,
+  attempted: Set<string>,
+): Promise<StepResultV1 | null> {
+  if (attempted.size >= MAX_REVIEW_DRAIN_PER_RUN) return null;
+  for (const id of rankReviewDrain(context.snapshot)) {
+    if (attempted.has(id)) continue;
+    attempted.add(id);
+    const record = context.snapshot.work.find((work) => work.id === id);
+    if (record === undefined) continue;
+    const released = clearWait(record, deps.clock.now());
+    if (!declaredOperationFits(deps, context, released)) continue;
+    const persisted = await persistWork(deps, context, released);
+    return persisted;
+  }
+  return null;
+}
+
+/**
+ * Attach an existing live PR to a record that has a durable publication intent
+ * naming its deterministic branch but no persisted `target.pr` yet. The PR is
+ * adopted only when it is OPEN, its head is the record's exact candidate
+ * head, and its base is the configured base branch; a foreign or divergent PR
+ * is never adopted. This runs before ranking, so discovery precedes cap
+ * enforcement (issue-141 / PR 433).
+ */
+async function reconcileOrphanPublication(
+  deps: RepairCycleDepsV1,
+  context: LoopContextV1,
+  attempted: Set<string>,
+): Promise<StepResultV1 | null> {
+  for (const record of context.snapshot.work) {
+    if (record.nextStep !== "work") continue;
+    if (record.target.pr !== null) continue;
+    if (!hasPublishedIdentity(record)) continue;
+    const branch = record.target.branch;
+    const head = record.target.head;
+    if (branch === null || head === null) continue;
+    if (attempted.has(record.id)) continue;
+    attempted.add(record.id);
+    const config = configFor(deps, record.repository);
+    if (config === null) continue;
+    const found = await deps.github.findPullRequestByHeadRef(branch);
+    if (!found.ok) {
+      return { kind: "deferred", detail: "orphan PR discovery unavailable" };
+    }
+    if (
+      found.value === null || found.value.head !== head ||
+      found.value.state !== "open" ||
+      found.value.baseRef !== config.baseBranch
+    ) {
+      continue;
+    }
+    const adopted = {
+      ...record,
+      target: { ...record.target, pr: found.value.number },
+      updatedAt: deps.clock.now(),
+    };
+    return persistWork(deps, context, adopted);
+  }
+  return null;
+}
+
+/**
+ * True when one execution advanced the record's durable shape. The lifecycle
+ * step, the published target, the intent identity, the blocker, the terminal
+ * step and the charged counters all count; a re-armed wait, a fresh wait
+ * timestamp and free-text notes alone do not, because they leave the record
+ * exactly where a later run will find it.
+ */
+function executionAdvanced(
+  before: WorkRecordV1,
+  after: WorkRecordV1,
+): boolean {
+  if (after.nextStep !== before.nextStep) return true;
+  if (after.blocker?.message !== before.blocker?.message) return true;
+  if (after.target.base !== before.target.base) return true;
+  if (after.target.head !== before.target.head) return true;
+  if (after.target.pr !== before.target.pr) return true;
+  if (
+    after.target.candidateState?.publishedHead !==
+      before.target.candidateState?.publishedHead
+  ) {
+    return true;
+  }
+  if (after.intent?.key !== before.intent?.key) return true;
+  if (after.intent?.resultId !== before.intent?.resultId) return true;
+  if (after.counters.attempts !== before.counters.attempts) return true;
+  if (after.counters.retries !== before.counters.retries) return true;
+  if (after.counters.reviewRounds !== before.counters.reviewRounds) return true;
+  return false;
+}
+
 // ---------------------------------------------------------------------------
 // State load/commit (expected-head compare-and-swap, never force overwrite).
 // Context mutates in place after every applied write so a later commit in the
@@ -581,7 +763,12 @@ async function loadSnapshot(
 ): Promise<LoopContextV1 | null> {
   const read = await deps.state.readRepair();
   if (!read.ok || read.value.status === "absent") return null;
-  return { snapshot: read.value.snapshot, head: read.value.head, bounds };
+  return {
+    snapshot: read.value.snapshot,
+    head: read.value.head,
+    bounds,
+    executionBaseline: null,
+  };
 }
 
 /** Seed the repair branch once with sequence 1 when no snapshot exists. */
@@ -607,7 +794,12 @@ async function seedSnapshot(
   });
   const written = await deps.state.writeRepair(seed, null);
   if (!written.ok || written.value.status !== "applied") return null;
-  return { snapshot: seed, head: written.value.head, bounds };
+  return {
+    snapshot: seed,
+    head: written.value.head,
+    bounds,
+    executionBaseline: null,
+  };
 }
 
 async function persistTransition(
@@ -773,7 +965,21 @@ function persistWork(
   context: LoopContextV1,
   next: WorkRecordV1,
 ): Promise<StepResultV1> {
-  return persistTransition(deps, context, replaceWorkMutation(next));
+  // Per-record no-progress budget (run fairness): ONE execution of the
+  // selected record either advanced its durable shape or only re-armed state.
+  // The comparison is always against the execution baseline — never against an
+  // intermediate write of the same execution — so the count is idempotent
+  // across a step's bookkeeping writes and no extra state movement is created.
+  const baseline = context.executionBaseline;
+  const counted = baseline !== null && baseline.id === next.id
+    ? noteExecution(
+      next,
+      baseline.counters.stalled ?? 0,
+      executionAdvanced(baseline, next),
+      deps.clock.now(),
+    )
+    : next;
+  return persistTransition(deps, context, replaceWorkMutation(counted));
 }
 
 // ---------------------------------------------------------------------------
@@ -1453,6 +1659,89 @@ function executeStep(
 // Work phase: deterministic evidence, reproduction, implementation, replay.
 // ---------------------------------------------------------------------------
 
+/**
+ * Recovery for a review wait parked on a closed-unmerged PR. A closed PR can
+ * never produce a review verdict, so a `review_pending` wait paired with a
+ * `review_request` intent that names a closed-unmerged PR is dead: the wait
+ * and the intent are cleared in ONE transition and the record returns to
+ * work, where the ordinary lifecycle republishes the preserved candidate.
+ * Any other PR state (open, merged, unreadable, or no PR named) changes
+ * nothing, so the ordinary lifecycle keeps the record. This runs before any
+ * intent dispatch in the work phase because the parked wait otherwise pins
+ * the record ahead of the publish reconciliation that could clear it (the
+ * issue-140 stall, where the wait outlived its PR by a week). A cooling
+ * installation defers the recovery instead of issuing GitHub reads.
+ */
+async function recoverClosedReviewWait(
+  deps: RepairCycleDepsV1,
+  context: LoopContextV1,
+  record: WorkRecordV1,
+): Promise<StepResultV1 | null> {
+  if (record.wait?.reason !== "review_pending") return null;
+  const intent = record.intent;
+  if (intent === null || intent.kind !== "review_request") return null;
+  const prNumber = intent.pr;
+  if (prNumber === null) return null;
+  // A cooling installation performs no GitHub calls: the recovery defers
+  // instead of issuing a PR read during cooldown.
+  const cooling = await checkGithubCooldown(
+    deps,
+    record.repository,
+    context.bounds,
+  );
+  if (cooling.kind === "state_error") {
+    return { kind: "state_error", detail: cooling.detail };
+  }
+  if (cooling.kind === "deferred") {
+    return { kind: "deferred", detail: cooling.detail };
+  }
+  const now = deps.clock.now();
+  const observed = await deps.github.readPullRequest(prNumber);
+  if (!observed.ok || observed.value === null) return null;
+  if (observed.value.state !== "closed" || observed.value.mergeSha !== null) {
+    return null;
+  }
+  // The PR is dead: preserve the admission charge as ambiguous (the review
+  // request may have been submitted). Settlement advances the repair-state
+  // head, so the cleared record is persisted against the RELOADED snapshot:
+  // persisting against the pre-settlement context would trip the transition
+  // conflict check and leave the dead wait parked.
+  let freshContext = context;
+  let fresh = record;
+  if (intent.requestId !== null) {
+    const settled = await settleReviewCharge(
+      deps,
+      context,
+      intent.requestId,
+      "ambiguous",
+    );
+    if (settled.kind !== "progress") return settled;
+    const afterSettlement = await loadSnapshot(deps, context.bounds);
+    if (afterSettlement === null) {
+      return { kind: "state_error", detail: "repair state unavailable" };
+    }
+    const current = afterSettlement.snapshot.work.find(
+      (work) => work.id === record.id,
+    );
+    if (current === undefined) {
+      return {
+        kind: "state_error",
+        detail: "work record missing after review reconciliation",
+      };
+    }
+    freshContext = afterSettlement;
+    fresh = current;
+  }
+  // The dead wait and the dead intent are cleared in ONE transition and the
+  // record returns to work, where the ordinary lifecycle republishes the
+  // preserved candidate.
+  const cleared = clearWait(
+    clearIntent(retireClosedPublication(fresh, now, "work"), now),
+    now,
+  );
+  return persistWork(deps, freshContext, cleared);
+}
+
 interface CarryV1 {
   beforeRun: IsolatedReplayResultV1 | null;
   fixtureRef: string | null;
@@ -1480,6 +1769,12 @@ async function executeWorkStep(
       ),
     );
   }
+
+  // A review wait parked on a closed-unmerged PR is recovered BEFORE any
+  // intent dispatch: the dead wait pins the record ahead of the publish
+  // reconciliation that could otherwise clear it.
+  const recovered = await recoverClosedReviewWait(deps, context, record);
+  if (recovered !== null) return recovered;
 
   // A pending candidate-preservation intent is reconciled BEFORE any other
   // work: the exact produced candidate is made durable through the real
@@ -3126,8 +3421,12 @@ async function executePublishStep(
   // an existing PR does not open another unfinished PR — it updates the branch
   // this task already owns — so it must never be blocked by the cap (matching
   // the selection rule, which caps only records with target.pr === null).
+  // The unfinished-PR cap applies only to FRESH publications, and it MUST see
+  // the same identity the selection gate sees. A record that already holds a
+  // PR (or an in-flight publication intent that names one) is a correction or
+  // recovery of its own existing publication and never counts as a new one.
   const openPrs = countUnfinishedPullRequests(context.snapshot.work);
-  if (record.target.pr === null && openPrs >= MAX_UNFINISHED_PRS) {
+  if (!hasPublishedIdentity(record) && openPrs >= MAX_UNFINISHED_PRS) {
     return persistWork(
       deps,
       context,
@@ -3172,7 +3471,7 @@ async function executePublishStep(
       return persistWork(
         deps,
         context,
-        markBlocked(
+        markTerminalBlocked(
           record,
           "other",
           "candidate branch ref identity mismatch",
@@ -3184,7 +3483,7 @@ async function executePublishStep(
       return persistWork(
         deps,
         context,
-        markBlocked(
+        markTerminalBlocked(
           record,
           "other",
           "published candidate ref is missing",
@@ -3412,7 +3711,7 @@ async function createPullRequestFor(
     return persistWork(
       deps,
       context,
-      markBlocked(
+      markTerminalBlocked(
         record,
         "other",
         "PR publication identity mismatch",
@@ -3669,12 +3968,15 @@ async function requestReviewFor(
     purpose: "review_request",
   });
   if (reservation.status === "deferred") {
+    // Quota exhaustion is the explicit TRANSIENT state, never a terminal
+    // block: the record keeps its publication and the review-drain pass
+    // retries it (oldest/highest-priority first) when the budget returns.
     return persistWork(
       deps,
       context,
       setWait(
         record,
-        { reason: "budget_cap", since: now, until: reservation.retryAt },
+        { reason: "review_quota", since: now, until: reservation.retryAt },
         now,
       ),
     );
@@ -3685,10 +3987,11 @@ async function requestReviewFor(
   ) {
     // The same review identity was already admitted and settled, but its
     // operation intent is gone: a state contradiction, never a re-invocation.
+    // The publication identity is dead, so the block clears it.
     return persistWork(
       deps,
       context,
-      markBlocked(
+      markTerminalBlocked(
         record,
         "unavailable",
         "review admission already settled without an intent",
@@ -3700,7 +4003,7 @@ async function requestReviewFor(
     return persistWork(
       deps,
       context,
-      markBlocked(
+      markTerminalBlocked(
         record,
         "unavailable",
         `review admission refused: ${reservation.status}`,
@@ -3718,7 +4021,11 @@ async function requestReviewFor(
       context,
       setWait(
         record,
-        { reason: "unavailable", since: now, until: null },
+        {
+          reason: "review_quota",
+          since: now,
+          until: now + REVIEW_POLL_MS,
+        },
         now,
       ),
     );
@@ -3991,7 +4298,7 @@ async function reconcilePublishIntent(
         return persistWork(
           deps,
           context,
-          markBlocked(
+          markTerminalBlocked(
             record,
             "other",
             "published candidate ref is missing",
@@ -4017,7 +4324,7 @@ async function reconcilePublishIntent(
       return persistWork(
         deps,
         context,
-        markBlocked(
+        markTerminalBlocked(
           record,
           "other",
           "candidate branch ref identity mismatch",
@@ -4067,6 +4374,18 @@ async function reconcilePublishIntent(
       );
     }
     if (pr.value !== null && pr.value.head === intent.expectedHead) {
+      if (pr.value.baseRef !== config.baseBranch) {
+        return persistWork(
+          deps,
+          context,
+          markTerminalBlocked(
+            record,
+            "other",
+            "PR base identity mismatch",
+            now,
+          ),
+        );
+      }
       const updated = clearIntent(
         { ...record, target: { ...record.target, pr: pr.value.number } },
         now,
@@ -4077,7 +4396,7 @@ async function reconcilePublishIntent(
       return persistWork(
         deps,
         context,
-        markBlocked(
+        markTerminalBlocked(
           record,
           "other",
           "PR head identity mismatch",
@@ -4131,6 +4450,25 @@ async function reconcilePublishIntent(
         kind: "state_error",
         detail: "work record missing after review reconciliation",
       };
+    }
+    // The exact PR this review intent names is observed BEFORE the identity is
+    // resurrected. A closed-unmerged own PR can never produce a verdict, so the
+    // intent is cleared and the publication retired in ONE transition: the next
+    // run re-publishes the preserved candidate instead of re-arming the dead PR
+    // (the issue-140 livelock, where a closed PR recorded only in intent.pr was
+    // re-adopted on every run).
+    const dead = await deps.github.readPullRequest(prNumber);
+    if (
+      dead.ok && dead.value !== null &&
+      dead.value.headRef === candidateBranch(current.id) &&
+      dead.value.head === head &&
+      dead.value.state === "closed" && dead.value.mergeSha === null
+    ) {
+      return persistWork(
+        deps,
+        afterSettlement,
+        clearIntent(retireClosedPublication(current, now, "work"), now),
+      );
     }
     const withPr = {
       ...current,
@@ -4196,36 +4534,46 @@ async function observeReview(
     if (pull.value.state === "closed" && pull.value.mergeSha === null) {
       // The review phase has no pull request to review: the record returns to
       // work so the next publish step creates the replacement for the same
-      // preserved candidate.
+      // preserved candidate. The dead review intent is cleared IN THE SAME
+      // transition: without it, intent.pr would resurrect the closed PR on the
+      // next run and the reconcile -> review -> retire cycle would spin (the
+      // issue-140 livelock).
       return persistWork(
         deps,
         context,
-        retireClosedPublication(record, now, "work"),
+        clearIntent(retireClosedPublication(record, now, "work"), now),
       );
     }
     if (pull.value.state === "merged") {
       return persistWork(
         deps,
         context,
-        markBlocked(record, "other", RETIRED_MERGED_MESSAGE, now),
+        markTerminalBlocked(record, "other", RETIRED_MERGED_MESSAGE, now),
       );
     }
   }
   const observed = await observeStandingReview(deps, record, pr, head);
   if (!observed.ok) {
+    // A failed observation is TRANSIENT review unavailability (transport
+    // hiccup, rate limit, quota), never a terminal failure: it re-arms the
+    // explicit review-quota wait and is retroactively drained later. Only a
+    // bound terminal disposition WITHOUT an accepted verdict (below) may
+    // terminally block.
     const since = reviewWaitSince(record, now);
     return persistWork(
       deps,
       context,
       setWait(
         record,
-        { reason: "unavailable", since, until: now + REVIEW_POLL_MS },
+        { reason: "review_quota", since, until: now + REVIEW_POLL_MS },
         now,
       ),
     );
   }
   const value = observed.value.observation;
   if (value.status === "pending") {
+    // A healthy review that simply has not posted yet stays on the ordinary
+    // bounded poll; it is transient and never blocks by itself.
     const since = reviewWaitSince(record, now);
     return persistWork(
       deps,
@@ -4247,6 +4595,8 @@ async function observeReview(
     // previously indistinguishable here, so a terminal disposition was polled
     // forever and the task could never move again.
     if (value.completedAt === null) {
+      // Non-terminal unavailability is transient: keep the explicit
+      // review-quota state and let the drain pass retry it when quota returns.
       const since = reviewWaitSince(record, now);
       return persistWork(
         deps,
@@ -4254,7 +4604,7 @@ async function observeReview(
         setWait(
           record,
           {
-            reason: "review_pending",
+            reason: "review_quota",
             since,
             until: Math.max(now, since) + REVIEW_POLL_MS,
           },
@@ -4369,7 +4719,11 @@ async function recoverFromNoVerdictReview(
     deps,
     context,
     markBlocked(
-      record,
+      // The exhausted review request is dead, so its residual intent is
+      // cleared; the published PR identity is deliberately retained because a
+      // trusted supervisor can still deliver the retained receipt or grant one
+      // fresh review round, and the cap no longer counts any blocked record.
+      clearIntent(record, now),
       "review_quota",
       `review rounds exhausted without an accepted verdict (${
         boundedReviewReason(value.summary)
@@ -4645,17 +4999,104 @@ async function ensureBaseRefreshIntent(
 }
 
 /**
+ * Consecutive failed executions of one exact base-refresh intent that are
+ * tolerated before the record blocks. The intent is re-armed at most
+ * MAX_BASE_REFRESH_FAILURES - 1 times, so no refresh can hold a slot in a
+ * silent `unavailable` loop forever.
+ */
+const MAX_BASE_REFRESH_FAILURES = 3;
+
+/** Closed failure details stored in the bounded base-refresh failure record. */
+const BASE_REFRESH_CAPABILITY_DETAIL = "base refresh port is unavailable";
+const BASE_REFRESH_PR_OBSERVATION_DETAIL =
+  "own pull request could not be observed";
+const BASE_REFRESH_UNPREPARED_DETAIL =
+  "prepared candidate could not be generated";
+const BASE_REFRESH_BASE_READ_DETAIL = "configured base could not be observed";
+const BASE_REFRESH_PRESERVE_DETAIL = "candidate could not be preserved";
+const BASE_REFRESH_REF_READ_DETAIL = "candidate ref could not be observed";
+const BASE_REFRESH_PUSH_DETAIL = "prepared candidate was not published";
+const BASE_REFRESH_FOREIGN_HEAD_DETAIL =
+  "candidate ref carries an unrelated head";
+
+/**
+ * One failed execution of the exact base-refresh intent.
+ *
+ * The bounded failure record is written with the SAME intent — same key, same
+ * observedBase, same persisted prepared result — so the state ref alone shows
+ * why the refresh cannot finish: only the closed port error kind and a closed
+ * detail constant are stored, never raw upstream text. The wait is re-armed
+ * only while the consecutive failure count is under MAX_BASE_REFRESH_FAILURES;
+ * at the bound the intent is cleared and the record blocks with the classified
+ * message, so a livelocked refresh becomes a visible blocker instead of an
+ * endless `unavailable` wait. Target, counters, evidence and reviews are
+ * preserved.
+ */
+function failBaseRefresh(
+  deps: RepairCycleDepsV1,
+  context: LoopContextV1,
+  record: WorkRecordV1,
+  intent: IncompleteOperationV1,
+  failure: { kind: string; detail: string },
+): Promise<StepResultV1> {
+  const at = deps.clock.now();
+  const attempts = (intent.failure?.attempts ?? 0) + 1;
+  if (attempts >= MAX_BASE_REFRESH_FAILURES) {
+    return persistWork(
+      deps,
+      context,
+      clearIntent(
+        markTerminalBlocked(
+          record,
+          "other",
+          `base refresh failed ${attempts} consecutive times: ${failure.kind} ${failure.detail}`,
+          at,
+        ),
+        at,
+      ),
+    );
+  }
+  return persistWork(
+    deps,
+    context,
+    setWait(
+      setIntent(
+        record,
+        {
+          ...intent,
+          failure: {
+            kind: failure.kind,
+            detail: failure.detail,
+            atMs: at,
+            attempts,
+          },
+        },
+        at,
+      ),
+      { reason: "unavailable", since: at, until: at + CHECK_POLL_MS },
+      at,
+    ),
+  );
+}
+
+/**
  * Execute or resume one durable base-refresh intent.
  *
- * The deterministic prepared commit is regenerated through the optional
- * trusted port capability (a fresh run reproduces the identical SHA after a
- * runner disappeared) and persisted as the intent result BEFORE any push. The
- * exact branch is then read: only the old candidate head or the exact prepared
- * result are accepted. The old head is pushed with the existing expected-ref
- * pushHead; an already-published prepared commit is reconciled without a
- * duplicate push. Unknown heads, failures and lost responses leave the same
- * durable intent with a bounded wait, while a known merge conflict blocks the
- * task with the existing blocker fields and retains the candidate. On success
+ * The record's own publication is reconciled FIRST: a merge outside the trusted
+ * review path is terminal for capacity and is never republished, and a
+ * closed-unmerged pull request retires the closed publication so the next
+ * publish step creates its replacement. The deterministic prepared commit is
+ * then regenerated through the optional trusted port capability (a fresh run
+ * reproduces the identical SHA after a runner disappeared) and persisted as the
+ * intent result BEFORE any push. The exact branch is read: only the old
+ * candidate head or the exact prepared result are accepted, and the old head is
+ * pushed with the existing expected-ref pushHead; an already-published prepared
+ * commit is reconciled without a duplicate push. Unknown heads, failures and
+ * lost responses leave the same durable intent with a bounded wait AND a
+ * bounded failure record, and after MAX_BASE_REFRESH_FAILURES consecutive
+ * failed executions the record blocks with a classified message instead of
+ * re-arming that wait forever, while a known merge conflict blocks the task
+ * with the existing blocker fields and retains the candidate. On success
  * the target advances to the exact new base/prepared head, the intent is
  * cleared and nextStep returns to `work`, so the existing publication and
  * fresh-review admission handle the exact new head (an old review is never
@@ -4700,20 +5141,52 @@ async function executeBaseRefreshIntent(
       detail: "base refresh without repository configuration",
     };
   }
+  // The record's OWN publication may have been merged or closed unmerged while
+  // this intent was parked across runs. A refresh can never complete against a
+  // published disposition, so it is reconciled before any refresh work: a
+  // human merge is terminal for capacity and is never republished, and a
+  // closed-unmerged pull request retires the closed publication so the next
+  // publish step creates its replacement for the same preserved candidate. A
+  // foreign branch at that number and an unreadable observation change nothing
+  // (the observation is a bounded failure, never a fabricated disposition).
+  const pull = await deps.github.readPullRequest(record.target.pr);
+  if (!pull.ok) {
+    return failBaseRefresh(deps, context, record, intent, {
+      kind: pull.error.kind,
+      detail: BASE_REFRESH_PR_OBSERVATION_DETAIL,
+    });
+  }
+  if (pull.value !== null && pull.value.headRef === record.target.branch) {
+    if (pull.value.state === "merged") {
+      const at = deps.clock.now();
+      return persistWork(
+        deps,
+        context,
+        clearIntent(
+          markTerminalBlocked(record, "other", RETIRED_MERGED_MESSAGE, at),
+          at,
+        ),
+      );
+    }
+    if (pull.value.state === "closed" && pull.value.mergeSha === null) {
+      const at = deps.clock.now();
+      return persistWork(
+        deps,
+        context,
+        clearIntent(retireClosedPublication(record, at, "work"), at),
+      );
+    }
+  }
   const prepare = deps.github.prepareBaseRefresh?.bind(deps.github);
   if (prepare === undefined) {
     // Capability absence is an explicit bounded wait: the durable intent and
-    // the old candidate are preserved and no deprecated path is taken.
-    const at = deps.clock.now();
-    return persistWork(
-      deps,
-      context,
-      setWait(
-        record,
-        { reason: "unavailable", since: at, until: at + CHECK_POLL_MS },
-        at,
-      ),
-    );
+    // the old candidate are preserved and no deprecated path is taken. The
+    // bounded failure record still applies, so a permanently missing
+    // capability becomes a classified blocker instead of a silent loop.
+    return failBaseRefresh(deps, context, record, intent, {
+      kind: "unavailable",
+      detail: BASE_REFRESH_CAPABILITY_DETAIL,
+    });
   }
   const expectedBase: GitSha = observedBase;
   const prepared = await prepare({
@@ -4737,7 +5210,7 @@ async function executeBaseRefreshIntent(
       return persistWork(
         deps,
         context,
-        markBlocked(
+        markTerminalBlocked(
           clearIntent(record, at),
           "other",
           "base refresh has conflicts",
@@ -4745,7 +5218,6 @@ async function executeBaseRefreshIntent(
         ),
       );
     }
-    const at = deps.clock.now();
     if (persistedPrepared === null) {
       // No authorized push can exist before the prepared result was persisted.
       // Re-observe the configured base under the shared cooldown: a SECOND
@@ -4768,20 +5240,12 @@ async function executeBaseRefreshIntent(
       );
       const observedAt = deps.clock.now();
       if (!currentBase.ok || currentBase.value === null) {
-        // A failed ref read retains the exact intent with a bounded wait.
-        return persistWork(
-          deps,
-          context,
-          setWait(
-            record,
-            {
-              reason: "unavailable",
-              since: observedAt,
-              until: observedAt + CHECK_POLL_MS,
-            },
-            observedAt,
-          ),
-        );
+        // A failed ref read retains the exact intent with a bounded wait and a
+        // bounded failure record (never a fabricated "unchanged" base).
+        return failBaseRefresh(deps, context, record, intent, {
+          kind: currentBase.ok ? "unavailable" : currentBase.error.kind,
+          detail: BASE_REFRESH_BASE_READ_DETAIL,
+        });
       }
       if (currentBase.value.sha !== expectedBase) {
         // Clear only this unprepared intent; the same run replans a fresh
@@ -4790,15 +5254,10 @@ async function executeBaseRefreshIntent(
         return persistWork(deps, context, clearIntent(record, observedAt));
       }
     }
-    return persistWork(
-      deps,
-      context,
-      setWait(
-        record,
-        { reason: "unavailable", since: at, until: at + CHECK_POLL_MS },
-        at,
-      ),
-    );
+    return failBaseRefresh(deps, context, record, intent, {
+      kind: prepared.error.kind,
+      detail: BASE_REFRESH_UNPREPARED_DETAIL,
+    });
   }
   const preparedHead = prepared.value;
   if (!isGitSha(preparedHead)) {
@@ -4815,14 +5274,16 @@ async function executeBaseRefreshIntent(
     };
   }
   // Persist the exact prepared result BEFORE any push: a crash after a
-  // successful push is then recoverable from the durable intent alone.
+  // successful push is then recoverable from the durable intent alone. The
+  // exact persisted result is part of the intent identity every failure below
+  // stays bound to (same key, same observed base, same prepared commit).
+  const durableIntent: IncompleteOperationV1 = {
+    ...intent,
+    resultId: preparedHead,
+  };
   let durable = record;
   if (persistedPrepared === null) {
-    durable = setIntent(
-      record,
-      { ...intent, resultId: preparedHead },
-      deps.clock.now(),
-    );
+    durable = setIntent(record, durableIntent, deps.clock.now());
     const persisted = await persistWork(deps, context, durable);
     if (persisted.kind !== "progress") return persisted;
   }
@@ -4860,16 +5321,10 @@ async function executeBaseRefreshIntent(
       publishedHead: candidateState.publishedHead,
     });
     if (!preserved.ok) {
-      const at = deps.clock.now();
-      return persistWork(
-        deps,
-        context,
-        setWait(
-          durable,
-          { reason: "unavailable", since: at, until: at + CHECK_POLL_MS },
-          at,
-        ),
-      );
+      return failBaseRefresh(deps, context, durable, durableIntent, {
+        kind: preserved.error.kind,
+        detail: BASE_REFRESH_PRESERVE_DETAIL,
+      });
     }
   }
   // Recheck the total run deadline and the shared cooldown immediately before
@@ -4899,17 +5354,11 @@ async function executeBaseRefreshIntent(
   }
   const ref = `refs/heads/${record.target.branch}`;
   const current = await deps.github.readRef(ref);
-  const readAt = deps.clock.now();
   if (!current.ok || current.value === null) {
-    return persistWork(
-      deps,
-      context,
-      setWait(
-        durable,
-        { reason: "unavailable", since: readAt, until: readAt + CHECK_POLL_MS },
-        readAt,
-      ),
-    );
+    return failBaseRefresh(deps, context, durable, durableIntent, {
+      kind: current.ok ? "unavailable" : current.error.kind,
+      detail: BASE_REFRESH_REF_READ_DETAIL,
+    });
   }
   const currentHead = current.value.sha;
   if (currentHead === record.target.head) {
@@ -4930,35 +5379,22 @@ async function executeBaseRefreshIntent(
       preparedHead,
       record.target.head,
     );
-    const pushAt = deps.clock.now();
     if (!pushed.ok || pushed.value !== "applied") {
-      // Unknown/error/lost push: keep the same durable intent and wait
-      // bounded; a later run reconciles the exact ref before repeating.
-      return persistWork(
-        deps,
-        context,
-        setWait(
-          durable,
-          {
-            reason: "unavailable",
-            since: pushAt,
-            until: pushAt + CHECK_POLL_MS,
-          },
-          pushAt,
-        ),
-      );
+      // Unknown/error/lost push: keep the same durable intent and wait bounded;
+      // a later run reconciles the exact ref before repeating. The bounded
+      // failure record makes a repeated non-application a classified blocker.
+      return failBaseRefresh(deps, context, durable, durableIntent, {
+        kind: pushed.ok ? "unavailable" : pushed.error.kind,
+        detail: BASE_REFRESH_PUSH_DETAIL,
+      });
     }
   } else if (currentHead !== preparedHead) {
-    // Any unrelated head is never adopted: preserve the intent and wait.
-    return persistWork(
-      deps,
-      context,
-      setWait(
-        durable,
-        { reason: "unavailable", since: readAt, until: readAt + CHECK_POLL_MS },
-        readAt,
-      ),
-    );
+    // Any unrelated head is never adopted: preserve the intent, record the
+    // closed conflict identity and wait bounded.
+    return failBaseRefresh(deps, context, durable, durableIntent, {
+      kind: "conflict",
+      detail: BASE_REFRESH_FOREIGN_HEAD_DETAIL,
+    });
   }
   // Success: the refreshed candidate becomes the exact target and the existing
   // publication path requests a fresh review for the new head. For a
@@ -5039,13 +5475,29 @@ async function executeMerge(
     return { kind: "deferred", detail: cooling.detail };
   }
   const config = configFor(deps, record.repository);
-  const receipt = context.snapshot.reviews.find((review) =>
+  // HARD INVARIANT: nothing merges without a passing review. Find a durable
+  // completed receipt for this exact PR/head, then require the strict
+  // authorization predicate (exact repository/PR/head/base, trusted reviewer,
+  // zero uncounted findings, no unresolved P0/P1). A completed-but-unclean
+  // receipt is authoritative disposition, never a blind resubmission.
+  const completed = context.snapshot.reviews.find((review) =>
     review.pullRequest.number === record.target.pr &&
     review.pullRequest.head === record.target.head &&
     review.outcome === "completed"
   );
-  if (config === null || receipt === undefined || receipt === null) {
-    return { kind: "state_error", detail: "merge without accepted review" };
+  if (config === null || completed === undefined) {
+    return { kind: "state_error", detail: MERGE_WITHOUT_REVIEW_DETAIL };
+  }
+  const receipt = authorizingReceipt(
+    [completed],
+    record,
+    deps.github.reviewerIdentity,
+  );
+  if (receipt === null) {
+    // A durable completed verdict exists but does not authorize this exact
+    // merge (base drift, unresolved P0/P1, uncounted findings, untrusted
+    // reviewer). Never resubmit or merge: surface the state contradiction.
+    return { kind: "state_error", detail: MERGE_WITHOUT_REVIEW_DETAIL };
   }
   let mergeRequest;
   try {
@@ -5133,7 +5585,7 @@ async function handleMergeOutcome(
       return persistWork(
         deps,
         context,
-        markBlocked(
+        markTerminalBlocked(
           cleared,
           "other",
           "release request identity invalid",
@@ -5238,7 +5690,7 @@ async function reconcileMergeIntent(
       return persistWork(
         deps,
         context,
-        markBlocked(
+        markTerminalBlocked(
           record,
           "other",
           "observed merged head identity mismatch",
@@ -5256,7 +5708,7 @@ async function reconcileMergeIntent(
     return persistWork(
       deps,
       context,
-      markBlocked(
+      markTerminalBlocked(
         record,
         "other",
         "pull request closed before merge",
@@ -5499,7 +5951,7 @@ function blockRelease(
   return persistWork(
     deps,
     context,
-    markBlocked(record, "other", `release ${phase}`, now),
+    markTerminalBlocked(record, "other", `release ${phase}`, now),
   );
 }
 

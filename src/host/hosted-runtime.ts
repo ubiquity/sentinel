@@ -58,7 +58,17 @@ export const HOSTED_RUNTIME_WORKFLOW_REF =
   `${HOSTED_SUPERVISOR_REPOSITORY}/${HOSTED_SUPERVISOR_WORKFLOW_PATH}@${HOSTED_SUPERVISOR_REF}`;
 /** Fixed child entrypoint inside the verified runtime checkout. */
 export const HOSTED_RUNTIME_CHILD_ENTRYPOINT = "src/host/actions.ts";
-/** 112 minutes, inside the workflow's 120-minute bound. */
+/**
+ * 112 minutes, inside the workflow's 120-minute bound. This is the launcher's
+ * own bounded wait over the child process, measured from the instant it spawns
+ * that process. It is deliberately two minutes longer than the child's own
+ * 110-minute budget (`RUN_DEADLINE_MS` in `src/host/actions.ts`), which the
+ * child anchors at the earliest instant it can observe for ITSELF, before its
+ * own setup. That origin is later than the launcher's by the child startup and
+ * module load already spent, so the real drain cushion before this bound is two
+ * minutes minus that unmeasured startup: setup inside the child is charged to
+ * the child's own budget, never to this cushion.
+ */
 export const HOSTED_RUNTIME_DEADLINE_MS = 112 * 60 * 1000;
 /** Combined retained child stdout+stderr bound (4 MiB). */
 export const HOSTED_RUNTIME_MAX_OUTPUT_BYTES = 4 * 1024 * 1024;
@@ -77,7 +87,11 @@ export const HOSTED_RUNTIME_CHILD_ENV_KEYS = [
   "SENTINEL_MODEL_BASE_URL",
   "SENTINEL_MODEL_ID",
   "SENTINEL_MODEL_FALLBACK",
+  "SENTINEL_REVIEW_MODEL_ID",
   "SENTINEL_DEEPSEEK_API_KEY",
+  // Explicit development switch for the durable GitHub cooldown gates; it
+  // crosses only when the launcher was given a non-empty value.
+  "SENTINEL_COOLDOWN_MODE",
   "UOS_AI_TOKEN",
   "GITHUB_RUN_ID",
   "GITHUB_RUN_ATTEMPT",
@@ -679,7 +693,9 @@ function buildChildEnvironment(
     "SENTINEL_MODEL_BASE_URL",
     "SENTINEL_MODEL_ID",
     "SENTINEL_MODEL_FALLBACK",
+    "SENTINEL_REVIEW_MODEL_ID",
     "SENTINEL_DEEPSEEK_API_KEY",
+    "SENTINEL_COOLDOWN_MODE",
   ] as const;
   const routeEnv: Record<string, string> = {};
   for (const key of routeKeys) {
@@ -858,6 +874,7 @@ export async function runHostedRuntimeMain(): Promise<
       SENTINEL_MODEL_BASE_URL: Deno.env.get("SENTINEL_MODEL_BASE_URL"),
       SENTINEL_MODEL_ID: Deno.env.get("SENTINEL_MODEL_ID"),
       SENTINEL_MODEL_FALLBACK: Deno.env.get("SENTINEL_MODEL_FALLBACK"),
+      SENTINEL_REVIEW_MODEL_ID: Deno.env.get("SENTINEL_REVIEW_MODEL_ID"),
       SENTINEL_DEEPSEEK_API_KEY: Deno.env.get("SENTINEL_DEEPSEEK_API_KEY"),
       UOS_AI_TOKEN: Deno.env.get("UOS_AI_TOKEN"),
     };

@@ -10,9 +10,11 @@ import type { RepairStateSnapshotV1 } from "../../src/contracts/state-snapshots.
 import type { WorkRecordV1 } from "../../src/contracts/work-record.ts";
 import {
   countUnfinishedPullRequests,
+  hasPublishedIdentity,
   isEligible,
   MAX_UNFINISHED_PRS,
   rankEligibleWork,
+  rankReviewDrain,
   RETIRED_MERGED_MESSAGE,
 } from "../../src/repair/selection.ts";
 import {
@@ -575,7 +577,7 @@ Deno.test(
 );
 
 Deno.test(
-  "retired PR WIP: arbitrary blocked, open and waiting PRs still consume the cap",
+  "retired PR WIP: terminal blocks free the cap while an open waiting PR still counts",
   () => {
     const genericBlocked = prRecord(
       "issue-ubiquity-ai.ubq.fi-301",
@@ -607,13 +609,18 @@ Deno.test(
     );
     const openWaiting = prRecord("issue-ubiquity-ai.ubq.fi-303", 303, 403);
     const fresh = freshIssue("issue-ubiquity-ai.ubq.fi-999", 999);
-    const ranked = rankEligibleWork(
-      snapshot([genericBlocked, unavailableBlocked, openWaiting, fresh]),
-      repairConfigs(),
-      NOW,
-    );
-    assert.deepEqual(ranked.ordered, []);
-    assert.equal(ranked.skipped[fresh.id], "wip");
+    const snapshotWithAll = snapshot([
+      genericBlocked,
+      unavailableBlocked,
+      openWaiting,
+      fresh,
+    ]);
+    // A blocked record can never deliver its PR, so it never occupies a slot:
+    // the two terminal blocks are free, only the live waiting PR counts.
+    assert.equal(countUnfinishedPullRequests(snapshotWithAll.work), 1);
+    const ranked = rankEligibleWork(snapshotWithAll, repairConfigs(), NOW);
+    assert.deepEqual(ranked.ordered, [fresh.id]);
+    assert.equal(ranked.skipped[fresh.id], undefined);
     assert.equal(ranked.skipped[genericBlocked.id], "blocked");
     assert.equal(ranked.skipped[unavailableBlocked.id], "blocked");
     assert.equal(ranked.skipped[openWaiting.id], "waiting");
@@ -637,8 +644,7 @@ Deno.test(
       wait: null,
     });
     assert.equal(countUnfinishedPullRequests([merged]), 0);
-    // Control: the identical record with only its durable blocker message
-    // changed still consumes one slot.
+    // Control: the identical live record (not parked) still consumes one slot.
     const open = work("issue-78", {
       target: {
         base: SHA1,
@@ -647,12 +653,342 @@ Deno.test(
         head: SHA2,
         pr: 8,
       },
-      nextStep: "blocked",
-      blocker: { kind: "other", message: "some other refusal", since: T0 },
+      nextStep: "work",
       intent: null,
       wait: null,
     });
     assert.equal(countUnfinishedPullRequests([open]), 1);
     assert.equal(countUnfinishedPullRequests([merged, open]), 1);
+  },
+);
+
+Deno.test(
+  "selection: every terminal-block shape frees the cap (79/PR83, 80/PR84, 138/PR499)",
+  () => {
+    const reviewAdmissionSettled = work("issue-ubiquity-sentinel-79", {
+      target: {
+        base: SHA1,
+        branch: "sentinel/repair/issue-ubiquity-sentinel-79",
+        checkpoint: null,
+        head: SHA2,
+        pr: 83,
+      },
+      nextStep: "blocked",
+      blocker: {
+        kind: "unavailable",
+        message: "review admission already settled without an intent",
+        since: T0,
+      },
+      intent: null,
+      wait: null,
+    });
+    const reviewIntentResidual = work("issue-ubiquity-sentinel-80", {
+      target: {
+        base: SHA1,
+        branch: "sentinel/repair/issue-ubiquity-sentinel-80",
+        checkpoint: null,
+        head: SHA2,
+        pr: 84,
+      },
+      nextStep: "blocked",
+      blocker: {
+        kind: "unavailable",
+        message: "review produced no verdict within the bounded review wait",
+        since: T0,
+      },
+      wait: null,
+      intent: {
+        kind: "review_request",
+        key: `review:84:${SHA2}`,
+        startedAt: T0,
+        branch: "sentinel/repair/issue-ubiquity-sentinel-80",
+        expectedHead: SHA2,
+        observedBase: SHA1,
+        pr: 84,
+        requestId: null,
+        resultId: null,
+      },
+    });
+    const baseRefreshConflict = work("issue-ubiquity-ai.ubq.fi-138", {
+      target: {
+        base: SHA1,
+        branch: "sentinel/repair/issue-ubiquity-ai.ubq.fi-138",
+        checkpoint: null,
+        head: SHA2,
+        pr: 499,
+      },
+      nextStep: "blocked",
+      blocker: {
+        kind: "other",
+        message: "base refresh has conflicts",
+        since: T0,
+      },
+      intent: null,
+      wait: null,
+    });
+    assert.equal(
+      countUnfinishedPullRequests([
+        reviewAdmissionSettled,
+        reviewIntentResidual,
+        baseRefreshConflict,
+      ]),
+      0,
+    );
+    // A fresh publication is admitted on the freed slots; the three offenders
+    // are skipped as terminal, never as over-cap.
+    const fresh = freshIssue("issue-ubiquity-ai.ubq.fi-999", 999);
+    const ranked = rankEligibleWork(
+      snapshot([
+        reviewAdmissionSettled,
+        reviewIntentResidual,
+        baseRefreshConflict,
+        fresh,
+      ]),
+      repairConfigs(),
+      NOW,
+    );
+    assert.deepEqual(ranked.ordered, [fresh.id]);
+    assert.equal(ranked.skipped[fresh.id], undefined);
+  },
+);
+
+Deno.test(
+  "selection: a transient review-quota record frees the cap and is drained oldest/highest priority first",
+  () => {
+    const lowPriorityOld = prRecord("issue-1", 1, 7, {
+      nextStep: "review",
+      wait: { reason: "review_quota", since: T0, until: T0 + 60_000 },
+      classification: { severity: "P3", priority: 5 },
+      firstSeenAt: T0 - 900_000,
+      createdAt: T0 - 900_000,
+    });
+    const highPriorityYoung = prRecord("issue-2", 2, 8, {
+      nextStep: "review",
+      wait: { reason: "review_quota", since: T0, until: T0 + 60_000 },
+      classification: { severity: "P2", priority: 9 },
+      firstSeenAt: T0 - 60_000,
+      createdAt: T0 - 60_000,
+    });
+    const missingPriorityOldest = prRecord("issue-3", 3, 9, {
+      nextStep: "review",
+      wait: { reason: "review_quota", since: T0, until: T0 + 60_000 },
+      classification: { severity: "P2", priority: null },
+      firstSeenAt: T0 - 1_800_000,
+      createdAt: T0 - 1_800_000,
+    });
+    // A quota record is still a real unfinished PR for delivery purposes but it
+    // never consumes a NEW-publication slot, so production continues.
+    assert.equal(
+      countUnfinishedPullRequests([
+        lowPriorityOld,
+        highPriorityYoung,
+        missingPriorityOldest,
+      ]),
+      0,
+    );
+    // Drain order: recognized priority first (9 before 5), missing priority
+    // last, ties oldest first.
+    assert.deepEqual(
+      rankReviewDrain(
+        snapshot([lowPriorityOld, highPriorityYoung, missingPriorityOldest]),
+      ),
+      [highPriorityYoung.id, lowPriorityOld.id, missingPriorityOldest.id],
+    );
+    // A pending (non-quota) review is not a drain candidate.
+    const pending = prRecord("issue-4", 4, 10, {
+      nextStep: "review",
+      wait: { reason: "review_pending", since: T0, until: T0 + 60_000 },
+    });
+    assert.deepEqual(
+      rankReviewDrain(snapshot([pending, highPriorityYoung])),
+      [highPriorityYoung.id],
+    );
+  },
+);
+
+Deno.test(
+  "selection: an in-flight pull_request intent with no persisted PR keeps its published identity",
+  () => {
+    const inFlight = work("issue-141", {
+      source: { kind: "issue", id: "141", revision: SHA2 },
+      related: { incidentId: null, issueNumber: 141 },
+      target: {
+        base: SHA1,
+        branch: "sentinel/repair/issue-141",
+        checkpoint: null,
+        head: SHA2,
+        pr: null,
+      },
+      nextStep: "work",
+      intent: {
+        kind: "pull_request",
+        key: `pr:${SHA2}`,
+        startedAt: T0,
+        branch: "sentinel/repair/issue-141",
+        expectedHead: SHA2,
+        observedBase: SHA1,
+        pr: null,
+        requestId: null,
+        resultId: null,
+      },
+    });
+    assert.equal(hasPublishedIdentity(inFlight), true);
+    const saturated = [
+      prRecord("issue-1", 1, 7),
+      prRecord("issue-2", 2, 8),
+      prRecord("issue-3", 3, 9),
+      inFlight,
+    ];
+    const ranked = rankEligibleWork(snapshot(saturated), repairConfigs(), NOW);
+    assert.equal(
+      ranked.skipped[inFlight.id],
+      undefined,
+      "an in-flight publication is never WIP-skipped",
+    );
+    assert.ok(ranked.ordered.includes(inFlight.id));
+  },
+);
+
+/** Backlog record with an exact age, so oldest-first ordering is explicit. */
+function agedIssue(
+  id: string,
+  issueNumber: number,
+  firstSeenAt: number,
+  overrides: Record<string, unknown> = {},
+): WorkRecordV1 {
+  return work(id, {
+    source: { kind: "issue", id: String(issueNumber), revision: SHA2 },
+    related: { incidentId: null, issueNumber },
+    classification: { severity: "P2", priority: 9 },
+    firstSeenAt,
+    createdAt: firstSeenAt,
+    counters: { attempts: 0, retries: 0, reviewRounds: 0 },
+    ...overrides,
+  });
+}
+
+/**
+ * The documented per-record no-progress budget. Pinned as a literal so this
+ * case can be run against a revision without the budget and fail on ORDERING
+ * (a setup/import error would prove nothing).
+ */
+const BUDGET = 3;
+
+Deno.test(
+  "no-progress budget: a stalled oldest record yields to a younger record that advanced",
+  () => {
+    const older = agedIssue("issue-1", 1, T0 - 900_000, {
+      counters: {
+        attempts: 0,
+        retries: 0,
+        reviewRounds: 0,
+        stalled: BUDGET,
+      },
+    });
+    const younger = agedIssue("issue-2", 2, T0 - 60_000);
+    const ranked = rankEligibleWork(
+      snapshot([older, younger]),
+      repairConfigs(),
+      NOW,
+    );
+    assert.deepEqual(ranked.ordered, [younger.id, older.id]);
+    assert.equal(
+      ranked.skipped[older.id],
+      undefined,
+      "demotion is ordering, never a skip",
+    );
+
+    // Boundary: one execution under the budget keeps the oldest-first order,
+    // so the budget is a bound and not a blanket reordering.
+    const withinBudget = agedIssue("issue-1", 1, T0 - 900_000, {
+      counters: {
+        attempts: 0,
+        retries: 0,
+        reviewRounds: 0,
+        stalled: BUDGET - 1,
+      },
+    });
+    const bounded = rankEligibleWork(
+      snapshot([withinBudget, younger]),
+      repairConfigs(),
+      NOW,
+    );
+    assert.deepEqual(bounded.ordered, [withinBudget.id, younger.id]);
+  },
+);
+
+Deno.test(
+  "no-progress budget: demotion never crosses a plan bucket",
+  () => {
+    const stalledDelivery = prRecord("issue-1", 1, 7, {
+      nextStep: "delivery",
+      wait: null,
+      counters: {
+        attempts: 1,
+        retries: 0,
+        reviewRounds: 1,
+        stalled: BUDGET + 4,
+      },
+    });
+    const advancing = agedIssue("issue-2", 2, T0 - 60_000);
+    const ranked = rankEligibleWork(
+      snapshot([stalledDelivery, advancing]),
+      repairConfigs(),
+      NOW,
+    );
+    assert.deepEqual(
+      ranked.ordered,
+      [stalledDelivery.id, advancing.id],
+      "delivery bookkeeping stays ahead of new work even when demoted",
+    );
+  },
+);
+
+Deno.test(
+  "selection: the WIP cap skips only NEW publications, never an existing published intent",
+  () => {
+    // Three unfinished pull requests saturate the cap.
+    const saturated = [
+      prRecord("issue-1", 1, 7),
+      prRecord("issue-2", 2, 8),
+      prRecord("issue-3", 3, 9),
+    ];
+    // A record whose durable intent already names a published PR is recovering
+    // an EXISTING publication (retiring a closed one, observing its review) and
+    // must stay selectable even though the cap is full.
+    const carrier = work("issue-4", {
+      source: { kind: "issue", id: "4", revision: SHA2 },
+      related: { incidentId: null, issueNumber: 4 },
+      classification: { severity: "P2", priority: 9 },
+      firstSeenAt: T0 - 900_000,
+      createdAt: T0 - 900_000,
+      intent: {
+        kind: "review_request",
+        key: `review:21:${SHA2}`,
+        startedAt: T0,
+        branch: "sentinel/repair/issue-4",
+        expectedHead: SHA2,
+        observedBase: SHA1,
+        pr: 21,
+        requestId: null,
+        resultId: null,
+      },
+    });
+    // A record with no published identity at all is still a NEW publication.
+    const fresh = freshIssue("issue-5", 5);
+
+    const ranked = rankEligibleWork(
+      snapshot([...saturated, carrier, fresh]),
+      repairConfigs(),
+      NOW,
+    );
+    assert.deepEqual(ranked.ordered, [carrier.id]);
+    assert.equal(ranked.skipped[carrier.id], undefined, "never wip-skipped");
+    assert.equal(ranked.skipped[fresh.id], "wip");
+    assert.equal(
+      countUnfinishedPullRequests(snapshot([...saturated, carrier]).work),
+      3,
+      "the cap itself still counts only records holding a target PR",
+    );
   },
 );

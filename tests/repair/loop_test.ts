@@ -957,7 +957,11 @@ Deno.test("rolling budget caps share model starts and review requests", async ()
       7,
       "PR published before the review wait",
     );
-    assert.equal(state.work[0].wait?.reason, "budget_cap");
+    assert.equal(
+      state.work[0].wait?.reason,
+      "review_quota",
+      "review-request quota deferral is the explicit transient state",
+    );
     assert.ok((state.work[0].wait?.until ?? 0) > T0, "explicit retryAt");
     assert.equal(state.reservations.length, 1);
     assert.equal(state.reservations[0].purpose, "implementation");
@@ -1065,7 +1069,7 @@ Deno.test("rolling budget caps share model starts and review requests", async ()
       8,
       "second PR published before its review wait",
     );
-    assert.equal(secondAfter?.wait?.reason, "budget_cap");
+    assert.equal(secondAfter?.wait?.reason, "review_quota");
     assert.equal(
       state.reservations.filter((reservation) =>
         reservation.outcome === "submitted"
@@ -1506,7 +1510,13 @@ Deno.test("P1 findings trigger a fresh bounded implementation/candidate/replay p
     const state3 = await rig3.snapshot();
     assert.ok(
       state3.work[0].wait?.reason === "review_pending" ||
+        state3.work[0].wait?.reason === "review_quota" ||
         state3.work[0].wait?.reason === "unavailable",
+    );
+    assert.equal(
+      state3.work[0].blocker,
+      null,
+      "a no-verdict review never terminally blocks",
     );
     assert.equal(rig3.model.requests.length, before);
   } finally {
@@ -2982,11 +2992,17 @@ Deno.test(
     assert.equal(state.work[0].target.base, SHA1, "base stays as recorded");
     assert.equal(state.work[0].wait?.reason, "unavailable");
     assert.equal(state.work[0].wait?.until, T0 + 60 * 60_000);
-    assert.deepEqual(state.work[0].counters, {
-      attempts: 0,
-      retries: 0,
-      reviewRounds: 0,
-    });
+    // No reservation, model start or charged counter: the record only re-armed
+    // its bounded wait, which the additive no-progress counter records.
+    assert.deepEqual(
+      {
+        attempts: state.work[0].counters.attempts,
+        retries: state.work[0].counters.retries,
+        reviewRounds: state.work[0].counters.reviewRounds,
+      },
+      { attempts: 0, retries: 0, reviewRounds: 0 },
+    );
+    assert.equal(state.work[0].counters.stalled, 2);
   },
 );
 
@@ -3558,12 +3574,16 @@ function preservedIssueWork(
 
 /** Stable candidate/accounting subset that no freshness refusal may alter. */
 function candidateAccounting(record: WorkRecordV1): unknown {
+  // `counters.stalled` is the per-record no-progress budget, not candidate or
+  // attempt accounting: a refused/failed read legitimately advances it while
+  // the charged counters and the candidate bytes stay exactly as recorded.
+  const { stalled: _noProgress, ...chargedCounters } = record.counters;
   return {
     id: record.id,
     source: record.source,
     fingerprint: record.fingerprint,
     target: record.target,
-    counters: record.counters,
+    counters: chargedCounters,
     dependencies: record.dependencies,
     controller: record.controller,
     evidence: record.evidence,
@@ -4011,7 +4031,12 @@ Deno.test(
         work.blocker?.message,
         "pull request was merged outside the trusted review path",
       );
-      assert.equal(work.target.pr, 7, "the merged PR identity is retained");
+      assert.equal(
+        work.target.pr,
+        null,
+        "the dead merged PR identity is cleared",
+      );
+      assert.equal(work.target.head, H1, "the candidate head is retained");
       assert.equal(work.intent, null);
       assert.equal(work.wait, null);
       assert.equal(
@@ -4616,11 +4641,36 @@ Deno.test(
         );
         const state = await rig.snapshot();
         const work = state.work[0];
-        assert.deepEqual(
-          candidateAccounting(work),
-          before,
-          `${testCase.name}: candidate/accounting unchanged`,
-        );
+        const after = candidateAccounting(work) as {
+          target: Record<string, unknown>;
+        };
+        const expectedAccounting = before as {
+          target: Record<string, unknown>;
+        };
+        if (testCase.expectedBlocked !== undefined) {
+          // A terminal block is the ONE intended accounting change: the stale
+          // PR identity is cleared (item 3), while every candidate byte,
+          // counter and identity is preserved exactly.
+          assert.deepEqual(
+            { ...after, target: { ...after.target, pr: null } },
+            {
+              ...expectedAccounting,
+              target: { ...expectedAccounting.target, pr: null },
+            },
+            `${testCase.name}: candidate/accounting unchanged (pr cleared)`,
+          );
+          assert.equal(
+            work.target.pr,
+            null,
+            `${testCase.name}: terminal block clears the stale PR`,
+          );
+        } else {
+          assert.deepEqual(
+            after,
+            expectedAccounting,
+            `${testCase.name}: candidate/accounting unchanged`,
+          );
+        }
         assert.equal(state.reservations.length, 0, `${testCase.name}: charge`);
         assert.equal(rig.model.requests.length, 0, `${testCase.name}: model`);
         assert.equal(
@@ -6430,7 +6480,7 @@ Deno.test(
 );
 
 Deno.test(
-  "retired PR WIP: three arbitrary blocked or waiting PRs yield no model start (control)",
+  "retired PR WIP: two terminal blocks free the cap so a fresh issue starts (control)",
   async () => {
     const rig = await makeRig("retired-wip-control", {
       summaries: false,
@@ -6482,18 +6532,603 @@ Deno.test(
       assert.ok(write.ok && write.value.status === "applied");
 
       const outcome = await rig.run();
-      assert.equal(rig.model.requests.length, 0, JSON.stringify(outcome));
+      // The two terminal blocks free their slots; only the one live waiting PR
+      // still counts, so the fresh issue is admitted and starts one model run.
+      assert.equal(rig.model.requests.length, 1, JSON.stringify(outcome));
 
       const state = await rig.snapshot();
       const fresh = state.work.find((record) =>
         record.id === FRESH_AFTER_RETIREMENT
       );
       assert.ok(fresh, "the fresh issue was admitted into state");
-      assert.equal(fresh.nextStep, "work");
-      assert.equal(fresh.target.pr, null);
-      assert.equal(fresh.counters.attempts, 0);
-      assert.equal(fresh.wait, null, "never selected or deferred");
-      assert.equal(state.reservations.length, 0);
+      assert.equal(fresh.counters.attempts, 1, "the fresh issue ran");
+      assert.equal(
+        state.work.filter((record) => record.nextStep === "blocked").length,
+        2,
+        "the two terminal blocks stay terminal",
+      );
+    } finally {
+      await rig.ctx.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "review wait: a reviewer that never posts a verdict stays transient and never blocks",
+  async () => {
+    const rig = await makeRig("review-budget", {
+      github: { candidateLifecycle: positiveLifecycle() },
+    });
+    try {
+      // Run 1: the repair reaches the review wait with its request submitted.
+      const first = await rig.run();
+      assert.equal(first.status, "idle", JSON.stringify(first));
+      let state = await rig.snapshot();
+      const pending = state.work[0];
+      assert.equal(pending.nextStep, "review");
+      assert.equal(pending.wait?.reason, "review_pending");
+      const since = pending.wait?.since;
+      assert.ok(typeof since === "number", "the pending baseline is recorded");
+
+      // One poll still under the budget re-arms the wait and preserves the
+      // FIRST pending instant, so the bound is total wall-clock.
+      const budget = 4 * 60 * 60_000;
+      const elapsed = rig.clock.now() - since;
+      rig.clock.advance(budget - elapsed - 60_000);
+      const under = await rig.run();
+      assert.equal(under.status, "idle", JSON.stringify(under));
+      state = await rig.snapshot();
+      assert.equal(state.work[0].nextStep, "review", "still waiting");
+      assert.equal(state.work[0].wait?.reason, "review_pending");
+      assert.equal(state.work[0].wait?.since, since, "baseline preserved");
+
+      // Crossing the budget is a TRANSIENT review unavailability, not a
+      // terminal review failure: the explicit quota/awaiting state is re-armed
+      // and the publication is never parked by a silent reviewer.
+      rig.clock.advance(17 * 60_000);
+      const over = await rig.run();
+      assert.equal(over.status, "idle", JSON.stringify(over));
+      state = await rig.snapshot();
+      const stillWaiting = state.work[0];
+      assert.equal(stillWaiting.nextStep, "review");
+      assert.equal(
+        stillWaiting.blocker,
+        null,
+        "a missing verdict never terminally blocks",
+      );
+      assert.equal(stillWaiting.wait?.reason, "review_pending");
+      assert.equal(stillWaiting.wait?.since, since, "baseline preserved");
+      assert.equal(stillWaiting.target.head, SHA3, "the candidate is retained");
+      assert.equal(rig.model.requests.length, 1, "no new model work");
+    } finally {
+      await rig.ctx.cleanup();
+    }
+  },
+);
+
+/** Exact closed-unmerged PR bound to the candidate branch/head/base. */
+function exactClosedPr(
+  number: number,
+  head: GitSha,
+  headRef: string,
+  base: GitSha = SHA1,
+): GitHubPullRequestV1 {
+  return {
+    ...exactOpenPr(number, head, headRef, base),
+    state: "closed",
+    mergeSha: null,
+  };
+}
+
+Deno.test(
+  "issue-140: a closed-unmerged review-intent PR is cleared and republished, never re-adopted",
+  async () => {
+    const taskId = asWorkItemId("issue-140");
+    const branch = candidateBranch(taskId);
+    const rig = await makeRig("closed-review-intent", {
+      summaries: false,
+      github: {
+        candidateLifecycle: {
+          ...positiveLifecycle(),
+          refs: { [`refs/heads/${branch}`]: SHA3 },
+          pullRequests: [exactClosedPr(7, SHA3, branch)],
+        },
+      },
+    });
+    try {
+      const seeded = await rig.store.writeRepair(
+        seededSnapshot([
+          workRecord("issue-140", {
+            source: { kind: "issue", id: "140", revision: SHA1 },
+            related: { incidentId: null, issueNumber: 140 },
+            target: {
+              base: SHA1,
+              branch,
+              checkpoint: null,
+              head: SHA3,
+              pr: null,
+            },
+            nextStep: "work",
+            intent: {
+              kind: "review_request",
+              key: `review:7:${SHA3}`,
+              startedAt: T0,
+              branch,
+              expectedHead: SHA3,
+              observedBase: SHA1,
+              pr: 7,
+              requestId: null,
+              resultId: null,
+            },
+          }),
+        ]),
+        null,
+      );
+      assert.ok(seeded.ok && seeded.value.status === "applied");
+
+      const outcome = await rig.run();
+      assert.equal(outcome.status, "idle", JSON.stringify(outcome));
+      const state = await rig.snapshot();
+      const record = state.work[0];
+      // The dead PR was cleared and never re-adopted: the record's identity is
+      // the fresh replacement PR, not the closed number 7.
+      assert.equal(record.intent, null, "the dead review intent is cleared");
+      assert.notEqual(record.target.pr, 7, "the closed PR is not re-adopted");
+      assert.notEqual(record.target.pr, null, "a replacement was published");
+      assert.equal(
+        rig.github.calls.filter((call) => call === "createPr").length,
+        1,
+        "exactly one replacement publication",
+      );
+      assert.equal(
+        rig.github.reviewRequestIdentities.length,
+        1,
+        "exactly one review request for the replacement",
+      );
+    } finally {
+      await rig.ctx.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "issue-140: a review_pending wait parked on a closed-unmerged PR is released with the dead intent",
+  async () => {
+    const taskId = asWorkItemId("issue-140-wait");
+    const branch = candidateBranch(taskId);
+    const requestId = "review-req-140-wait";
+    // The closed PR is NOT the sentinel-owned candidate branch (a foreign or
+    // older PR): the #85 retirement requires headRef === candidateBranch, so
+    // it never fires and the parked wait pins the record forever.
+    const foreignRef = "someone-else/stale-feature";
+    const rig = await makeRig("closed-review-wait", {
+      summaries: false,
+      github: {
+        candidateLifecycle: {
+          ...positiveLifecycle(),
+          refs: { [`refs/heads/${branch}`]: SHA3 },
+          pullRequests: [exactClosedPr(7, SHA3, foreignRef)],
+        },
+      },
+    });
+    try {
+      // The live stall shape: an EXPIRED review_pending wait paired with a
+      // review_request intent that names a closed-unmerged PR, with a settled
+      // (submitted) admission charge for the dead request.
+      const seeded = await rig.store.writeRepair(
+        seededSnapshot(
+          [
+            workRecord("issue-140-wait", {
+              source: { kind: "issue", id: "140", revision: SHA1 },
+              related: { incidentId: null, issueNumber: 140 },
+              target: {
+                base: SHA1,
+                branch,
+                checkpoint: null,
+                head: SHA3,
+                pr: null,
+              },
+              nextStep: "work",
+              wait: {
+                reason: "review_pending",
+                since: T0 - 100_000,
+                until: T0 - 50_000,
+              },
+              intent: {
+                kind: "review_request",
+                key: `review:7:${SHA3}`,
+                startedAt: T0 - 100_000,
+                branch,
+                expectedHead: SHA3,
+                observedBase: SHA1,
+                pr: 7,
+                requestId,
+                resultId: null,
+              },
+            }),
+          ],
+          {
+            reservations: [
+              reservation(requestId, {
+                taskId,
+                attempt: 1,
+                head: SHA3,
+                purpose: "review_request",
+                outcome: "submitted",
+                createdAt: T0 - 95_000,
+                settledAt: T0 - 90_000,
+              }),
+            ],
+          },
+        ),
+        null,
+      );
+      assert.ok(seeded.ok && seeded.value.status === "applied");
+
+      const outcome = await rig.run();
+      assert.equal(outcome.status, "idle", JSON.stringify(outcome));
+      const state = await rig.snapshot();
+      const record = state.work[0];
+      // The dead wait and the dead intent are both gone: the record is no
+      // longer pinned ahead of the publish reconciliation.
+      assert.equal(record.wait, null, "the dead review wait is cleared");
+      assert.ok(
+        record.intent === null || record.intent.key !== `review:7:${SHA3}`,
+        "the dead review intent is cleared",
+      );
+      assert.notEqual(record.target.pr, 7, "the closed PR is not re-adopted");
+      // The settled charge for the dead request is preserved, never
+      // resubmitted or dropped.
+      const charge = state.reservations.find((r) => r.id === requestId);
+      assert.ok(charge !== undefined, "the dead request charge is retained");
+      assert.equal(charge.outcome, "submitted");
+    } finally {
+      await rig.ctx.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "transient review transport failure is re-armed as review_quota and never terminally blocks",
+  async () => {
+    const taskId = asWorkItemId("issue-quota");
+    const branch = candidateBranch(taskId);
+    const rig = await makeRig("review-quota", {
+      summaries: false,
+      github: {
+        reviewUnavailable: true,
+        candidateLifecycle: {
+          ...positiveLifecycle(),
+          refs: { [`refs/heads/${branch}`]: SHA3 },
+          pullRequests: [exactOpenPr(7, SHA3, branch)],
+        },
+      },
+    });
+    try {
+      const seeded = await rig.store.writeRepair(
+        seededSnapshot([
+          workRecord("issue-quota", {
+            source: { kind: "issue", id: "900", revision: SHA1 },
+            related: { incidentId: null, issueNumber: 900 },
+            target: {
+              base: SHA1,
+              branch,
+              checkpoint: null,
+              head: SHA3,
+              pr: 7,
+            },
+            nextStep: "review",
+            wait: null,
+          }),
+        ]),
+        null,
+      );
+      assert.ok(seeded.ok && seeded.value.status === "applied");
+
+      const outcome = await rig.run();
+      assert.equal(outcome.status, "idle", JSON.stringify(outcome));
+      const state = await rig.snapshot();
+      const record = state.work[0];
+      assert.equal(
+        record.nextStep,
+        "review",
+        "a transient transport failure never parks the publication",
+      );
+      assert.equal(record.blocker, null, "no terminal blocker is written");
+      assert.equal(
+        record.wait?.reason,
+        "review_quota",
+        "the explicit transient review state is re-armed",
+      );
+      assert.equal(
+        record.target.pr,
+        7,
+        "the published PR identity is retained for the drain",
+      );
+      assert.equal(
+        rig.github.calls.filter((call) => call === "mergePr").length,
+        0,
+        "nothing merges without an accepted review",
+      );
+    } finally {
+      await rig.ctx.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "delivery never merges without an authorizing current-head review receipt",
+  async () => {
+    const taskId = asWorkItemId("issue-noreview");
+    const branch = candidateBranch(taskId);
+    const rig = await makeRig("merge-gate-none", {
+      summaries: false,
+      github: {
+        candidateLifecycle: {
+          ...positiveLifecycle(),
+          refs: { [`refs/heads/${branch}`]: SHA3 },
+          pullRequests: [exactOpenPr(7, SHA3, branch)],
+        },
+      },
+    });
+    try {
+      const seeded = await rig.store.writeRepair(
+        seededSnapshot([
+          workRecord("issue-noreview", {
+            source: { kind: "issue", id: "901", revision: SHA1 },
+            related: { incidentId: null, issueNumber: 901 },
+            target: {
+              base: SHA1,
+              branch,
+              checkpoint: null,
+              head: SHA3,
+              pr: 7,
+            },
+            nextStep: "delivery",
+            wait: null,
+          }),
+        ]),
+        null,
+      );
+      assert.ok(seeded.ok && seeded.value.status === "applied");
+
+      const outcome = await rig.run();
+      assert.equal(
+        outcome.status,
+        "state_error",
+        "a delivery without a review is a state contradiction",
+      );
+      assert.equal(
+        rig.github.calls.filter((call) => call === "mergePr").length,
+        0,
+        "the merge is refused before any merge mutation",
+      );
+    } finally {
+      await rig.ctx.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "delivery refuses to merge on a completed receipt with unresolved P1 findings",
+  async () => {
+    const taskId = asWorkItemId("issue-rejected");
+    const branch = candidateBranch(taskId);
+    const rig = await makeRig("merge-gate-rejected", {
+      summaries: false,
+      github: {
+        candidateLifecycle: {
+          ...positiveLifecycle(),
+          refs: { [`refs/heads/${branch}`]: SHA3 },
+          pullRequests: [exactOpenPr(7, SHA3, branch)],
+        },
+      },
+    });
+    try {
+      const rejected = completedReceipt(7, SHA3, SHA1, {
+        findings: [{
+          id: "finding-1",
+          severity: "P1",
+          path: "src/app.ts",
+          message: "required fix",
+          fingerprint: "a".repeat(64),
+          resolved: false,
+          resolutionEvidence: null,
+        }],
+        unresolvedSeverities: ["P1"],
+      });
+      const seeded = await rig.store.writeRepair(
+        seededSnapshot([
+          workRecord("issue-rejected", {
+            source: { kind: "issue", id: "902", revision: SHA1 },
+            related: { incidentId: null, issueNumber: 902 },
+            target: {
+              base: SHA1,
+              branch,
+              checkpoint: null,
+              head: SHA3,
+              pr: 7,
+            },
+            nextStep: "delivery",
+            wait: null,
+          }),
+        ], { reviews: [rejected] }),
+        null,
+      );
+      assert.ok(seeded.ok && seeded.value.status === "applied");
+
+      const outcome = await rig.run();
+      assert.equal(
+        outcome.status,
+        "state_error",
+        "a completed but non-authorizing verdict is a contradiction, not a merge",
+      );
+      assert.equal(
+        rig.github.calls.filter((call) => call === "mergePr").length,
+        0,
+        "the P1-bearing receipt never authorizes a merge",
+      );
+    } finally {
+      await rig.ctx.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "issue-141: a live PR is discovered and attached before the unfinished-PR cap is enforced",
+  async () => {
+    const taskId = asWorkItemId("issue-141");
+    const branch = candidateBranch(taskId);
+    const rig = await makeRig("orphan-attach", {
+      summaries: false,
+      github: {
+        candidateLifecycle: {
+          ...positiveLifecycle(),
+          refs: { [`refs/heads/${branch}`]: SHA3 },
+          pullRequests: [exactOpenPr(9, SHA3, branch)],
+        },
+      },
+    });
+    try {
+      // Three live (waiting) publications saturate the cap. They are skipped
+      // as waiting, so only the orphan can make progress.
+      const saturated = [1, 2, 3].map((n) =>
+        workRecord(`issue-${n}`, {
+          source: { kind: "issue", id: String(n), revision: SHA1 },
+          related: { incidentId: null, issueNumber: n },
+          target: {
+            base: SHA1,
+            branch: `sentinel/repair/issue-${n}`,
+            checkpoint: null,
+            head: SHA3,
+            pr: n,
+          },
+          nextStep: "review",
+          wait: {
+            reason: "review_pending",
+            since: T0,
+            until: T0 + 3_600_000,
+          },
+        })
+      );
+      const orphan = workRecord("issue-141", {
+        source: { kind: "issue", id: "141", revision: SHA1 },
+        related: { incidentId: null, issueNumber: 141 },
+        target: {
+          base: SHA1,
+          branch,
+          checkpoint: null,
+          head: SHA3,
+          pr: null,
+        },
+        nextStep: "work",
+        intent: {
+          kind: "pull_request",
+          key: `pr:${SHA3}`,
+          startedAt: T0,
+          branch,
+          expectedHead: SHA3,
+          observedBase: SHA1,
+          pr: null,
+          requestId: null,
+          resultId: null,
+        },
+      });
+      const seeded = await rig.store.writeRepair(
+        seededSnapshot([...saturated, orphan]),
+        null,
+      );
+      assert.ok(seeded.ok && seeded.value.status === "applied");
+
+      const outcome = await rig.run();
+      assert.equal(outcome.status, "idle", JSON.stringify(outcome));
+      const state = await rig.snapshot();
+      const attached = state.work.find((record) => record.id === "issue-141");
+      assert.ok(attached, "the orphan record still exists");
+      assert.equal(
+        attached?.target.pr,
+        9,
+        "the existing live PR is attached instead of being WIP-skipped",
+      );
+      assert.equal(
+        rig.github.calls.filter((call) => call === "createPr").length,
+        0,
+        "no replacement PR is created for an already-published branch",
+      );
+    } finally {
+      await rig.ctx.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "orphan PR with a foreign base is not adopted even at the exact head",
+  async () => {
+    const taskId = asWorkItemId("issue-142");
+    const branch = candidateBranch(taskId);
+    const foreignPr = {
+      ...exactOpenPr(9, SHA3, branch),
+      baseRef: "main",
+    };
+    const rig = await makeRig("orphan-foreign-base", {
+      summaries: false,
+      github: {
+        candidateLifecycle: {
+          ...positiveLifecycle(),
+          refs: { [`refs/heads/${branch}`]: SHA3 },
+          pullRequests: [foreignPr],
+        },
+      },
+    });
+    try {
+      const orphan = workRecord("issue-142", {
+        source: { kind: "issue", id: "142", revision: SHA1 },
+        related: { incidentId: null, issueNumber: 142 },
+        target: {
+          base: SHA1,
+          branch,
+          checkpoint: null,
+          head: SHA3,
+          pr: null,
+        },
+        nextStep: "work",
+        intent: {
+          kind: "pull_request",
+          key: `pr:${SHA3}`,
+          startedAt: T0,
+          branch,
+          expectedHead: SHA3,
+          observedBase: SHA1,
+          pr: null,
+          requestId: null,
+          resultId: null,
+        },
+      });
+      const seeded = await rig.store.writeRepair(
+        seededSnapshot([orphan]),
+        null,
+      );
+      assert.ok(seeded.ok && seeded.value.status === "applied");
+
+      await rig.run();
+      const state = await rig.snapshot();
+      const record = state.work.find((work) => work.id === "issue-142");
+      assert.ok(record, "the orphan record still exists");
+      assert.equal(
+        record?.target.pr,
+        null,
+        "the foreign-base PR is never adopted at the exact head",
+      );
+      assert.equal(
+        record?.nextStep,
+        "blocked",
+        "the foreign publication terminally blocks instead of cycling",
+      );
+      assert.equal(
+        record?.blocker?.message,
+        "PR base identity mismatch",
+        "the blocker names the base identity mismatch",
+      );
     } finally {
       await rig.ctx.cleanup();
     }

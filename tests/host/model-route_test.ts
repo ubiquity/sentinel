@@ -19,6 +19,7 @@ import type { ModelRunRequestV1 } from "../../src/contracts/ports.ts";
 import {
   MODEL_ROUTE_INVALID,
   resolveModelRoute,
+  resolveReviewModelId,
 } from "../../src/host/model-route.ts";
 import {
   CodexImplementationPort,
@@ -232,6 +233,84 @@ Deno.test("model route: a malformed environment mapping fails closed", () => {
     assert.throws(
       () =>
         resolveModelRoute(
+          value as unknown as Record<string, string | undefined>,
+        ),
+      (error: unknown) =>
+        error instanceof Error && error.message === MODEL_ROUTE_INVALID,
+    );
+  }
+});
+
+Deno.test("review model: a declared override is used verbatim", () => {
+  assert.equal(
+    resolveReviewModelId({ SENTINEL_REVIEW_MODEL_ID: "codex-auto-review" }),
+    "codex-auto-review",
+  );
+  // The review override is independent of the implementation route: a
+  // DeepSeek-direct implementation route does not change the review model.
+  assert.equal(
+    resolveReviewModelId({
+      SENTINEL_MODEL_FALLBACK: "deepseek",
+      SENTINEL_DEEPSEEK_API_KEY: SECRET,
+      SENTINEL_REVIEW_MODEL_ID: "codex-auto-review",
+    }),
+    "codex-auto-review",
+  );
+  // Unrelated environment changes nothing: the owner's preferred default.
+  assert.equal(
+    resolveReviewModelId({ PATH: "/usr/bin", UOS_AI_TOKEN: "gateway-token" }),
+    "codex-auto-review",
+  );
+});
+
+Deno.test("review model: unset or blank yields the preferred default", () => {
+  // Unset, completely empty and blank count as unset: the reviewer runs on
+  // the owner's preferred model instead of refusing.
+  assert.equal(resolveReviewModelId({}), "codex-auto-review");
+  assert.equal(
+    resolveReviewModelId({ SENTINEL_REVIEW_MODEL_ID: "" }),
+    "codex-auto-review",
+  );
+  assert.equal(
+    resolveReviewModelId({ SENTINEL_REVIEW_MODEL_ID: "   " }),
+    "codex-auto-review",
+  );
+});
+
+Deno.test("review model: a declared-but-invalid value refuses", () => {
+  // A padded, over-long or control-character value is invalid: it never
+  // fabricates a review model.
+  for (
+    const modelId of [
+      " codex-auto-review",
+      "codex-auto-review ",
+      "codex\nreview",
+      `codex_${"x".repeat(300)}`,
+    ]
+  ) {
+    assert.equal(
+      resolveReviewModelId({ SENTINEL_REVIEW_MODEL_ID: modelId }),
+      "",
+      JSON.stringify(modelId),
+    );
+  }
+  // An invalid review override never falls back to the implementation
+  // route's model: the reviewer refuses instead.
+  assert.equal(
+    resolveReviewModelId({
+      SENTINEL_MODEL_FALLBACK: "deepseek",
+      SENTINEL_DEEPSEEK_API_KEY: SECRET,
+      SENTINEL_REVIEW_MODEL_ID: " bad ",
+    }),
+    "",
+  );
+});
+
+Deno.test("review model: a malformed environment mapping fails closed", () => {
+  for (const value of [null, undefined, "SENTINEL_REVIEW_MODEL_ID=x"]) {
+    assert.throws(
+      () =>
+        resolveReviewModelId(
           value as unknown as Record<string, string | undefined>,
         ),
       (error: unknown) =>

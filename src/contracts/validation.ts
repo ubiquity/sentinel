@@ -195,13 +195,29 @@ export function expectExactKeys(
   allowed: readonly string[],
   path: string,
 ): void {
-  const known = new Set(allowed);
+  expectExactKeysWithOptional(obj, allowed, [], path);
+}
+
+/**
+ * Same contract as {@link expectExactKeys} for a set of REQUIRED keys, with an
+ * additional closed set of OPTIONAL keys that may be absent. This is the
+ * additive-evolution shape: a reader accepts a row written before the optional
+ * key existed (defaulted by the caller) and still rejects every unknown key,
+ * so an older deployment can never silently accept a newer row's semantics.
+ */
+export function expectExactKeysWithOptional(
+  obj: Record<string, unknown>,
+  required: readonly string[],
+  optional: readonly string[],
+  path: string,
+): void {
+  const known = new Set([...required, ...optional]);
   for (const key of Object.keys(obj)) {
     if (!known.has(key)) {
       fail(`${path}.${key}`, "unknown_key", "unknown key");
     }
   }
-  for (const key of allowed) {
+  for (const key of required) {
     if (
       !Object.prototype.hasOwnProperty.call(obj, key) || obj[key] === undefined
     ) {

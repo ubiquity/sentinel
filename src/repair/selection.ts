@@ -37,8 +37,8 @@ export const RETIRED_MERGED_MESSAGE =
 
 /**
  * A trusted hosted retirement: the exact blocker above, still blocked, with
- * no remaining intent or wait. Only this exact shape is exempt; arbitrary
- * blocked, open or waiting PRs keep consuming the cap.
+ * no remaining intent or wait. It is a subset of the terminal blocks below and
+ * is retained as an explicit, independently testable identity.
  */
 export function isRetiredTargetRecord(record: WorkRecordV1): boolean {
   const message = record.blocker?.message;
@@ -51,17 +51,102 @@ export function isRetiredTargetRecord(record: WorkRecordV1): boolean {
 }
 
 /**
+ * A terminal block. A blocked record is skipped by every lifecycle phase and
+ * can never deliver its pull request, so it must never consume one of the
+ * `MAX_UNFINISHED_PRS` slots. The three known offenders
+ * (`issue-ubiquity-sentinel-79`/PR 83, `issue-ubiquity-sentinel-80`/PR 84 and
+ * `issue-ubiquity-ai.ubq.fi-138`/PR 499) are exactly this shape and previously
+ * wedged the cap permanently.
+ */
+export function isTerminalBlock(record: WorkRecordV1): boolean {
+  return record.nextStep === "blocked";
+}
+
+/**
+ * The explicit TRANSIENT quota-exhausted / awaiting-review state: a wait
+ * carrying the dedicated `review_quota` reason. Distinct from a terminal
+ * block — the record is still live, keeps producing/updating its publication
+ * and is retroactively drained by the review pass when quota returns.
+ */
+export function isReviewQuotaWait(record: WorkRecordV1): boolean {
+  return record.wait?.reason === "review_quota";
+}
+
+/** A live record parked in the transient review-quota state. */
+export function isTransientReviewQuota(record: WorkRecordV1): boolean {
+  return record.nextStep !== "done" && record.nextStep !== "blocked" &&
+    isReviewQuotaWait(record);
+}
+
+/**
+ * Durable published identity. In addition to the stored PR number, an in-flight
+ * `pull_request`/`push` intent that names its deterministic branch (and any
+ * intent that already persisted a PR number) proves the record is recovering
+ * an EXISTING publication. Such a record must be admitted ahead of cap
+ * enforcement and have its live PR attached, so a real open PR is never
+ * WIP-skipped as "over-cap" (issue-141 / PR 433).
+ */
+export function hasPublishedIdentity(record: WorkRecordV1): boolean {
+  if (record.target.pr !== null) return true;
+  const intent = record.intent;
+  if (intent === null) return false;
+  if (intent.pr !== null) return true;
+  return intent.branch !== null &&
+    (intent.kind === "pull_request" || intent.kind === "push");
+}
+
+/**
  * Counted unfinished target pull requests. The selection gate and the publish
- * gate MUST agree: a fresh publication is admitted only while this count is
- * under MAX_UNFINISHED_PRS, and a trusted retirement never consumes a slot.
+ * gate MUST agree, so both share `isTerminalBlock`, `isTransientReviewQuota`
+ * and `hasPublishedIdentity`: a terminal block and a transient review-quota
+ * record never consume a slot, and every counted record is one whose real PR
+ * this pipeline still owns.
  */
 export function countUnfinishedPullRequests(
   work: readonly WorkRecordV1[],
 ): number {
   return work.filter((record) =>
     record.target.pr !== null && record.nextStep !== "done" &&
-    !isRetiredTargetRecord(record)
+    !isTerminalBlock(record) && !isTransientReviewQuota(record)
   ).length;
+}
+
+/**
+ * The review-drain pass selection: every live record parked in the transient
+ * `review_quota` state, ordered highest priority first and then oldest first.
+ * A record with no recognized numeric priority sorts after one that has it;
+ * ties fall back to the stable identity tie-break (never time or list order).
+ */
+export function rankReviewDrain(
+  snapshot: RepairStateSnapshotV1,
+): WorkItemId[] {
+  return snapshot.work
+    .filter((record) =>
+      isTransientReviewQuota(record) &&
+      dependenciesDone(record, snapshot)
+    )
+    .sort((a, b) => compareKeys(drainKey(a), drainKey(b)))
+    .map((record) => record.id);
+}
+
+/**
+ * Drain ordering key: highest recognized numeric priority first, missing
+ * priority last, then the oldest first-seen (created) instant, then the stable
+ * identity tie-break. Mirrors the backlog bucket's priority key so the drain
+ * never reinvents a different order.
+ */
+function drainKey(record: WorkRecordV1): string[] {
+  return [priorityKey(record), zeroPad(oldestSeen(record)), tie(record)];
+}
+
+function priorityKey(record: WorkRecordV1): string {
+  return record.classification.priority === null
+    ? "9".repeat(20)
+    : zeroPad(Number.MAX_SAFE_INTEGER - record.classification.priority);
+}
+
+function oldestSeen(record: WorkRecordV1): number {
+  return record.firstSeenAt ?? record.createdAt;
 }
 
 export interface RankedWorkV1 {
@@ -134,7 +219,13 @@ export function rankEligibleWork(
       skipped[record.id] = "dependency";
       continue;
     }
-    if (record.target.pr === null && openPrCount >= MAX_UNFINISHED_PRS) {
+    // The unfinished-PR cap bounds NEW publications only. A record that
+    // already carries a durable published pull request — in its target or in
+    // an in-flight publication intent, including a `pull_request` intent whose
+    // PR number was not yet persisted — is recovering an EXISTING publication
+    // and must never be starved behind the cap it is itself holding, or the
+    // cap re-arms its own cause (issue-141 / PR 433).
+    if (!hasPublishedIdentity(record) && openPrCount >= MAX_UNFINISHED_PRS) {
       skipped[record.id] = "wip";
       continue;
     }
@@ -154,23 +245,39 @@ export function rankEligibleWork(
 }
 
 /**
- * Lexicographic priority key. The first element is the fixed plan bucket;
- * later elements are the documented tie-breakers. Compare lower-first.
+ * Per-record no-progress budget. An execution that advanced nothing durable
+ * increments the record's `stalled` counter; at this budget the record is
+ * demoted inside its own plan bucket so an oldest-first queue head can never
+ * starve younger eligible work. It stays eligible — demotion is ordering, not
+ * a blocker — and the plan buckets, the ranking tie-breakers and the
+ * unfinished-PR cap are unchanged.
+ */
+export const NO_PROGRESS_BUDGET = 3;
+
+/**
+ * Lexicographic priority key. The first element is the fixed plan bucket; the
+ * second is the no-progress demotion tier (records that spent the budget come
+ * after records that did not); later elements are the documented tie-breakers.
+ * Compare lower-first.
  */
 function scoreKey(record: WorkRecordV1, now: number): string[] {
   const bucket = planBucket(record, now);
   const severityOrder = { P0: 0, P1: 1, P2: 2, P3: 3 };
   const oldest = record.firstSeenAt ?? record.createdAt;
+  const demoted = (record.counters.stalled ?? 0) >= NO_PROGRESS_BUDGET
+    ? "1"
+    : "0";
   switch (bucket) {
     case 0: {
       // Delivery bookkeeping: outstanding merges/closure first, oldest last
       // update first; the same bucket never races a new repair.
-      return [`0`, zeroPad(record.updatedAt), tie(record)];
+      return [`0`, demoted, zeroPad(record.updatedAt), tie(record)];
     }
     case 1: {
       // Active incidents: severity, then oldest first seen.
       return [
         `1`,
+        demoted,
         String(severityOrder[record.classification.severity]),
         zeroPad(oldest),
         tie(record),
@@ -180,16 +287,17 @@ function scoreKey(record: WorkRecordV1, now: number): string[] {
       // P0/P1 corrections: severity, then oldest.
       return [
         `2`,
+        demoted,
         String(severityOrder[record.classification.severity]),
         zeroPad(oldest),
         tie(record),
       ];
     }
     case 3: {
-      return [`3`, zeroPad(oldest), tie(record)];
+      return [`3`, demoted, zeroPad(oldest), tie(record)];
     }
     case 4: {
-      return [`4`, zeroPad(record.createdAt), tie(record)];
+      return [`4`, demoted, zeroPad(record.createdAt), tie(record)];
     }
     default: {
       // Issues/backlog: highest recognized numeric priority, missing last,
@@ -200,6 +308,7 @@ function scoreKey(record: WorkRecordV1, now: number): string[] {
         : zeroPad(Number.MAX_SAFE_INTEGER - record.classification.priority);
       return [
         `5`,
+        demoted,
         priorityKey,
         zeroPad(oldest),
         tie(record),

@@ -19,6 +19,13 @@
  *   3. Gateway: the existing primary route (`uos`, `gpt-reserve`, no key
  *      environment; the caller keeps its existing `UOS_AI_TOKEN` input).
  *
+ * The structured-review model is resolved SEPARATELY by
+ * `resolveReviewModelId`: it is never the shared implementation route's
+ * model, so pointing reviews at `codex-auto-review` cannot hijack the
+ * implementation worker's model. An unset or invalid review model id yields
+ * the invalid empty sentinel, which the structured reviewer refuses at
+ * prepare before any session opens.
+ *
  * An unknown, malformed or incomplete value never fabricates a route: every
  * invalid case resolves to the gateway route, and only an EMPTY value counts
  * as unset. The resolver is pure and dependency-free, reads no credential
@@ -40,8 +47,8 @@ export const MODEL_ROUTE_INVALID =
   "sentinel model route rejected: environment input is not a mapping";
 
 /** The existing primary gateway route. */
-const GATEWAY_PROVIDER = "uos";
-const GATEWAY_BASE_URL = "https://ai.ubq.fi/v1";
+export const GATEWAY_PROVIDER = "uos";
+export const GATEWAY_BASE_URL = "https://ai.ubq.fi/v1";
 const GATEWAY_MODEL_ID = "gpt-reserve";
 /** The DeepSeek-direct fallback route. */
 const DEEPSEEK_PROVIDER = "deepseek";
@@ -52,6 +59,8 @@ const DEEPSEEK_API_KEY_ENV = "SENTINEL_DEEPSEEK_API_KEY";
 const MODEL_BASE_URL_ENV = "SENTINEL_MODEL_BASE_URL";
 const MODEL_ID_ENV = "SENTINEL_MODEL_ID";
 const MODEL_FALLBACK_ENV = "SENTINEL_MODEL_FALLBACK";
+/** Dedicated structured-review model override (never the route's model). */
+const REVIEW_MODEL_ID_ENV = "SENTINEL_REVIEW_MODEL_ID";
 /** The only `SENTINEL_MODEL_FALLBACK` value that selects the fallback route. */
 const FALLBACK_SELECTOR = "deepseek";
 /** The frozen reasoning effort of every route. */
@@ -171,4 +180,43 @@ export function resolveModelRoute(
     return deepseekRoute(DEEPSEEK_BASE_URL, DEEPSEEK_MODEL_ID);
   }
   return gatewayRoute();
+}
+
+/** The review model used when `SENTINEL_REVIEW_MODEL_ID` is unset or blank. */
+export const DEFAULT_REVIEW_MODEL_ID = "codex-auto-review";
+
+/**
+ * Resolve the dedicated structured-review model id from the trusted
+ * environment mapping.
+ *
+ * The review model is NEVER the shared implementation route's model:
+ * `SENTINEL_REVIEW_MODEL_ID` names the model the structured reviewer
+ * submits (the owner's preferred review route, `codex-auto-review` on the
+ * gateway endpoint) while implementation keeps its own route-selected model.
+ * A declared value must satisfy the same bounded model-id contract as the
+ * route resolver. An unset, empty or blank value yields the owner's preferred
+ * default (`codex-auto-review`), so a production configuration that never
+ * sets the variable still reviews on the preferred model instead of
+ * refusing; a declared-but-invalid value (padded, over-long or carrying
+ * control characters) yields the invalid empty sentinel, which the
+ * structured reviewer refuses at prepare before any session opens — reviews
+ * never silently run on the implementation model.
+ *
+ * Pure and total like `resolveModelRoute`: a malformed mapping (not an
+ * object) is the one fail-closed refusal.
+ */
+export function resolveReviewModelId(
+  env: Record<string, string | undefined>,
+): string {
+  if (env === null || typeof env !== "object" || Array.isArray(env)) {
+    throw new Error(MODEL_ROUTE_INVALID);
+  }
+  const declaredModelId = declared(env, REVIEW_MODEL_ID_ENV);
+  if (declaredModelId === null || declaredModelId.trim().length === 0) {
+    return DEFAULT_REVIEW_MODEL_ID;
+  }
+  if (!isBoundedModelId(declaredModelId)) {
+    return "";
+  }
+  return declaredModelId;
 }

@@ -2,6 +2,11 @@
 // text, full SHA / digest shapes and exact enum membership.
 import assert from "node:assert/strict";
 
+import {
+  COOLDOWN_MODE_ENV,
+  DEFAULT_COOLDOWN_MODE,
+  parseCooldownModeV1,
+} from "../../src/contracts/cooldown-mode.ts";
 import { canonicalStringify } from "../../src/contracts/canonical.ts";
 import {
   isGitSha,
@@ -357,4 +362,21 @@ Deno.test("canonical stringify is used by records for stable comparison", () => 
     canonicalStringify({ b: 1, a: 2 }),
     canonicalStringify({ a: 2, b: 1 }),
   );
+});
+
+Deno.test("cooldown mode: absent enforces, known values pass, a typo never disables", () => {
+  assert.equal(parseCooldownModeV1(undefined), "enforce");
+  assert.equal(parseCooldownModeV1(null), "enforce");
+  assert.equal(parseCooldownModeV1(""), "enforce");
+  assert.equal(parseCooldownModeV1("enforce"), "enforce");
+  assert.equal(parseCooldownModeV1("off"), "off");
+  for (const bad of ["OFF", "disabled", "0", "true", "enforced", " off"]) {
+    assert.throws(
+      () => parseCooldownModeV1(bad),
+      TypeError,
+      `cooldown mode must reject ${JSON.stringify(bad)}`,
+    );
+  }
+  assert.equal(COOLDOWN_MODE_ENV, "SENTINEL_COOLDOWN_MODE");
+  assert.equal(DEFAULT_COOLDOWN_MODE, "enforce");
 });

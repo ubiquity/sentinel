@@ -60,6 +60,11 @@ import { createRepairStateStore } from "../state/mod.ts";
 import { composeLocalReleaseReader } from "./local-release.ts";
 import type { ModelRouteV1 } from "./model-route.ts";
 import {
+  DEFAULT_REVIEW_MODEL_ID,
+  GATEWAY_PROVIDER,
+  resolveReviewModelId,
+} from "./model-route.ts";
+import {
   earliestRetryAt,
   HOUR_WINDOW_MS,
   isCharged,
@@ -74,7 +79,6 @@ import type { HttpTransportV1 } from "../github/http.ts";
 import { classifyGitHubRateLimit } from "../github/rate-limit.ts";
 import { GitReviewSnapshot } from "../github/review-snapshot.ts";
 import { CodexStructuredReviewer } from "../github/codex-reviewer.ts";
-import { REVIEW_MODEL } from "../github/review-journal.ts";
 import { GitHubCodexReviewTransport } from "../github/codex-review-transport.ts";
 import {
   type CodexSessionV1,
@@ -179,6 +183,14 @@ export interface LocalRepairHostOptionsV1 {
    * what the implementation port submits and what the status envelope reports.
    */
   modelId?: string;
+  /**
+   * Dedicated structured-review model id for this run. It is never the
+   * implementation model: an absent value falls back to the owner's
+   * preferred default (`codex-auto-review`); a malformed value yields the
+   * invalid empty sentinel, which the reviewer refuses at prepare before
+   * any session opens.
+   */
+  reviewModelId?: string;
 }
 
 /** Outcome of one startup attempt. Busy is an explicit refusal, not a wait. */
@@ -1014,6 +1026,7 @@ export async function runLocalRepairHost(
       trustedPath: input.trustedPath,
       codexExecutable: input.codexExecutable,
       tracker,
+      reviewModelId: input.reviewModelId,
     });
     const model = new LocalCheckoutModelPort({
       stateRoot: input.stateRoot,
@@ -1114,9 +1127,9 @@ export async function runLocalRepairHost(
 }
 
 /**
- * Production direct startup. Reads exactly HOME, PATH, GITHUB_TOKEN and
- * UOS_AI_TOKEN; the source directory comes from this module URL and the
- * controller SHA from trusted `git rev-parse HEAD`.
+ * Production direct startup. Reads exactly HOME, PATH, GITHUB_TOKEN,
+ * UOS_AI_TOKEN and SENTINEL_REVIEW_MODEL_ID; the source directory comes from
+ * this module URL and the controller SHA from trusted `git rev-parse HEAD`.
  */
 export async function startLocalRepairHostFromEnv(): Promise<
   LocalRepairHostRunV1
@@ -1146,6 +1159,7 @@ export async function startLocalRepairHostFromEnv(): Promise<
     codexExecutable: joinPath(home, ".codex", "bin", "codex"),
     denoExecutable: Deno.execPath(),
     trustedPath,
+    reviewModelId: resolveReviewModelId(Deno.env.toObject()),
   });
 }
 
@@ -1219,12 +1233,23 @@ export interface LocalGitHubInputV1 {
   modelBaseUrl?: string;
   /**
    * Trusted route selection. The composed reviewer submits the route's
-   * provider (the same provider the review client config names) and the
-   * route's model, so a route-selected fallback never submits a provider or
-   * model the config lacks. Omitted callers keep the primary gateway provider
-   * and the frozen review model.
+   * provider (the same provider the review client config names) with the
+   * dedicated `reviewModelId`, so a route-selected fallback never submits a
+   * provider the config lacks. The review model is never the route's model.
+   * Omitted callers keep the primary gateway provider; an unset review model
+   * makes the reviewer refuse at prepare.
    */
   route?: ModelRouteV1;
+  /**
+   * Dedicated structured-review model id, resolved from
+   * `SENTINEL_REVIEW_MODEL_ID` by `resolveReviewModelId`. The reviewer
+   * submits ONLY this model: it is never the shared implementation route's
+   * model, so pointing reviews at `codex-auto-review` cannot hijack the
+   * implementation worker's model. An unset or invalid value yields the
+   * invalid empty sentinel, which the reviewer refuses at prepare before
+   * any session opens.
+   */
+  reviewModelId?: string;
   /**
    * Optional exact repository identity this port is composed for. Omitted
    * callers keep the frozen sentinel identity, so every existing call site is
@@ -1556,12 +1581,17 @@ export function composeLocalGitHub(input: LocalGitHubInputV1): GitHubPort {
     },
   };
   const reviewer = new CodexStructuredReviewer({
-    provider: input.route?.provider ?? DEFAULT_PROVIDER_NAME,
-    // The trusted route selects the review model. Only an OMITTED route keeps
-    // the frozen default; a present route whose runtime model is missing is
-    // normalized to the invalid empty sentinel the reviewer refuses at prepare,
-    // never silently replaced by the default.
-    model: input.route === undefined ? REVIEW_MODEL : input.route.model ?? "",
+    // The reviewer ALWAYS submits through the gateway provider, where the
+    // dedicated review model lives: it never follows the implementation
+    // route's provider, so a DeepSeek-direct implementation route cannot
+    // pair a gateway-only review model with the DeepSeek endpoint.
+    provider: GATEWAY_PROVIDER,
+    // The dedicated review-model override selects the review model; it is
+    // never the shared implementation route's model. An omitted override
+    // falls back to the owner's preferred default; an explicitly invalid
+    // value is the invalid empty sentinel the reviewer refuses at prepare,
+    // never silently replaced by the route model or the frozen default.
+    model: input.reviewModelId ?? DEFAULT_REVIEW_MODEL_ID,
     sessionCwd: input.reviewCheckout,
     permissionProfile: "sentinel-review",
     openSession: ({ cwd }) =>
@@ -2729,24 +2759,28 @@ export async function ensureTaskClient(input: {
   );
 }
 
-/** Isolated read-only review client home, token file and profile config. */
+/**
+ * Isolated read-only review client home, token file and profile config.
+ *
+ * The review client is ALWAYS bound to the gateway provider: the structured
+ * reviewer submits through `GATEWAY_PROVIDER` with the dedicated review model,
+ * so the generated config names the gateway provider and never follows the
+ * implementation route (a DeepSeek-direct implementation route must not pair
+ * the gateway-only review model with the DeepSeek endpoint). Callers pass the
+ * gateway token and, for the hosted path, the gateway endpoint override;
+ * omitted callers keep the local loopback gateway default.
+ */
 export async function ensureReviewClient(input: {
   reviewCheckout: string;
   reviewClientHome: string;
   reviewTmpDir: string;
   reviewDenoDir: string;
-  /** The route's key, written to the private client token file. */
+  /** The gateway token, written to the private client token file. */
   token: string;
   codexExecutable: string;
   denoExecutable: string;
   trustedPath: string;
-  /**
-   * Trusted route selection: the generated review client config names this
-   * route's provider and endpoint (the reviewer submits the same provider).
-   * Omitted callers keep the local gateway default.
-   */
-  route?: ModelRouteV1;
-  /** Explicit endpoint override; omitted callers use the route's base URL. */
+  /** Explicit endpoint override; omitted callers keep the loopback default. */
   baseUrl?: string;
 }): Promise<void> {
   await ensurePrivateDir(input.reviewCheckout);
@@ -2768,8 +2802,8 @@ export async function ensureReviewClient(input: {
       codexDistributionDir: codexDistributionDir(input.codexExecutable),
       denoExecutable: input.denoExecutable,
       writeGrants: [],
-      baseUrl: input.baseUrl ?? input.route?.baseUrl,
-      providerName: input.route?.provider,
+      baseUrl: input.baseUrl,
+      providerName: GATEWAY_PROVIDER,
     }),
   );
 }
@@ -3860,7 +3894,7 @@ function statusTextWithinBounds(text: string): boolean {
 
 function readLocalHostOptions(
   options: LocalRepairHostOptionsV1,
-): LocalRepairHostOptionsV1 & { modelId: string } {
+): LocalRepairHostOptionsV1 & { modelId: string; reviewModelId: string } {
   let record: Record<string, unknown>;
   try {
     record = options as unknown as Record<string, unknown>;
@@ -3879,6 +3913,7 @@ function readLocalHostOptions(
     denoExecutable: requirePath(record.denoExecutable, "denoExecutable"),
     trustedPath: requirePath(record.trustedPath, "trustedPath"),
     modelId: requireModelId(record.modelId),
+    reviewModelId: requireReviewModelId(record.reviewModelId),
   };
 }
 
@@ -3891,6 +3926,17 @@ function readLocalHostOptions(
 function requireModelId(value: unknown): string {
   if (value === undefined) return DEFAULT_IMPLEMENTATION_MODEL;
   if (!isBoundedModelId(value)) throw new TypeError(STATIC_INVALID_OPTIONS);
+  return value;
+}
+
+/**
+ * Dedicated structured-review model id. An absent or malformed value yields
+ * the invalid empty sentinel (never the frozen default and never the
+ * implementation model): the reviewer refuses at prepare before any session
+ * opens.
+ */
+function requireReviewModelId(value: unknown): string {
+  if (!isBoundedModelId(value)) return "";
   return value;
 }
 

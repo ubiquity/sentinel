@@ -2,6 +2,10 @@
 
 Read before changing Sentinel runtime or delivery. These are scoped user exceptions; they do not broadly override higher authority.
 
+## Owner-directed autonomous recovery - 2026-10-02
+
+The owner directed: "fix the fucking sentinel and don’t stop until it’s guaranteed working autonomously". For this current Sentinel recovery task, the integration owner may complete necessary source delivery, guarded runtime installation, bounded queue intervention, and hosted acceptance without repeated per-attempt approval questions. Keep local deterministic checks as the edit loop, preserve App identity, runtime review/CI/merge/promotion gates, durable charged admission history and one production implementation writer, and never fabricate health or delivery receipts. A new credential permission or an exception to the App publication identity remains an explicit owner decision. Completion requires live autonomous delivery and continued operation, not a scheduled heartbeat or an uncommitted passing candidate.
+
 ## Closing keywords in repair pull requests - 2026-09-23
 
 For the foreign-target repair pipeline (`ubiquity/sentinel` and `ubiquity/ai.ubq.fi`), the owner directed that an issue-backed repair pull request must use GitHub's closing syntax: the entire body is exactly `Resolves #N` for the source issue `N`, so the merge links the pull request to the issue and closes it. This retires the earlier "avoid auto-closing keywords before production acceptance" rule recorded in `MASTER-PLAN.md` and `docs/design-rationale.md`, and the publication-time keyword sanitizer is removed with it. A record with no issue reference keeps a non-closing descriptive body. Review, CI, merge, promotion, admission/quota and installation/rollback gates are unchanged.
