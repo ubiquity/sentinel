@@ -135,10 +135,11 @@ export const OWNER_DEVELOPMENT_INSTALL_HISTORY_REVISION =
 export const OWNER_DEVELOPMENT_INSTALL_HISTORY_GENERATION = 14;
 /**
  * Exact revision building a settled review receipt from its durable request
- * reservation; its install also triggers an immediate health-gap execution.
+ * reservation (the CI-verified revision, which contains the capped-submission
+ * fix); its install also triggers an immediate health-gap execution.
  */
 export const OWNER_DEVELOPMENT_INSTALL_RECEIPT_REVISION =
-  "3b78061f0cab84a85af1f4a84dadbb80ce5a2a14" as GitSha;
+  "9fcc959bcdc903aed21f2bbe968c8838d86010ef" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_RECEIPT_GENERATION = 15;
 
 const API_BASE = "https://api.github.com";
