@@ -774,8 +774,10 @@ export interface GitHubRuleSetWireV1 {
   enforcement: "active" | "evaluate" | "disabled";
   /**
    * `null` when the API omitted it — the caller (our App installation token)
-   * may lack write access to the ruleset. Omitted bypass policy is unknown
-   * and blocks; never treated as "no bypass actors".
+   * may lack write access to the ruleset. An omitted list is unknown and is
+   * never read as "no bypass actors"; it only stops meaning unknown policy
+   * when the same evidence explicitly reports the sibling
+   * `currentUserCanBypass: "never"` for this exact merging credential.
    */
   bypassActors: GitHubBypassActorWireV1[] | null;
   /** `null` when the API omitted it (unknown whether the caller can bypass). */

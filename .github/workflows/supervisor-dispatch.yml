@@ -1,21 +1,20 @@
-# Sentinel repair dispatcher.
+# Deterministic dispatcher for the protected hosted supervisor.
 #
-# Hourly/manual native-token dispatch of the exact protected supervisor ref.
-# This workflow holds no App key, no model credential and no runtime code; the
-# selected runtime executes in supervisor.yml's repair job with its own
-# sentinel-repair concurrency, so dispatch never holds the runtime group.
-name: sentinel-repair
+# Scheduled runs execute from the default branch, so they dispatch the fixed
+# supervisor workflow explicitly at its protected source ref. This job has no
+# App key and cannot read the supervisor environment secret.
+name: sentinel-supervisor-dispatch
 
 on:
   schedule:
-    - cron: "0 * * * *"
+    - cron: "*/5 * * * *"
   workflow_dispatch:
 
 permissions:
   actions: write
 
 concurrency:
-  group: sentinel-repair-dispatch
+  group: sentinel-supervisor-dispatch
   cancel-in-progress: false
 
 jobs:

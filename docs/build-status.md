@@ -2,6 +2,511 @@
 
 ## Active task register — Astra owned
 
+Latest verified state, 2026-09-14 04:32 UTC: canonical branch and both VPS
+checkouts are at ec940acf81118c5cda65832dcfc9f5b6fb2cfeda. No DSH print writer
+is running. Supervisor ruleset23197450 remains absent; never recreate it.
+Healthy bootstrap proof is persisted; autonomous delivery is not yet proved.
+PR30 remains runtime-owned at d92d140 with an unprepared base_refresh intent,
+not a published refresh. Read-only installation_audit is diagnosing that
+unavailable result before the next ordinary pass due 04:55:28 UTC. Issue21 remains
+blocked without a trusted receipt; preserve all five reservations. The older
+00:30 checkpoint below records the starting state, not current installation.
+
+Current checkpoint, 2026-09-14 00:30 UTC: owner supersedes the Mac-only canonical
+location and confirms all work is pushed. Canonical worktree is now
+`/home/codex/repos/ubiquity/sentinel/.codex-worktrees/master-plan-gfa795549e5`,
+same branch `codex/master-plan-gfa795549e5` and preserved goal suffix. Fetched all
+published heads and tags with full history. Remote canonical f0bd7a0 and
+development 556dee8 had identical trees but different ancestry after squash
+delivery; integrated development with an ancestry-preserving merge. The issue-1
+interrupt worker tip 261e044 is already integrated. PR30 at d92d140 remains a
+runtime-owned candidate for issue18; do not merge it manually to claim autonomous
+success. State refs and protected supervisor ref are intentional. All 334 commits
+reported by local fsck also occur in `git rev-list --all`; no unreferenced commit
+was found in that inventory. No Mac inspection is required by current authority.
+
+Current Actions evidence: repair34789040915 has startupReady true, zero terminal
+records, issue21 blocked after no trusted model receipt, issue18 awaiting delivery.
+Merge rejects ruleset23197426 because Actions token sees omitted bypass_actors;
+operator read returns empty actors and current_user_can_bypass never. PR30 is
+also behind strict branch checks. Preserve state and all charged reservations.
+Supervisor34791116998 only confirms existing release-state seed at14bd027; no
+accepted delivery is proved. Next scope is the hosted merge authority/base path,
+then protected supervisor delivery proof; old local-only pause notes below are
+historical and superseded by the owner's current end-to-end Actions instruction.
+
+DeepSeek official catalog and pricing documentation identify `deepseek-flash`
+as V4.1 Flash. This owner's explicit latest-model instruction supersedes the old
+API-name rule for development workers; max/workspace-write and separate runtime
+Luna policy remain. Current worker and validation checkpoints appear newest
+first below. Primary re-read playbook2026-09-12.1, git-coordination,
+project-workflow, test-evidence and Deno instructions. Read-only Astra audit
+hosted_acceptance_audit has returned its foundation and composition findings;
+it has no write or test authority. Primary alone owns this register and plan.
+
+### Historical checkpoints
+
+04:44 UTC: history V1 and V2 settled exit0/completed; actual Flash/max headers
+825941/836819 and live cwd/NODE_ENV verified. Only pwd/final formatter shell
+calls; formatter wrappers printed exit status despite V2 no-wrapper request.
+No tests/Git/network/children. V1 fixture cloned the wrong branch and added a
+depth flag to later fetch; primary corrected the assignment before execution.
+Real-Git regression f4f53bb0-69b9-4224-a4f3-0dbf7e41bc9b now reproduces the
+actual shallow-copy/normal-fetch ancestry failure and full-history success.
+Hosted composition0064d52a-c1ba-43f4-be55-4c219b3d1689 passed. Both are fresh
+VPS executions in namespace459acb17ad9ea6b3117a31ea7e3934ee42910852ebdd735c5b0a8110d8083e59.
+Committed sourceaf0abd44338675f66e220573862853681691a3e0, PR44 open; local
+review exit0/no actionable findings, /tmp/sentinel-runtime-history-review.log.
+CI34806850404 and34806868006 remain live. No installation yet. All issue21
+charges and blocked state remain; selection skips blocked work, so a second
+autonomous delivery needs separately justified recovery. No new task fabricated.
+
+04:35 UTC: read-only installation_audit traced the saved unprepared refresh to
+likely shallow ancestry: real bootstrap Git fetched runtime with depth1; private
+clone and subsequent fetches preserve that boundary. Full history has common
+ancestor b209de1, REST PR identity is correct. Raw child stderr was not retained;
+require real-Git reproduction before accepting the cause. Sole DSH exec95902,
+PID1767962 owns only supervisor.yml and tests/github/base-refresh_test.ts under
+/tmp/sentinel-runtime-history-v1.txt; exact cwd/NODE_ENV verified, actual request
+825941 is deepseek-official/deepseek-flash/max. Playbook2026-09-12.1 re-read.
+First edit2min, handback5min/40calls; no children/checks/Git, one final formatter,
+next-settled-assignment feedback and bounded task stop authority. Primary owns
+candidate-base-refresh fresh evidence and ledger. Prior ledger committed/pushed
+d9f8a23; source correction is pending, no live state or deadline change.
+
+04:28 UTC: step-name correction0b020d4 accepted after focused reader9b31b558,
+full CI34804852960 (1069tests/84steps/0fail), local Codex review no findings,
+PR CI34805406699 passed; PR43 mergedec940acf81118c5cda65832dcfc9f5b6fb2cfeda.
+Merged CI34805743698 passed. Local full70b0e5da failed only unchanged composed
+release test (monitoring instead of accepted); fresh independent audit found no
+justified source correction, isolated file3cb1339b passed44seconds. Preserve
+failure, cause unconfirmed. No unchanged full rerun.
+
+Installed supervisorec940ac without ruleset recreation. Immediate dispatch
+34805762129 surprisingly resolved oldcfe3d22; primary initially misattributed
+its continued failure. Verify run.head_sha immediately after every dispatch.
+Scheduled34805981730 used ec940ac, completed success and persisted original
+bootstrap34804213902:1:repair healthy proof in release reffa45709. Active runtime
+remains exactcfe3d22, execution cleared, healthy job103852805869, digest
+8e488466ff5ca1d42675765d31de4e003819340ab4750ab17ae465c4732225ce.
+All original model reservation blobs unchanged. New reconciliation34806076970
+also uses ec940ac. Ordinary next due1789361728122 (04:55:28UTC); preserve this
+deadline and budget. Bootstrap acceptance is now proved; autonomous issue
+delivery and observation remain outstanding. PR42 policy merged46e1fcd;
+supervisor source ruleset23197450 absent, never recreate it. Both VPS checkouts
+are at mergedec940ac; only this primary-owned ledger update is uncommitted.
+
+04:05 UTC: PR42 merged46e1fcd records never adding branch protection. Root
+and canonical fast-forwarded; supervisor non-force advanced to reviewedcfe3d22.
+Fresh Astra installation_audit independently passed installation readiness.
+Bootstrap34804213902 prepare/repair/finalize completed success; actual terminal
+healthy/startupReady/settled at exactcfe3d22. Reservation Git tree unchanged.
+Reconcile34804462921 prepare could not read evidence; finalize correctly refused
+another run's saved intent. Independent diagnosis confirms parseHostedJobs uses
+label64 for all steps, rejecting pinned post-action names68/69chars. Raw operator
+evidence /tmp/sentinel-bootstrap-{attempt,jobs}.json and job-raw.log retained;
+no state reset or new model reservation. Only next correction client step-name
+bound to existing path512 and sanitized regression, /tmp/sentinel-step-name-fix-v1.txt.
+Sole DSH exec45138/PID1630625 live cwd/NODE_ENV verified, header820578
+deepseek-official/deepseek-flash/max. Primary owns docs/Git/evidence. No accepted
+bootstrap proof or autonomous delivery yet; do not repeat unchanged dispatch.
+
+03:53 UTC owner explicitly ordered deletion of supervisor source protection,
+never adding branch protection rules to this project, and proceeding. Deleted
+ruleset23197450; refreshed repository list confirms it absent. No restoration
+is authorized. AGENTS.md and MASTER-PLAN record the replacement policy; global
+decisions log updated. The supervisor environment uses a custom named-branch
+policy rather than protected-branches-only admission. Fresh read-only Astra
+installation_audit checks installation/acceptance independently; primary owns
+all writes. Earlier pending-approval and restoration notes are superseded.
+
+03:44 UTC continuation: merged-commit CI34803318970 passed on exact
+cfe3d22694385e6273977a5a9502e8a1c5ecf2d0. Dispatcher34803319486 also passed
+and launched supervisor34803326054, completed success on old protected6987219.
+This proves the dispatch path only; the old supervisor remains seed-only.
+Current ruleset23197450 is still active, with update restriction and no bypass.
+No owner reply has authorized the requested maintenance exception. Installation,
+bootstrap, autonomous delivery and observation remain pending that decision.
+
+03:40 UTC acceptance and installation boundary: canonical source
+ddb024d2d5ec0dad095069e1381cf95ee6d90775 passed full VPS test:local,
+1068tests/84steps/0failures/9ignored, evidence36e71225-b007-4738-9cf8-2cf9e65899bd
+in the VPS namespace above. CI34802251118 and PR CI34802963799 passed.
+Local Codex review round1 session01a09df4-78e1-7813-92df-9b063acf2dd1,
+command codex review --base556dee88a4194b5e6e0e8832f885c87f5b855817,
+completed exit0/no actionable findings; /tmp/sentinel-acceptance-review-r1.log.
+PR41 merged2026-09-14T03:38:51Z as cfe3d22694385e6273977a5a9502e8a1c5ecf2d0.
+Reviewed and merged trees identical; canonical and old protected source are
+ancestors of merged development. Root development fast-forwarded cleanly to
+cfe3d22. Canonical branch retains reviewed ddb024d; this operator ledger update
+is the only pending local edit and is owned by primary.
+
+Post-merge drain queries for repair.yml queued/in_progress/waiting/pending/
+requested all returned0 at03:39UTC; /tmp/sentinel-old-repair-STATUS-0339.json.
+Latest old direct34802281510, source556dee88, completed success03:21:50UTC.
+Protected source remains6987219254760a3d153166ce6b0d9b596738f03c; refreshed
+ruleset23197450 exactly matches saved policy, active/no bypass/update restricted.
+Concrete install draft /tmp/sentinel-protected-source-installation.md binds
+cfe3d22, old-run drain, non-force update and immediate exact policy restoration.
+Owner authorization for this one-time source-rule maintenance exception is
+required before changing protection. No exception or source update has run.
+Bootstrap, autonomous issue delivery and six-hour observation remain unproved;
+preserve issue18/PR30, blockedissue21 and all charged reservations.
+
+03:20 UTC: integrated3e81df9b completed in399seconds:1067passed84steps,
+1failed9ignored. Only failure was valid JSON release snapshot missing cooldowns.
+No other failure was reported. Sole fixture/comment correction exec37128,
+PID1502902, header819340 FlashV4.1/max verified with live cwd/NODE_ENV;
+settled exit0/completed, actual pwd/reads/two edits/one formatter, no descendants.
+Fresh contract fixtures734d49c7-767b-49fa-bb39-0fb1694751dd passed.
+Composition and fixture changes are ready to commit for exact integrated
+validation; full acceptance, formal review and installation are still pending.
+
+03:12 UTC: workflow V3 exec65560 settled exit0/completed, actual header814078
+confirms deepseek-official/deepseek-flash/max. Actual calls were scoped reads,
+edits, pwd and one formatter; no descendants remain. Live cwd/NODE_ENV check
+was missed across handoff, so this launch does not have full live attestation.
+Fresh hosted-workflow b599773d-8e02-4217-bc2a-a22396457492 passed in22seconds.
+Integrated30a7b934-1d5b-426b-84ca-52e3fe64adad passed fmt/lint/production
+check, then failed test typecheck: ports_test release fixture omitted cooldowns.
+Single-file correction exec6118/PID1385049 settled exit0/completed; live
+cwd/NODE_ENV and header818531 FlashV4.1/max verified. Actual calls pwd/read/edit/
+one formatter only. Fresh integrated3e81df9b-189d-4b12-9040-c4ae8aacc53d
+is running under exec90636; no verdict yet. All references use VPS namespace
+459acb17ad9ea6b3117a31ea7e3934ee42910852ebdd735c5b0a8110d8083e59.
+Full explicit heads/tags fetch refreshes canonical remote to d421c12; default
+configured fetch only follows development. Protected source still6987219.
+No formal review, installation or autonomous delivery proof yet.
+
+03:03 UTC: workflow V1/V2 settled exit0 with actual shell calls pwd/oneformatter
+only; V2 exec45538/PID1374630 live cwd/NODE_ENV/header802041 verified.
+Fresh744b1efb-d5ca-460b-8483-d9d8aa83b503 failed compile beforetests:
+duplicate STATIC_SOURCE/writeOutput and fixture calling method hidden by facade.
+Sole next V3 corrects these and pins existing setup-node v4.4.0 to verified
+49933ea5288caeca8642d1e84afbd3f7d6820020 (official v4/v4.4.0 refs agree).
+Independent integrated authority audit has no other P0/P1 receipt/settlement
+findings. No integrated run/review/source installation yet.
+
+02:53 UTC: workflow writer exec32651/PID1373166 verified live cwd/NODE_ENV;
+header760826 FlashV4.1/max. Existing automatic CI34800597677 on d421c12
+failed lint at client.ts:60 unused expectExactKeys import after consumer removal,
+saved /tmp/sentinel-ci-d421c12.log. Not a focused test failure. Exact removal
+recorded in /tmp/sentinel-hosted-workflow-correction-notes-v2.txt for next settled
+worker boundary; current immutable workflow scope excludes client. No rerun.
+
+02:52 UTC: consumer committedb066585, normal no-ff protected-source merge
+d421c124c2b582e0d37daf92449f41a9bf7d9975 preserves unchanged accepted tree;
+6987219 is now an ancestor. Pushed exact canonical head. Sole next writer
+exec32651 uses /tmp/sentinel-hosted-workflow-launch-v1.txt for production
+prepare/repair/finalize composition, existing task grants, two workflows and
+actual composition fixtures; no other writer/test runs. Registered hosted-workflow
+then sentinel-integrated remain next checks. Protected remote source unchanged.
+
+02:50 UTC: consumer accepted after V2 fixture change and V3 typing correction.
+V2 header715734/PID1329872 and V3 header757341/PID1331410 verified
+FlashV4.1/max/cwd/NODE_ENV, both settled exit0, only permitted shell mutations,
+no checks/Git/network/children. V2 receipt219066ba-64b3-4077-9a23-76f7730d204a
+failed callback typing before tests; V3 fixes exact callbacks. Fresh runtime
+f4d17527-ba96-441d-9ab6-9b3bad579cf5 PASS; consumer
+5118668f-9a04-47c5-b289-dbe2fff6a1e2 PASS55 (97seconds), real controller
+transitions generate persisted accepted/rollback receipts consumed by actual
+repair entrypoint. Obsolete raw contract/client path deleted; any malformed
+object-looking child line and any invalid status property refuses acceptance.
+Next normal source ancestry merge, then sole prepared workflow composition.
+
+02:40 UTC: sole correction DSH exec53809/PID1329872 live cwd/NODE_ENV verified;
+actual header715734 deepseek-official/deepseek-flash/max. Shared fixture scope
+adds tests/host/hosted-receipt-fixture.ts; it must use actual supervisor/core
+transitions over real Git, never insert terminal release state directly.
+Source ancestry integration and prepared workflow assignment remain pending.
+
+02:39 UTC: consumer V1 settled exit0; only pwd/one formatter, no children.
+Fresh439bac51-78d7-4a02-9696-2850983517e4 failed6/passed47 (86seconds):
+fixtures illegally seed terminal releases directly; production guard correctly
+refuses. Correction /tmp/sentinel-hosted-consumer-correction-v2.txt uses real
+supervisor transitions for shared fixture, explicitly permits obsolete contract
+deletion, removes now-unused helper and fixes audit P1 reordered/nonstring
+status ambiguity. No weakening state/parser; current draft not accepted.
+
+02:33 UTC: protected source6987219254760a3d153166ce6b0d9b596738f03c and
+canonical ancestor f0bd7a0cd17cc5604f82218459df784760a9a33d have identical tree
+c5ad78445191d4084cafa254e20c39bf01fbfc77; three protected-source merge commits
+are not canonical ancestors. After current writer acceptance, integrate source
+ancestry with normal no-ff merge before final review so exact reviewed
+development source can later fast-forward protected ref. Ruleset23197450 live
+read still active/no bypass/update restriction/one last-push approval; no waiver.
+Fresh read-only authority agent audits committed f64ac4e runtime only; current
+consumer draft excluded. Permission events remain workspace-write/ask.
+
+02:31 UTC: runtime/audit committed and pushed f64ac4e2c89a6f7d955c8c53b14512cbac503b36.
+Consumer sole DSH exec10343/PID1294132 live cwd/NODE_ENVproduction verified,
+actual header642584 FlashV4.1/max. Registered hosted-consumer and hosted-workflow.
+Prepared immutable next composition /tmp/sentinel-hosted-workflow-launch-v1.txt,
+not launched. Latest old repair34799133859 completed02:26:41 at556dee88;
+30-run sample all completed, still not post-dispatcher drain evidence. PR30
+is only open PR; preserves runtime ownership. No protected source installation.
+
+02:28 UTC: runtime and audit correction accepted. DSH47087/PID1289232
+settled exit0, actual header628037 FlashV4.1/max, live cwd/NODE_ENV verified;
+actual shell calls pwd and one formatter only, no children/background.
+Fresh runtime d256519e-0762-444e-81ee-74e8f5424358 PASS; cooldown/state
+8d236736-1971-489d-acc7-d7636e702f6c PASS, direct VPS execution at3aee5ae+draft.
+Guard forbids shorter finite deadlines/decreased backoff; scanner rejects
+truncated status-first child result beside healthy. Ordinary preflight remains
+accepted. Next sole consumer assignment /tmp/sentinel-hosted-consumer-launch-v1.txt
+replaces obsolete raw Actions receipts with strict stored supervisor receipts.
+
+02:25 UTC: runtime V2 settled exit0, actual shell calls pwd/one formatter only;
+no children/background. Fresh runtime evidence d69c7b38-11a5-4a41-8bea-65cdd35fe3a2
+passed. Independent hosted_authority_audit P1: finite retry deadline/backoff can
+regress under later observation. Primary also found malformed child status could
+be ignored beside a healthy result; actual preflight logs have no status field.
+Sole next assignment /tmp/sentinel-hosted-audit-fix-v1.txt owns only state guard,
+runtime scanner and their two focused tests; no workflow/consumer edits.
+
+02:19 UTC: runtime V1 settled with only pwd/owned tools/one formatter and no
+checks/network/Git/children. Direct evidencebe8eac31-94cb-4447-a22e-45ce49b834d5
+passed9/failed1: positive prepare fixture still supplied repair job identity.
+Primary found scoped env.toObject incompatibility, lost failed-run startup/base
+metadata, masked backward clock and ignored settled timeout. Sole correction
+/tmp/sentinel-hosted-runtime-v2.txt (initial full prompt preserved in
+runtime-launch-v1.txt) fixes those; exec19560/PID1286416 live cwd/env verified,
+header605667 FlashV4.1/max. Exact three-file scope, no checks/Git/network/children,
+one formatter then handback. Fresh hosted_authority_audit independently audits
+committed core/reader/cooldown only; current runtime draft excluded. Latest
+repair34796139912 completed01:32 atdevelopment556dee88; protected source still
+6987219254760a3d153166ce6b0d9b596738f03c. That sample is not full drain proof.
+
+02:09 UTC: cooldown committed/pushed3aee5aeb48f0bc4b23f24a423fbfae78db41c18f.
+Sole runtime assignment /tmp/sentinel-hosted-runtime-launch-v1.txt owns new
+hosted-runtime.ts, actions.ts and focused runtime test only. Exec54364/PID1282024
+live exact cwd/NODE_ENVproduction and header506815 FlashV4.1/max verified.
+No checks/network/Git/children, one final formatter, expected8min/65calls.
+Registered hosted-runtime proves real Git identity and owned-group boundary;
+actual live Actions remains later acceptance. Consumer cutover design at
+/tmp/sentinel-hosted-consumer-design-v1.txt is not yet assigned. Other writers
+are settled; primary alone owns docs and final integration.
+
+02:08 UTC: hosted cooldown accepted with direct real-Git evidence
+2626bbb7-d718-439d-b5bf-9a03894e025a at4b884ea+draft. Worker settled exit0;
+actual shell calls only pwd and one final formatter, no repeated shell searches,
+checks/Git/network/children. Primary inspected strict release collection and
+preservation guard, role-limited gates and mechanical Deno/core constructors.
+Both refs' holds block hosted requests; each role writes only its own ref.
+Prepared runtime assignment /tmp/sentinel-hosted-runtime-v2.txt is next; it is
+not launched until this accepted state is committed. Live activation unchanged.
+
+02:02 UTC: reader committed/pushed4b884ea. Sole cooldown assignment
+/tmp/sentinel-hosted-cooldown-launch-v1.txt owns release snapshot/store cooldown
+seams, pure calculator export, hosted role gates and listed mechanical fixtures.
+Exec34677/PID1277882 live cwd/NODE_ENVproduction and header432720 FlashV4.1/max
+verified. Existing registered hosted-cooldown uses real Git fixtures. Expected
+8min/65calls; no checks/network/Git/children, one final formatter. Supplied exact
+source positions and restricted shell calls to pwd/formatter to correct prior
+malformed searches; current calls use read/grep tools. Next wiring design is
+/tmp/sentinel-hosted-wiring-design-v1.txt, primary-owned, not yet implementation.
+
+02:01 UTC: reader accepted with direct fresh evidence
+39f5d4cd-565e-4daa-b02e-00cebe8c90e3 at ad22083+draft. V2/V3 settled exit0;
+V3 PID1277270 live cwd/NODE_ENVproduction and header428008 FlashV4.1/max verified.
+Primary corrected its own specification after live compare API read proved
+head_commit absent: real keys base_commit/merge_base_commit/status/counters now
+drive ancestry. Exact development556dee88 returned identical at01:58UTC.
+V2 fixes truncated/contradictory terminal handling and skipped/time metadata;
+V3 fixes real compare shape. Both repeated prohibited shell searches; preserve
+that qualification, no worker tests/network/Git, one formatter each. New work
+must use supplied file locations and read tool without shell search. Reader
+tests pass; live composition/installation remains unperformed.
+
+01:57 UTC: reader V1 settled, direct testcf689ac6-f10b-46c0-8345-6ddf0138d5f4
+passed10/failed1 because the log regex required a closing brace and ignored a
+truncated terminal. Primary also found healthy-terminal/failed-job evidence was
+being rewritten to failed, which could wrongly trigger rollback. Sole V2 fixes
+both and missing skipped-step/timestamp guards; exec23104/PID1276327, live exact
+cwd/NODE_ENVproduction and header414043 FlashV4.1/max verified. Reader V1 actual
+calls included three prohibited malformed shell searches despite read-tool
+guidance; no tests/network/Git, one formatter. V2 explicitly repeats no shell
+searches. Preserve useful draft, verify actual calls and focused evidence before
+acceptance. No hosted source installation or live delivery claim.
+
+01:52 UTC: core committed/pushed ad2208362a07dd8c7ab04c8dded125da8a757a57.
+Sole reader assignment /tmp/sentinel-hosted-reader-v1.txt owns client.ts, new
+hosted-execution terminal contract and focused reader test. Exec64705/PID1274880
+live cwd/NODE_ENVproduction verified; header368457 confirms FlashV4.1/max.
+No checks/network/Git/children, one final formatter; primary registered
+hosted-execution-reader. Expected8min/65calls checkpoint, settled-turn feedback.
+Audit recommends release-owned githubCooldowns using existing strict cooldown
+records and shared pure calculation, with both hosted gates reading both refs
+but writing only their role. Fixed launcher must capture candidate output and
+verify process-group settlement before emitting its terminal; existing
+DenoReplayRuntime provides the bounded owned-group execution mechanism.
+
+01:49 UTC: corrected core passed direct fresh evidence
+1634e241-c809-43b9-936a-06234dad604c on VPS canonical13402f0+draft, including
+ordinary skipped-run retry and exact frozen promotion-source guards. Inspected
+actual worker calls: pwd, owned reads/edits, V1 file-size read, one formatter
+per assignment. No worker checks or external writes. Core is ready for commit;
+actual runtime invocation and GitHub proof transport remain unimplemented.
+
+01:48 UTC: resumed canonical13402f0 on the exact VPS lane; core V1/V2 writers
+settled exit0 in sessionaa59f724. V2 PID1270042 live cwd and NODE_ENVproduction
+verified, persisted request/header361048 confirms deepseek-official/deepseek-flash
+at max. Two owned files only, one final formatter each, no tests/Git/children.
+Core V1 direct evidence c1996b5f-67cc-4907-b9d9-e2f888ab7f7c passed8/failed1:
+the CAS fixture advanced saved time without advancing its clock. V2 fixes that
+fixture, restores ordinary due eligibility after exact not_started settlement,
+and binds promotion preflight to the full frozen request. Fresh core execution
+is running under the registered target; do not rerun to recover its output.
+Primary re-read current plan, decisions and orchestration references. The
+read-only audit is checking durable supervisor cooldown and launcher evidence
+composition; no second implementation writer. Live workflow wiring, integrated
+acceptance, review, installation and autonomous deliveries remain outstanding.
+
+01:34 UTC: hosted foundation accepted for canonical integration. V5 fixed both
+source-audit findings: full release-proof equality with the exact settlement,
+and stable execution-ID reuse rejection in parser and transitions. V6 changed
+only two fixture execution IDs; earlier febfa21f had exposed their reused prior
+ID under the stronger guard. Final14 contract/state tests pass direct receipt
+24352d21-8cf0-44da-8cad-fe8ad4d25b4d in the existing VPS evidence namespace at
+c091839+draft. Primary checked both exact guard changes and storage/snapshot
+wiring; diff check passed. Prior type88e2758d and lint838dd29f passed; focused
+test execution also compiled the final contract. V5/V6 completed exit0 with
+owned mutations, one formatter and no checks/Git/children. V5 live cwd/env and
+actual Flash/max verified; V6 ended before live sampling, so retain explicit
+env-i launch/header evidence without claiming live environment attestation.
+No supervisor core execution, workflow cutover, review or deployment yet.
+
+01:28 UTC: hosted-contracts V2/V3/V4 completed with settled owned processes,
+verified live cwd/NODE_ENVproduction and actual FlashV4.1/max; no checks/Git or
+children, one final formatter each. V3 added exact not_started settlement and
+initial-snapshot validation. GPT types passed 88e2758d-4cac-4588-84ff-bda71ec669fe.
+Initial contract/state attempt b0e26bae failed five fixture boundary/time inputs;
+V4 corrected only tests. All14 then passed 53814910-1e47-455e-a564-7ea38b186ae5,
+lint passed 838dd29f-67ae-42c8-b821-6455b4f85841, direct VPS/canonical c091839+draft
+in namespace459acb17ad9ea6b3117a31ea7e3934ee42910852ebdd735c5b0a8110d8083e59.
+Independent source audit found two substantive guards missing: complete proof
+equality for release attachment, and stable execution-ID comparison on replay.
+Sole V5 /tmp/sentinel-hosted-contracts-v5.txt now owns the contract and its test
+only, exec6789, same persisted session. Expected3min/20calls, no tests/Git/children,
+one formatter then handback; primary validates through existing evidence targets.
+Core design /tmp/sentinel-hosted-core-design-v2.txt incorporates skipped-job
+settlement and release-recovery precedence over initial bootstrap. Core not yet
+implemented or deployed; source schema remains uncommitted pending these guards.
+
+01:17 UTC: hosted-contracts V1 completed exit0 with owned mutations, one final
+formatter and no checks/Git/children. It still emitted several malformed quoted
+shell searches, but did not repeat them into a loop; minimum read-tool guidance
+remains required. GPT type evidence 2ee02865-dc59-45b5-9782-3fc650ddf46c failed one
+new fixture's widened purpose string. No contract/state test run yet. Read-only
+audit found missing ordinary/bootstrap failure settlement, failed rollback proof
+retry deadlock, and pointer/execution ordering requirements. Sole V2 correction
+/tmp/sentinel-hosted-contracts-v2.txt owns contract, two focused tests, and shared
+record-kind literals only. Same session, exec78306/PID1257879, live cwd and
+NODE_ENVproduction plus actual FlashV4.1/max verified; workspace-write/ask intact.
+Five-minute/45-call checkpoint, one formatter then handback, no tests/Git/children.
+Latest hosted run34793759676 completed but still reports zero terminal records;
+restricted log /tmp/sentinel-repair-34793759676.log confirms old merge gate.
+PR30 remains exact d92d140 and behind; no new delivery or budget reset.
+
+01:08 UTC: base refresh committed and pushed as
+c091839e634dc9a5edce7f5fd0897143c3f82d3f; canonical source clean before next task.
+Independent hosted audit confirmed separate runtime/release collections through
+existing release Git CAS, protected prepare/repair/finalize jobs using standard
+GitHub identity fields, no new credentials. Verified supervisor workflow ID
+357012162 from GitHub. Sole foundation DSH assignment
+/tmp/sentinel-hosted-contracts-v1.txt now owns new hosted-supervisor contract,
+snapshot/store release seams, focused tests and listed mechanical snapshot
+constructors only. Same persisted session aa59f724, exec74287/PID1256010, live
+exact cwd/NODE_ENVproduction and actual deepseek-official/deepseek-flash/max
+verified. workspace-write/ask inherited persisted settings. First edit target
+2min; handback10min/80calls diagnostic, no children/checks/Git, one final formatter.
+GPT registered hosted-supervisor-contracts; not executed yet. Next settled
+assignment feedback; bounded exact-task stop authority. Primary ledger only;
+read-only auditor checking state edge cases independently. Protected supervisor
+installation and live delivery remain unperformed; no state/budget changes.
+
+01:06 UTC: base-refresh V3 and fixture-only V4 completed exit0 with owned edits,
+single final formatter and no checks/Git/children. V3 live PID1252987 settled;
+V4 completed before live sampling, so retain launch command and exact persisted
+Flash/max header but do not claim V4 live environment attestation. GPT final
+base-refresh tests passed b66d5948-5273-4cae-8f9d-96c285df59ef (14 tests), real
+hosted restoration passed ec5ced03-55fc-4362-8691-9a728e0dd5ec (5 tests, including
+both prepared-before-push and published crash windows), lint passed
+48e0976d-82d5-42b3-af35-c178e43eb9f6. All direct VPS executions in namespace
+459acb17ad9ea6b3117a31ea7e3934ee42910852ebdd735c5b0a8110d8083e59 at canonical
+8e2c79b plus draft; diff check passed. Intermediate 5f1631ad failed two fixtures
+that omitted the now-required capability; corrected fixture inputs preserved
+all intent-before-effect and no-budget assertions. Accept base-refresh for
+canonical integration; full review/deployment remain pending integrated host.
+
+01:02 UTC: base-refresh V1 was stopped after repeated malformed searches;
+PID1247315 and descendants settled, source preserved, no completed terminal
+record. V2 resumed persisted session aa59f724-6774-4054-9f6e-f4233ca527ce and
+completed exit0 with edits and formatter. Actual Flash V4.1/max header verified;
+live process sampling was missed on V2, so no full live attestation claim.
+GPT direct focused tests passed 2ba24e1f-5ee3-478f-97e2-f147083a346c and fresh
+types passed 96842ab4-f68d-4434-a29e-9b7ee160b376 in evidence namespace
+459acb17ad9ea6b3117a31ea7e3934ee42910852ebdd735c5b0a8110d8083e59 on canonical
+8e2c79b plus draft. Host-restoration attempt 8e764077-27e3-44e2-8c60-a25c2aac8e75
+failed 3 of 5; registration omitted standard subprocess Deno executable and
+NODE_V8_COVERAGE grants. Registration corrected, no unchanged rerun.
+Primary inspection found prepared-before-push restore rejection, same-head
+refresh review-key reuse, and missing unsupported-port guard in delivery.
+V3 immutable assignment /tmp/sentinel-base-refresh-v3.txt owns five source/test
+files only, same session, exec44217/PID1252987. Live exact cwd/NODE_ENVproduction
+and persisted deepseek-official/deepseek-flash/max verified. First edits observed.
+No tests/Git/children; one final formatter then handback; four-minute/30-call
+diagnostic checkpoint, next-settled-assignment feedback and bounded task stop
+authority. Primary owns ledger; hosted_acceptance_audit is read-only on state
+and runtime seams for the next supervisor assignment. No deployment or live
+delivery claim; preserve PR30 and all issue21 charges.
+
+00:42 UTC: sole base-refresh DSH assignment `/tmp/sentinel-base-refresh-v1.txt`
+launched from canonical8e2c79b. Owns specified shared contracts/Git/host/loop and
+focused tests; no other writer. Design: deterministic two-parent local merge,
+durable base_refresh intent with prepared SHA before expected-ref push, restart
+reconciliation, fresh review/CI through existing publication, no model charge.
+PID1247315/exec76940, stream `/tmp/sentinel-base-refresh-v1.stream.jsonl`, persisted
+sessionaa59f724-6774-4054-9f6e-f4233ca527ce. Live cwd/NODE_ENV and actual
+deepseek-official/deepseek-flash/max verified; permission/preset workspace-write,
+sandbox/mode workspace-write, approval/policy ask verified in persisted events.
+First edit3min, expected12min/100calls; no children/tests/Git, one optional final
+formatter, next-settled-assignment feedback, bounded task-owned stop authority.
+GPT registered candidate-base-refresh, no execution yet. Fresh read-only Astra
+is checking hosted supervisor architecture independently; no writes/tests.
+
+00:36 UTC: hosted merge-gate DSH task completed exit0 with terminal completed,
+25 tool calls, verified owned edit events, first pwd, one allowed final formatter
+and no subsequent calls, no checks/Git writes/children. Live PID settled.
+Primary reviewed four-file diff and git diff --check passed. GPT deterministic
+hosted-merge-gates execution passed at source fcd812d with this patch present:
+`459acb17ad9ea6b3117a31ea7e3934ee42910852ebdd735c5b0a8110d8083e59/2c03f680-1415-43b9-b375-5ea4ca867fce`,
+VPS, canonical worktree, direct execution3.455s/exit0. This proves local adapter
+behavior only, not actual Actions caller value, deployment or end-to-end delivery.
+Accept for canonical integration; Codex review remains deferred to integrated
+acceptance under project policy. Next implementation remains candidate base
+refresh followed by the protected hosted supervisor; no state reset or manual
+merge of runtime PR30 is authorized by these test results.
+
+00:34 UTC: fresh read-only Astra audit `hosted_acceptance_audit` confirmed the
+narrow caller-bound ruleset correction is safe: exact active/source-bound
+`current_user_can_bypass: never` from the same merge credential proves server
+enforcement even if actors are omitted. Preserve unknown/other caller values,
+present nonempty actors, and all head/review/CI/base gates as blocked. The old
+global-empty-list condition is implementation policy, not an owner mandate.
+It also independently confirmed two remaining gaps: existing candidates have
+no base-refresh path and hosted acceptance waits for a real supervisor.
+
+Sole DSH writer launched at canonical base fcd812d with immutable assignment
+`/tmp/sentinel-merge-gates-v1.txt`; owns impl.ts, wire.ts comments and two GitHub
+tests only. No children/checks/Git; one optional final formatter. First edit90s,
+handback5min/45calls, feedback next settled assignment. PID1245516 live cwd and
+NODE_ENV=production verified. Persisted sessionc3bea170-4775-4b75-856b-0e665bc7db90
+request header proves deepseek-official/deepseek-flash/max; settings use
+workspace-write. Exec73425 and stream `/tmp/sentinel-merge-gates-v1.stream.jsonl`.
+Playbook hash7e237d6002069b085f0ee1879972b18e6c8466a8c138fcbef508499b66291149.
+GPT owns registered evidence target hosted-merge-gates after settlement.
+
 Current checkpoint, 2026-09-11 20:39 UTC: owner forbids further tests/reviews and requires LOCAL iteration before GitHub deployment. Direct local launcher is configured, schedule paused, issue18 requeued under state063d4203615ffd9cf3025ca48de15bc8f9881434 with all three charges preserved; next eligibility21:25:48.847UTC. Owner temporary-cap question remains unanswered; no cap change is authorized yet. Small local-only source change now enforces owner instructions in exact scope0 Sentinel prompt and refuses push/PR/review/merge operations while preserving local candidate/state/read operations. No tests/reviews/checks run. DSH first local-only turn was stopped for repeated formatting research;9line partial constant preserved, PID25994 settled. Same session626e97f1 resumed with exact edits, completed/exit0 and no children/tests/reviews/Git writes; actual Flash/max and inherited workspace-write/ask verified. Second live env sampling missed the already-ended short process; explicit env-i NODE_ENVproduction launch retained. Primary will commit only local source plus ledger, install exact local revision without pushing or starting CI, and queue one direct local attempt at permitted time unless owner changes the cap. No autonomous candidate/delivery yet. Last real failure was nested supervisor/Codex sandbox startup; outer supervisor is bypassed for this owner-directed local experiment, model sandbox retained.
 
 Historical checkpoint, 2026-09-11 18:22 UTC: canonical a8fbd741013bb840bbe230ff6e0c6a44052d54fe still matches merged PR23. Installed runtime a411d89 and hourly minute53 scheduler are enabled, idle after invocation e3c0270f-d48c-4069-bab4-e418a1e619e0. Issue18 produced no candidate or PR: actual Luna/max receipt records interrupted/output_limit at 414585 characters against 400000. Reservation created18:06:34.323UTC remains charged; no requeue/reset. Actions34631726170 correctly reports red. Updater V2 worker e1d7633d settled exit0/completed, 67 calls, Flash/max/workspace-write/ask verified; no tests/Git writes/children, one formatter. Recovered checks: types e4370ed6 passed; host 1f2c331a failed 10 fixtures on missing completed-review resultId; loop 2614561b failed 5 fixtures on issueNumber null; local host66cb9055 and lint667abf66 passed. Ten new supervisor fixture directories were preserved after setup failures. Fresh read-only Astra fixture audit updater_fixture_audit confirmed missing resultId/issueNumber, wrong repository fixture binding, request lookup missing repo/base and setup cleanup defects; primary found rewritten receipt.createdAt and pending rollback terminalization needing bounded correction. Astra owns ledger/private state/Git; DSH V3 receives one bounded canonical correction for the four owned supervisor/loop source/test files; first edit90sec, handback6min/65calls, no children/checks/Git, one formatter. Playbook hash unchanged and credentials present in launch shell. Next: correct fixture construction, preserve original release timestamps and resumable rollback, then verify without rerunning unchanged failures. Local updater remains unaccepted and undeployed; output preparation and queued stale-base recovery remain required before useful live retry.

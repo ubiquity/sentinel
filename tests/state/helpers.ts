@@ -497,6 +497,32 @@ export class LostPushResponseRunner implements GitRunnerV1 {
   }
 }
 
+/** Transport wrapper: rejects the push before any remote ref is changed. */
+export class FailedPushRunner implements GitRunnerV1 {
+  pushAttempts = 0;
+
+  constructor(
+    private readonly inner: GitRunnerV1,
+    private readonly stderr = "remote: permission denied",
+  ) {}
+
+  runGit(
+    args: string[],
+    opts: { cwd: string; env?: Readonly<Record<string, string>> },
+  ): Promise<GitRunResultV1> {
+    if (args[0] === "push") {
+      this.pushAttempts++;
+      return Promise.resolve({
+        ok: false,
+        code: 128,
+        stdout: "",
+        stderr: this.stderr,
+      });
+    }
+    return this.inner.runGit(args, opts);
+  }
+}
+
 /**
  * Transport wrapper: throws (with an exception text that would leak a path if
  * it ever escaped) whenever the argument predicate matches, otherwise behaves

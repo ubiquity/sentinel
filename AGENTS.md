@@ -24,6 +24,9 @@ identity and isolated worker lanes are invariants. Preserve unrelated work.
 
 ## Development and review
 
+- Never add branch protection rules or branch rulesets to this project.
+  Do not recreate deleted protection rules.
+
 - Follow the owner's instruction to defer Codex review to integrated acceptance.
   Do not request Codex review for every module, small edit or internal merge.
 - Run focused deterministic checks during development. Integrate worker results

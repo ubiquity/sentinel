@@ -15,10 +15,23 @@ import { SystemClock } from "../contracts/ports.ts";
 import type { RepairCycleOutcomeV1 } from "../repair/loop.ts";
 import { parseRepairStateSnapshotV1 } from "../contracts/state-snapshots.ts";
 import { RollingStartBudget } from "../budget/mod.ts";
-import { DurableGitHubCooldownGate } from "../repair/github-cooldown.ts";
+import { HostedRepairCooldownGate } from "./hosted-cooldown.ts";
+import {
+  parseHostedEnvironment,
+  readHostedIdentityEnv,
+  readHostedRuntimeExecution,
+} from "./hosted-runtime.ts";
+import type { HostedExecutionIntentV1 } from "../contracts/hosted-supervisor.ts";
 import { fetchHttpTransport } from "../github/http.ts";
 import { runRepairEntrypoint } from "../main.ts";
 import { runActionsPreflight } from "./actions-preflight.ts";
+import {
+  type ActionsCiApprovalSummaryV1,
+  runActionsCiApproval,
+} from "./actions-ci.ts";
+import { readHostedReleaseReceipt } from "./actions-release.ts";
+import { createActionsCandidateRestorer } from "./actions-candidates.ts";
+import type { ReleaseRequestV1 } from "../contracts/release.ts";
 import { createRepairStateStore, DenoGitRunner } from "../state/mod.ts";
 import {
   composeLocalGitHub,
@@ -60,12 +73,21 @@ export interface ActionsRepairHostResultV1 {
   login: string;
   /** False when the model startup diagnostic failed for this run. */
   startupReady: boolean;
+  /** Bounded deterministic CI approval counts for this run. */
+  ciApproval: ActionsCiApprovalSummaryV1;
+  /** The exact saved supervisor execution this run settles. */
+  execution: HostedExecutionIntentV1;
 }
 
 /** Run one hosted repair pass through the actual production entrypoint. */
 export async function runActionsRepairHost(): Promise<
   ActionsRepairHostResultV1
 > {
+  // The protected native identity is validated before any credential, state,
+  // executable or network work: a malformed job identity fails with no request
+  // and no durable write.
+  const identity = parseHostedEnvironment(readHostedIdentityEnv(), "repair");
+
   const githubToken = requireEnv("GITHUB_TOKEN");
   const modelToken = requireEnv("UOS_AI_TOKEN");
   const trustedPath = requireEnv("PATH");
@@ -96,8 +118,16 @@ export async function runActionsRepairHost(): Promise<
     ),
   });
   const clock = new SystemClock();
+  // The saved supervisor pointer must bind exactly this run, attempt, launcher
+  // and controller revision BEFORE any repair seed, source, model, preflight or
+  // review-client preparation. A stale or foreign pointer never runs.
+  const execution = await readHostedRuntimeExecution({
+    state,
+    identity,
+    controllerSha,
+  });
   await ensureRepairStateSeed(state, clock);
-  const gate = new DurableGitHubCooldownGate({ state, clock });
+  const gate = new HostedRepairCooldownGate({ state, clock });
   const hostInput = {
     stateRoot,
     sourceDir,
@@ -133,6 +163,22 @@ export async function runActionsRepairHost(): Promise<
 
   const tracker = new LocalSessionTracker();
   const http = fetchHttpTransport();
+  // Lazy candidate restoration for a fresh Actions clone: the exact durable
+  // candidate objects are fetched only when a review snapshot, an ancestry
+  // check, or a correction checkout actually needs them (never before the
+  // repair loop).
+  const gitExecutable = await resolveExecutable("git", trustedPath);
+  const candidates = createActionsCandidateRestorer({
+    state,
+    gate,
+    token: githubToken,
+    http,
+    clock,
+    sourcePath,
+    scratch,
+    trustedPath,
+    gitExecutable,
+  });
   const github = scopeLocalRepairIssues(composeLocalGitHub({
     clock,
     state,
@@ -150,6 +196,7 @@ export async function runActionsRepairHost(): Promise<
     trustedPath,
     codexExecutable,
     tracker,
+    ensureCandidateObjects: candidates.ensure,
     modelBaseUrl: ACTIONS_UOS_BASE_URL,
   }));
   const model = new LocalCheckoutModelPort({
@@ -164,8 +211,18 @@ export async function runActionsRepairHost(): Promise<
     clock,
     modelBaseUrl: ACTIONS_UOS_BASE_URL,
     localIteration: false,
+    ensureCandidateObjects: candidates.ensure,
   });
   const config = createLocalRepositoryConfig();
+
+  // The hosted self release path reads the protected supervisor's persisted
+  // strict receipt from the same release state this host already reads. No
+  // HTTP, token, client or write is involved, and the obsolete raw
+  // workflow-green path is gone.
+  Object.assign(state, {
+    readHostedRelease: (request: ReleaseRequestV1) =>
+      readHostedReleaseReceipt({ state }, request),
+  });
 
   // Model startup availability is proved once, in-process, before the
   // deterministic pass. The probe already logs its bounded dummy-only failure;
@@ -204,7 +261,10 @@ export async function runActionsRepairHost(): Promise<
     }, {
       deadline: clock.now() + RUN_DEADLINE_MS,
       stepLimit: STEP_LIMIT,
-      modelStartsEnabled: startupReady,
+      // Only an ordinary hosted execution may start a model. Bootstrap, prior,
+      // candidate and rollback runs execute the deterministic entrypoint with
+      // no model starts while keeping every budget, limit and source behavior.
+      modelStartsEnabled: startupReady && execution.purpose === "ordinary",
     });
   } catch (error) {
     failure = error;
@@ -216,6 +276,18 @@ export async function runActionsRepairHost(): Promise<
   if (failure !== null) throw failure;
   if (outcome === null) throw new Error(STATIC_RUNNER);
 
+  // Deterministic CI approval for durable self-target candidates runs after
+  // the loop and the tracker drain, even when model startup was unavailable.
+  // The helper is bounded and never throws, so an approval failure cannot
+  // prevent deterministic bookkeeping or change the original error semantics.
+  const ciApproval = await runActionsCiApproval({
+    state,
+    gate,
+    http,
+    token: githubToken,
+    clock,
+  });
+
   const result: ActionsRepairHostResultV1 = {
     status: "ran",
     outcome,
@@ -223,6 +295,8 @@ export async function runActionsRepairHost(): Promise<
     baseSha,
     login: ACTIONS_LOGIN,
     startupReady,
+    ciApproval,
+    execution,
   };
   console.log(JSON.stringify(result));
   // The deterministic pass and its drain completed and were logged above; the

@@ -641,3 +641,44 @@ Deno.test("pushHead: real executor end-to-end conflict and applied reconcile", a
     await ctx.cleanup();
   }
 });
+
+Deno.test(
+  "pushHead: an already-equal remote SHA is applied from observation without local objects",
+  async () => {
+    const git = new FakeGitExecutor();
+    git.refs.set("heads/sentinel/repair/issue-1", SHA2);
+    // The candidate object is NOT available locally: any ancestry question
+    // would answer false, but the equal-ref fast path must never ask it.
+    git.ancestryEvery = false;
+    const { port } = makePort({ git });
+    const applied = await port.pushHead(
+      "heads/sentinel/repair/issue-1",
+      SHA2,
+      SHA2,
+    );
+    assert.ok(applied.ok);
+    if (!applied.ok) return;
+    assert.equal(applied.value, "applied");
+    assert.equal(git.remoteReads.length, 1);
+    assert.equal(git.ancestry.length, 0, "no local ancestry check");
+    assert.equal(git.pushes.length, 0, "no push for an already-published ref");
+
+    // Expected-ref semantics stay strict: a moved or absent ref conflicts.
+    const moved = await port.pushHead(
+      "heads/sentinel/repair/issue-1",
+      SHA3,
+      SHA1,
+    );
+    assert.equal(moved.ok, false);
+    if (!moved.ok) assert.equal(moved.error.kind, "conflict");
+    const absent = await port.pushHead(
+      "heads/sentinel/repair/issue-1",
+      SHA2,
+      null,
+    );
+    assert.equal(absent.ok, false);
+    if (!absent.ok) assert.equal(absent.error.kind, "conflict");
+    assert.equal(git.ancestry.length, 0, "no ancestry after conflicts");
+    assert.equal(git.pushes.length, 0, "no push after conflicts");
+  },
+);

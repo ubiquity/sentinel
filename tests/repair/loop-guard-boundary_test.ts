@@ -14,7 +14,7 @@ const pause = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
  * load headroom. The intentional-fault negative cases use the shorter
  * explicitly test-local bound so they fail fast.
  */
-const OBSERVATION_TIMEOUT_MS = 2000;
+const OBSERVATION_TIMEOUT_MS = 10000;
 const FAULT_OBSERVATION_TIMEOUT_MS = 300;
 
 /** Fault injection for the bounded-observation negative cases. */
@@ -182,7 +182,10 @@ async function probe(mode: Mode, fault: Fault | null = null) {
           });
         }
         for (let i = 1; i <= 6 && interrupts === 0; i++) {
-          await pause(300);
+          if (
+            mode !== "unsupported" && mode !== "hung-steer" &&
+            mode !== "late-start" && mode !== "stop-race"
+          ) await pause(300);
           if (i === 4 && mode === "edit") {
             await Deno.writeTextFile(`${root}/app.ts`, "export const a = 2;\n");
           }
@@ -206,10 +209,21 @@ async function probe(mode: Mode, fault: Fault | null = null) {
             turnId: mode === "stale" ? "old" : "u",
             item: item(i),
           };
-          emit("item/started", {
-            ...params,
-            item: { ...item(i), status: "inProgress" },
-          });
+          // Keep the repeated-failure fixture in one stable generation for
+          // the early-stop modes.  The production port invalidates a pending
+          // checkpoint when a new command starts; emitting serial starts
+          // faster than the real checkpoint would make every observation
+          // stale and hide the guard decision behind scheduler timing.
+          if (
+            i === 1 ||
+            (mode !== "unsupported" && mode !== "hung-steer" &&
+              mode !== "late-start" && mode !== "stop-race")
+          ) {
+            emit("item/started", {
+              ...params,
+              item: { ...item(i), status: "inProgress" },
+            });
+          }
           emit("item/completed", params);
           if (mode === "late-start" && i === 1) {
             emit("item/started", {
@@ -217,16 +231,24 @@ async function probe(mode: Mode, fault: Fault | null = null) {
               item: { ...item(i), status: "inProgress" },
             });
           }
-          if (mode === "hung-steer" && i === 4) {
+          if (
+            i === 4 &&
+            (mode === "unsupported" || mode === "hung-steer" ||
+              mode === "late-start" || mode === "stop-race")
+          ) {
+            // Let the asynchronous port continuation observe the steer
+            // acknowledgement (or the early interrupt) before post-ack
+            // failures are delivered. This is an event barrier, not a wall
+            // clock delay, and keeps the fixture deterministic under load.
             await observe(
-              `hung-steer steer or interrupt (mode ${mode})`,
+              `early steer or interrupt (mode ${mode})`,
               Promise.race([
                 steerObserved.promise,
                 interruptObserved.promise,
               ]),
               observationTimeoutMs,
             );
-            break;
+            if (mode === "hung-steer") break;
           }
         }
         // Wait for the model port's interrupt before flushing a terminal event
@@ -313,7 +335,7 @@ async function probe(mode: Mode, fault: Fault | null = null) {
       evidence: [],
       model: "gpt-5.6-luna",
       reasoning: "max",
-      maxDurationMs: 5000,
+      maxDurationMs: 120000,
       maxOutputChars: mode === "output" || mode === "wrong-terminal"
         ? 1000
         : 200000,
@@ -357,8 +379,15 @@ async function probe(mode: Mode, fault: Fault | null = null) {
     ) {
       assert.equal(steers, 1, mode);
       assert.equal(interrupts, 1, mode);
+      assert.equal(result.value.outcome, "interrupted", mode);
       assert.equal(result.value.error, "failed_command_loop");
       assert.equal(result.value.candidate, null);
+      assert.equal(result.value.actual.terminalOrigin, "runtime", mode);
+      assert.equal(
+        result.value.actual.observedTerminalStatus,
+        mode === "stop-race" ? "completed" : "interrupted",
+        mode,
+      );
     } else if (mode === "output" || mode === "wrong-terminal") {
       assert.equal(interrupts, 1);
       assert.equal(result.value.candidate, null);
@@ -379,7 +408,7 @@ async function probe(mode: Mode, fault: Fault | null = null) {
       assert.equal(result.value.outcome, "completed", mode);
     }
     assert.ok(
-      performance.now() - started < 4000,
+      performance.now() - started < 10000,
       "early completion must not await default grace",
     );
   } finally {

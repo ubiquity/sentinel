@@ -24,6 +24,8 @@ export * from "./replay-result.ts";
 export * from "./release.ts";
 export * from "./github-cooldown.ts";
 export * from "./state-snapshots.ts";
+// Hosted supervisor records (separate from Deno release records).
+export * from "./hosted-supervisor.ts";
 // Merge authorization parser (type with the ports below).
 export * from "./merge-request.ts";
 // Ports.

@@ -37,6 +37,15 @@ import { canonicalStringify } from "../contracts/canonical.ts";
 import { parseGitHubCooldownV1 } from "../contracts/github-cooldown.ts";
 import type { GitHubCooldownV1 } from "../contracts/github-cooldown.ts";
 import {
+  parseHostedReleaseRecordV1,
+  parseHostedRuntimeRecordV1,
+  validateHostedStateTransition,
+} from "../contracts/hosted-supervisor.ts";
+import type {
+  HostedReleaseRecordV1,
+  HostedRuntimeRecordV1,
+} from "../contracts/hosted-supervisor.ts";
+import {
   parseIncidentEvidenceV1,
   parseIncidentSummaryV1,
 } from "../contracts/incident.ts";
@@ -216,9 +225,9 @@ function parseStateManifest(
 /**
  * Identity source of one validated state record. Every record kind carries
  * exactly one of the two: existing records identify by their string `id`,
- * while the durable GitHub cooldown fragment is deliberately a kind-less
- * plain data record addressing its storage slot by its positive installation
- * id (`githubCooldowns/sha256(String(installationId)).json`).
+ * while the durable GitHub cooldown fragment (repair and release roles) is
+ * deliberately a kind-less plain data record addressing its storage slot by its
+ * positive installation id (`githubCooldowns/sha256(String(installationId)).json`).
  */
 interface RecordIdentitySource {
   id?: string;
@@ -288,6 +297,24 @@ const RECORD_COLLECTIONS: Record<StateKind, RecordCollection[]> = {
       directory: "releases",
       kind: "release_record",
       parse: parseReleaseRecordV1,
+      rows: [],
+    },
+    {
+      directory: "hostedRuntimes",
+      kind: "hosted_runtime",
+      parse: parseHostedRuntimeRecordV1,
+      rows: [],
+    },
+    {
+      directory: "hostedReleases",
+      kind: "hosted_release",
+      parse: parseHostedReleaseRecordV1,
+      rows: [],
+    },
+    {
+      directory: "githubCooldowns",
+      kind: "github_cooldown",
+      parse: parseGitHubCooldownV1,
       rows: [],
     },
   ],
@@ -618,7 +645,11 @@ export class GitStateStore implements StateStore {
         return portError("invalid", transitionMessage);
       }
 
-      let candidate: { pushed: boolean; head: GitSha };
+      let candidate: {
+        pushed: boolean;
+        head: GitSha;
+        pushFailureKind: PortErrorV1["kind"] | null;
+      };
       try {
         candidate = await this.buildAndPush(
           op,
@@ -647,6 +678,16 @@ export class GitStateStore implements StateStore {
       const verifyParsed = !verify.ok
         ? ({ status: "invalid" } as const)
         : this.parseLsRemote(verify.stdout, ref);
+      if (verifyParsed.status === "absent" && !candidate.pushed) {
+        // A successful authoritative reread proves that a failed push did not
+        // create the ref. Preserve the safe transport category so a trusted
+        // caller can distinguish authentication from local availability
+        // failure without exposing Git's raw stderr.
+        return portError(
+          candidate.pushFailureKind ?? "unavailable",
+          "state push was not applied; the remote ref remains absent",
+        );
+      }
       if (verifyParsed.status !== "found") {
         return portOk({ status: "ambiguous", currentHead: priorHead });
       }
@@ -679,7 +720,7 @@ export class GitStateStore implements StateStore {
    * Forms the candidate commit — parent pinned to the exact expected head
    * (no checkout/reset is ever performed; plumbing only) — with a unique
    * trusted write nonce in the commit message, then pushes without force.
-   * Returns the actual commit identity and whether the push reported success;
+   * Returns the actual commit identity, push result and safe failure category;
    * reconciliation (applied/conflict/ambiguous) happens in the caller.
    */
   private async buildAndPush(
@@ -688,7 +729,11 @@ export class GitStateStore implements StateStore {
     expectedHead: GitSha | null,
     kind: StateKind,
     ref: string,
-  ): Promise<{ pushed: boolean; head: GitSha }> {
+  ): Promise<{
+    pushed: boolean;
+    head: GitSha;
+    pushFailureKind: PortErrorV1["kind"] | null;
+  }> {
     const manifest: StateManifestV1 = {
       version: "v1",
       kind: MANIFEST_KIND[kind],
@@ -745,7 +790,11 @@ export class GitStateStore implements StateStore {
       "origin",
       `${ourHead}:${ref}`,
     ]);
-    return { pushed: push.ok, head: ourHead as GitSha };
+    return {
+      pushed: push.ok,
+      head: ourHead as GitSha,
+      pushFailureKind: push.ok ? null : this.classifyGitError(push),
+    };
   }
 
   private recordFiles(
@@ -781,14 +830,22 @@ export class GitStateStore implements StateStore {
       add("github_cooldown", repair.githubCooldowns);
     } else {
       const release = next as ReleaseStateSnapshotV1;
-      const directory = collectionDirectory(kind, "release_record");
-      for (const value of release.releases) {
-        records.push({
-          id: recordIdentity(value as RecordIdentitySource),
-          directory,
-          value,
-        });
-      }
+      const add = (recordKind: string, rows: readonly unknown[]) => {
+        const directory = collectionDirectory(kind, recordKind);
+        for (const value of rows) {
+          records.push({
+            id: recordIdentity(value as RecordIdentitySource),
+            directory,
+            value,
+          });
+        }
+      };
+      add("release_record", release.releases);
+      add("hosted_runtime", release.hostedRuntimes);
+      add("hosted_release", release.hostedReleases);
+      // Release-role cooldowns use the same kind-less fragment convention as
+      // the repair role; both are addressed by installation id.
+      add("github_cooldown", release.githubCooldowns);
     }
     return Promise.all(
       records.map(async (record) => ({
@@ -1021,6 +1078,15 @@ export class GitStateStore implements StateStore {
           sequence: manifest.sequence,
           updatedAt: manifest.updatedAt,
           releases: orderRecords(records.releases) as ReleaseRecordV1[],
+          hostedRuntimes: orderRecords(
+            records.hostedRuntimes,
+          ) as HostedRuntimeRecordV1[],
+          hostedReleases: orderRecords(
+            records.hostedReleases,
+          ) as HostedReleaseRecordV1[],
+          githubCooldowns: orderRecords(
+            records.githubCooldowns,
+          ) as GitHubCooldownV1[],
         };
         snapshot = parseReleaseStateSnapshotV1(release);
       }
@@ -1145,6 +1211,17 @@ function validateSnapshotTransition(
   if (prior === null) {
     if (next.sequence !== 1) {
       return "the first state snapshot must have sequence 1";
+    }
+    // Initial hosted validation: a first release snapshot cannot smuggle
+    // historical proofs, a non-initial generation or terminal receipts.
+    if (!("work" in next)) {
+      const firstRelease = next as ReleaseStateSnapshotV1;
+      return validateHostedStateTransition(
+        [],
+        [],
+        firstRelease.hostedRuntimes,
+        firstRelease.hostedReleases,
+      );
     }
   } else {
     if (next.sequence !== prior.sequence + 1) {
@@ -1396,14 +1473,31 @@ function validateRepairTransition(
     // pending/unavailable observations may update observed reviewer, result,
     // findings and outcome — including becoming completed.
   }
-  // Durable GitHub cooldowns are fail-closed preservation state: one record
-  // per affected installation, never dropped, never moved to a different
-  // installation, and a manual fail-closed hold (null deadline) can never be
-  // silently converted into a finite retry deadline. A new observation may
-  // refresh deadline, observation identity, backoff and observedAt for the
-  // same installation; the m01 writer owns that update policy.
-  for (const priorRecord of prior.githubCooldowns) {
-    const nextRecord = next.githubCooldowns.find(
+  // Durable GitHub cooldowns are fail-closed preservation state; the same
+  // guard protects both refs.
+  return cooldownTransitionMessage(
+    prior.githubCooldowns,
+    next.githubCooldowns,
+  );
+}
+
+/**
+ * Durable GitHub cooldowns are fail-closed preservation state in both refs:
+ * one record per affected installation, never dropped, never moved to a
+ * different installation, and a hold may only ever become STRICTER. A manual
+ * fail-closed hold (null deadline) can never be silently converted into a
+ * finite retry deadline; a finite deadline can never be shortened (moving to
+ * null is a stricter manual hold and stays allowed); and the bounded fallback
+ * index can never decrease. A new observation may otherwise refresh deadline,
+ * observation identity and observedAt for the same installation; the
+ * role-owned writer owns that update policy.
+ */
+function cooldownTransitionMessage(
+  priorRecords: readonly GitHubCooldownV1[],
+  nextRecords: readonly GitHubCooldownV1[],
+): string | null {
+  for (const priorRecord of priorRecords) {
+    const nextRecord = nextRecords.find(
       (record) => record.installationId === priorRecord.installationId,
     );
     if (nextRecord === undefined) {
@@ -1417,6 +1511,16 @@ function validateRepairTransition(
       nextRecord.retryNotBefore !== null
     ) {
       return "a manual github cooldown hold cannot become a retry deadline";
+    }
+    if (
+      priorRecord.retryNotBefore !== null &&
+      nextRecord.retryNotBefore !== null &&
+      nextRecord.retryNotBefore < priorRecord.retryNotBefore
+    ) {
+      return "a github cooldown deadline cannot be shortened";
+    }
+    if (nextRecord.secondaryBackoff < priorRecord.secondaryBackoff) {
+      return "a github cooldown backoff cannot decrease";
     }
   }
   return null;
@@ -1469,7 +1573,22 @@ function validateReleaseTransition(
       return "release record phase transition is not allowed";
     }
   }
-  return null;
+  // Durable cooldowns are preserved on this ref exactly as on the repair ref:
+  // a record can never disappear, move backward or lift a manual hold.
+  const cooldownMessage = cooldownTransitionMessage(
+    prior.githubCooldowns,
+    next.githubCooldowns,
+  );
+  if (cooldownMessage !== null) return cooldownMessage;
+  // Hosted supervisor records share this ref through their own collections;
+  // the existing Deno checks above run first, then the hosted preservation and
+  // pointer-movement rules.
+  return validateHostedStateTransition(
+    prior.hostedRuntimes,
+    prior.hostedReleases,
+    next.hostedRuntimes,
+    next.hostedReleases,
+  );
 }
 
 // ---------------------------------------------------------------------------

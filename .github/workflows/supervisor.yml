@@ -1,0 +1,158 @@
+# Fixed hosted Sentinel supervisor.
+#
+# Dispatched at the immutable protected source ref by supervisor-dispatch.yml
+# (five-minute cadence) and by repair.yml (hourly/manual). prepare and finalize
+# run under the sentinel-supervisor environment, which alone may read the App
+# private key; the repair job runs the selected runtime with no App credential
+# and starts no model for verification executions.
+name: sentinel-supervisor
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: sentinel-supervisor
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: github.ref == 'refs/heads/sentinel-supervisor'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: sentinel-supervisor
+    outputs:
+      run: ${{ steps.prepare.outputs.run }}
+      revision: ${{ steps.prepare.outputs.revision }}
+    steps:
+      - name: Checkout protected supervisor source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        with:
+          deno-version: v2.x
+      - name: Mint the scoped supervisor installation token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: Iv23liB8E2FcIZd9i7Pg
+          private-key: ${{ secrets.SENTINEL_SUPERVISOR_APP_PRIVATE_KEY }}
+          owner: ubiquity
+          repositories: sentinel
+          permission-contents: write
+      - name: Prepare hosted supervisor run
+        id: prepare
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SENTINEL_SUPERVISOR_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: deno task supervisor:run
+
+  repair:
+    needs: prepare
+    if: github.ref == 'refs/heads/sentinel-supervisor' && needs.prepare.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: write
+      actions: write
+      issues: write
+      pull-requests: write
+      checks: read
+      statuses: read
+    concurrency:
+      group: sentinel-repair
+      cancel-in-progress: false
+    steps:
+      - name: Checkout protected launcher source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.sha }}
+          path: launcher
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Checkout selected runtime source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ needs.prepare.outputs.revision }}
+          path: runtime
+          # Full history: a depth-1 checkout keeps a shallow boundary through
+          # the local copy and makes the base-refresh merge see no ancestor.
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        with:
+          deno-version: v2.x
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - name: Install pinned Codex app-server
+        run: npm install --global @openai/codex@0.154.0
+      # GitHub-hosted Linux runners need unprivileged user namespaces for
+      # bubblewrap; same handling as openai/codex-action action.yml 289-315:
+      # https://github.com/openai/codex-action/blob/main/action.yml
+      # Ephemeral runner only; no model profile or host setting changes.
+      - name: Enable Linux user namespaces for bubblewrap
+        continue-on-error: true
+        if: runner.os == 'Linux' && runner.environment == 'github-hosted'
+        run: |
+          set -euo pipefail
+          current_userns=$(sysctl -n kernel.unprivileged_userns_clone 2>/dev/null || true)
+          if [ -n "$current_userns" ] && [ "$current_userns" != "1" ]; then
+            sudo sysctl -w kernel.unprivileged_userns_clone=1
+          fi
+          current_apparmor=$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || true)
+          if [ -n "$current_apparmor" ] && [ "$current_apparmor" != "0" ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+      - name: Run selected Sentinel runtime
+        working-directory: launcher
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          UOS_AI_TOKEN: ${{ secrets.UOS_AI_TOKEN }}
+        run: >-
+          deno run
+          --allow-read
+          --allow-write
+          --allow-run
+          --allow-net="api.github.com,*.blob.core.windows.net"
+          --allow-env=HOME,PATH,GITHUB_TOKEN,UOS_AI_TOKEN,NODE_V8_COVERAGE,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_REPOSITORY,GITHUB_REF,GITHUB_SHA,GITHUB_WORKFLOW_SHA,GITHUB_WORKFLOW_REF,GITHUB_JOB
+          src/host/hosted-runtime.ts
+
+  finalize:
+    needs: [prepare, repair]
+    if: always() && github.ref == 'refs/heads/sentinel-supervisor'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: sentinel-supervisor
+    steps:
+      - name: Checkout protected supervisor source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        with:
+          deno-version: v2.x
+      - name: Mint the scoped supervisor installation token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: Iv23liB8E2FcIZd9i7Pg
+          private-key: ${{ secrets.SENTINEL_SUPERVISOR_APP_PRIVATE_KEY }}
+          owner: ubiquity
+          repositories: sentinel
+          permission-contents: write
+      - name: Finalize hosted supervisor run
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SENTINEL_SUPERVISOR_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: deno task supervisor:run
