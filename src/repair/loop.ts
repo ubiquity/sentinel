@@ -25,6 +25,7 @@ import type {
   LegacyBaseRefreshLossProofV1,
   MergeOutcomeV1,
   ModelRunReceiptV1,
+  ModelRunRequestV1,
   PortResultV1,
   ReplayPort,
   ReviewObservationV1,
@@ -90,10 +91,8 @@ import {
   reviewReceiptId,
 } from "./keys.ts";
 import {
-  countUnfinishedPullRequests,
   hasPublishedIdentity,
   isWaiting,
-  MAX_UNFINISHED_PRS,
   rankEligibleWork,
   rankReviewDrain,
   RETIRED_MERGED_MESSAGE,
@@ -163,21 +162,6 @@ const DEFAULT_STEP_LIMIT = 32;
 export const REPAIR_RUN_CEILING_MS = 120 * 60_000;
 /** No NEW model work may start after 90 minutes of one run (plan §4). */
 export const REPAIR_MODEL_CUTOFF_MS = 90 * 60_000;
-const MAX_IMPLEMENTATION_ATTEMPTS = 4;
-/**
- * Plan §"Development and review": at most three review rounds per acceptance
- * cycle. Rounds bound every review attempt for one exact head, including a
- * re-attempt after an attempt concluded without an accepted verdict; past the
- * allowance the task is blocked with the recorded reason, never merged.
- */
-const MAX_REVIEW_ROUNDS = 3;
-/**
- * Bounded review-drain attempts per run: the retroactive pass releases at most
- * this many transient `review_quota` records, highest-priority/oldest first,
- * once each per run. The shared model-start budget still bounds the actual
- * starts; this only bounds the pass's own bookkeeping.
- */
-const MAX_REVIEW_DRAIN_PER_RUN = 8;
 const MAX_OUTPUT_LIMIT_BYTES = 4096;
 /**
  * Frozen gateway default model id. It is used ONLY when neither the trusted
@@ -318,6 +302,8 @@ export interface RepairCycleDepsV1 {
   modelId?: string;
   /** The one production admission controller (RollingStartBudget). */
   budget: BudgetControllerV1;
+  /** Matrix-owned implementations settle only through authenticated artifact ingestion. */
+  externalImplementations?: boolean;
 }
 
 /** Read-only trusted identity lookup paired with the concrete fixture resolver. */
@@ -362,7 +348,11 @@ export type PostDrainReviewContinuationV1 = (
   operationKeys: readonly string[],
 ) => Promise<RepairCycleOutcomeV1 | null>;
 
-interface LoopContextV1 {
+/**
+ * One loaded run context. Exported for the matrix planner/ingester, which are
+ * trusted consumers of the same selection, preparation and receipt paths.
+ */
+export interface LoopContextV1 {
   snapshot: RepairStateSnapshotV1;
   head: GitSha | null;
   /** Run-relative bounds for every start decision in this run. */
@@ -377,36 +367,98 @@ interface LoopContextV1 {
 }
 
 /** Effective run bounds: caller deadline clamped by the fixed ceiling. */
-interface RunBoundsV1 {
+export interface RunBoundsV1 {
   /** Total deadline: min(caller deadline, run start + 120 minutes). */
   runDeadline: number;
   /** No NEW model work may start at/after this point of the run. */
   modelCutoff: number;
 }
 
-type StepResultV1 =
+export type StepResultV1 =
   | { kind: "progress" }
   | { kind: "idle" }
   | { kind: "margin"; detail: string }
   | { kind: "state_error"; detail: string }
   | { kind: "deferred"; detail: string };
 
-/** One run of the bounded repair loop. */
-export async function runRepairCycle(
+const MATRIX_IMPLEMENTATION_DEFERRED: StepResultV1 = {
+  kind: "deferred",
+  detail: "implementation admission belongs to the matrix planner",
+};
+const MATRIX_ARTIFACT_DEFERRED: StepResultV1 = {
+  kind: "deferred",
+  detail: "implementation awaits its authenticated matrix artifact",
+};
+
+/**
+ * One fully prepared, durably admitted implementation start: the exact
+ * `ModelRunRequestV1` a matrix cell may run, the persisted record carrying its
+ * implementation intent and the fresh context after that write. Produced by
+ * `prepareImplementationStart` and consumed either in-process by
+ * `executeImplementationStep` or by the trusted matrix cell/ingester. The
+ * `kind` discriminant is shared with `StepResultV1`, so a caller can tell the
+ * two apart without casts.
+ */
+export interface PreparedImplementationV1 {
+  kind: "prepared";
+  /** Persisted record with the implementation intent and counted attempt. */
+  record: WorkRecordV1;
+  /** Fresh authoritative context after the admission/intent write. */
+  context: LoopContextV1;
+  /** Durable reservation identity that admitted this exact start. */
+  reservationId: string;
+  /** Exact secret-free request the cell must run. */
+  request: ModelRunRequestV1;
+}
+
+/**
+ * True only when this record's NEXT work step is an implementation start the
+ * ordinary lifecycle would dispatch to `executeImplementationStep`: a GitHub
+ * issue at `work`, with no in-flight operation intent, no unusable candidate
+ * lifecycle, a deterministic branch and a real session bound, and either a
+ * fresh candidate (no saved head) or a review-rejected candidate correction.
+ * This mirrors the real dispatcher's implementation branch; review, delivery,
+ * preservation, live-intent and unpublished-head records are left to the
+ * ordinary serial lifecycle and must never receive a matrix grant.
+ */
+export function isMatrixImplementationReadyV1(
+  record: WorkRecordV1,
+  snapshot: RepairStateSnapshotV1,
+  config: RepositoryConfigV1,
+): boolean {
+  if (record.source.kind !== "issue") return false;
+  if (record.nextStep !== "work") return false;
+  if (record.intent !== null) return false;
+  const candidateState = record.target.candidateState;
+  if (candidateState !== undefined && candidateState.preserved === null) {
+    return false;
+  }
+  if (record.target.branch === null) return false;
+  if (config.sessionBound === null) return false;
+  return record.target.head === null ||
+    headRejectedByReview(snapshot, record);
+}
+
+/**
+ * Effective run bounds for one trusted run. The matrix planner and the repair
+ * cycle share this exact construction so a planned cell can never run under
+ * looser bounds than the run that admitted it.
+ *
+ * The caller-supplied deadline is clamped to the fixed run ceiling (the
+ * stricter of the two always wins), and no NEW model work (implementation
+ * start or review request) may start after the 90-minute cutoff. A NaN caller
+ * deadline is not a bound at all (every comparison against NaN is false, so it
+ * must never bypass the fixed ceiling): it is treated as unbounded and the
+ * ceiling governs. The real clock is the wall clock; fakes advance it inside
+ * port calls so a step that crosses the cutoff mid-flight still fails closed.
+ * A trusted `runStartedAt` from the entrypoint anchors both bounds to the
+ * ORIGINAL run start; it is never moved forward by a shortened deadline (a
+ * future value is rejected).
+ */
+export function createRunBounds(
   deps: RepairCycleDepsV1,
   options: RepairCycleOptionsV1,
-  registerPostDrain?: (continuation: PostDrainReviewContinuationV1) => void,
-): Promise<RepairCycleOutcomeV1> {
-  // Run-relative time bounds: the caller-supplied deadline is clamped to the
-  // fixed run ceiling (the stricter of the two always wins), and no NEW model
-  // work (implementation start or review request) may start after the 90-minute
-  // cutoff. A NaN caller deadline is not a bound at all (every comparison
-  // against NaN is false, so it must never bypass the fixed ceiling): it is
-  // treated as unbounded and the ceiling governs. The real clock is the wall
-  // clock; fakes advance it inside port calls so a step that crosses the
-  // cutoff mid-flight still fails closed. A trusted `runStartedAt` from the
-  // entrypoint anchors both bounds to the ORIGINAL run start; it is never
-  // moved forward by a shortened deadline (a future value is rejected).
+): RunBoundsV1 {
   const nowAtStart = deps.clock.now();
   const startedAt = options.runStartedAt !== undefined &&
       Number.isSafeInteger(options.runStartedAt) &&
@@ -427,7 +479,17 @@ export async function runRepairCycle(
   const modelCutoff = options.modelStartsEnabled === false
     ? Number.NEGATIVE_INFINITY
     : startedAt + REPAIR_MODEL_CUTOFF_MS;
-  const bounds: RunBoundsV1 = { runDeadline, modelCutoff };
+  return { runDeadline, modelCutoff };
+}
+
+/** One run of the bounded repair loop. */
+export async function runRepairCycle(
+  deps: RepairCycleDepsV1,
+  options: RepairCycleOptionsV1,
+  registerPostDrain?: (continuation: PostDrainReviewContinuationV1) => void,
+): Promise<RepairCycleOutcomeV1> {
+  const bounds = createRunBounds(deps, options);
+  const { runDeadline } = bounds;
   const stepLimit = options.stepLimit ?? DEFAULT_STEP_LIMIT;
   let steps = 0;
   let sourceError: string | null = null;
@@ -436,6 +498,9 @@ export async function runRepairCycle(
   // bounds are deferred so that lower-ranked deterministic work still runs;
   // the run ends in the existing typed "margin" outcome when nothing remains.
   const deferred = new Set<string>();
+  const matrixDeferred = new Set<string>();
+  let horizonDeferred = false;
+  let postDrainAllowed = false;
   // One run-local attempt per task and legacy-loss phase: a phase is never
   // proved twice in the same run, even after a state reload.
   const legacyLossAttempted = new Set<string>();
@@ -456,7 +521,7 @@ export async function runRepairCycle(
   let lastSnapshot: RepairStateSnapshotV1 | null = null;
   let continued = false;
   registerPostDrain?.(async (operationKeys) => {
-    if (continued || lastSnapshot === null) return null;
+    if (!postDrainAllowed || continued || lastSnapshot === null) return null;
     continued = true;
     // Reuse the original absolute bounds and remaining transitions. Disabling
     // starts is an additional guard; the narrow dispatcher below never selects
@@ -780,6 +845,7 @@ export async function runRepairCycle(
       if (!didWork && sourceError !== null) {
         return { status: "source_error", detail: sourceError };
       }
+      postDrainAllowed = true;
       return {
         status: "idle",
         detail: idleDetail(context.snapshot, rank.skipped),
@@ -805,9 +871,14 @@ export async function runRepairCycle(
       // This record cannot start under the current bounds; keep looking for
       // eligible deterministic work before giving up (never block it).
       deferred.add(id);
+      horizonDeferred = true;
       cannotFit = `next operation for ${id} cannot fit`;
     }
     if (selected === null) {
+      // Only matrix ownership can leave this deterministic continuation open.
+      // A horizon refusal anywhere in the run remains a real margin exit.
+      postDrainAllowed = !horizonDeferred &&
+        rank.ordered.every((id) => matrixDeferred.has(id));
       return {
         status: "margin",
         detail: deferred.size > 0
@@ -821,6 +892,10 @@ export async function runRepairCycle(
     context.executionBaseline = null;
     if (result.kind === "deferred") {
       deferred.add(selected.id);
+      if (
+        result === MATRIX_IMPLEMENTATION_DEFERRED ||
+        result === MATRIX_ARTIFACT_DEFERRED
+      ) matrixDeferred.add(selected.id);
       continue;
     }
     if (result.kind === "state_error") {
@@ -833,6 +908,7 @@ export async function runRepairCycle(
       if (!didWork && sourceError !== null) {
         return { status: "source_error", detail: sourceError };
       }
+      postDrainAllowed = true;
       return {
         status: "idle",
         detail: `no eligible work after ${steps} steps`,
@@ -847,15 +923,17 @@ export async function runRepairCycle(
  * Release the next transient review-quota record's wait so the ordinary
  * ranking selects it on a following iteration. The drain order is highest
  * priority first, then oldest first (pure `rankReviewDrain`), and each record is
- * released at most once per run. Returns null when there is nothing left to
- * drain or the next candidate cannot fit the remaining run bounds.
+ * released at most once per run. There is no fixed per-run truncation: the
+ * pass walks the ACTUAL pending collection and every candidate must still fit
+ * the remaining run bounds (`declaredOperationFits`), while the outer loop's
+ * step budget and deadline bound the run. Returns null when there is nothing
+ * left to drain or the next candidate cannot fit the remaining run bounds.
  */
 async function releaseReviewQuotaWait(
   deps: RepairCycleDepsV1,
   context: LoopContextV1,
   attempted: Set<string>,
 ): Promise<StepResultV1 | null> {
-  if (attempted.size >= MAX_REVIEW_DRAIN_PER_RUN) return null;
   for (const id of rankReviewDrain(context.snapshot)) {
     if (attempted.has(id)) continue;
     attempted.add(id);
@@ -874,8 +952,8 @@ async function releaseReviewQuotaWait(
  * naming its deterministic branch but no persisted `target.pr` yet. The PR is
  * adopted only when it is OPEN, its head is the record's exact candidate
  * head, and its base is the configured base branch; a foreign or divergent PR
- * is never adopted. This runs before ranking, so discovery precedes cap
- * enforcement (issue-141 / PR 433).
+ * is never adopted. This runs before ranking, so discovery precedes selection
+ * (issue-141 / PR 433).
  */
 async function reconcileOrphanPublication(
   deps: RepairCycleDepsV1,
@@ -950,18 +1028,74 @@ function executionAdvanced(
 // same step never races its own earlier checkpoint.
 // ---------------------------------------------------------------------------
 
+/** Rearm only authentic historical emissions of the retired spending ceilings. */
+function retiredCapNextStep(
+  deps: RepairCycleDepsV1,
+  record: WorkRecordV1,
+): "work" | "review" | null {
+  if (
+    record.nextStep !== "blocked" || record.blocker?.kind !== "review_quota" ||
+    record.intent !== null || record.wait !== null ||
+    configFor(deps, record.repository) === null
+  ) return null;
+  const message = record.blocker.message;
+  if (
+    record.counters.attempts >= 4 &&
+    message === "implementation attempt budget exhausted"
+  ) return "work";
+  const prefix = "review rounds exhausted without an accepted verdict (";
+  if (
+    record.counters.reviewRounds >= 3 && record.target.head !== null &&
+    record.target.pr !== null && message.startsWith(prefix) &&
+    message.endsWith(")") &&
+    message.length > prefix.length + 1
+  ) return "review";
+  return null;
+}
+
 async function loadSnapshot(
   deps: RepairCycleDepsV1,
   bounds: RunBoundsV1,
 ): Promise<LoopContextV1 | null> {
   const read = await deps.state.readRepair();
   if (!read.ok || read.value.status === "absent") return null;
-  return {
+  const context: LoopContextV1 = {
     snapshot: read.value.snapshot,
     head: read.value.head,
     bounds,
     executionBaseline: null,
   };
+  if (
+    deps.clock.now() < bounds.runDeadline &&
+    context.snapshot.work.some((record) =>
+      retiredCapNextStep(deps, record) !== null
+    )
+  ) {
+    const now = deps.clock.now();
+    const restored = await persistTransition(deps, context, (draft) => {
+      draft.work = draft.work.map((record) => {
+        const nextStep = retiredCapNextStep(deps, record);
+        return nextStep === null
+          ? record
+          : { ...record, nextStep, blocker: null, updatedAt: now };
+      });
+    });
+    if (restored.kind !== "progress") return null;
+  }
+  return context;
+}
+
+/**
+ * Trusted fresh-state load for the matrix planner and ingester: the exact same
+ * authoritative read and context shape the repair cycle uses. An absent or
+ * unavailable state returns null, and the caller fails closed instead of
+ * planning or ingesting against a fabricated empty state.
+ */
+export async function loadRepairContext(
+  deps: RepairCycleDepsV1,
+  bounds: RunBoundsV1,
+): Promise<LoopContextV1 | null> {
+  return await loadSnapshot(deps, bounds);
 }
 
 /** Seed the repair branch once with sequence 1 when no snapshot exists. */
@@ -1266,8 +1400,7 @@ function legacyLossPhase(
   if (record.nextStep === "work") return "discover";
   if (
     record.nextStep === "blocked" &&
-    record.blocker?.kind === "missing_evidence" &&
-    record.counters.attempts < MAX_IMPLEMENTATION_ATTEMPTS
+    record.blocker?.kind === "missing_evidence"
   ) {
     return "restore";
   }
@@ -1815,6 +1948,12 @@ function declaredOperationFits(
   if (now >= bounds.runDeadline) return false;
   const config = configFor(deps, record.repository);
   if (config === null) return false;
+  // Fresh matrix intake still needs the ordinary deterministic branch assignment.
+  // No model admission occurs until the planner prepares the resulting record.
+  if (
+    deps.externalImplementations === true && record.nextStep === "work" &&
+    record.intent === null && record.target.branch === null
+  ) return true;
   if (isModelStartAction(context.snapshot, record)) {
     if (now >= bounds.modelCutoff) return false;
     const bound = config.sessionBound;
@@ -1980,6 +2119,9 @@ async function executeWorkStep(
 
   // A saved implementation intent is never resubmitted; fail closed.
   if (record.intent !== null && record.intent.kind === "implementation") {
+    if (deps.externalImplementations === true) {
+      return MATRIX_ARTIFACT_DEFERRED;
+    }
     return handleImplementationUncertainty(deps, context, record);
   }
 
@@ -2864,12 +3006,13 @@ function withReplayEvidence(
 // Implementation: durable admission, durable intent, then one run.
 // ---------------------------------------------------------------------------
 
-async function executeImplementationStep(
+export async function prepareImplementationStart(
   deps: RepairCycleDepsV1,
   context: LoopContextV1,
   record: WorkRecordV1,
   config: RepositoryConfigV1,
-): Promise<StepResultV1> {
+  beforeAdmission?: (request: ModelRunRequestV1) => Promise<boolean>,
+): Promise<StepResultV1 | PreparedImplementationV1> {
   // No NEW model work after the 90-minute cutoff (or at/after the total run
   // deadline): the start is rejected before any reservation is made (nothing
   // is charged), and the record stays exactly as it was so a later run inside
@@ -2883,18 +3026,6 @@ async function executeImplementationStep(
     };
   }
   const now = deps.clock.now();
-  if (record.counters.attempts >= MAX_IMPLEMENTATION_ATTEMPTS) {
-    return persistWork(
-      deps,
-      context,
-      markBlocked(
-        record,
-        "review_quota",
-        "implementation attempt budget exhausted",
-        now,
-      ),
-    );
-  }
   const bound = config.sessionBound;
   if (bound === null) {
     return persistWork(
@@ -3017,6 +3148,30 @@ async function executeImplementationStep(
       kind: "deferred",
       detail:
         "implementation start is past the model cutoff or no longer fits the run bounds",
+    };
+  }
+
+  const rejectedHead = headRejectedByReview(context.snapshot, record);
+  const findings = correctionFindings(context.snapshot, record);
+  const request: ModelRunRequestV1 = {
+    taskId: record.id,
+    repository: record.repository,
+    base: record.target.base,
+    ...(rejectedHead && record.target.head !== null
+      ? { checkoutBase: record.target.head }
+      : {}),
+    issue,
+    evidence: record.evidence,
+    ...(findings === null ? {} : { reviewFindings: findings }),
+    model: implementationModelId(deps),
+    reasoning: REASONING,
+    maxDurationMs: bound.maxDurationMs,
+    maxOutputChars: bound.maxOutputChars,
+  };
+  if (beforeAdmission !== undefined && !await beforeAdmission(request)) {
+    return {
+      kind: "deferred",
+      detail: "implementation cannot fit its immutable dispatch artifact",
     };
   }
 
@@ -3189,45 +3344,83 @@ async function executeImplementationStep(
     };
   }
 
-  const rejectedHead = headRejectedByReview(context.snapshot, withIntent);
-  const findings = correctionFindings(context.snapshot, withIntent);
-  const receipt = await deps.model.runModel({
-    taskId: withIntent.id,
-    repository: withIntent.repository,
-    base: withIntent.target.base,
-    ...(rejectedHead && withIntent.target.head !== null
-      ? { checkoutBase: withIntent.target.head }
-      : {}),
-    issue,
-    evidence: withIntent.evidence,
-    ...(findings === null ? {} : { reviewFindings: findings }),
-    model: implementationModelId(deps),
-    reasoning: REASONING,
-    maxDurationMs: bound.maxDurationMs,
-    maxOutputChars: bound.maxOutputChars,
-  });
+  return {
+    kind: "prepared",
+    record: withIntent,
+    context: fresh,
+    reservationId: durable.reservation.id,
+    request,
+  };
+}
+
+/**
+ * The in-process serial consumer of one prepared implementation start: run the
+ * exact prepared request through the injected model port and hand the receipt
+ * (or the trusted failure) to the same receipt consumer the matrix ingester
+ * uses. The matrix path prepares in the trusted planner and consumes in the
+ * trusted ingester instead.
+ */
+async function executeImplementationStep(
+  deps: RepairCycleDepsV1,
+  context: LoopContextV1,
+  record: WorkRecordV1,
+  config: RepositoryConfigV1,
+): Promise<StepResultV1> {
+  if (deps.externalImplementations === true) {
+    return MATRIX_IMPLEMENTATION_DEFERRED;
+  }
+  const prepared = await prepareImplementationStart(
+    deps,
+    context,
+    record,
+    config,
+  );
+  if (prepared.kind !== "prepared") return prepared;
+  const receipt = await deps.model.runModel(prepared.request);
   if (!receipt.ok) {
-    const blocked = await settleAndBlock(
+    return settleFailedImplementation(
       deps,
-      durable.reservation.id,
-      "ambiguous",
-      withIntent,
+      context,
+      prepared.record,
+      prepared.reservationId,
       "model run ended without a trusted receipt",
-      deps.clock.now(),
-    );
-    return persistAfterSettlement(
-      deps,
-      context.bounds,
-      replaceWorkMutation(blocked),
     );
   }
   return handleModelReceipt(
     deps,
-    fresh,
-    withIntent,
-    durable.reservation.id,
+    prepared.context,
+    prepared.record,
+    prepared.reservationId,
     receipt.value,
     config,
+  );
+}
+
+/**
+ * Trusted terminal handling for a start that produced no usable receipt: the
+ * reservation settles ambiguous (charged, never refunded from absence) and the
+ * record is blocked with the exact static detail. Shared by the serial step
+ * and the matrix ingester so both consumers are byte-identical.
+ */
+export async function settleFailedImplementation(
+  deps: RepairCycleDepsV1,
+  context: LoopContextV1,
+  record: WorkRecordV1,
+  reservationId: string,
+  detail: string,
+): Promise<StepResultV1> {
+  const blocked = await settleAndBlock(
+    deps,
+    reservationId,
+    "ambiguous",
+    record,
+    detail,
+    deps.clock.now(),
+  );
+  return persistAfterSettlement(
+    deps,
+    context.bounds,
+    replaceWorkMutation(blocked),
   );
 }
 
@@ -3249,7 +3442,7 @@ function implementationIntent(
   };
 }
 
-async function handleModelReceipt(
+export async function handleModelReceipt(
   deps: RepairCycleDepsV1,
   context: LoopContextV1,
   record: WorkRecordV1,
@@ -3488,6 +3681,21 @@ async function executeCandidatePreservation(
     // attempt under the existing attempt ceiling instead of retrying a
     // candidate that can never appear.
     if (preserved.error.kind === "not_found") {
+      // There is no durable serial/matrix producer discriminator in this shape.
+      // Local/remote Git absence does not prove archived artifact loss. Preserve
+      // ambiguous modern serial rows too; the separately proven legacy bridge
+      // remains the authority for its own historical loss cases.
+      if (deps.externalImplementations === true) {
+        return persistWork(
+          deps,
+          context,
+          setWait(record, {
+            reason: "unavailable",
+            since: at,
+            until: at + CHECK_POLL_MS,
+          }, at),
+        );
+      }
       const recovered: WorkRecordV1 = {
         ...record,
         intent: null,
@@ -3643,27 +3851,9 @@ async function executePublishStep(
     };
   }
 
-  // The unfinished-PR cap applies only to FRESH publications. A correction of
-  // an existing PR does not open another unfinished PR — it updates the branch
-  // this task already owns — so it must never be blocked by the cap (matching
-  // the selection rule, which caps only records with target.pr === null).
-  // The unfinished-PR cap applies only to FRESH publications, and it MUST see
-  // the same identity the selection gate sees. A record that already holds a
-  // PR (or an in-flight publication intent that names one) is a correction or
-  // recovery of its own existing publication and never counts as a new one.
-  const openPrs = countUnfinishedPullRequests(context.snapshot.work);
-  if (!hasPublishedIdentity(record) && openPrs >= MAX_UNFINISHED_PRS) {
-    return persistWork(
-      deps,
-      context,
-      setWait(
-        record,
-        { reason: "backoff", since: now, until: now + CHECK_POLL_MS },
-        now,
-      ),
-    );
-  }
-
+  // No unfinished-PR admission cap exists on this surface: a fresh publication
+  // is not deferred because other publications are open. Every identity,
+  // candidate-preservation, CI, review and merge gate below is unchanged.
   // Push the exact candidate. The expected old ref is the verified published
   // head: an already-published exact candidate is adopted, the exact saved old
   // head is one expected-ref update, and any unrelated head is a conflict that
@@ -5013,28 +5203,16 @@ async function recoverFromNoVerdictReview(
   context: LoopContextV1,
   record: WorkRecordV1,
   pr: number,
-  value: ReviewObservationV1,
+  _value: ReviewObservationV1,
 ): Promise<StepResultV1> {
   const now = deps.clock.now();
-  if (record.counters.reviewRounds < MAX_REVIEW_ROUNDS) {
-    return await requestReviewFor(deps, context, clearWait(record, now), pr);
-  }
-  return persistWork(
-    deps,
-    context,
-    markBlocked(
-      // The exhausted review request is dead, so its residual intent is
-      // cleared; the published PR identity is deliberately retained because a
-      // trusted supervisor can still deliver the retained receipt or grant one
-      // fresh review round, and the cap no longer counts any blocked record.
-      clearIntent(record, now),
-      "review_quota",
-      `review rounds exhausted without an accepted verdict (${
-        boundedReviewReason(value.summary)
-      })`,
-      now,
-    ),
-  );
+  // No fixed review-round ceiling: a no-verdict attempt is not a pass and not
+  // a rejection, so another fresh bounded round is requested while the work
+  // keeps making progress. Each round is its own durable, uniquely admitted
+  // review request; provider limits, waits, run deadlines, failure blocks and
+  // every current-head semantic/CI gate still bound the work, and a record is
+  // never merged because a round count ran out.
+  return await requestReviewFor(deps, context, clearWait(record, now), pr);
 }
 
 /** Re-observe only the exact legacy missing-acceptance blocker, once per run. */
@@ -5052,7 +5230,6 @@ async function recoverBlockedMissingTaskReview(
       record.wait !== null || record.target.pr === null ||
       record.target.head === null ||
       record.counters.reviewRounds < 1 ||
-      record.counters.reviewRounds >= MAX_REVIEW_ROUNDS ||
       !legacyDependenciesDone(context.snapshot, record) ||
       attempted.has(record.id)
     ) continue;
@@ -5106,7 +5283,6 @@ async function recoverMissingTaskReview(
     record.source.id !== String(issueNumber) ||
     record.related.incidentId !== null ||
     record.counters.reviewRounds < 1 ||
-    record.counters.reviewRounds >= MAX_REVIEW_ROUNDS ||
     receipt.taskAcceptance !== null || receipt.outcome !== "completed" ||
     receipt.resultId === null || receipt.completedAt === null ||
     !sameRepositoryIdentity(receipt.repository, record.repository) ||
@@ -5223,34 +5399,6 @@ async function recoverMissingTaskReview(
   });
   if (saved.kind !== "progress") return saved;
   return await requestReviewFor(deps, context, retained, retained.target.pr!);
-}
-
-/**
- * Bounded single-line rendering of one observed no-verdict reason. The
- * observation carries an already-sanitized static string; this only enforces
- * the durable blocker's own single-line and length discipline. Control
- * characters are collapsed to one space (no regex: the durable reason must
- * never be able to carry them at all).
- */
-function boundedReviewReason(summary: string | null): string {
-  if (summary === null) return "no reason reported";
-  let single = "";
-  let collapsed = false;
-  for (const char of summary) {
-    const code = char.codePointAt(0) ?? 0;
-    if (code < 0x20 || code === 0x7f) {
-      collapsed = single.length > 0;
-      continue;
-    }
-    if (collapsed) {
-      single += " ";
-      collapsed = false;
-    }
-    single += char;
-  }
-  const trimmed = single.trim();
-  if (trimmed.length === 0) return "no reason reported";
-  return trimmed.length > 200 ? `${trimmed.slice(0, 197)}...` : trimmed;
 }
 
 async function applyObservedReview(
@@ -6053,26 +6201,19 @@ async function executeMerge(
   ) {
     return { kind: "state_error", detail: MERGE_WITHOUT_REVIEW_DETAIL };
   }
-  if (currentReview === undefined) {
-    // Legacy fallback requires absence of every exact newer attempt receipt,
-    // including pending/unavailable/refused outcomes without a saved charge.
-    for (let round = currentRound + 1; round <= MAX_REVIEW_ROUNDS; round++) {
-      const newerId = await reviewReceiptId(
-        reviewOperationKey(record.target.pr!, record.target.head!, round),
-        record.target.head!,
-      );
-      if (
-        context.snapshot.reviews.some((review) =>
-          review.id === newerId &&
-          sameRepositoryIdentity(review.repository, record.repository) &&
-          review.pullRequest.number === record.target.pr &&
-          review.pullRequest.head === record.target.head &&
-          review.pullRequest.base === record.target.base
-        )
-      ) {
-        return { kind: "state_error", detail: MERGE_WITHOUT_REVIEW_DETAIL };
-      }
-    }
+  if (
+    currentReview === undefined &&
+    context.snapshot.reviews.some((review) =>
+      review.id !== legacyReviewId &&
+      sameRepositoryIdentity(review.repository, record.repository) &&
+      review.pullRequest.number === record.target.pr &&
+      review.pullRequest.head === record.target.head &&
+      review.pullRequest.base === record.target.base
+    )
+  ) {
+    // A modern receipt without the exact current receipt cannot prove absence
+    // of newer work. Inspect actual history, never an arbitrary round ceiling.
+    return { kind: "state_error", detail: MERGE_WITHOUT_REVIEW_DETAIL };
   }
   // A retained legacy verdict cannot shadow the exact new attempt. A present
   // current-round refusal never falls back to an older completed receipt.
@@ -6182,7 +6323,7 @@ async function executeMerge(
       ),
     );
   }
-  return handleMergeOutcome(deps, context, record, merged.value, receipt);
+  return handleMergeOutcome(deps, context, withIntent, merged.value, receipt);
 }
 
 /**
@@ -6211,7 +6352,7 @@ async function handleMergeOutcome(
     // counted as a newly delivered repair.
     const semantic = await deliveryTaskRefusal(deps, record, receipt);
     if (semantic === "wait") {
-      return waitRelease(deps, context, cleared, now);
+      return waitRelease(deps, context, record, now);
     }
     if (semantic !== null) {
       return persistWork(

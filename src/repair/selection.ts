@@ -12,12 +12,13 @@
  */
 
 import type { WorkItemId } from "../contracts/brands.ts";
-import type { RepositoryConfigV1 } from "../contracts/repository-config.ts";
+import {
+  type LiveStartLimitsV1,
+  type RepositoryConfigV1,
+  resolveGlobalLiveStartLimits,
+} from "../contracts/repository-config.ts";
 import type { RepairStateSnapshotV1 } from "../contracts/state-snapshots.ts";
 import type { WorkRecordV1 } from "../contracts/work-record.ts";
-
-/** One implementation writer globally; at most three unfinished target PRs. */
-export const MAX_UNFINISHED_PRS = 3;
 
 /**
  * Exact hosted-retirement blocker. The hosted autonomy pass records it only
@@ -52,11 +53,10 @@ export function isRetiredTargetRecord(record: WorkRecordV1): boolean {
 
 /**
  * A terminal block. A blocked record is skipped by every lifecycle phase and
- * can never deliver its pull request, so it must never consume one of the
- * `MAX_UNFINISHED_PRS` slots. The three known offenders
+ * can never deliver its pull request. The historical three known offenders
  * (`issue-ubiquity-sentinel-79`/PR 83, `issue-ubiquity-sentinel-80`/PR 84 and
  * `issue-ubiquity-ai.ubq.fi-138`/PR 499) are exactly this shape and previously
- * wedged the cap permanently.
+ * wedged the retired unfinished-PR cap permanently.
  */
 export function isTerminalBlock(record: WorkRecordV1): boolean {
   return record.nextStep === "blocked";
@@ -82,9 +82,8 @@ export function isTransientReviewQuota(record: WorkRecordV1): boolean {
  * Durable published identity. In addition to the stored PR number, an in-flight
  * `pull_request`/`push` intent that names its deterministic branch (and any
  * intent that already persisted a PR number) proves the record is recovering
- * an EXISTING publication. Such a record must be admitted ahead of cap
- * enforcement and have its live PR attached, so a real open PR is never
- * WIP-skipped as "over-cap" (issue-141 / PR 433).
+ * an EXISTING publication, so its live PR is attached instead of being
+ * republished (issue-141 / PR 433).
  */
 export function hasPublishedIdentity(record: WorkRecordV1): boolean {
   if (record.target.pr !== null) return true;
@@ -96,11 +95,10 @@ export function hasPublishedIdentity(record: WorkRecordV1): boolean {
 }
 
 /**
- * Counted unfinished target pull requests. The selection gate and the publish
- * gate MUST agree, so both share `isTerminalBlock`, `isTransientReviewQuota`
- * and `hasPublishedIdentity`: a terminal block and a transient review-quota
- * record never consume a slot, and every counted record is one whose real PR
- * this pipeline still owns.
+ * Counted unfinished target pull requests. Retained as exact accounting for
+ * reporting and reconciliation; it is no longer an admission authority on any
+ * surface. A terminal block and a transient review-quota record never count,
+ * and every counted record is one whose real PR this pipeline still owns.
  */
 export function countUnfinishedPullRequests(
   work: readonly WorkRecordV1[],
@@ -163,6 +161,40 @@ export function isWaiting(record: WorkRecordV1, now: number): boolean {
   return now < record.wait.until;
 }
 
+/**
+ * True only when the complete supplied configuration set resolves to one
+ * enabled policy whose BOTH rolling caps are explicitly null. A missing,
+ * wholly null, conflicting or numeric policy is never uncapped: a null
+ * `liveStartLimits` record still means inference is not enabled, and every
+ * existing wait rule stays in force.
+ */
+export function isExplicitlyUncappedPolicy(
+  configs: readonly RepositoryConfigV1[],
+): boolean {
+  const policy = resolveGlobalLiveStartLimits(configs);
+  return policy.status === "enabled" &&
+    policy.limits.perHour === null &&
+    policy.limits.perSevenDays === null;
+}
+
+/**
+ * A stored wait caused solely by a retired artificial rolling cap: the exact
+ * `budget_cap` reason recorded when admission deferred on `retryAt`. Under an
+ * explicitly fully uncapped policy no rolling window can defer a start, so
+ * that wait is obsolete and may be reconsidered without touching the record's
+ * charges, counters or identity. Every other wait class (provider, backoff,
+ * manual, dependency, evidence, active operation) keeps its existing expiry
+ * rules.
+ */
+export function isRetiredBudgetWait(
+  record: WorkRecordV1,
+  limits: LiveStartLimitsV1 | null | undefined,
+): boolean {
+  if (record.wait?.reason !== "budget_cap") return false;
+  if (limits === null || limits === undefined) return false;
+  return limits.perHour === null && limits.perSevenDays === null;
+}
+
 /** A record is eligible for deterministic/lifecycle work at `now`. */
 export function isEligible(
   record: WorkRecordV1,
@@ -195,7 +227,7 @@ export function rankEligibleWork(
   configs: readonly RepositoryConfigV1[],
   now: number,
 ): RankedWorkV1 {
-  const openPrCount = countUnfinishedPullRequests(snapshot.work);
+  const uncappedPolicy = isExplicitlyUncappedPolicy(configs);
   const byRepository = new Map(
     configs.map((config) => [repoKey(config.repository), config] as const),
   );
@@ -211,7 +243,14 @@ export function rankEligibleWork(
       skipped[record.id] = "blocked";
       continue;
     }
-    if (isWaiting(record, now)) {
+    const config = byRepository.get(repoKey(record.repository));
+    // A legacy budget-only wait is obsolete under an explicitly fully
+    // uncapped policy; every other wait keeps its existing expiry rule.
+    if (
+      isWaiting(record, now) &&
+      !(uncappedPolicy &&
+        isRetiredBudgetWait(record, config?.liveStartLimits))
+    ) {
       skipped[record.id] = "waiting";
       continue;
     }
@@ -219,17 +258,7 @@ export function rankEligibleWork(
       skipped[record.id] = "dependency";
       continue;
     }
-    // The unfinished-PR cap bounds NEW publications only. A record that
-    // already carries a durable published pull request — in its target or in
-    // an in-flight publication intent, including a `pull_request` intent whose
-    // PR number was not yet persisted — is recovering an EXISTING publication
-    // and must never be starved behind the cap it is itself holding, or the
-    // cap re-arms its own cause (issue-141 / PR 433).
-    if (!hasPublishedIdentity(record) && openPrCount >= MAX_UNFINISHED_PRS) {
-      skipped[record.id] = "wip";
-      continue;
-    }
-    if (!byRepository.has(repoKey(record.repository))) {
+    if (config === undefined) {
       skipped[record.id] = "unconfigured";
       continue;
     }
@@ -249,8 +278,7 @@ export function rankEligibleWork(
  * increments the record's `stalled` counter; at this budget the record is
  * demoted inside its own plan bucket so an oldest-first queue head can never
  * starve younger eligible work. It stays eligible — demotion is ordering, not
- * a blocker — and the plan buckets, the ranking tie-breakers and the
- * unfinished-PR cap are unchanged.
+ * a blocker — and the plan buckets and ranking tie-breakers are unchanged.
  */
 export const NO_PROGRESS_BUDGET = 3;
 

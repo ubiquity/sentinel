@@ -46,6 +46,7 @@ import {
   runHostedRuntimeLauncher,
 } from "../../src/host/hosted-runtime.ts";
 import type {
+  HostedModelDiagnosticV1,
   HostedRuntimeIdentityV1,
   HostedRuntimeLauncherInputV1,
   HostedRuntimeLauncherResultV1,
@@ -53,6 +54,7 @@ import type {
 import {
   createLocalRepositoryConfig,
   localCheckoutKey,
+  parseLocalModelDiagnosticV1,
   unavailableIncidents,
   unavailableReplay,
   writeLocalModelResult,
@@ -88,6 +90,7 @@ const OPTIONAL_CHILD_ENV_KEYS = [
   "SENTINEL_MODEL_FALLBACK",
   "SENTINEL_REVIEW_MODEL_ID",
   "SENTINEL_DEEPSEEK_API_KEY",
+  "SENTINEL_APP_INSTALLATION_ID",
   "SENTINEL_COOLDOWN_MODE",
 ] as const;
 
@@ -127,7 +130,10 @@ class BorderRuntime implements ReplayRuntimeV1 {
 
   async run(input: ReplayCommandInputV1): Promise<ReplayCommandResultV1> {
     this.calls.push(input);
-    if (input.args.includes(HOSTED_RUNTIME_CHILD_ENTRYPOINT)) {
+    if (
+      input.args.includes(HOSTED_RUNTIME_CHILD_ENTRYPOINT) ||
+      input.args.includes("src/host/matrix-actions.ts")
+    ) {
       if (this.throwOnChild) throw new Error("forced child border failure");
       if (this.realChild) return await this.real.run(input);
       if (this.child === null) throw new Error("no canned child result");
@@ -218,6 +224,30 @@ function diagnosticLine(overrides: Record<string, unknown> = {}): string {
     candidatePresent: true,
     reasonCode: null,
     ...overrides,
+  });
+}
+
+/**
+ * One advisory summary exactly as the independently pinned INSTALLED runtime
+ * version emits it: a port error carries `reasonCode`, either one of that
+ * version's own eight static seam codes or null. No raw detail is ever a code.
+ */
+function runtimeDiagnosticLine(reasonCode: string | null): string {
+  return JSON.stringify({
+    version: "v1",
+    kind: "sentinel_model_diagnostic",
+    taskKey: DIAGNOSTIC_TASK_KEY,
+    base: OBSERVED_BASE,
+    observedAt: T0,
+    outcome: "port_error",
+    reason: "runtime_error",
+    errorKind: "unavailable",
+    terminalOrigin: null,
+    observedTerminalStatus: null,
+    durationMs: null,
+    outputChars: null,
+    candidatePresent: false,
+    reasonCode,
   });
 }
 
@@ -376,11 +406,8 @@ async function seedRelease(rig: RigV1): Promise<void> {
   );
 }
 
-function launch(
-  rig: RigV1,
-  overrides: Partial<HostedRuntimeLauncherInputV1> = {},
-): Promise<HostedRuntimeLauncherResultV1> {
-  return runHostedRuntimeLauncher({
+function launchInput(rig: RigV1): HostedRuntimeLauncherInputV1 {
+  return {
     state: rig.release,
     clock: rig.clock,
     env: rig.env,
@@ -388,13 +415,43 @@ function launch(
     runtimeDir: rig.runtimeDir,
     denoExecutable: Deno.execPath(),
     process: rig.process,
-    ...overrides,
-  });
+  };
+}
+
+function launch(
+  rig: RigV1,
+  overrides: Partial<HostedRuntimeLauncherInputV1> = {},
+): Promise<HostedRuntimeLauncherResultV1> {
+  return runHostedRuntimeLauncher({ ...launchInput(rig), ...overrides });
+}
+
+/**
+ * The same launcher input with one optional advisory sink attached through
+ * Object.assign, so this fixture keeps compiling against a runtime that does
+ * not declare the optional streaming field yet.
+ */
+function launchWithSink(
+  rig: RigV1,
+  sink: (diagnostic: HostedModelDiagnosticV1) => void,
+): Promise<HostedRuntimeLauncherResultV1> {
+  return runHostedRuntimeLauncher(
+    Object.assign({}, launchInput(rig), { onDiagnostic: sink }),
+  );
 }
 
 async function pathExists(path: string): Promise<boolean> {
   try {
     await Deno.stat(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Synchronous marker check usable from inside a streaming sink callback. */
+function pathExistsSync(path: string): boolean {
+  try {
+    Deno.statSync(path);
     return true;
   } catch {
     return false;
@@ -506,6 +563,87 @@ console.log(JSON.stringify({
   startupReady: true,
   settled: true,
   baseSha: null,
+}));
+`;
+}
+
+/**
+ * Real fixture child for the streaming case. It prints one valid advisory line
+ * in two pipe writes, waits (bounded) for the sink's acknowledgement file so
+ * the emission provably precedes the finish marker it writes below, then
+ * prints ignored inputs, an oversized line whose parseable-looking suffix
+ * arrives only after the retained bound was exceeded, a stderr advisory, a
+ * resumed valid advisory, and finally its status record.
+ */
+function streamingFixtureScript(input: {
+  firstHalf: string;
+  secondHalf: string;
+  ignoredLines: string[];
+  oversizedSuffix: string;
+  afterLine: string;
+  stderrLine: string;
+}): string {
+  return `const encoder = new TextEncoder();
+const write = (text: string) => Deno.stdout.writeSync(encoder.encode(text));
+const pause = (ms: number) =>
+  new Promise<void>((resolve) => setTimeout(resolve, ms));
+const exists = (path: string) => {
+  try {
+    Deno.statSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+};
+const decoder = new TextDecoder();
+const runId = Number(Deno.env.get("GITHUB_RUN_ID"));
+const runAttempt = Number(Deno.env.get("GITHUB_RUN_ATTEMPT"));
+const launcherSha = Deno.env.get("GITHUB_SHA");
+const head = decoder.decode(new Deno.Command("git", {
+  args: ["rev-parse", "HEAD"],
+  cwd: Deno.cwd(),
+}).outputSync().stdout).trim();
+const execution = {
+  id: runId + ":" + runAttempt + ":repair",
+  runId,
+  runAttempt,
+  launcherSha,
+  purpose: "ordinary",
+  revision: head,
+  generation: 1,
+  releaseId: null,
+  createdAt: ${T0},
+};
+// One valid advisory line split across two pipe writes: the retained partial
+// line must be assembled across the chunk boundary.
+write(${JSON.stringify(input.firstHalf)});
+await pause(80);
+write(${JSON.stringify(input.secondHalf)} + "\\n");
+// Bounded handshake: the sink acknowledges the first streamed advisory by
+// creating this file, so the finish marker below provably follows it. A
+// runtime without streaming lets the bound expire and still exits normally.
+for (let i = 0; i < 500 && !exists("release-child.txt"); i++) await pause(10);
+for (const line of ${JSON.stringify(input.ignoredLines)}) write(line + "\\n");
+// Oversized line: the retained bound is exceeded first, and only then does the
+// parseable-looking suffix arrive; the whole line must be discarded.
+write("x".repeat(2_100));
+await pause(30);
+write(${JSON.stringify(input.oversizedSuffix)} + "\\n");
+// stderr is never forwarded to the advisory sink.
+console.error(${JSON.stringify(input.stderrLine)});
+write(${JSON.stringify(input.afterLine)} + "\\n");
+// The finish marker is written after every advisory attempt and before the
+// status record: its absence at emission time proves the child had not exited.
+Deno.writeTextFileSync("child-finished.txt", "finished\\n");
+console.log(JSON.stringify({
+  status: "ran",
+  outcome: { status: "idle", detail: "fixture" },
+  controllerSha: head,
+  baseSha: "${OBSERVED_BASE}",
+  login: "github-actions[bot]",
+  startupReady: true,
+  ciApproval: { approved: 0, pending: 0, unavailable: 0 },
+  execution,
 }));
 `;
 }
@@ -775,6 +913,44 @@ Deno.test("hosted runtime: settled early failure is failed; unattestable zero ex
     assert.equal((await launch(rig)).status, "healthy");
   } finally {
     await rig.cleanup();
+  }
+});
+
+Deno.test("hosted runtime: the sentinel App bot login is accepted and an absent App token still forwards the strict child environment", async () => {
+  // App-login transition case: a child at or after the migration reports
+  // `ubiquity-sentinel[bot]`; it must settle exactly like the native identity.
+  const appRig = await makeRig();
+  try {
+    await seedRelease(appRig);
+    appRig.process.child = exited(
+      childLine(appRig.execution, { login: "ubiquity-sentinel[bot]" }),
+    );
+    const result = await launch(appRig);
+    assert.equal(result.status, "healthy", JSON.stringify(result));
+    assert.equal(result.terminal?.outcome, "healthy");
+  } finally {
+    await appRig.cleanup();
+  }
+
+  // Absence case: without the App token the child environment keeps exactly
+  // the declared key set, and the App token key is genuinely absent rather
+  // than present-and-empty.
+  const noAppRig = await makeRig();
+  try {
+    await seedRelease(noAppRig);
+    noAppRig.process.child = exited(childLine(noAppRig.execution));
+    const env = { ...hostedEnv(noAppRig.identity.launcherSha) };
+    delete env.SENTINEL_SUPERVISOR_TOKEN;
+    const result = await launch(noAppRig, { env });
+    assert.equal(result.status, "healthy", JSON.stringify(result));
+    const child = noAppRig.process.childCalls()[0];
+    assert.equal("SENTINEL_SUPERVISOR_TOKEN" in child.env, false);
+    assert.deepEqual(
+      Object.keys(child.env).sort(),
+      requiredChildEnvKeys(),
+    );
+  } finally {
+    await noAppRig.cleanup();
   }
 });
 
@@ -1254,6 +1430,63 @@ Deno.test("hosted runtime: malformed, oversized, unknown-field or forged advisor
   }
 });
 
+Deno.test("hosted runtime: an installed-runtime advisory keeps its static reason code and refuses any other", async () => {
+  // Decoder contract first: the installed pinned runtime emits the required
+  // `reasonCode`, either one of its own eight static seam codes or null.
+  const known = runtimeDiagnosticLine("model_checkout_unavailable");
+  const knownParsed = parseLocalModelDiagnosticV1(JSON.parse(known));
+  assert.deepEqual(knownParsed, JSON.parse(known), known);
+
+  const nullCode = runtimeDiagnosticLine(null);
+  const nullParsed = parseLocalModelDiagnosticV1(JSON.parse(nullCode));
+  assert.deepEqual(nullParsed, JSON.parse(nullCode), nullCode);
+
+  // A diagnostic missing its required static reason-code key is refused.
+  const missingCode = JSON.parse(diagnosticLine());
+  delete missingCode.reasonCode;
+  assert.equal(parseLocalModelDiagnosticV1(missingCode), null);
+
+  // Only the exact eight static literals are codes: a raw error or provider
+  // string, an unknown word, a near-miss code, an empty string and a code on
+  // a settled record are all still refused.
+  for (
+    const refused of [
+      runtimeDiagnosticLine("hosted-fixture-raw-error-marker"),
+      runtimeDiagnosticLine("unavailable"),
+      runtimeDiagnosticLine("model_checkout_unavailable_v2"),
+      runtimeDiagnosticLine(""),
+      diagnosticLine({ reasonCode: "model_checkout_unavailable" }),
+      diagnosticLine({ reasonCode: "not_a_static_code" }),
+      runtimeDiagnosticLine("model_checkout_unavailable").replace(
+        '"errorKind":"unavailable"',
+        '"errorKind":"made_up"',
+      ),
+      diagnosticLine({ reasonCode: null, candidatePresent: "true" }),
+    ]
+  ) {
+    assert.equal(
+      parseLocalModelDiagnosticV1(JSON.parse(refused)),
+      null,
+      refused,
+    );
+  }
+
+  // One real launcher call: the known code survives into the stamped advisory
+  // and health and terminal are unchanged.
+  const rig = await makeRig();
+  try {
+    await seedRelease(rig);
+    rig.process.child = exited(`${known}\n${childLine(rig.execution)}\n`);
+    const result = await launch(rig);
+    assert.equal(result.status, "healthy");
+    assert.equal(result.terminal?.outcome, "healthy");
+    assert.equal(result.diagnostics.length, 1);
+    assert.deepEqual(result.diagnostics[0]?.diagnostic, JSON.parse(known));
+  } finally {
+    await rig.cleanup();
+  }
+});
+
 Deno.test("hosted runtime: a real owned-group child cannot forge the wrapper terminal", async () => {
   const forged = await makeRig({
     runtimeFiles: {
@@ -1536,19 +1769,33 @@ Deno.test("hosted runtime: actions environment allowlist", async () => {
     UOS_AI_TOKEN: "",
   };
 
+  const cacheInfo = await new Deno.Command(Deno.execPath(), {
+    args: ["info", "--json"],
+    cwd: ROOT,
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  assert.ok(cacheInfo.success, new TextDecoder().decode(cacheInfo.stderr));
+  const cachedDenoDir = JSON.parse(
+    new TextDecoder().decode(cacheInfo.stdout),
+  ).denoDir;
+  assert.ok(typeof cachedDenoDir === "string" && cachedDenoDir.length > 0);
+
   /** Run the real entrypoint once through the owned-group child border. */
   const runEntrypoint = (env: Record<string, string>) =>
     new DenoReplayRuntime(Deno.execPath()).run({
       executable: Deno.execPath(),
       args: [
         "run",
+        "--frozen",
+        "--cached-only",
         "--allow-read",
         "--allow-write",
         `--allow-env=${declaredEnvAllowlist}`,
         HOSTED_RUNTIME_CHILD_ENTRYPOINT,
       ],
       cwd: ROOT,
-      env,
+      env: { ...env, DENO_DIR: cachedDenoDir },
       maxDurationMs: 120_000,
       maxOutputBytes: 256 * 1024,
     });
@@ -1584,7 +1831,13 @@ Deno.test("hosted runtime: actions environment allowlist", async () => {
         "hosted repair host requires its configured credentials",
       ),
       "the run must cross the environment configuration boundary and stop " +
-        `at its credential boundary\nstdout:\n${stdout}\nstderr:\n${stderr}`,
+        `at its credential boundary\nchild: ${
+          JSON.stringify({
+            outcome: result.outcome,
+            exitCode: result.exitCode,
+            settled: result.settled,
+          })
+        }\nstdout:\n${stdout}\nstderr:\n${stderr}`,
     );
     const lines = stdout.split("\n").map((line) => line.trim()).filter((line) =>
       line.length > 0
@@ -2042,5 +2295,326 @@ Deno.test("hosted runtime: the real host hands its origin-anchored deadline to t
     );
   } finally {
     await Deno.remove(root, { recursive: true }).catch(() => {});
+  }
+});
+
+Deno.test("streams sanitized hosted diagnostics before runtime exit", async () => {
+  const FIRST_TASK_KEY = "d".repeat(64);
+  const AFTER_TASK_KEY = "e".repeat(64);
+  const STDERR_TASK_KEY = "f".repeat(64);
+  const OVERSIZED_TASK_KEY = "1".repeat(64);
+  const firstLine = diagnosticLine({ taskKey: FIRST_TASK_KEY });
+  const afterLine = diagnosticLine({ taskKey: AFTER_TASK_KEY });
+  const stderrLine = diagnosticLine({ taskKey: STDERR_TASK_KEY });
+  const oversizedSuffix = diagnosticLine({ taskKey: OVERSIZED_TASK_KEY });
+  const invalidLine = '{"kind":"sentinel_model_diagnostic"}';
+  const privateLine = diagnosticLine({
+    taskKey: FIRST_TASK_KEY,
+    provider: HOSTED_FIXTURE_PROVIDER,
+  });
+  const forgedLine = JSON.stringify({
+    version: "v1",
+    kind: "hosted_model_diagnostic",
+    advisory: true,
+    execution: null,
+    diagnostic: JSON.parse(firstLine),
+  });
+
+  const rig = await makeRig({
+    runtimeFiles: {
+      "src/host/actions.ts": streamingFixtureScript({
+        firstHalf: firstLine.slice(0, 20),
+        secondHalf: firstLine.slice(20),
+        ignoredLines: [invalidLine, privateLine, forgedLine],
+        oversizedSuffix,
+        afterLine,
+        stderrLine,
+      }),
+      ".gitignore": ".sentinel/\n",
+    },
+  });
+  try {
+    await seedRelease(rig);
+    const runtimeReal = await Deno.realPath(rig.runtimeDir);
+    const releaseMarker = `${runtimeReal}/release-child.txt`;
+    const finishedMarker = `${runtimeReal}/child-finished.txt`;
+    const streamed: {
+      diagnostic: HostedModelDiagnosticV1;
+      runSettled: boolean;
+      finishedMarkerPresent: boolean;
+    }[] = [];
+    let runSettled = false;
+    rig.process.realChild = true;
+    const result = await launchWithSink(rig, (diagnostic) => {
+      streamed.push({
+        diagnostic,
+        runSettled,
+        finishedMarkerPresent: pathExistsSync(finishedMarker),
+      });
+      if (streamed.length === 1) {
+        Deno.writeTextFileSync(releaseMarker, "released\n");
+      }
+      if (streamed.length === 2) {
+        // The advisory sink is never allowed to disturb capture or settlement.
+        throw new Error("forced advisory sink failure");
+      }
+    });
+    runSettled = true;
+
+    // The valid line was split across pipe writes and still reached the sink
+    // before the child finished and before the launcher promise settled.
+    assert.equal(streamed.length, 2, JSON.stringify(streamed));
+    const first = streamed[0];
+    const second = streamed[1];
+    assert.ok(first !== undefined && second !== undefined);
+    if (first === undefined || second === undefined) {
+      throw new Error("unreachable");
+    }
+    assert.equal(first.runSettled, false);
+    assert.equal(first.finishedMarkerPresent, false);
+    assert.deepEqual(Object.keys(first.diagnostic).sort(), [
+      "advisory",
+      "diagnostic",
+      "execution",
+      "kind",
+      "version",
+    ]);
+    assert.equal(first.diagnostic.version, "v1");
+    assert.equal(first.diagnostic.kind, "hosted_model_diagnostic");
+    assert.equal(first.diagnostic.advisory, true);
+    for (const entry of streamed) {
+      assert.equal(entry.runSettled, false);
+      assert.equal(
+        canonicalStringify(entry.diagnostic.execution),
+        canonicalStringify(rig.execution),
+      );
+    }
+    assert.deepEqual(first.diagnostic.diagnostic, {
+      ...SAFE_DIAGNOSTIC,
+      taskKey: FIRST_TASK_KEY,
+    });
+    assert.deepEqual(second.diagnostic.diagnostic, {
+      ...SAFE_DIAGNOSTIC,
+      taskKey: AFTER_TASK_KEY,
+    });
+
+    // Invalid, private, forged, oversized and stderr inputs produced nothing,
+    // while the valid line after the oversized one resumed streaming.
+    const serialized = JSON.stringify(
+      streamed.map((entry) => entry.diagnostic),
+    );
+    for (
+      const marker of [
+        HOSTED_FIXTURE_PROVIDER,
+        HOSTED_FIXTURE_RAW_ERROR,
+        HOSTED_FIXTURE_ISSUE_BODY,
+      ]
+    ) {
+      assert.equal(serialized.includes(marker), false, marker);
+    }
+    assert.equal(
+      streamed.some((entry) =>
+        entry.diagnostic.diagnostic.taskKey === OVERSIZED_TASK_KEY
+      ),
+      false,
+      "an oversized line is discarded through its newline, suffix included",
+    );
+    assert.equal(
+      streamed.some((entry) =>
+        entry.diagnostic.diagnostic.taskKey === STDERR_TASK_KEY
+      ),
+      false,
+      "stderr is never forwarded to the sink",
+    );
+
+    // A throwing advisory sink changed nothing: the real child still settles
+    // the one healthy trusted terminal, and the unchanged final capture and
+    // parser see exactly the two advisory lines the stream saw.
+    assert.equal(result.status, "healthy", JSON.stringify(result));
+    assert.equal(result.terminal?.outcome, "healthy");
+    assert.equal(result.terminal?.settled, true);
+    assert.equal(result.terminal?.baseSha, OBSERVED_BASE);
+    assert.deepEqual(
+      result.diagnostics.map((entry) => entry.diagnostic.taskKey),
+      [FIRST_TASK_KEY, AFTER_TASK_KEY],
+    );
+    assert.equal(
+      await pathExists(finishedMarker),
+      true,
+      "the real fixture child must have executed",
+    );
+  } finally {
+    await rig.cleanup();
+  }
+});
+
+Deno.test("hosted matrix launcher: native plan role reads one repair intent without a terminal", async () => {
+  const rig = await makeRig();
+  try {
+    await seedRelease(rig);
+    const planDigest = "d".repeat(64);
+    const carrier = {
+      kind: "sentinel_matrix_plan",
+      waveId: rig.execution.id,
+      run: {
+        runId: RUN_ID,
+        runAttempt: RUN_ATTEMPT,
+        launcherSha: rig.identity.launcherSha,
+      },
+      runtimeSha: rig.execution.revision,
+      generation: rig.execution.generation,
+      planDigest,
+      prepared: 1,
+    };
+    rig.process.child = exited(JSON.stringify(carrier) + "\n");
+    const result = await launch(rig, {
+      env: {
+        ...rig.env,
+        GITHUB_JOB: "matrix_plan",
+        GITHUB_OUTPUT: "/tmp/native-output",
+      },
+    });
+    assert.equal(result.status, "healthy", JSON.stringify(result));
+    assert.equal(result.terminal, null);
+    assert.deepEqual(
+      (result as unknown as { matrixCarrier: unknown }).matrixCarrier,
+      carrier,
+    );
+    const child = rig.process.calls.find((call) =>
+      call.args.includes("src/host/matrix-actions.ts")
+    );
+    assert.ok(child);
+    assert.equal(child.env.GITHUB_JOB, "matrix_plan");
+    assert.equal(child.env.GITHUB_OUTPUT, "/tmp/native-output");
+    assert.equal(await rig.releaseHead() !== null, true);
+  } finally {
+    await rig.cleanup();
+  }
+});
+
+Deno.test("hosted matrix launcher: native cell stdin and carrier never settle aggregate repair", async () => {
+  const rig = await makeRig();
+  try {
+    await seedRelease(rig);
+    const head = await rig.releaseHead();
+    const cellId = "c".repeat(64);
+    const stdin = JSON.stringify({ planDigest: "d".repeat(64), cellId });
+    const carrier = {
+      kind: "sentinel_matrix_cell",
+      run: {
+        runId: RUN_ID,
+        runAttempt: RUN_ATTEMPT,
+        launcherSha: rig.identity.launcherSha,
+      },
+      runtimeSha: rig.execution.revision,
+      generation: rig.execution.generation,
+      cellId,
+      reservationId: "reservation-1",
+      resultDigest: "e".repeat(64),
+      bundleDigest: "f".repeat(64),
+      status: "completed",
+    };
+    rig.process.child = exited(
+      JSON.stringify(carrier) + "\n" + childLine(rig.execution),
+    );
+    const input = Object.assign({
+      env: { ...rig.env, GITHUB_JOB: "matrix_cell" },
+    }, { stdin });
+    const result = await launch(rig, input);
+    assert.equal(result.status, "healthy", JSON.stringify(result));
+    assert.equal(
+      result.terminal,
+      null,
+      "cell may never mint the repair terminal",
+    );
+    const child = rig.process.calls.find((call) =>
+      call.args.includes("src/host/matrix-actions.ts")
+    );
+    assert.ok(child);
+    assert.equal(
+      (child as ReplayCommandInputV1 & { stdin?: string }).stdin,
+      stdin,
+    );
+    assert.equal("GITHUB_OUTPUT" in child.env, false);
+    assert.equal(child.env.GITHUB_JOB, "matrix_cell");
+    assert.equal(
+      await rig.releaseHead(),
+      head,
+      "only aggregate owns settlement",
+    );
+    for (
+      const forged of [
+        { ...carrier, run: { ...carrier.run, runAttempt: RUN_ATTEMPT + 1 } },
+        { ...carrier, runtimeSha: OTHER_REVISION },
+        { ...carrier, generation: 2 },
+        { ...carrier, cellId: "a".repeat(64) },
+        { ...carrier, rawModelOutput: "do not disclose" },
+      ]
+    ) {
+      rig.process.child = exited(JSON.stringify(forged));
+      const refused = await launch(rig, input);
+      assert.equal(refused.status, "unavailable");
+      assert.equal(refused.terminal, null);
+      assert.equal(refused.matrixCarrier, undefined);
+    }
+  } finally {
+    await rig.cleanup();
+  }
+});
+
+Deno.test("hosted matrix identity: explicit native roles share read-only repair identity", async () => {
+  const rig = await makeRig();
+  try {
+    await seedRelease(rig);
+    const head = await rig.releaseHead();
+    for (const job of ["matrix_plan", "matrix_cell"] as const) {
+      const identity = parseHostedEnvironment(
+        { ...rig.env, GITHUB_JOB: job },
+        job,
+      );
+      assert.equal(identity.job, job);
+      assert.throws(() =>
+        parseHostedEnvironment({ ...rig.env, GITHUB_JOB: "repair" }, job)
+      );
+      assert.equal(
+        (await readHostedRuntimeExecution({
+          state: rig.release,
+          identity,
+          controllerSha: rig.execution.revision,
+        })).id,
+        rig.execution.id,
+      );
+      await assert.rejects(readHostedRuntimeExecution({
+        state: rig.release,
+        identity: { ...identity, runAttempt: RUN_ATTEMPT + 1 },
+        controllerSha: rig.execution.revision,
+      }));
+      assert.equal(await rig.releaseHead(), head);
+    }
+  } finally {
+    await rig.cleanup();
+  }
+});
+
+Deno.test("hosted matrix launcher: aggregate receives only native digest JSON", async () => {
+  const rig = await makeRig();
+  try {
+    await seedRelease(rig);
+    rig.process.child = exited(childLine(rig.execution));
+    const stdin = JSON.stringify({ planDigest: "d".repeat(64) });
+    const result = await launch(rig, { stdin });
+    assert.equal(result.status, "healthy");
+    assert.ok(result.terminal);
+    assert.equal(rig.process.childCalls()[0].stdin, stdin);
+    const before = rig.process.childCalls().length;
+    assert.equal(
+      (await launch(rig, {
+        stdin: JSON.stringify({ planDigest: "bad", secret: "no" }),
+      })).status,
+      "unavailable",
+    );
+    assert.equal(rig.process.childCalls().length, before);
+  } finally {
+    await rig.cleanup();
   }
 });

@@ -4,6 +4,8 @@ Owner planning session: 2026-09-06 America/New_York; created across 2026-09-07 0
 
 ## 1. Outcome and scope
 
+Owner update, 2026-10-02 22:05 UTC: the owner requested aggressive concurrent issue processing, then directed "lift all the limits for now". The earlier one-production-implementation-writer, sequential-target, three-unfinished-PR, 120-start hourly and ordinary-hourly-cadence restrictions below are superseded for this concurrency task. Implement isolated issue matrix workers across the configured targets with no artificial throughput cap, while retaining one trusted state/integration owner and exclusive promotion ownership, durable admission/settlement history and the existing semantic/current-head review and CI gates. Existing recorded canonical goal and module identities remain unchanged. See `docs/DECISIONS.md` for the explicit uncapped policy and deployment-proof boundary.
+
 Owner development policy update, 2026-09-15: use 120 shared Luna model starts
 per rolling hour and no rolling-seven-day cap during development, including
 supervised GitHub Actions runs. This supersedes all earlier 60/hour and

@@ -211,6 +211,55 @@ Deno.test("fromFetch: passes redirect error policy and an abort signal", async (
   assert.ok(seen[0].signal instanceof AbortSignal);
 });
 
+Deno.test("fromFetch: per-request deadlines only shorten and invalid bounds send nothing", async () => {
+  let calls = 0;
+  const signals: AbortSignal[] = [];
+  const completing: FetchLikeV1 = (_url, init) => {
+    calls++;
+    if (init?.signal !== undefined) signals.push(init.signal);
+    return new Promise((resolve) => {
+      const finish = () => resolve(fakeResponse("{}", []));
+      const timer = setTimeout(finish, 80);
+      init?.signal?.addEventListener("abort", () => {
+        clearTimeout(timer);
+        finish();
+      }, { once: true });
+    });
+  };
+  const bounded = fromFetch(completing, { deadlineMs: 120 });
+  const request = {
+    method: "GET" as const,
+    url: "https://api.github.com/repos/x/y",
+    headers: new Map<string, string>(),
+    body: null,
+    deadlineMs: 20,
+  };
+  const started = Date.now();
+  await assert.rejects(() => bounded(request));
+  assert.ok(
+    signals.at(-1)?.aborted,
+    "the shortened deadline aborts the real fetch signal",
+  );
+  assert.ok(Date.now() - started < 2000);
+  const existingBound = fromFetch(completing, { deadlineMs: 20 });
+  const longer = { ...request, deadlineMs: 1000 };
+  await assert.rejects(() => existingBound(longer));
+  assert.ok(
+    signals.at(-1)?.aborted,
+    "a longer override cannot admit the later response",
+  );
+  const beforeInvalid = calls;
+  for (const deadlineMs of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+    const invalid = { ...request, deadlineMs };
+    await assert.rejects(() => bounded(invalid));
+  }
+  assert.equal(
+    calls,
+    beforeInvalid,
+    "invalid provided bounds fail before fetch",
+  );
+});
+
 Deno.test("fromFetch: abort-ignoring headers and body cannot block past the deadline", async () => {
   // The fake ignores the abort signal and never returns headers.
   const ignoringHeaders: FetchLikeV1 = () => new Promise(() => {});
@@ -368,4 +417,19 @@ Deno.test("token provider: a hung injected signer cannot block past its bound", 
   }
   assert.equal(transport.requests.length, 0, "no request after signer hang");
   assert.ok(Date.now() - started < 2_000, "signer hang settled");
+});
+
+Deno.test("fromFetch: byte responses preserve non UTF-8 archive bytes", async () => {
+  const bytes = new Uint8Array([0x50, 0x4b, 0xff, 0x00, 0x80]);
+  const transport = fromFetch(() => Promise.resolve(new Response(bytes)));
+  const response = await transport({
+    method: "GET",
+    url: "https://api.github.com/archive",
+    headers: new Map(),
+    body: null,
+    ...{ responseType: "bytes" as const },
+  });
+  assert.deepEqual("bodyBytes" in response, true);
+  if ("bodyBytes" in response) assert.deepEqual(response.bodyBytes, bytes);
+  assert.deepEqual(response.bodyText, "");
 });

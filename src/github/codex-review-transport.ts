@@ -24,9 +24,11 @@
  * author/head/body proves publication.
  *
  * There is no independent model-admission authority here: the caller's durable
- * reservation/work intent is the authority for the submission. At most three
- * operations are active at once, overlapping submissions per operation key or
- * per PR are rejected, and admission stops permanently once drain starts.
+ * reservation/work intent is the authority for the submission. The concurrent
+ * operation bound is explicit configuration: null or omitted means no
+ * artificial bound, and a finite positive integer is honored exactly.
+ * Overlapping submissions per operation key or per PR are rejected, and
+ * admission stops permanently once drain starts.
  */
 
 import type { GitSha } from "../contracts/brands.ts";
@@ -100,8 +102,12 @@ export interface GitHubCodexReviewTransportOptionsV1 {
   snapshot: GitReviewSnapshotCaptureV1;
   /** Concrete structured reviewer (public prepare capability). */
   reviewer: CodexReviewPrepareCapabilityV1;
-  /** Finite concurrent operation bound; default and maximum three. */
-  maxActiveReviews?: number;
+  /**
+   * Concurrent operation bound. Null or omitted means no artificial bound; a
+   * finite positive safe integer is honored exactly (no silent clamp). Any
+   * other provided value is invalid configuration and refuses construction.
+   */
+  maxActiveReviews?: number | null;
 }
 
 /** The single finite review bound used for a submission that must fit. */
@@ -258,7 +264,7 @@ export class GitHubCodexReviewTransport implements ReviewServiceTransportV1 {
   private readonly ownerRunId: string;
   private readonly snapshot: GitReviewSnapshotCaptureV1;
   private readonly reviewer: CodexReviewPrepareCapabilityV1;
-  private readonly maxActiveReviews: number;
+  private readonly maxActiveReviews: number | null;
   private readonly operations = new Map<string, OwnedReviewV1>();
   private draining = false;
 
@@ -270,10 +276,16 @@ export class GitHubCodexReviewTransport implements ReviewServiceTransportV1 {
     this.ownerRunId = options.ownerRunId;
     this.snapshot = options.snapshot;
     this.reviewer = options.reviewer;
-    const maxActive = options.maxActiveReviews ?? 3;
-    this.maxActiveReviews = Number.isSafeInteger(maxActive) && maxActive > 0
-      ? Math.min(maxActive, 3)
-      : 3;
+    const maxActive = options.maxActiveReviews ?? null;
+    if (
+      maxActive !== null &&
+      (!Number.isSafeInteger(maxActive) || maxActive < 1)
+    ) {
+      throw new TypeError(
+        "maxActiveReviews must be null or a positive safe integer",
+      );
+    }
+    this.maxActiveReviews = maxActive;
   }
 
   // -------------------------------------------------------------------------
@@ -306,7 +318,10 @@ export class GitHubCodexReviewTransport implements ReviewServiceTransportV1 {
         return portError("conflict", DETAIL_OVERLAP);
       }
     }
-    if (this.activeCount() >= this.maxActiveReviews) {
+    if (
+      this.maxActiveReviews !== null &&
+      this.activeCount() >= this.maxActiveReviews
+    ) {
       return portError("conflict", DETAIL_CAPACITY);
     }
     this.operations.set(op.operationKey, op);

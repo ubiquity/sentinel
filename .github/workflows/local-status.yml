@@ -47,15 +47,15 @@ jobs:
           const ERROR_OUTCOMES = ["state_error", "source_error"];
           const KNOWN_PURPOSES = ["implementation", "continuation", "retry", "review_request"];
           const KNOWN_RESERVATION_OUTCOMES = ["reserved", "submitted", "ambiguous", "confirmed_not_submitted"];
+          const KNOWN_MODELS = ["gpt-reserve", "gpt-5.6-luna"];
           const REPORT_VERSION = "v2";
           const MAX_RECORD_ID_CHARS = 256;
           const MAX_LOGIN_CHARS = 128;
-          const LIMIT_PER_HOUR = 120;
           const HOUR_WINDOW_MS = 3600000;
           const WEEK_WINDOW_MS = 604800000;
           const HEADING = "# Sentinel local run report";
           const PROVENANCE = "Execution is a local Sentinel run and GitHub Actions records its sanitized result. A green report alone does not prove issue delivery or a runtime update.";
-          const BUDGET_NOTE = "Waiting for the rolling-hour budget is normal and does not mean work was delivered.";
+          const BUDGET_NOTE = "Waiting on source dependencies, provider limits or run bounds is normal and does not mean work was delivered.";
 
           const summaryPath = Deno.env.get("GITHUB_STEP_SUMMARY");
           const eventPath = Deno.env.get("GITHUB_EVENT_PATH");
@@ -172,11 +172,16 @@ jobs:
             if (status.kind !== "sentinel_local_status") reject("kind is not sentinel_local_status");
             if (status.version !== "v1") reject("version is not v1");
             if (status.reportVersion !== REPORT_VERSION) reject("reportVersion is not v2");
-            if (status.model !== "gpt-reserve" || status.reasoning !== "max") {
+            if ((status.model !== "gpt-5.6-luna" && status.model !== "gpt-reserve") || status.reasoning !== "max") {
               reject("model policy is not gpt-reserve with max reasoning");
             }
-            if (!isObject(status.limits) || status.limits.perHour !== LIMIT_PER_HOUR || status.limits.perSevenDays !== null) {
-              reject("admission limits are not 120 per hour with no weekly cap");
+            if (
+              !isObject(status.limits) ||
+              !hasOnlyKeys(status.limits, ["perHour", "perSevenDays"]) ||
+              status.limits.perHour !== null ||
+              status.limits.perSevenDays !== null
+            ) {
+              reject("admission limits are not explicitly uncapped (null hourly and weekly caps)");
             }
             if (!isBoundedString(status.invocationId, MAX_RECORD_ID_CHARS)) {
               reject("invocationId is not a bounded non-empty string");
@@ -348,7 +353,6 @@ jobs:
             let detailSettled = 0;
             let detailChargedHour = 0;
             let detailChargedSevenDays = 0;
-            const chargedDetailTimes = [];
             for (const entry of reservations) {
               if (!isObject(entry)) reject("a reservation entry is not an object");
               if (!isBoundedString(entry.taskId, MAX_RECORD_ID_CHARS)) reject("a reservation taskId is not bounded");
@@ -369,7 +373,6 @@ jobs:
               }
               // Charging is by outcome only; intervals are (finishedAt - window, finishedAt].
               if (entry.outcome !== "confirmed_not_submitted") {
-                chargedDetailTimes.push(entry.createdAt);
                 if (entry.createdAt > status.finishedAt - HOUR_WINDOW_MS) detailChargedHour += 1;
                 if (entry.createdAt > status.finishedAt - WEEK_WINDOW_MS) detailChargedSevenDays += 1;
               }
@@ -397,39 +400,12 @@ jobs:
 
             const expectedSummary = W.omitted === 0 && R.omitted === 0 ? "complete" : "truncated";
             if (status.summary !== expectedSummary) reject("summary marker is inconsistent with the omission counts");
-            // Only the rolling hour bounds admission: perSevenDays is retained
-            // historical usage with no weekly cap, so it never sets atCap.
-            const atCap = R.chargedHour >= LIMIT_PER_HOUR;
-            if (atCap) {
-              if (!isTime(status.nextEligibleStartAt)) {
-                reject("next eligible start is missing while the rolling hour cap is reached");
-              }
-              if (status.nextEligibleStartAt <= status.finishedAt) {
-                reject("next eligible start is not after the observation time");
-              }
-            } else if (status.nextEligibleStartAt !== null) {
-              reject("next eligible start is set while the rolling hour cap has room");
-            }
-            // The cap retry is exact when every reservation is visible; a
-            // truncated list can still prove a lower bound from visible charges.
-            chargedDetailTimes.sort((a, b) => b - a);
-            const hourCandidate = chargedDetailTimes.length >= LIMIT_PER_HOUR
-              ? chargedDetailTimes[LIMIT_PER_HOUR - 1] + HOUR_WINDOW_MS
-              : status.finishedAt;
-            if (!Number.isSafeInteger(hourCandidate)) {
-              reject("rolling retry timestamps are not representable");
-            }
-            if (R.omitted === 0) {
-              const exactRetry = Math.max(status.finishedAt, hourCandidate);
-              const expectedRetry = exactRetry > status.finishedAt ? exactRetry : null;
-              if (status.nextEligibleStartAt !== expectedRetry) {
-                reject("next eligible start is not the exact retry under the rolling hour cap");
-              }
-            } else if (atCap) {
-              const lowerBound = Math.max(status.finishedAt, hourCandidate);
-              if (status.nextEligibleStartAt < lowerBound) {
-                reject("next eligible start is earlier than the charged detail proves");
-              }
+            // Admission is explicitly uncapped: no rolling window can defer a
+            // start, so the producer must record no next eligible start. The
+            // retained rolling counts above stay fully validated against the
+            // bounded detail and the complete aggregates.
+            if (status.nextEligibleStartAt !== null) {
+              reject("next eligible start is set while admission is uncapped");
             }
 
             const blocked = W.blocked > 0;
@@ -445,8 +421,8 @@ jobs:
             details.push("- Dispatch age: " + elapsed(ageMs) + " (stale beyond 2 hours)");
             details.push("- Controller SHA: " + status.controllerSha);
             details.push("- Target base SHA: " + (isSha(status.targetBaseSha) ? status.targetBaseSha : "none recorded"));
-            details.push("- Implementation model: gpt-reserve with max reasoning (matches the required runtime policy)");
-            details.push("- Admission limits: 120 starts per rolling hour, no weekly cap");
+            details.push("- Implementation model: " + status.model + " with max reasoning (matches the required runtime policy)");
+            details.push("- Admission limits: uncapped (no rolling hourly or weekly model-start cap)");
             details.push("- Outcome: " + outcomeStatus + (outcomeStatus === "step_limit" ? " after " + status.outcome.steps + " steps" : ""));
             details.push("- Work items: " + W.total + (W.omitted > 0 ? " (" + work.length + " in bounded detail, " + W.omitted + " omitted)" : ""));
             details.push("- Work by next step: " + KNOWN_STEPS.map((step) => step + " " + W.byNextStep[step]).join(", ") + (W.unknownSteps > 0 ? ", unknown " + W.unknownSteps : ""));
@@ -458,8 +434,8 @@ jobs:
               : "none"));
             details.push("- Numeric issue IDs in bounded detail: " + (issues.length > 0 ? issues.map((id) => "#" + id).join(", ") : "none"));
             details.push("- Reservations: " + R.total + " total, " + R.open + " open, " + R.settled + " settled" + (R.omitted > 0 ? " (" + reservations.length + " in bounded detail, " + R.omitted + " omitted)" : ""));
-            details.push("- Rolling usage: " + R.chargedHour + " of " + LIMIT_PER_HOUR + " in the last hour; " + R.chargedSevenDays + " charged in the last seven days (historical usage, no weekly cap)");
-            details.push("- Next eligible local start (UTC): " + (status.nextEligibleStartAt === null ? "none recorded (the rolling hour has room)" : utc(status.nextEligibleStartAt)));
+            details.push("- Rolling usage: " + R.chargedHour + " charged in the last hour; " + R.chargedSevenDays + " charged in the last seven days (historical usage, no admission caps)");
+            details.push("- Next eligible local start (UTC): " + (status.nextEligibleStartAt === null ? "none recorded (admission is uncapped)" : utc(status.nextEligibleStartAt)));
             details.push("- Local state: available");
             details.push("- Report detail: " + (status.summary === "truncated" ? "truncated (aggregates remain complete)" : "complete"));
             details.push("- " + BUDGET_NOTE);

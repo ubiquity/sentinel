@@ -5,13 +5,9 @@ identity and isolated worker lanes are invariants. Preserve unrelated work.
 
 ## Design
 
-- Implement the minimal polling design: one production implementation writer,
-  plus a separate deterministic Deno release controller with exclusive release
-  ownership. Parallel development workers do not imply parallel runtime agents.
+- Owner update, 2026-10-02: implement isolated concurrent issue workers with one trusted state/integration coordinator, plus a separate deterministic Deno release controller with exclusive promotion ownership.
 - Use Deno and TypeScript. Define shared contracts before parallel implementation.
-- During development, cap shared model admission at 120 starts per rolling hour
-  with no weekly cap, as directed on 2026-09-15. Preserve durable reservations;
-  review requests, retries and continuations count. No quota/model fallback.
+- Owner update, 2026-10-02: artificial hourly/weekly model-start, unfinished-PR, review-concurrency and review-drain caps are lifted. Preserve durable reservations and settlement for implementation, review, retry and continuation starts. Provider and platform limits still apply; model routing is unchanged.
 - Sentinel runs as a cron-triggered GitHub Actions job.
 - Preserve runtime implementation model gpt-5.6-luna with max reasoning. Local
   DSH implementation follows the current global deepseek-harness.md playbook;

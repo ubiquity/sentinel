@@ -140,7 +140,10 @@ const ACTIONS_RELEASE_LOG_HOST =
 
 /** Hosted supervisor execution reader: one bounded whole-operation window. */
 const HOSTED_EXECUTION_READ_DEADLINE_MS = 120_000;
-const HOSTED_EXECUTION_MAX_JOBS = 100;
+// Native protected workflow: at most 256 matrix cells plus five fixed jobs.
+const HOSTED_EXECUTION_MAX_JOBS = 256 + 5;
+const HOSTED_EXECUTION_JOBS_PAGE_SIZE = 100;
+const HOSTED_EXECUTION_MAX_JOB_STEPS = 100;
 const HOSTED_EXECUTION_BRANCH = "sentinel-supervisor";
 const HOSTED_EXECUTION_UNAVAILABLE = "hosted execution evidence is unavailable";
 const HOSTED_EXECUTION_SCOPE =
@@ -1026,6 +1029,76 @@ export class GitHubApiClient {
   }
 
   /**
+   * Ordinary-only capability proof for the exact admitted commit. Complete,
+   * authenticated Git trees prove absence; unknown identity or transport never does.
+   */
+  async verifyMatrixOrdinaryRevision(
+    revision: GitSha,
+  ): Promise<PortResultV1<boolean>> {
+    if (!this.isHostedSelfScope() || !isGitSha(revision)) {
+      return portError("invalid", HOSTED_EXECUTION_SCOPE);
+    }
+    const deadline = createDeadline(HOSTED_EXECUTION_READ_DEADLINE_MS);
+    try {
+      const repo = repoPath(this.repository);
+      const commit = await this.actionsReleaseGet(
+        `/repos/${repo}/git/commits/${revision}`,
+        {},
+        deadline,
+      );
+      if (!commit.ok) return commit;
+      const parsed = parseWith(commit.value, (value) => {
+        const obj = expectRecord(value, "$");
+        if (expectGitSha(obj.sha, "$.sha") !== revision) {
+          fail(
+            "$.sha",
+            "invalid_value",
+            "commit does not bind admitted revision",
+          );
+        }
+        const tree = expectRecord(obj.tree, "$.tree");
+        return expectGitSha(tree.sha, "$.tree.sha");
+      });
+      if (!parsed.ok) return parsed;
+      let treeSha = parsed.value;
+      const path = ["src", "host", "matrix-actions.ts"];
+      for (const [index, name] of path.entries()) {
+        if (deadline.fired()) return this.hostedExecutionTimeout();
+        const tree = await this.actionsReleaseGet(
+          `/repos/${repo}/git/trees/${treeSha}`,
+          {},
+          deadline,
+        );
+        if (!tree.ok) return tree;
+        const entry = parseWith(
+          tree.value,
+          (value) => parseMatrixTreeEntry(value, treeSha, name, this.maxItems),
+        );
+        if (!entry.ok) return entry;
+        if (entry.value === null) return portOk(false);
+        const last = index === path.length - 1;
+        if (
+          last
+            ? entry.value.type !== "blob" ||
+              (entry.value.mode !== "100644" && entry.value.mode !== "100755")
+            : entry.value.type !== "tree" || entry.value.mode !== "040000"
+        ) {
+          return portError(
+            "invalid",
+            "ordinary matrix entrypoint is not a normal source file",
+          );
+        }
+        treeSha = entry.value.sha;
+      }
+      return portOk(true);
+    } catch {
+      return portError("unavailable", HOSTED_EXECUTION_UNAVAILABLE);
+    } finally {
+      deadline.dispose();
+    }
+  }
+
+  /**
    * Exact self production open request: the merged PR and its two-parent merge
    * commit are revalidated, then the requested revision must be an ancestor of
    * the current development ref within the SAME deadline. No workflow listing
@@ -1090,7 +1163,7 @@ export class GitHubApiClient {
 
   /**
    * Exact authenticated settlement of one saved hosted execution intent:
-   * attempt + complete one-page jobs listing + (for a completed runtime step)
+   * attempt + complete paginated jobs listing + (for a completed runtime step)
    * the trusted signed job log carrying exactly one runtime terminal. A missing
    * or not-yet-complete repair job is `null` (pending); an exact completed
    * skip/cancellation/timeout/absence is an explicit not_started settlement.
@@ -1209,6 +1282,44 @@ export class GitHubApiClient {
         step,
         observedAt,
       );
+      // A runtime step that STARTED and then concluded failure without
+      // publishing any terminal is an explicit, observable failure of that
+      // exact execution: the child ran and died before it could emit one.
+      // Returning unavailable here would strand the pointer's saved execution
+      // forever, because no later observation of that completed job can ever
+      // produce a terminal. Only the no-terminal case is rewritten, and only
+      // when the step itself concluded failure with coherent timestamps; every
+      // other metadata fault stays unavailable.
+      if (
+        !parsedTerminal.ok &&
+        parsedTerminal.error.detail === HOSTED_EXECUTION_TERMINAL &&
+        step.conclusion === "failure" &&
+        !HOSTED_EXECUTION_TERMINAL_LOOKING.test(log.value) &&
+        repair.startedAt !== null && step.startedAt !== null &&
+        step.completedAt !== null && repair.completedAt !== null &&
+        step.startedAt + tolerance >= repair.startedAt &&
+        step.completedAt <= repair.completedAt + tolerance &&
+        repair.completedAt <= observedAt + tolerance &&
+        step.completedAt <= observedAt + tolerance
+      ) {
+        return parseWith({
+          execution: saved,
+          workflowId: HOSTED_SUPERVISOR_WORKFLOW_ID,
+          workflowPath: HOSTED_SUPERVISOR_WORKFLOW_PATH,
+          repository: HOSTED_SUPERVISOR_REPOSITORY,
+          ref: HOSTED_SUPERVISOR_REF,
+          jobId: repair.id,
+          startedAt: repair.startedAt,
+          finishedAt: repair.completedAt,
+          observedAt,
+          outcome: "failed",
+          startupReady: false,
+          settled: true,
+          baseSha: null,
+          terminalAt: step.completedAt,
+          logDigest: await sha256Hex(log.value),
+        }, parseHostedRunProofV1);
+      }
       if (!parsedTerminal.ok) return parsedTerminal;
       const terminal = parsedTerminal.value.terminal;
       // A healthy terminal with a failed job or runtime step is contradictory:
@@ -1263,40 +1374,78 @@ export class GitHubApiClient {
     }, parseHostedNotStartedProofV1);
   }
 
-  /** One complete bounded jobs page; duplicates/identity mismatches fail. */
+  /** Complete native attempt listing; every page shares the same deadline. */
   private async readHostedAttemptJobs(
     intent: HostedExecutionIntentV1,
     deadline: DeadlineV1,
   ): Promise<
     PortResultV1<{ raw: unknown; repair: HostedRepairJobV1 | null }>
   > {
-    if (deadline.fired()) return this.hostedExecutionTimeout();
-    const repo = repoPath(this.repository);
-    const response = await this.request(
-      "GET",
-      `/repos/${repo}/actions/runs/${intent.runId}/attempts/${intent.runAttempt}/jobs`,
-      { per_page: String(HOSTED_EXECUTION_MAX_JOBS) },
-      deadline,
+    const path = `/repos/${
+      repoPath(this.repository)
+    }/actions/runs/${intent.runId}/attempts/${intent.runAttempt}/jobs`;
+    const pages: unknown[] = [];
+    const jobs: unknown[] = [];
+    let total: number | null = null;
+    const maxPages = Math.ceil(
+      HOSTED_EXECUTION_MAX_JOBS / HOSTED_EXECUTION_JOBS_PAGE_SIZE,
     );
-    if (!response.ok) return response;
-    if (response.value.status !== 200) {
-      return portError(...this.mapError(response.value));
+    for (let page = 1; page <= maxPages; page++) {
+      if (deadline.fired()) return this.hostedExecutionTimeout();
+      const response = await this.request(
+        "GET",
+        path,
+        {
+          per_page: String(HOSTED_EXECUTION_JOBS_PAGE_SIZE),
+          page: String(page),
+        },
+        deadline,
+      );
+      if (!response.ok) return response;
+      if (response.value.status !== 200) {
+        return portError(...this.mapError(response.value));
+      }
+      const parsed = parseWire(response.value, parseHostedJobsPage);
+      if (!parsed.ok) return parsed;
+      if (total === null) total = parsed.value.total;
+      if (
+        total !== parsed.value.total ||
+        parsed.value.jobs.length !== Math.min(
+            HOSTED_EXECUTION_JOBS_PAGE_SIZE,
+            total - jobs.length,
+          )
+      ) {
+        return portError("unavailable", HOSTED_EXECUTION_METADATA);
+      }
+      pages.push(JSON.parse(response.value.bodyText));
+      jobs.push(...parsed.value.jobs);
+      const link = response.value.headers.get("link") ?? "";
+      if ([...link.matchAll(/;\s*rel="next"/g)].length > 1) {
+        return portError("unavailable", HOSTED_EXECUTION_METADATA);
+      }
+      const next = nextLinkUrl(response.value.headers);
+      if (jobs.length === total) {
+        if (next !== null) {
+          return portError("unavailable", HOSTED_EXECUTION_METADATA);
+        }
+        const complete = parseWith(
+          { total_count: total, jobs },
+          (value) => parseHostedJobs(value, intent),
+        );
+        if (!complete.ok) return complete;
+        return portOk({
+          raw: pages.length === 1 ? pages[0] : pages,
+          repair: complete.value.repair,
+        });
+      }
+      if (
+        next === null ||
+        !validHostedJobsNext(this.apiBaseUrl, path, next, page + 1)
+      ) {
+        return portError("unavailable", HOSTED_EXECUTION_METADATA);
+      }
     }
-    if (nextLinkUrl(response.value.headers) !== null) {
-      return portError("unavailable", HOSTED_EXECUTION_METADATA);
-    }
-    let raw: unknown;
-    try {
-      raw = JSON.parse(response.value.bodyText);
-    } catch {
-      return portError("invalid", "GitHub API response is malformed");
-    }
-    const parsed = parseWith(
-      raw,
-      (value) => parseHostedJobs(value, intent),
-    );
-    if (!parsed.ok) return parsed;
-    return portOk({ raw, repair: parsed.value.repair });
+    return portError("unavailable", HOSTED_EXECUTION_METADATA);
   }
 
   /** Trusted signed job log, bounded and read without any credential. */
@@ -2527,7 +2676,50 @@ function parseHostedAttempt(
   return { status, completedAt };
 }
 
-/** Exactly one bounded complete page with at most one total repair job. */
+/** Each authenticated page is bounded by the native API page size. */
+function parseHostedJobsPage(
+  value: unknown,
+): { total: number; jobs: unknown[] } {
+  const obj = expectRecord(value, "$");
+  const total = expectCount(obj.total_count, "$.total_count");
+  if (total > HOSTED_EXECUTION_MAX_JOBS) {
+    fail(
+      "$.total_count",
+      "bound_exceeded",
+      "native job count exceeds workflow",
+    );
+  }
+  const jobs = expectArray(
+    obj.jobs,
+    "$.jobs",
+    HOSTED_EXECUTION_JOBS_PAGE_SIZE,
+    (item) => item,
+  );
+  return { total, jobs };
+}
+
+/** A next page must stay on this exact authenticated attempt and advance once. */
+function validHostedJobsNext(
+  apiBaseUrl: string,
+  path: string,
+  next: string,
+  page: number,
+): boolean {
+  try {
+    const url = new URL(next);
+    return url.origin === new URL(apiBaseUrl).origin &&
+      url.username === "" && url.password === "" && url.hash === "" &&
+      url.pathname === path &&
+      [...url.searchParams.keys()].length === 2 &&
+      url.searchParams.get("per_page") ===
+        String(HOSTED_EXECUTION_JOBS_PAGE_SIZE) &&
+      url.searchParams.get("page") === String(page);
+  } catch {
+    return false;
+  }
+}
+
+/** Exactly one complete native listing with at most one total repair job. */
 function parseHostedJobs(
   value: unknown,
   intent: HostedExecutionIntentV1,
@@ -2544,9 +2736,26 @@ function parseHostedJobs(
     fail("$.total_count", "bound_exceeded", "job list is not a complete page");
   }
   const matches: Array<{ job: Record<string, unknown>; path: string }> = [];
+  const ids = new Set<number>();
   for (const [index, item] of jobs.entries()) {
     const path = `$.jobs[${index}]`;
     const job = expectRecord(item, path);
+    const id = expectPositiveInt(job.id, `${path}.id`);
+    if (
+      ids.has(id) ||
+      expectPositiveInt(job.run_id, `${path}.run_id`) !== intent.runId ||
+      expectPositiveInt(job.run_attempt, `${path}.run_attempt`) !==
+        intent.runAttempt ||
+      expectNonEmptyString(job.head_sha, `${path}.head_sha`, 40) !==
+        intent.launcherSha
+    ) {
+      fail(
+        path,
+        "invalid_value",
+        "native job identity is duplicate or foreign",
+      );
+    }
+    ids.add(id);
     if (
       expectNonEmptyString(job.name, `${path}.name`, MaxText.label) !== "repair"
     ) {
@@ -2608,7 +2817,7 @@ function parseHostedJobs(
   const steps = expectArray(
     job.steps,
     `${path}.steps`,
-    HOSTED_EXECUTION_MAX_JOBS,
+    HOSTED_EXECUTION_MAX_JOB_STEPS,
     (item) => item,
   );
   const stepMatches: Array<{ step: Record<string, unknown>; path: string }> =
@@ -2787,6 +2996,54 @@ async function sha256Hex(text: string): Promise<string> {
   return [...new Uint8Array(digest)]
     .map((byte) => byte.toString(16).padStart(2, "0"))
     .join("");
+}
+
+/** Strict complete nonrecursive tree proof, without mutable-ref selection. */
+function parseMatrixTreeEntry(
+  value: unknown,
+  treeSha: GitSha,
+  name: string,
+  maxItems: number,
+): { sha: GitSha; type: string; mode: string } | null {
+  const obj = expectRecord(value, "$");
+  if (
+    expectGitSha(obj.sha, "$.sha") !== treeSha ||
+    expectBoolean(obj.truncated, "$.truncated")
+  ) {
+    fail(
+      "$",
+      "invalid_value",
+      "matrix capability tree is incomplete or foreign",
+    );
+  }
+  const entries = expectArray(obj.tree, "$.tree", maxItems, (item) => item);
+  const names = new Set<string>();
+  let selected: { sha: GitSha; type: string; mode: string } | null = null;
+  for (const [index, value] of entries.entries()) {
+    const at = `$.tree[${index}]`;
+    const entry = expectRecord(value, at);
+    const path = expectNonEmptyString(entry.path, `${at}.path`, MaxText.path);
+    if (path.includes("/") || names.has(path)) {
+      fail(`${at}.path`, "invalid_value", "tree entry path is ambiguous");
+    }
+    names.add(path);
+    const sha = expectGitSha(entry.sha, `${at}.sha`);
+    const type = expectEnum(
+      entry.type,
+      ["tree", "blob", "commit"],
+      `${at}.type`,
+    );
+    const mode = expectNonEmptyString(entry.mode, `${at}.mode`, 6);
+    if (
+      (type === "tree" && mode !== "040000") ||
+      (type === "blob" && !["100644", "100755", "120000"].includes(mode)) ||
+      (type === "commit" && mode !== "160000")
+    ) {
+      fail(at, "invalid_value", "tree entry type and mode disagree");
+    }
+    if (path === name) selected = { sha, type, mode };
+  }
+  return selected;
 }
 
 function sameOrigin(first: string, second: string): boolean {

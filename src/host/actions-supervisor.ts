@@ -28,6 +28,7 @@ import type {
 } from "../contracts/hosted-supervisor.ts";
 import type {
   Clock,
+  PortErrorV1,
   PortResultV1,
   ReleaseStateWriter,
   StateReadResultV1,
@@ -41,6 +42,12 @@ import {
   parseCooldownModeV1,
 } from "../contracts/cooldown-mode.ts";
 import type { ReleaseRequestV1 } from "../contracts/release.ts";
+import {
+  checkReviewTaskStatement,
+  reviewTaskStatementDigest,
+  type ReviewTaskStatementV1,
+} from "../contracts/review-receipt.ts";
+import { reviewAuthorizesMerge } from "../repair/review-gate.ts";
 import type { RepositoryIdentityV1 } from "../contracts/shared.ts";
 import { parseReleaseStateSnapshotV1 } from "../contracts/state-snapshots.ts";
 import type {
@@ -68,6 +75,15 @@ const SUPERVISOR_TOKEN_ENV = "SENTINEL_SUPERVISOR_TOKEN";
 const STATIC_TOKEN = "hosted supervisor credentials are unavailable";
 const STATIC_STATE = "hosted supervisor release state is unavailable";
 const STATIC_SEED = "hosted supervisor release state could not be seeded";
+/**
+ * The one fixed GitHub App reviewer identity that may authorize an
+ * issue-backed release at the persisted-receipt boundary: sentinel App
+ * 4682172, bot user 319834869, whose review login is `ubiquity-sentinel[bot]`.
+ * The predicate pins this exact reviewer string, so a self-consistent receipt
+ * naming any other reviewer is a different reviewer and never authorizes.
+ * Legacy receipts still parse; they refuse as new authorization.
+ */
+const HOSTED_SUPERVISOR_REVIEWER = "ubiquity-sentinel[bot]";
 
 export interface HostedSupervisorBootstrapResultV1 {
   status: "seeded" | "already_present";
@@ -174,7 +190,6 @@ function emptyReleaseState(now: number): ReleaseStateSnapshotV1 {
 // repair state. No credentials or environment are read here.
 // ---------------------------------------------------------------------------
 
-const HOUR_MS = 3_600_000;
 const MAX_TRANSITIONS = 8;
 const SELF_REPOSITORY: RepositoryIdentityV1 = {
   owner: "ubiquity",
@@ -218,7 +233,22 @@ export interface HostedSupervisorEvidencePortV1 {
     savedIntent: HostedExecutionIntentV1,
   ): Promise<PortResultV1<HostedExecutionSettlementV1 | null>>;
   verifyRevision(revision: GitSha): Promise<PortResultV1<boolean>>;
+  /** Ordinary-only proof of the exact admitted revision's native matrix entrypoint. */
+  verifyMatrixOrdinaryRevision?(
+    revision: GitSha,
+  ): Promise<PortResultV1<boolean>>;
   verifyRequest(request: ReleaseRequestV1): Promise<PortResultV1<boolean>>;
+  /**
+   * Trusted, independent read of the source issue's exact task statement,
+   * performed immediately before any release selection or promotion: the
+   * issue's own bounded title/body with the canonical digest of that text.
+   * Absent, unreadable or over-bound context means the statement is
+   * unavailable, which never authorizes an issue-backed release. A record
+   * without a source issue (incident work) is not read at all.
+   */
+  readIssueTask?(
+    issueNumber: number,
+  ): Promise<PortResultV1<ReviewTaskStatementV1 | null>>;
 }
 
 export interface HostedSupervisorInputV1 {
@@ -369,24 +399,80 @@ async function readSettlement(
   input: HostedSupervisorInputV1,
   savedIntent: HostedExecutionIntentV1,
 ): Promise<SettlementReadV1> {
-  let result: PortResultV1<HostedExecutionSettlementV1 | null>;
-  try {
-    result = await input.evidence.readExecution(savedIntent);
-  } catch {
-    return { ok: false, outcome: pending(STATIC_EVIDENCE) };
+  // The evidence read is idempotent and read-only, so a transport-shaped
+  // failure is retried a bounded number of times inside this job: one flaky
+  // HTTP window must never strand the pointer's saved execution (and with it
+  // the whole lane) until a human intervenes. A refusal a retry cannot change
+  // (auth, rate limit, invalid input) is reported immediately, and every
+  // reported failure carries its CLOSED identity so the job output names the
+  // cause instead of one static string.
+  let failure = STATIC_EVIDENCE;
+  for (let attempt = 1; attempt <= EVIDENCE_READ_ATTEMPTS; attempt++) {
+    let result: PortResultV1<HostedExecutionSettlementV1 | null>;
+    try {
+      result = await input.evidence.readExecution(savedIntent);
+    } catch {
+      failure = `${STATIC_EVIDENCE} (thrown)`;
+      if (attempt < EVIDENCE_READ_ATTEMPTS) {
+        await pause(EVIDENCE_RETRY_PAUSE_MS);
+        continue;
+      }
+      break;
+    }
+    if (!result.ok) {
+      failure = evidenceFailureDetail(STATIC_EVIDENCE, result.error);
+      if (
+        attempt < EVIDENCE_READ_ATTEMPTS &&
+        result.error.kind === "unavailable"
+      ) {
+        await pause(EVIDENCE_RETRY_PAUSE_MS);
+        continue;
+      }
+      break;
+    }
+    if (result.value === null) {
+      return { ok: false, outcome: pending(STATIC_SETTLEMENT_PENDING) };
+    }
+    const parsed = tryParse(parseHostedExecutionSettlementV1, result.value);
+    if (!parsed.ok) {
+      const issue = parsed.issues[0];
+      return {
+        ok: false,
+        outcome: pending(
+          `${STATIC_EVIDENCE_BINDING} (invalid settlement: ${
+            issue?.code ?? "unknown"
+          } at ${issue?.path ?? "?"})`,
+        ),
+      };
+    }
+    if (!sameCanonical(parsed.value.execution, savedIntent)) {
+      return { ok: false, outcome: pending(STATIC_EVIDENCE_BINDING) };
+    }
+    return { ok: true, settlement: parsed.value };
   }
-  if (!result.ok) return { ok: false, outcome: pending(STATIC_EVIDENCE) };
-  if (result.value === null) {
-    return { ok: false, outcome: pending(STATIC_SETTLEMENT_PENDING) };
-  }
-  const parsed = tryParse(parseHostedExecutionSettlementV1, result.value);
-  if (!parsed.ok) {
-    return { ok: false, outcome: pending(STATIC_EVIDENCE_BINDING) };
-  }
-  if (!sameCanonical(parsed.value.execution, savedIntent)) {
-    return { ok: false, outcome: pending(STATIC_EVIDENCE_BINDING) };
-  }
-  return { ok: true, settlement: parsed.value };
+  return { ok: false, outcome: pending(failure) };
+}
+
+/** Bounded attempts of one read-only evidence read inside a single job. */
+const EVIDENCE_READ_ATTEMPTS = 3;
+const EVIDENCE_RETRY_PAUSE_MS = 2_000;
+
+function pause(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Closed, sanitized evidence-failure identity: the port's closed error kind
+ * plus, only when the port itself supplied one of its own
+ * `hosted execution ...` constants, that constant. Arbitrary upstream text (a
+ * response body, a redirect URL or a credential) is never propagated into the
+ * job output.
+ */
+function evidenceFailureDetail(base: string, error: PortErrorV1): string {
+  const closed = /^hosted execution [a-z ]{1,64}$/.test(error.detail)
+    ? `: ${error.detail}`
+    : "";
+  return `${base} (${error.kind}${closed})`;
 }
 
 function sameCanonical(a: unknown, b: unknown): boolean {
@@ -645,26 +731,95 @@ function isSelfOpenRequest(request: ReleaseRequestV1): boolean {
     sameRepository(request.target.repository, SELF_REPOSITORY);
 }
 
-/** Exact completed review binding: reviewer, PR/head/base, zero unresolved. */
-function reviewAuthorizes(
+/**
+ * The exact receipt the request references, bound to the request's own
+ * repository/PR/head/base identity. This is an identity lookup only: the shared
+ * semantic predicate in `reviewAuthorizes` decides whether it authorizes.
+ */
+function boundReceipt(
   snapshot: RepairStateSnapshotV1,
   request: ReleaseRequestV1,
-): boolean {
+): RepairStateSnapshotV1["reviews"][number] | null {
   const receiptId = request.source.reviewReceiptId;
-  if (receiptId === null) return false;
-  return snapshot.reviews.some((review) =>
+  if (receiptId === null) return null;
+  const found = snapshot.reviews.find((review) =>
     review.id === receiptId &&
     review.requestId === request.source.reviewRequestId &&
     sameRepository(review.repository, request.target.repository) &&
     review.pullRequest.number === request.source.pullRequest &&
     review.pullRequest.head === request.source.head &&
-    review.pullRequest.base === request.source.base &&
-    review.outcome === "completed" &&
-    review.resultId !== null && review.completedAt !== null &&
-    review.observedReviewer !== null &&
-    review.observedReviewer === review.expectedReviewer &&
-    review.findingsUncounted === 0 &&
-    !review.unresolvedSeverities.some((s) => s === "P0" || s === "P1")
+    review.pullRequest.base === request.source.base
+  );
+  return found ?? null;
+}
+
+/**
+ * The exact existing WorkRecord that published the request: same repository and
+ * the same PR/head/base. Its own `related.issueNumber` is the only task identity
+ * the trusted live read may be bound to; a request without that record has no
+ * provable task context and never authorizes a release.
+ */
+function boundWorkRecord(
+  snapshot: RepairStateSnapshotV1,
+  request: ReleaseRequestV1,
+): RepairStateSnapshotV1["work"][number] | null {
+  const found = snapshot.work.find((record) =>
+    sameRepository(record.repository, request.target.repository) &&
+    record.target.pr === request.source.pullRequest &&
+    record.target.head === request.source.head &&
+    record.target.base === request.source.base
+  );
+  return found ?? null;
+}
+
+/**
+ * The trusted live task statement for one record, read through the evidence
+ * port immediately before the authorization it feeds. A record without a
+ * source issue keeps the existing change-only contract (null); an unavailable
+ * port, transport failure or unreadable/over-bound statement is
+ * `"unavailable"`, which never authorizes issue-backed work.
+ */
+async function trustedTask(
+  input: HostedSupervisorInputV1,
+  record: RepairStateSnapshotV1["work"][number],
+): Promise<ReviewTaskStatementV1 | null | "unavailable"> {
+  const issueNumber = record.related.issueNumber;
+  if (issueNumber === null) return null;
+  const evidence = input.evidence;
+  if (evidence.readIssueTask === undefined) return "unavailable";
+  try {
+    // Called on the port itself: a detached reference loses the receiver and
+    // turns every legal port into an unavailable read.
+    const result = await evidence.readIssueTask(issueNumber);
+    if (!result.ok || result.value === null) return "unavailable";
+    return result.value;
+  } catch {
+    return "unavailable";
+  }
+}
+
+/**
+ * The one release authorization, shared with the maintenance consumer through
+ * `src/repair/review-gate.ts`: the exact referenced receipt must bind this
+ * request's identity and the record's exact publication AND carry a positive
+ * task acceptance bound to the trusted live source-issue statement read
+ * immediately before this check. A legacy quality-only receipt, a
+ * wrong-task/wrong-issue acceptance, a not-fulfilled, uncertain or
+ * already-satisfied base verdict and an unreadable task context all refuse.
+ */
+async function reviewAuthorizes(
+  input: HostedSupervisorInputV1,
+  snapshot: RepairStateSnapshotV1,
+  request: ReleaseRequestV1,
+): Promise<boolean> {
+  const receipt = boundReceipt(snapshot, request);
+  const record = boundWorkRecord(snapshot, request);
+  if (receipt === null || record === null) return false;
+  return reviewAuthorizesMerge(
+    receipt,
+    record,
+    HOSTED_SUPERVISOR_REVIEWER,
+    await trustedTask(input, record),
   );
 }
 
@@ -689,27 +844,33 @@ async function selectSourceRequest(
   const recorded = new Set(releases.map((item) => item.id));
   const eligible = snapshot.releaseRequests
     .filter((request) =>
-      !recorded.has(request.id) && isSelfOpenRequest(request) &&
-      reviewAuthorizes(snapshot, request)
+      !recorded.has(request.id) && isSelfOpenRequest(request)
     )
     .sort((a, b) =>
       a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
     );
-  const request = eligible[0];
-  if (request === undefined) return { kind: "none" };
-  if (request.revision === runtime.activeRevision) {
-    return { kind: "pending", detail: STATIC_REQUEST_ACTIVE };
+  for (const request of eligible) {
+    if (!(await reviewAuthorizes(input, snapshot, request))) continue;
+    if (request.revision === runtime.activeRevision) {
+      return { kind: "pending", detail: STATIC_REQUEST_ACTIVE };
+    }
+    let verified: PortResultV1<boolean>;
+    try {
+      verified = await input.evidence.verifyRequest(request);
+    } catch {
+      return { kind: "pending", detail: STATIC_REQUEST };
+    }
+    if (!verified.ok || !verified.value) {
+      return { kind: "pending", detail: STATIC_REQUEST };
+    }
+    // The source verifier has settled, so the trusted live task statement is
+    // read again now: this FINAL semantic authorization is the last read
+    // before the requested receipt is created, and text that drifted while the
+    // verifier ran changes the task and never selects the release.
+    if (!(await reviewAuthorizes(input, snapshot, request))) continue;
+    return { kind: "found", request };
   }
-  let verified: PortResultV1<boolean>;
-  try {
-    verified = await input.evidence.verifyRequest(request);
-  } catch {
-    return { kind: "pending", detail: STATIC_REQUEST };
-  }
-  if (!verified.ok || !verified.value) {
-    return { kind: "pending", detail: STATIC_REQUEST };
-  }
-  return { kind: "found", request };
+  return { kind: "none" };
 }
 
 function buildRequestedReceipt(
@@ -734,8 +895,14 @@ function buildRequestedReceipt(
   return parsed.ok ? parsed.value : null;
 }
 
+/**
+ * Ordinary work is due once every release is terminal and the active
+ * revision/generation carries a healthy settled proof. A persisted
+ * `nextOrdinaryAt` is retained as schema/identity bookkeeping only and never
+ * throttles admission: provider and platform limits govern scheduling, while
+ * the active-execution and same-run guards still prevent a second execution.
+ */
 function ordinaryDue(
-  input: HostedSupervisorInputV1,
   runtime: HostedRuntimeRecordV1,
   releases: readonly HostedReleaseRecordV1[],
 ): boolean {
@@ -743,15 +910,16 @@ function ordinaryDue(
   const healthy = runtime.lastHealthyProof;
   return healthy !== null &&
     healthy.execution.revision === runtime.activeRevision &&
-    healthy.execution.generation === runtime.generation &&
-    input.clock.now() >= runtime.nextOrdinaryAt;
+    healthy.execution.generation === runtime.generation;
 }
 
 /**
  * Promotion-source preflight before a healthy prior settlement may persist the
  * promote intent: the reread repair request must canonical-equal the frozen
- * hosted release request, still pass the review binding, and be accepted by
- * the source verifier. Failure/unavailability changes nothing.
+ * hosted release request and be accepted by the source verifier, and only then
+ * is the review binding re-applied to the freshly read live task statement, so
+ * the final semantic authorization is the last read before the pointer
+ * mutation. Failure/unavailability changes nothing.
  */
 async function authorizePromotionSource(
   input: HostedSupervisorInputV1,
@@ -774,10 +942,14 @@ async function authorizePromotionSource(
   );
   if (
     request === undefined || !sameCanonical(request, frozen) ||
-    !isSelfOpenRequest(request) || !reviewAuthorizes(snapshot, request)
+    !isSelfOpenRequest(request)
   ) {
     return { ok: false, detail: STATIC_REQUEST };
   }
+  // The source verifier settles FIRST: the trusted live task statement is read
+  // only after it, so the FINAL semantic authorization below is the last read
+  // before the caller's pointer mutation. Text that drifted while the verifier
+  // ran changes the task and never promotes.
   let verified: PortResultV1<boolean>;
   try {
     verified = await input.evidence.verifyRequest(request);
@@ -785,6 +957,9 @@ async function authorizePromotionSource(
     return { ok: false, detail: STATIC_REQUEST };
   }
   if (!verified.ok || !verified.value) {
+    return { ok: false, detail: STATIC_REQUEST };
+  }
+  if (!(await reviewAuthorizes(input, snapshot, request))) {
     return { ok: false, detail: STATIC_REQUEST };
   }
   return { ok: true };
@@ -879,7 +1054,10 @@ export async function runHostedSupervisorPrepare(
         generation: 1,
         lastHealthyProof: null,
         lastExecutionProof: null,
-        nextOrdinaryAt: now + HOUR_MS,
+        // No artificial ordinary-work cooldown: the next scheduled dispatch may run
+        // ordinary work as soon as the previous execution actually settled. The
+        // same run/attempt still cannot start a second execution.
+        nextOrdinaryAt: now,
         execution: null,
         createdAt: now,
         updatedAt: now,
@@ -892,6 +1070,19 @@ export async function runHostedSupervisorPrepare(
 
     const recovery = planPointerRecovery(runtime, releases, input.clock.now());
     if (recovery !== null) {
+      // A persisted promote intent is durable, not self-authorizing: before
+      // the pointer actually moves on a RESUMED intent, the current trusted
+      // WorkRecord/receipt/source issue are re-read and the same semantic
+      // authorization is re-applied. An unavailable context or a changed task
+      // blocks conservatively here: the old intent is never cleared,
+      // rewritten or fabricated, and the active revision never moves.
+      const promoting = releases.find((item) =>
+        item.phase === "promoting" && item.pointerIntent !== null
+      );
+      if (promoting !== undefined) {
+        const authorized = await authorizePromotionSource(input, promoting);
+        if (!authorized.ok) return pending(authorized.detail);
+      }
       const applied = await commitHosted(
         input,
         cursor,
@@ -959,7 +1150,36 @@ export async function runHostedSupervisorPrepare(
       continue;
     }
 
-    if (ordinaryDue(input, runtime, releases)) {
+    if (ordinaryDue(runtime, releases)) {
+      const verify = input.evidence.verifyMatrixOrdinaryRevision;
+      if (verify === undefined) {
+        return pending("ordinary matrix capability proof is unavailable");
+      }
+      let verified: PortResultV1<boolean>;
+      try {
+        verified = await verify.call(input.evidence, runtime.activeRevision);
+      } catch {
+        return pending("ordinary matrix capability proof is unavailable");
+      }
+      if (
+        verified === null || typeof verified !== "object" ||
+        !verified.ok || typeof verified.value !== "boolean"
+      ) {
+        return pending("ordinary matrix capability proof is unavailable");
+      }
+      // Keep the original cursor/head for the eventual CAS. A capability read
+      // cannot authorize stale admission after any pointer or generation move.
+      const current = await readCursor(input);
+      if (
+        current === null || current.head !== cursor.head ||
+        canonicalStringify(current.snapshot) !==
+          canonicalStringify(cursor.snapshot)
+      ) {
+        return pending(STATIC_CONFLICT);
+      }
+      if (!verified.value) {
+        return idle("active runtime does not support ordinary matrix work");
+      }
       return await startExecution(
         input,
         cursor,
@@ -968,7 +1188,30 @@ export async function runHostedSupervisorPrepare(
         "ordinary",
         runtime.activeRevision,
         null,
-        input.clock.now() + HOUR_MS,
+        input.clock.now(),
+      );
+    }
+
+    if (
+      runtime.lastHealthyProof === null ||
+      runtime.lastHealthyProof.execution.revision !== runtime.activeRevision ||
+      runtime.lastHealthyProof.execution.generation !== runtime.generation
+    ) {
+      // The active revision carries no current health proof, so one
+      // verification execution is scheduled. It is deliberately NOT an
+      // `ordinary` execution: only `ordinary` may start model work, so a
+      // missing proof can never become a model-enabled run. The ordinary
+      // cadence stays owned by `ordinaryDue`, which starts ordinary work as
+      // soon as a healthy proof for the active revision/generation settles;
+      // this verification neither brings that forward nor pushes it back.
+      return await startExecution(
+        input,
+        cursor,
+        runtime,
+        releases,
+        "bootstrap",
+        runtime.activeRevision,
+        null,
       );
     }
     return idle(STATIC_IDLE_NONE);
@@ -1068,7 +1311,7 @@ function supervisorJob(value: string | undefined): HostedRuntimeJobV1 {
  * Real production composition: exact native identity and the clean protected
  * source are proved BEFORE any auth, API, output or state work, then the
  * existing core prepare/finalize runs with the authenticated native client
- * behind the shared cooldown gate. Prepare writes only `run`/`revision`;
+ * behind the shared cooldown gate. Prepare writes `run`/`revision`/`modelStartsEnabled`;
  * finalize writes no outputs and never starts a model.
  */
 export async function runHostedSupervisorHost(
@@ -1111,7 +1354,29 @@ export async function runHostedSupervisorHost(
   const evidence: HostedSupervisorEvidencePortV1 = {
     readExecution: (saved) => client.readHostedExecution(saved),
     verifyRevision: (revision) => client.verifyHostedRevision(revision),
+    verifyMatrixOrdinaryRevision: (revision) =>
+      client.verifyMatrixOrdinaryRevision(revision),
     verifyRequest: (request) => client.verifyHostedReleaseRequest(request),
+    // The trusted source-issue statement is read over the same authenticated
+    // native client (and the same cooldown gate) as every other supervisor
+    // read, immediately before the release authorization it feeds. An
+    // unreadable, malformed or over-bound issue is not a statement.
+    readIssueTask: async (issueNumber: number) => {
+      const issue = await client.readIssue(issueNumber);
+      if (!issue.ok) return issue;
+      if (issue.value === null) return portOk(null);
+      const checked = await checkReviewTaskStatement({
+        issueNumber: issue.value.number,
+        title: issue.value.title,
+        body: issue.value.body,
+        digest: await reviewTaskStatementDigest({
+          issueNumber: issue.value.number,
+          title: issue.value.title,
+          body: issue.value.body,
+        }),
+      });
+      return portOk(checked.ok ? checked.statement : null);
+    },
   };
   const core = {
     clock: input.clock,
@@ -1153,6 +1418,31 @@ export async function runHostedSupervisorHost(
   if (!isGitSha(outcome.execution.revision)) throw new Error(STATIC_RESULT);
   await writeOutput("run", "true");
   await writeOutput("revision", outcome.execution.revision);
+  // Only ordinary work with the exact current healthy pointer may fan out.
+  // Verification retains the installed runtime's existing repair entrypoint.
+  let modelStartsEnabled = false;
+  if (outcome.execution.purpose === "ordinary") {
+    const current = await input.state.readRelease();
+    if (!current.ok || current.value.status !== "found") {
+      throw new Error(STATIC_RESULT);
+    }
+    const runtimes = current.value.snapshot.hostedRuntimes;
+    const runtime = runtimes.length === 1 ? runtimes[0] : undefined;
+    if (
+      runtime === undefined || runtime.execution === null ||
+      canonicalStringify(runtime.execution) !==
+        canonicalStringify(outcome.execution) ||
+      runtime.activeRevision !== outcome.execution.revision ||
+      runtime.generation !== outcome.execution.generation
+    ) {
+      throw new Error(STATIC_RESULT);
+    }
+    const healthy = runtime.lastHealthyProof;
+    modelStartsEnabled = healthy !== null &&
+      healthy.execution.revision === runtime.activeRevision &&
+      healthy.execution.generation === runtime.generation;
+  }
+  await writeOutput("modelStartsEnabled", String(modelStartsEnabled));
   return {
     job,
     status: "run",

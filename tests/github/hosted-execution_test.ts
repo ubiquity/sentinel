@@ -461,6 +461,53 @@ Deno.test("hosted execution: an explicit failed terminal or failed job is a fail
   );
 });
 
+Deno.test("hosted execution: a started runtime step that concluded failure with no terminal settles as failed, never stranded", async () => {
+  // The real 2026-09-20 case: the gateway was unreachable, the child runtime
+  // step started and then exited non-zero BEFORE it could publish a
+  // `hosted_runtime_terminal` line. The attempt and job are completed, so no
+  // later observation can ever produce a terminal. Returning unavailable here
+  // strands the pointer's saved execution forever and the supervisor can never
+  // advance; the honest, observable settlement is an explicit failure.
+  const stranded = makeRig();
+  scriptAttemptAndJobs(
+    stranded,
+    attemptBody(),
+    jobsBody([
+      jobBody({
+        conclusion: "failure",
+        steps: [runtimeStep({ conclusion: "failure" })],
+      }),
+    ]),
+  );
+  scriptLog(
+    stranded,
+    "2026-09-20T10:23:05.4041704Z hosted runtime result is unavailable\n",
+  );
+  const proof = settlementProof(
+    await stranded.client.readHostedExecution(intent()),
+  );
+  assert.equal(proof.outcome, "failed");
+  assert.equal(proof.startupReady, false);
+  assert.equal(proof.baseSha, null);
+  assert.equal(proof.settled, true);
+  assert.equal(proof.jobId, JOB_ID);
+  assert.equal(proof.logDigest.length, 64);
+
+  // A successful runtime step with no terminal stays unavailable: nothing
+  // observable failed, so there is no honest failed settlement to publish.
+  const contradictory = makeRig();
+  scriptAttemptAndJobs(
+    contradictory,
+    attemptBody(),
+    jobsBody([jobBody({ steps: [runtimeStep()] })]),
+  );
+  scriptLog(contradictory, "2026-09-20T10:23:05.4041704Z nothing to see\n");
+  assert.equal(
+    (await contradictory.client.readHostedExecution(intent())).ok,
+    false,
+  );
+});
+
 Deno.test("hosted execution: skipped, cancelled, timed-out or absent completed repair jobs are explicit not_started", async () => {
   const skipped = makeRig();
   scriptAttemptAndJobs(
@@ -995,4 +1042,305 @@ Deno.test("hosted execution: future, inverted or early-terminal metadata is refu
     (await earlyTerminal.client.readHostedExecution(intent())).ok,
     false,
   );
+});
+
+Deno.test("hosted execution: paginated native jobs reject incomplete conflicting or foreign pages", async (t) => {
+  for (
+    const defect of [
+      "duplicate_id",
+      "duplicate_repair",
+      "wrong_attempt",
+      "wrong_head",
+      "changing_total",
+      "missing_next",
+      "short_page",
+      "cycle",
+      "foreign_origin",
+      "foreign_attempt",
+      "userinfo",
+      "repeated_query",
+      "extra_next",
+      "multiple_next",
+      "missing_page",
+      "native_ceiling",
+      "page_cooldown",
+    ]
+  ) {
+    await t.step(defect, async () => {
+      const rig = makeRig();
+      const cells = Array.from(
+        { length: 100 },
+        (_, index) =>
+          jobBody({ id: 10000 + index, name: "matrix_cell (" + index + ")" }),
+      );
+      const repair = jobBody();
+      if (defect === "duplicate_id") repair.id = cells[0].id;
+      if (defect === "duplicate_repair") cells[0] = jobBody({ id: JOB_ID + 1 });
+      if (defect === "wrong_attempt") cells[0].run_attempt = RUN_ATTEMPT + 1;
+      if (defect === "wrong_head") cells[0].head_sha = "f".repeat(40);
+      scriptAttemptAndJobs(rig, attemptBody(), {});
+      rig.http.on("GET", JOBS_PATH, (request) => {
+        const page = Number(
+          new URL(request.url).searchParams.get("page") ?? "1",
+        );
+        if (defect === "page_cooldown" && page === 1) rig.gate.deny = true;
+        if (defect === "missing_page" && page === 2) return response(404, {});
+        let next = page === 1
+          ? API_BASE + JOBS_PATH + "?per_page=100&page=2"
+          : null;
+        if (defect === "missing_next") next = null;
+        if (defect === "cycle") {
+          next = API_BASE + JOBS_PATH + "?per_page=100&page=1";
+        }
+        if (defect === "foreign_origin") {
+          next = "https://evil.example" + JOBS_PATH + "?per_page=100&page=2";
+        }
+        if (defect === "foreign_attempt") {
+          next = API_BASE +
+            JOBS_PATH.replace(
+              "/attempts/" + RUN_ATTEMPT,
+              "/attempts/" + (RUN_ATTEMPT + 1),
+            ) + "?per_page=100&page=2";
+        }
+        if (defect === "userinfo") {
+          next = "https://user@api.github.com" + JOBS_PATH +
+            "?per_page=100&page=2";
+        }
+        if (defect === "repeated_query") {
+          next = API_BASE + JOBS_PATH + "?per_page=100&page=2&page=2";
+        }
+        if (defect === "extra_next" && page === 2) {
+          next = API_BASE + JOBS_PATH + "?per_page=100&page=3";
+        }
+        const total = defect === "native_ceiling"
+          ? 262
+          : defect === "changing_total" && page === 2
+          ? 102
+          : 101;
+        const jobs = page === 1
+          ? defect === "short_page" ? cells.slice(0, 99) : cells
+          : [repair];
+        return response(
+          200,
+          jobsBody(jobs, total),
+          next === null ? {} : {
+            link: "<" + next + '>; rel="next"' +
+              (defect === "multiple_next"
+                ? ", <" + next + '>; rel="next"'
+                : ""),
+          },
+        );
+      });
+      scriptLog(rig, logText([terminalRecord()]));
+      const result = await rig.client.readHostedExecution(intent());
+      assert.equal(result.ok, false, defect);
+      assert.equal(
+        rig.http.callsTo(JOB_LOG_PATH).length,
+        0,
+        "invalid listing cannot authenticate a terminal",
+      );
+      assert.ok(
+        rig.http.calls.every((call) => new URL(call.url).origin === API_BASE),
+        "no credential may follow a foreign page",
+      );
+      assert.ok(rig.gate.admissions.every((scope) => scope === 0));
+      if (defect === "page_cooldown") {
+        assert.equal(rig.http.callsTo(JOBS_PATH).length, 1);
+        if (!result.ok) assert.equal(result.error.kind, "rate_limited");
+      }
+    });
+  }
+});
+
+const MATRIX_ROOT_SHA = "5".repeat(40);
+const MATRIX_SRC_SHA = "6".repeat(40);
+const MATRIX_HOST_SHA = "7".repeat(40);
+const MATRIX_COMMIT_PATH = "/repos/" + REPO + "/git/commits/" + REVISION;
+const matrixTreePath = (sha: string) => "/repos/" + REPO + "/git/trees/" + sha;
+
+function scriptMatrixCapability(rig: RigV1, capable = true): void {
+  rig.http.on("GET", MATRIX_COMMIT_PATH, () =>
+    response(200, {
+      sha: REVISION,
+      tree: { sha: MATRIX_ROOT_SHA },
+    }));
+  rig.http.on("GET", matrixTreePath(MATRIX_ROOT_SHA), () =>
+    response(200, {
+      sha: MATRIX_ROOT_SHA,
+      truncated: false,
+      tree: [{
+        path: "src",
+        type: "tree",
+        mode: "040000",
+        sha: MATRIX_SRC_SHA,
+      }],
+    }));
+  rig.http.on("GET", matrixTreePath(MATRIX_SRC_SHA), () =>
+    response(200, {
+      sha: MATRIX_SRC_SHA,
+      truncated: false,
+      tree: [{
+        path: "host",
+        type: "tree",
+        mode: "040000",
+        sha: MATRIX_HOST_SHA,
+      }],
+    }));
+  rig.http.on("GET", matrixTreePath(MATRIX_HOST_SHA), () =>
+    response(200, {
+      sha: MATRIX_HOST_SHA,
+      truncated: false,
+      tree: capable
+        ? [{
+          path: "matrix-actions.ts",
+          type: "blob",
+          mode: "100644",
+          sha: "8".repeat(40),
+        }]
+        : [],
+    }));
+}
+
+Deno.test("ordinary matrix source: authenticated complete immutable trees prove capability or definitive absence", async (t) => {
+  for (const capable of [false, true]) {
+    await t.step(String(capable), async () => {
+      const rig = makeRig();
+      scriptMatrixCapability(rig, capable);
+      const result = await rig.client.verifyMatrixOrdinaryRevision(REVISION);
+      assert.ok(result.ok, JSON.stringify(result));
+      if (result.ok) assert.equal(result.value, capable);
+      assert.equal(rig.http.calls.length, 4);
+      assert.ok(
+        rig.http.calls.every((call) =>
+          call.method === "GET" && !call.url.includes("development") &&
+          call.headers.get("authorization") === "Bearer test-token"
+        ),
+      );
+    });
+  }
+});
+
+Deno.test("ordinary matrix source: unknown commit tree path or type proof never becomes support or absence", async (t) => {
+  for (
+    const defect of [
+      "commit404",
+      "tree404",
+      "wrong_commit",
+      "missing_commit_tree",
+      "wrong_root",
+      "truncated",
+      "malformed",
+      "unknown_truncation",
+      "duplicate_path",
+      "recursive_path",
+      "symlink",
+      "directory",
+      "submodule",
+      "wrong_mode",
+      "wrong_src",
+      "malformed_other_entry",
+    ]
+  ) {
+    await t.step(defect, async () => {
+      const rig = makeRig();
+      scriptMatrixCapability(rig);
+      const entry = {
+        path: "matrix-actions.ts",
+        type: "blob",
+        mode: "100644",
+        sha: "8".repeat(40),
+      };
+      if (defect === "commit404") {
+        rig.http.on("GET", MATRIX_COMMIT_PATH, () => response(404, {}));
+      } else if (defect === "wrong_commit") {
+        rig.http.on(
+          "GET",
+          MATRIX_COMMIT_PATH,
+          () =>
+            response(200, { sha: LAUNCHER, tree: { sha: MATRIX_ROOT_SHA } }),
+        );
+      } else if (defect === "missing_commit_tree") {
+        rig.http.on(
+          "GET",
+          MATRIX_COMMIT_PATH,
+          () => response(200, { sha: REVISION }),
+        );
+      } else if (defect === "tree404") {
+        rig.http.on(
+          "GET",
+          matrixTreePath(MATRIX_ROOT_SHA),
+          () => response(404, {}),
+        );
+      } else if (
+        defect === "wrong_root" || defect === "truncated" ||
+        defect === "unknown_truncation" || defect === "malformed"
+      ) {
+        rig.http.on(
+          "GET",
+          matrixTreePath(MATRIX_ROOT_SHA),
+          () =>
+            response(200, {
+              sha: defect === "wrong_root" ? LAUNCHER : MATRIX_ROOT_SHA,
+              truncated: defect === "truncated"
+                ? true
+                : defect === "unknown_truncation"
+                ? "false"
+                : false,
+              tree: defect === "malformed" ? null : [{
+                path: "src",
+                type: "tree",
+                mode: "040000",
+                sha: MATRIX_SRC_SHA,
+              }],
+            }),
+        );
+      } else if (defect === "wrong_src") {
+        rig.http.on(
+          "GET",
+          matrixTreePath(MATRIX_SRC_SHA),
+          () =>
+            response(200, { sha: MATRIX_HOST_SHA, truncated: false, tree: [] }),
+        );
+      } else {
+        if (defect === "symlink") entry.mode = "120000";
+        if (defect === "directory") {
+          entry.type = "tree";
+          entry.mode = "040000";
+        }
+        if (defect === "submodule") {
+          entry.type = "commit";
+          entry.mode = "160000";
+        }
+        if (defect === "wrong_mode") entry.mode = "999999";
+        if (defect === "recursive_path") entry.path = "host/matrix-actions.ts";
+        const tree = defect === "duplicate_path"
+          ? [entry, entry]
+          : defect === "malformed_other_entry"
+          ? [entry, { ...entry, path: "other", sha: "bad" }]
+          : [entry];
+        rig.http.on(
+          "GET",
+          matrixTreePath(MATRIX_HOST_SHA),
+          () => response(200, { sha: MATRIX_HOST_SHA, truncated: false, tree }),
+        );
+      }
+      const result = await rig.client.verifyMatrixOrdinaryRevision(REVISION);
+      assert.equal(result.ok, false, defect);
+      assert.ok(rig.http.calls.every((call) => call.method === "GET"));
+    });
+  }
+});
+
+Deno.test("ordinary matrix source: existing scoped cooldown gate refuses later tree reads", async () => {
+  const rig = makeRig();
+  scriptMatrixCapability(rig);
+  rig.http.on("GET", MATRIX_COMMIT_PATH, () => {
+    rig.gate.deny = true;
+    return response(200, { sha: REVISION, tree: { sha: MATRIX_ROOT_SHA } });
+  });
+  const result = await rig.client.verifyMatrixOrdinaryRevision(REVISION);
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.error.kind, "rate_limited");
+  assert.equal(rig.http.calls.length, 1);
+  assert.ok(rig.gate.admissions.every((scope) => scope === 0));
 });

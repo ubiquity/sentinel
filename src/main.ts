@@ -109,6 +109,8 @@ export interface RepairEntrypointDepsV1 {
   model: ImplementationPort;
   /** The one durable model-start admission controller. */
   budget: BudgetControllerV1;
+  /** Trusted matrix ownership: no serial implementation fallback or uncertainty settlement. */
+  externalImplementations?: boolean;
 }
 
 export interface RepairEntrypointOptionsV1 {
@@ -191,6 +193,7 @@ export async function runRepairEntrypoint(
         fixtureIdentities: deps.fixtureIdentities,
         model: deps.model,
         budget: deps.budget,
+        externalImplementations: deps.externalImplementations,
       },
       {
         deadline: hardDeadline - OPERATION_MARGIN_MS,
@@ -246,7 +249,7 @@ export async function runRepairEntrypoint(
   if (cycleThrew) throw cycleError;
   if (
     report !== null && postDrain.continuation !== null &&
-    outcome?.status === "idle"
+    (outcome?.status === "idle" || outcome?.status === "margin")
   ) {
     const completedKeys = report.operations.filter((operation) =>
       operation.processSettled && operation.durable &&

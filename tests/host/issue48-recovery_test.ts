@@ -1082,6 +1082,12 @@ Deno.test("issue48 recovery: supervisor workflow dependency and locking contract
   // and mints the installation token from the environment secret.
   assert.ok(maintenance.includes("environment:"));
   assert.ok(maintenance.includes("name: sentinel-supervisor"));
+  assert.ok(maintenance.includes("create-github-app-token"));
+  assert.ok(
+    maintenance.includes(
+      "private-key: ${{ secrets.SENTINEL_SUPERVISOR_APP_PRIVATE_KEY }}",
+    ),
+  );
   assert.ok(maintenance.includes("client-id: Iv23liHUJNXds9mU3j7Q"));
   assert.ok(
     maintenance.includes(
@@ -1160,11 +1166,13 @@ Deno.test("issue48 recovery: supervisor workflow dependency and locking contract
   const repair = text.slice(repairAt, finalizeAt);
   assert.ok(
     repair.includes(
-      "if: ${{ !cancelled() && needs.prepare.result == 'success' && github.ref == 'refs/heads/sentinel-supervisor' && needs.prepare.outputs.run == 'true' }}",
+      "if: ${{ !cancelled() && needs.prepare.result == 'success' && github.ref == 'refs/heads/sentinel-supervisor' && needs.prepare.outputs.run == 'true' && (needs.prepare.outputs.modelStartsEnabled != 'true' || needs.matrix_plan.result == 'success') }}",
     ),
   );
   const finalize = text.slice(finalizeAt);
-  assert.ok(finalize.includes("needs: [prepare, repair]"));
+  assert.ok(
+    finalize.includes("needs: [prepare, matrix_plan, matrix_cell, repair]"),
+  );
   assert.ok(
     finalize.includes(
       "if: always() && github.ref == 'refs/heads/sentinel-supervisor'",

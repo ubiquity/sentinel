@@ -33,6 +33,10 @@ export interface HttpRequestV1 {
    * that must observe the provider's signed-log redirect itself.
    */
   redirect?: "error" | "manual";
+  /** Preserve raw bytes for bounded archive downloads. */
+  responseType?: "bytes";
+  /** Positive finite override that may only shorten the transport bound. */
+  deadlineMs?: number;
 }
 
 export interface HttpResponseV1 {
@@ -41,6 +45,8 @@ export interface HttpResponseV1 {
   headers: Headers;
   /** Buffered UTF-8 response body; consumed exactly once by the caller. */
   bodyText: string;
+  /** Present only for a raw-byte request; bodyText is empty then. */
+  bodyBytes?: Uint8Array;
 }
 
 export type HttpTransportV1 = (
@@ -173,7 +179,16 @@ export function fromFetch(
   const deadlineMs = options.deadlineMs ?? DEFAULT_HTTP_DEADLINE_MS;
   const maxBodyBytes = options.maxBodyBytes ?? DEFAULT_HTTP_MAX_BODY_BYTES;
   return async (request: HttpRequestV1): Promise<HttpResponseV1> => {
-    const deadline = createDeadline(deadlineMs);
+    const requestDeadline = request.deadlineMs;
+    if (
+      requestDeadline !== undefined &&
+      (!Number.isFinite(requestDeadline) || requestDeadline <= 0)
+    ) {
+      throw new Error("invalid HTTP request deadline");
+    }
+    const deadline = createDeadline(
+      Math.min(deadlineMs, requestDeadline ?? deadlineMs),
+    );
     const controller = new AbortController();
     try {
       const fetchPromise = fetchFn(request.url, {
@@ -198,9 +213,9 @@ export function fromFetch(
         throw error;
       }
       const body = startBoundedBodyRead(response, maxBodyBytes);
-      let bodyText: string;
+      let bodyBytes: Uint8Array;
       try {
-        bodyText = await deadline.race(body.promise);
+        bodyBytes = await deadline.race(body.promise);
       } catch (error) {
         // Release the stream (and swallow its later rejection) either way.
         body.cancel();
@@ -212,7 +227,10 @@ export function fromFetch(
       return {
         status: response.status,
         headers: response.headers,
-        bodyText,
+        bodyText: request.responseType === "bytes"
+          ? ""
+          : new TextDecoder().decode(bodyBytes),
+        ...(request.responseType === "bytes" ? { bodyBytes } : {}),
       };
     } finally {
       deadline.dispose();
@@ -224,9 +242,9 @@ export function fromFetch(
 function startBoundedBodyRead(
   response: HttpResponseLikeV1,
   maxBytes: number,
-): { promise: Promise<string>; cancel(): void } {
+): { promise: Promise<Uint8Array>; cancel(): void } {
   if (response.body === undefined || response.body === null) {
-    return { promise: Promise.resolve(""), cancel() {} };
+    return { promise: Promise.resolve(new Uint8Array()), cancel() {} };
   }
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
@@ -249,14 +267,14 @@ function startBoundedBodyRead(
         // The reader was canceled/aborted; nothing more to release.
       }
     }
-    if (chunks.length === 0) return "";
+    if (chunks.length === 0) return new Uint8Array();
     const merged = new Uint8Array(total);
     let offset = 0;
     for (const chunk of chunks) {
       merged.set(chunk, offset);
       offset += chunk.byteLength;
     }
-    return new TextDecoder().decode(merged);
+    return merged;
   })();
   return {
     promise,

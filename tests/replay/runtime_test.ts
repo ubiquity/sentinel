@@ -220,3 +220,24 @@ Deno.test("unsupported platforms are rejected before any execution", async () =>
     assert.equal(run.lastOwnedGroupId(), null);
   });
 });
+
+Deno.test("native matrix input is piped to the real owned child and closed", async () => {
+  await withFixture(async (root) => {
+    const run = runtime();
+    const stdin = JSON.stringify({
+      planDigest: "d".repeat(64),
+      cellId: "c".repeat(64),
+    });
+    const input = command(root, ["-c", "cat"], 1000);
+    const result = await run.run({ ...input, stdin });
+    assert.equal(result.outcome, "exited");
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.settled, true);
+    assert.equal(new TextDecoder().decode(result.stdout), stdin);
+    assertGroupGone(run);
+    const ignored = await run.run(input);
+    assert.equal(ignored.exitCode, 0);
+    assert.equal(ignored.stdout.byteLength, 0);
+    assertGroupGone(run);
+  });
+});

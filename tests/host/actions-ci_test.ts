@@ -196,6 +196,7 @@ function runBody(
     triggeringActor?: string;
     path?: string;
     headSha?: string;
+    headRef?: string;
     headRepo?: string;
     status?: string;
     conclusion?: string | null;
@@ -219,7 +220,7 @@ function runBody(
     event: "pull_request",
     path: overrides.path ?? WORKFLOW_PATH,
     head_sha: overrides.headSha ?? HEAD,
-    head_branch: HEAD_REF,
+    head_branch: overrides.headRef ?? HEAD_REF,
     head_repository: { full_name: overrides.headRepo ?? "ubiquity/sentinel" },
     actor: { login: overrides.actor ?? PUBLISHER },
     triggering_actor: { login: overrides.triggeringActor ?? PUBLISHER },
@@ -228,8 +229,8 @@ function runBody(
     pull_requests: [{
       number: overrides.prNumber ?? PR_NUMBER,
       head: {
-        sha: HEAD,
-        ref: HEAD_REF,
+        sha: overrides.headSha ?? HEAD,
+        ref: overrides.headRef ?? HEAD_REF,
         repo: associationRepo(),
       },
       base: {
@@ -303,6 +304,7 @@ function makeRig(work: WorkRecordV1[] = [candidateRecord()]) {
   state.repair = snapshot(work);
   const gate = new FakeGate();
   const http = new ScriptedHttp();
+  const clock = new FakeClock(T0);
   http.on("GET", PULL_PATH, () => response(200, pullBody()));
   http.on("GET", LIST_PATH, () => response(200, runsBody([runBody()])));
   http.on("GET", RUN_PATH, () => response(200, runBody()));
@@ -311,17 +313,225 @@ function makeRig(work: WorkRecordV1[] = [candidateRecord()]) {
     state,
     gate,
     http,
-    run: () =>
-      runActionsCiApproval({
+    clock,
+    run: (deadline = clock.now() + 60 * 60_000) => {
+      const input = {
         state,
         gate,
         http: http.transport,
         token: "dummy-token",
-        clock: new FakeClock(T0),
+        clock,
+        deadline,
         apiBaseUrl: API_BASE,
-      }),
+      };
+      return runActionsCiApproval(input);
+    },
   };
 }
+
+Deno.test(
+  "ci approval: absolute deadline stops candidates and recomputes every request bound",
+  async () => {
+    const expired = makeRig();
+    assert.deepEqual(await expired.run(expired.clock.now()), {
+      approved: 0,
+      pending: 0,
+      unavailable: 1,
+    });
+    assert.equal(expired.http.calls.length, 0);
+
+    const rig = makeRig();
+    const advance = (body: unknown) => {
+      rig.clock.advance(1000);
+      return response(200, body);
+    };
+    rig.http.on("GET", PULL_PATH, () => advance(pullBody()));
+    rig.http.on("GET", LIST_PATH, () => advance(runsBody([runBody()])));
+    rig.http.on("GET", RUN_PATH, () => advance(runBody()));
+    assert.deepEqual(await rig.run(T0 + 3500), {
+      approved: 0,
+      pending: 0,
+      unavailable: 1,
+    });
+    assert.equal(
+      rig.http.posts().length,
+      0,
+      "expiry before approval never submits",
+    );
+    assert.deepEqual(
+      rig.http.calls.map((call) =>
+        (call as HttpRequestV1 & { deadlineMs?: number }).deadlineMs
+      ),
+      [3500, 2500, 1500, 500],
+    );
+
+    const late = candidateRecord({
+      id: "late-deadline-candidate",
+      target: {
+        base: SHA1,
+        branch: "sentinel/repair/late-deadline",
+        checkpoint: null,
+        head: SHA2,
+        pr: PR_NUMBER + 1,
+        candidateState: {
+          preserved: {
+            operationKey: `impl:${"ef".repeat(32)}`,
+            base: SHA1,
+            head: SHA2,
+            ref: `refs/heads/sentinel-candidates/${"ef".repeat(32)}`,
+          },
+          publishedHead: SHA2,
+        },
+      },
+    });
+    const candidates = makeRig([candidateRecord(), late]);
+    candidates.http.on("POST", APPROVE_PATH, () => {
+      candidates.clock.advance(5000);
+      return response(201, {});
+    });
+    assert.deepEqual(await candidates.run(T0 + 5000), {
+      approved: 1,
+      pending: 0,
+      unavailable: 1,
+    });
+    assert.equal(
+      candidates.http.calls.length,
+      5,
+      "no request starts for a later expired candidate",
+    );
+    assert.equal(candidates.http.posts().length, 1);
+
+    const delayedGate = makeRig();
+    delayedGate.gate.beforeRequest = (installationId) => {
+      delayedGate.gate.admissions.push(installationId);
+      delayedGate.clock.advance(4000);
+      return Promise.resolve(portOk(undefined));
+    };
+    assert.deepEqual(await delayedGate.run(T0 + 3500), {
+      approved: 0,
+      pending: 0,
+      unavailable: 1,
+    });
+    assert.equal(
+      delayedGate.http.calls.length,
+      0,
+      "a late gate resolution cannot start HTTP",
+    );
+  },
+);
+
+Deno.test(
+  "ci approval: all five durable candidates progress and repeated approval is idempotent",
+  async () => {
+    const work = Array.from({ length: 5 }, (_, index) => {
+      const identity = (index + 4).toString(16);
+      const head = identity.repeat(40);
+      const reservation = identity.repeat(64);
+      return candidateRecord({
+        id: `uncapped-ci-${index}`,
+        source: { kind: "issue", id: `${200 + index}`, revision: SHA1 },
+        related: { incidentId: null, issueNumber: 200 + index },
+        target: {
+          base: SHA1,
+          branch: `sentinel/repair/uncapped-ci-${index}`,
+          checkpoint: null,
+          head,
+          pr: 50 + index,
+          candidateState: {
+            preserved: {
+              operationKey: `impl:${reservation}`,
+              base: SHA1,
+              head,
+              ref: `refs/heads/sentinel-candidates/${reservation}`,
+            },
+            publishedHead: head,
+          },
+        },
+      });
+    });
+    const rig = makeRig([
+      ...Array.from(
+        { length: 4 },
+        (_, index) => incompleteCandidateRecord(index),
+      ),
+      ...work,
+    ]);
+    const approvedRuns = new Set<number>();
+    const runFor = (index: number) => {
+      const record = work[index]!;
+      return runBody({
+        id: RUN_ID + index,
+        headSha: record.target.head!,
+        headRef: record.target.branch!,
+        prNumber: record.target.pr!,
+      });
+    };
+    for (const [index, record] of work.entries()) {
+      rig.http.on(
+        "GET",
+        `/repos/ubiquity/sentinel/pulls/${record.target.pr}`,
+        () =>
+          response(
+            200,
+            pullBody({
+              number: record.target.pr!,
+              headSha: record.target.head!,
+              headRef: record.target.branch!,
+            }),
+          ),
+      );
+      rig.http.on(
+        "GET",
+        `/repos/ubiquity/sentinel/actions/runs/${RUN_ID + index}`,
+        () => response(200, runFor(index)),
+      );
+      rig.http.on(
+        "POST",
+        `/repos/ubiquity/sentinel/actions/runs/${RUN_ID + index}/approve`,
+        () => {
+          approvedRuns.add(RUN_ID + index);
+          return response(201, {});
+        },
+      );
+    }
+    rig.http.on("GET", LIST_PATH, (request) => {
+      const head = new URL(request.url).searchParams.get("head_sha");
+      const index = work.findIndex((record) => record.target.head === head);
+      assert.ok(index >= 0, "the list query binds to one eligible exact head");
+      return response(
+        200,
+        runsBody(approvedRuns.has(RUN_ID + index) ? [] : [runFor(index)]),
+      );
+    });
+
+    assert.deepEqual(await rig.run(), {
+      approved: 5,
+      pending: 0,
+      unavailable: 0,
+    });
+    assert.deepEqual([...approvedRuns], work.map((_, index) => RUN_ID + index));
+    assert.equal(
+      rig.http.posts().length,
+      5,
+      "one POST for each distinct approved run",
+    );
+    assert.deepEqual(await rig.run(), {
+      approved: 0,
+      pending: 5,
+      unavailable: 0,
+    });
+    assert.equal(
+      rig.http.posts().length,
+      5,
+      "the next pass observes already approved runs",
+    );
+    assert.ok(
+      rig.http.calls.every((call) =>
+        call.headers.get("authorization") === "Bearer dummy-token"
+      ),
+    );
+  },
+);
 
 Deno.test(
   "ci approval: approves the single exact own action_required run",
@@ -751,7 +961,7 @@ type RigV1 = ReturnType<typeof makeRig>;
 
 // ---------------------------------------------------------------------------
 // M15 V1 candidate state: incomplete (unpreserved/unpublished) new-format
-// records are filtered BEFORE the bounded slice, so they are never
+// records are filtered before approval, so they are never
 // auto-approved and never starve a later eligible candidate.
 // ---------------------------------------------------------------------------
 
@@ -777,11 +987,10 @@ function incompleteCandidateRecord(index: number): WorkRecordV1 {
 }
 
 Deno.test(
-  "ci approval: incomplete unpublished candidates are filtered before the three-candidate slice",
+  "ci approval: incomplete unpublished candidates never reach approval",
   async () => {
     const incomplete = [0, 1, 2].map(incompleteCandidateRecord);
-    // The valid candidate is LAST: without pre-slice filtering the three
-    // incomplete records would occupy every approval slot.
+    // The valid candidate is LAST; incomplete records must never reach the API.
     const rig = makeRig([...incomplete, candidateRecord()]);
     let incompletePrReads = 0;
     for (const record of incomplete) {

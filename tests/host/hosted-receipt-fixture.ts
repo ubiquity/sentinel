@@ -27,8 +27,14 @@ import type {
   StateReadView,
 } from "../../src/contracts/ports.ts";
 import type { ReleaseRequestV1 } from "../../src/contracts/release.ts";
-import { parseReviewReceiptV1 } from "../../src/contracts/review-receipt.ts";
-import type { ReviewReceiptV1 } from "../../src/contracts/review-receipt.ts";
+import {
+  parseReviewReceiptV1,
+  type ReviewReceiptV1,
+  reviewTaskStatementDigest,
+  type ReviewTaskStatementV1,
+} from "../../src/contracts/review-receipt.ts";
+import { parseWorkRecordV1 } from "../../src/contracts/work-record.ts";
+import type { WorkRecordV1 } from "../../src/contracts/work-record.ts";
 import {
   parseReleaseStateSnapshotV1,
   parseRepairStateSnapshotV1,
@@ -68,6 +74,21 @@ const MAX_STEPS = 8;
 const STEP_CLOCK_MS = 5_000;
 const DUMMY_HEAD = "a".repeat(40) as GitSha;
 const DIGEST = "d".repeat(64);
+/** The single source issue this fixture's work record and receipt bind. */
+const ISSUE_NUMBER = 48;
+const TASK_TITLE = "Deliver the reviewed hosted candidate";
+const TASK_BODY =
+  "The protected hosted consumers must deliver this release request.";
+const TASK: ReviewTaskStatementV1 = {
+  issueNumber: ISSUE_NUMBER,
+  title: TASK_TITLE,
+  body: TASK_BODY,
+  digest: await reviewTaskStatementDigest({
+    issueNumber: ISSUE_NUMBER,
+    title: TASK_TITLE,
+    body: TASK_BODY,
+  }),
+};
 
 /**
  * Advance the real supervisor core legally into the requested phase and return
@@ -125,7 +146,7 @@ function fixtureState(
     updatedAt: input.clock.now(),
     incidents: [],
     evidence: [],
-    work: [],
+    work: [workRecordFor(input.request)],
     reservations: [],
     reviews: [review],
     replays: [],
@@ -154,9 +175,75 @@ function fixtureEvidence(
     readExecution: (saved: HostedExecutionIntentV1) =>
       Promise.resolve(portOk(fixtureProof(saved, input.phase))),
     verifyRevision: () => Promise.resolve(portOk(true)),
+    verifyMatrixOrdinaryRevision: (revision) =>
+      Promise.resolve(
+        portOk(
+          revision === input.priorRevision ||
+            revision === input.request.revision,
+        ),
+      ),
     verifyRequest: (request: ReleaseRequestV1) =>
       Promise.resolve(portOk(request.id === input.request.id)),
+    // The trusted live source-issue read the protected consumers require
+    // immediately before a release selection or promotion: the exact bounded
+    // statement this fixture's receipt is bound to.
+    readIssueTask: (issueNumber: number) =>
+      Promise.resolve(
+        portOk(issueNumber === TASK.issueNumber ? TASK : null),
+      ),
   };
+}
+
+/**
+ * The exact EXISTING work record that published the request. The protected
+ * consumers bind the trusted issue read to this record's own source issue and
+ * to its exact PR/head/base publication, so the fixture must seed it.
+ */
+function workRecordFor(request: ReleaseRequestV1): WorkRecordV1 {
+  const repository = request.target.repository;
+  return parseWorkRecordV1({
+    version: "v1",
+    kind: "work",
+    repository: { ...repository },
+    id: `issue-${repository.owner}-${repository.name}-${TASK.issueNumber}`,
+    source: {
+      kind: "issue",
+      id: String(TASK.issueNumber),
+      revision: request.source.base,
+    },
+    related: { incidentId: null, issueNumber: TASK.issueNumber },
+    fingerprint: null,
+    failingRevision: null,
+    sourceSnapshotDigest: null,
+    classification: { severity: "P2", priority: null },
+    urgency: {
+      activeProduction: false,
+      reproducible5xx: false,
+      severeSecurityOrDataLoss: false,
+    },
+    dependencies: [],
+    controller: { sha: request.source.base },
+    target: {
+      base: request.source.base,
+      branch:
+        `sentinel/repair/issue-${repository.owner}-${repository.name}-${TASK.issueNumber}`,
+      checkpoint: null,
+      head: request.source.head,
+      pr: request.source.pullRequest,
+    },
+    nextStep: "delivery",
+    wait: null,
+    blocker: null,
+    counters: { attempts: 1, retries: 0, reviewRounds: 1 },
+    evidence: [{
+      kind: "review_receipt",
+      ref: `artifact:${request.source.reviewReceiptId}`,
+    }],
+    intent: null,
+    firstSeenAt: request.createdAt,
+    createdAt: request.createdAt,
+    updatedAt: request.createdAt,
+  });
 }
 
 /** Full proof of the ACTUAL saved intent; candidate fails only for rollback. */
@@ -194,8 +281,11 @@ function completedReview(request: ReleaseRequestV1): ReviewReceiptV1 {
     kind: "review_receipt",
     id: receiptId,
     requestId: request.source.reviewRequestId,
-    expectedReviewer: "chatgpt-codex-connector[bot]",
-    observedReviewer: "chatgpt-codex-connector[bot]",
+    // The one fixed sentinel App reviewer identity (App 4682172, bot user
+    // 319834869) the protected consumers pin at the persisted-receipt
+    // boundary. A different reviewer login never authorizes.
+    expectedReviewer: "ubiquity-sentinel[bot]",
+    observedReviewer: "ubiquity-sentinel[bot]",
     repository: { ...request.target.repository },
     pullRequest: {
       number: request.source.pullRequest,
@@ -211,6 +301,15 @@ function completedReview(request: ReleaseRequestV1): ReviewReceiptV1 {
     submittedAt: request.createdAt - 2000,
     completedAt: request.createdAt - 1000,
     observedAt: request.createdAt - 500,
+    // The reviewer's positive acceptance of the ORIGINAL source issue, bound
+    // to the exact task text the trusted read returns. A quality-only receipt
+    // could not authorize the real protected consumers.
+    taskAcceptance: {
+      issueNumber: TASK.issueNumber,
+      taskDigest: TASK.digest,
+      verdict: "fulfilled",
+      evidence: ["the reviewed candidate satisfies the source issue"],
+    },
   });
 }
 

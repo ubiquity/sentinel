@@ -22,6 +22,7 @@
  */
 
 import { isGitSha } from "../contracts/brands.ts";
+import { canonicalStringify } from "../contracts/canonical.ts";
 import {
   COOLDOWN_MODE_ENV,
   parseCooldownModeV1,
@@ -52,7 +53,14 @@ import {
   readHostedRuntimeExecution,
 } from "./hosted-runtime.ts";
 import type { HostedExecutionIntentV1 } from "../contracts/hosted-supervisor.ts";
-import { fetchHttpTransport } from "../github/http.ts";
+import type { MatrixRunIdentityV1 } from "../contracts/matrix.ts";
+import type { MatrixArtifactTransportV1 } from "./matrix-artifact-port.ts";
+import {
+  readMatrixNativeCarrier,
+  runActionsMatrixAggregateCycles,
+} from "./matrix-actions.ts";
+import { parseReleaseStateSnapshotV1 } from "../contracts/state-snapshots.ts";
+import { fetchHttpTransport, type HttpTransportV1 } from "../github/http.ts";
 import { runRepairEntrypoint } from "../main.ts";
 import { runActionsPreflight } from "./actions-preflight.ts";
 import {
@@ -102,7 +110,8 @@ export const ACTIONS_UOS_BASE_URL = "https://ai.ubq.fi/v1";
 
 // Leave the workflow's final ten minutes for bounded drain and runner exit.
 const RUN_DEADLINE_MS = 110 * 60 * 1000;
-const STEP_LIMIT = 64;
+// Progress/no-progress tracking and the absolute deadline bound the host pass.
+const STEP_LIMIT = Number.POSITIVE_INFINITY;
 const ACTIONS_LOGIN = "github-actions[bot]";
 const APP_LOGIN = "ubiquity-sentinel[bot]";
 const STATIC_ENV = "hosted repair host requires its configured credentials";
@@ -224,6 +233,16 @@ export interface ActionsTargetCyclesInputV1 {
   deadline: number;
   stepLimit: number;
   modelStartsEnabled: boolean;
+  externalImplementations?: boolean;
+  /** Exact trusted runtime assembly supplied to the matrix executable seam. */
+  host?: {
+    execution: HostedExecutionIntentV1;
+    run: MatrixRunIdentityV1;
+    artifactRoot: string;
+    sourcePathFor: (config: RepositoryConfigV1) => string;
+    expectedProvider: string;
+    createArtifactTransport: () => Promise<MatrixArtifactTransportV1>;
+  };
   /**
    * Prepare one target's own private state before its port is composed: its
    * source mirror and that mirror's base fetch. A target whose preparation
@@ -330,6 +349,7 @@ export async function runActionsTargetCycles(
         replay: input.replay,
         model: input.model,
         budget: input.budget,
+        externalImplementations: input.externalImplementations,
       }, {
         deadline: input.deadline,
         stepLimit: input.stepLimit,
@@ -369,6 +389,23 @@ export function childRunDeadlineV1(runOrigin: number): number {
  * multi-target call itself.
  */
 export interface ActionsRepairHostDepsV1 {
+  /** Native job role selected by the fixed matrix executable, never a product flag. */
+  job?: "matrix_plan" | "matrix_cell";
+  /** Fake external ports/transports for the actual hosted composition checks. */
+  http?: HttpTransportV1;
+  /** Fake external artifact HTTP boundary; production uses its bounded binary factory. */
+  artifactHttp?: HttpTransportV1;
+  /** Deterministic state transport injection; production always uses the Git store. */
+  state?: StateReadView & RepairStateWriter;
+  model?: ImplementationPort;
+  composeGithub?: (
+    config: RepositoryConfigV1,
+    production: GitHubPort,
+  ) => GitHubPort;
+  prepareTarget?: (
+    config: RepositoryConfigV1,
+    sourcePath: string,
+  ) => Promise<void>;
   /** The run clock; defaults to the system clock. */
   clock?: Clock;
   /** The run environment (identity, credentials, PATH, route); defaults to the process environment. */
@@ -424,7 +461,7 @@ export async function runActionsRepairHost(
   // and no durable write.
   const identity = parseHostedEnvironment(
     deps.env ?? readHostedIdentityEnv(),
-    "repair",
+    (deps.job ?? "repair") as Parameters<typeof parseHostedEnvironment>[1],
   );
 
   // The trusted model route is resolved EXACTLY ONCE at host start, before any
@@ -496,7 +533,7 @@ export async function runActionsRepairHost(
   // The state store uses the same authenticated Git transport as publication,
   // but its role is fixed to repair. GitHub state never shares an index or
   // checkout with the source repository.
-  const state = createRepairStateStore({
+  const stateStore = deps.state ?? createRepairStateStore({
     scratchDir: scratch,
     remoteUrl: deps.stateRemoteUrl ?? REMOTE_URL,
     runner: new DenoGitRunner(
@@ -504,6 +541,18 @@ export async function runActionsRepairHost(
       githubGitAuthEnv(githubToken),
     ),
   });
+  // Cells expose literal read capabilities and a refusing internal write adapter.
+  // No helper can accidentally reach the remote repair writer in a cell job.
+  const state = deps.job === "matrix_cell"
+    ? {
+      readRepair: () => stateStore.readRepair(),
+      readRelease: () => stateStore.readRelease(),
+      writeRepair: () =>
+        Promise.resolve(
+          portError("invalid", "matrix cells cannot write shared state"),
+        ),
+    }
+    : stateStore;
   // The saved supervisor pointer must bind exactly this run, attempt, launcher
   // and controller revision BEFORE any repair seed, source, model, preflight or
   // review-client preparation. A stale or foreign pointer never runs.
@@ -512,18 +561,27 @@ export async function runActionsRepairHost(
     identity,
     controllerSha,
   });
-  await ensureRepairStateSeed(state, clock);
+  if (deps.job !== "matrix_cell") await ensureRepairStateSeed(state, clock);
   // The enforcement mode is injected through the environment and parsed
   // strictly: an absent or empty setting enforces, a typo fails the run before
   // any request, and `off` is the explicit development switch.
   const cooldownMode = parseCooldownModeV1(
     optionalEnv(readEnv, COOLDOWN_MODE_ENV),
   );
-  const gate = new HostedRepairCooldownGate({
+  const mutableGate = new HostedRepairCooldownGate({
     state,
     clock,
     mode: cooldownMode,
   });
+  const gate: GitHubCooldownGateV1 = deps.job === "matrix_cell"
+    ? {
+      beforeRequest: (scope) => mutableGate.beforeRequest(scope),
+      recordRateLimit: () =>
+        Promise.resolve(
+          portError("rate_limited", "matrix cell source read was rate limited"),
+        ),
+    }
+    : mutableGate;
   const hostInput = {
     stateRoot,
     sourceDir,
@@ -596,7 +654,7 @@ export async function runActionsRepairHost(
   });
 
   const tracker = new LocalSessionTracker();
-  const http = fetchHttpTransport();
+  const http = deps.http ?? fetchHttpTransport();
   const gitExecutable = await resolveExecutable("git", trustedPath);
 
   // The committed target setting is the ONLY source of target repositories.
@@ -685,7 +743,7 @@ export async function runActionsRepairHost(
   // handed to every target cycle unchanged; it is never recomputed.
   // The port is composed per target: the REST client, review service, trusted
   // git remote and cooldown scope all address exactly that repository.
-  const composeTargetGithub = (config: RepositoryConfigV1): GitHubPort =>
+  const composeProductionGithub = (config: RepositoryConfigV1): GitHubPort =>
     scopeLocalRepairIssues(composeLocalGitHub({
       clock,
       state,
@@ -711,7 +769,13 @@ export async function runActionsRepairHost(
       repository: config.repository,
       baseBranch: config.baseBranch,
     }));
-  const model = new LocalCheckoutModelPort({
+  const composeTargetGithub = (config: RepositoryConfigV1): GitHubPort => {
+    const production = composeProductionGithub(config);
+    return scopeLocalRepairIssues(
+      deps.composeGithub?.(config, production) ?? production,
+    );
+  };
+  const model = deps.model ?? new LocalCheckoutModelPort({
     stateRoot,
     sourcePath,
     scratch,
@@ -819,6 +883,10 @@ export async function runActionsRepairHost(
    * failed rather than treating it as addressed.
    */
   const prepareTarget = async (config: RepositoryConfigV1): Promise<void> => {
+    if (deps.prepareTarget !== undefined) {
+      await deps.prepareTarget(config, mirrorPathFor(config));
+      return;
+    }
     if (mirrorPathFor(config) === sourcePath) return;
     const remoteUrl =
       `https://github.com/${config.repository.owner}/${config.repository.name}.git`;
@@ -846,10 +914,33 @@ export async function runActionsRepairHost(
     );
   };
 
+  // An ordinary execution without current health is a deterministic verification.
+  // The purpose string alone is never authority to start implementation/review.
+  const releaseRead = await state.readRelease();
+  if (!releaseRead.ok || releaseRead.value.status !== "found") {
+    throw new Error(STATIC_RUNNER);
+  }
+  const runtime =
+    parseReleaseStateSnapshotV1(releaseRead.value.snapshot).hostedRuntimes[0];
+  const healthy = runtime?.lastHealthyProof;
+  const modelStartsEnabled = startupReady && execution.purpose === "ordinary" &&
+    runtime?.activeRevision === execution.revision &&
+    runtime.generation === execution.generation &&
+    canonicalStringify(runtime.execution) === canonicalStringify(execution) &&
+    healthy?.execution.revision === execution.revision &&
+    healthy.execution.generation === execution.generation;
+
   let outcome: RepairCycleOutcomeV1 | null = null;
   let failure: unknown = null;
   try {
-    const cycles = await (deps.runTargetCycles ?? runActionsTargetCycles)({
+    const runTargetCycles = deps.runTargetCycles ??
+      (async (input: ActionsTargetCyclesInputV1) => {
+        const { runActionsMatrixAggregateCycles } = await import(
+          "./matrix-actions.ts"
+        );
+        return runActionsMatrixAggregateCycles(input);
+      });
+    const cycles = await runTargetCycles({
       clock,
       state,
       configs: targetConfigs,
@@ -868,7 +959,36 @@ export async function runActionsRepairHost(
       // Only an ordinary hosted execution may start a model. Bootstrap, prior,
       // candidate and rollback runs execute the deterministic entrypoint with
       // no model starts while keeping every budget, limit and source behavior.
-      modelStartsEnabled: startupReady && execution.purpose === "ordinary",
+      modelStartsEnabled,
+      externalImplementations: deps.job !== undefined,
+      host: {
+        execution,
+        run: {
+          runId: identity.runId,
+          runAttempt: identity.runAttempt,
+          launcherSha: identity.launcherSha,
+        },
+        artifactRoot: joinPath(sourceDir, "..", ".sentinel-matrix"),
+        sourcePathFor: mirrorPathFor,
+        expectedProvider: modelRoute.provider,
+        createArtifactTransport: async () => {
+          const {
+            createActionsMatrixArtifactTransport,
+            createActionsMatrixArtifactHttpTransport,
+          } = await import("./matrix-artifacts.ts");
+          return createActionsMatrixArtifactTransport({
+            state: {
+              readRepair: () => state.readRepair(),
+              readRelease: () => state.readRelease(),
+            },
+            token: githubToken,
+            http: deps.artifactHttp ??
+              createActionsMatrixArtifactHttpTransport(),
+            clock,
+            artifactRoot: joinPath(sourceDir, "..", ".sentinel-matrix"),
+          });
+        },
+      },
       prepareTarget,
       composeGithub: composeTargetGithub,
       // The one advisory line reports every committed target as addressed or
@@ -899,13 +1019,16 @@ export async function runActionsRepairHost(
   // the loop and the tracker drain, even when model startup was unavailable.
   // The helper is bounded and never throws, so an approval failure cannot
   // prevent deterministic bookkeeping or change the original error semantics.
-  const ciApproval = await runActionsCiApproval({
-    state,
-    gate,
-    http,
-    token: githubToken,
-    clock,
-  });
+  const ciApproval = deps.job === undefined
+    ? await runActionsCiApproval({
+      state,
+      gate,
+      http,
+      token: githubToken,
+      clock,
+      deadline,
+    })
+    : { approved: 0, pending: 0, unavailable: 0 };
 
   const result: ActionsRepairHostResultV1 = {
     status: "ran",
@@ -926,8 +1049,8 @@ export async function runActionsRepairHost(
 
 /** Create the dedicated repair ref once, before any gated GitHub read. */
 async function ensureRepairStateSeed(
-  state: ReturnType<typeof createRepairStateStore>,
-  clock: SystemClock,
+  state: StateReadView & RepairStateWriter,
+  clock: Clock,
 ): Promise<void> {
   const current = await state.readRepair();
   if (!current.ok) throw new Error(STATIC_RUNNER);
@@ -1022,5 +1145,9 @@ async function readControllerSha(
 }
 
 if (import.meta.main) {
-  await runActionsRepairHost();
+  const carrier = await readMatrixNativeCarrier(false, true);
+  await runActionsRepairHost({
+    runTargetCycles: (input) =>
+      runActionsMatrixAggregateCycles(input, undefined, carrier),
+  });
 }

@@ -960,6 +960,11 @@ async function postDrainTaskScenario(
     | "deadline"
     | "foreign-only"
     | "foreign-first"
+    | "matrix-deferred"
+    | "matrix-fresh"
+    | "matrix-horizon"
+    | "matrix-deadline"
+    | "matrix-step-limit"
     | "lost-merge" = "expired",
 ): Promise<void> {
   const head = SHA3;
@@ -1051,12 +1056,58 @@ async function postDrainTaskScenario(
       resultId: null,
       completedAt: null,
     });
-    const seededWork = mode === "foreign-only"
+    const matrixOwned = mode.startsWith("matrix-");
+    const matrixCharge = reservation("matrix-owned-implementation", {
+      taskId: "issue-2",
+    });
+    const matrixWork = workRecord("issue-2", {
+      source: { kind: "issue", id: "2", revision: SHA1 },
+      related: { incidentId: null, issueNumber: 2 },
+      target: {
+        base: SHA1,
+        branch: "sentinel/repair/issue-2",
+        checkpoint: null,
+        head: null,
+        pr: null,
+      },
+      counters: { attempts: 1, retries: 0, reviewRounds: 0 },
+      intent: {
+        kind: "implementation",
+        key: "matrix-owned-implementation",
+        startedAt: T0,
+        branch: "sentinel/repair/issue-2",
+        expectedHead: SHA1,
+        observedBase: SHA1,
+        pr: null,
+        requestId: matrixCharge.id,
+        resultId: null,
+      },
+    });
+    const freshMatrixWork = workRecord("issue-3", {
+      source: { kind: "issue", id: "3", revision: SHA1 },
+      related: { incidentId: null, issueNumber: 3 },
+      target: {
+        base: SHA1,
+        branch: "sentinel/repair/issue-3",
+        checkpoint: null,
+        head: null,
+        pr: null,
+      },
+    });
+    const seededWork = matrixOwned
+      ? mode === "matrix-fresh"
+        ? [work, freshMatrixWork]
+        : mode === "matrix-horizon"
+        ? [work, freshMatrixWork, matrixWork]
+        : [work, matrixWork]
+      : mode === "foreign-only"
       ? [foreign]
       : collision
       ? [foreign, work]
       : [work];
-    const charges = mode === "foreign-only"
+    const charges = matrixOwned && mode !== "matrix-fresh"
+      ? [matrixCharge, charge]
+      : mode === "foreign-only"
       ? [foreignCharge]
       : collision
       ? [foreignCharge, charge]
@@ -1153,7 +1204,9 @@ async function postDrainTaskScenario(
         [...rest.reviews.values()][0].head = SECOND_HEAD;
       }
       if (mode === "failed-drain") result.value.ok = false;
-      if (mode === "deadline") rig.clock.advance(60 * 60_000);
+      if (mode === "deadline" || mode === "matrix-deadline") {
+        rig.clock.advance(60 * 60_000);
+      }
       return result;
     };
     const merge = rig.github.mergePullRequest.bind(rig.github);
@@ -1170,7 +1223,51 @@ async function postDrainTaskScenario(
     if (mode === "failed-drain") {
       await assert.rejects(() => rig.run(60 * 60_000), RepairReviewDrainError);
     } else {
-      const outcome = await rig.run(60 * 60_000);
+      const configs = repairConfigs({
+        sessionBound: {
+          maxDurationMs: mode === "matrix-horizon" ? 55 * 60_000 : 240_000,
+          maxOutputChars: 200_000,
+        },
+      });
+      const outcome = matrixOwned
+        ? await runRepairEntrypoint({
+          clock: rig.clock,
+          state: rig.store,
+          configs,
+          controllerSha: SHA1,
+          github: rig.github,
+          githubCooldown: rig.githubCooldown,
+          incidents: rig.incidents,
+          replay: rig.replay,
+          model: rig.model,
+          budget: new RollingStartBudget({
+            clock: rig.clock,
+            state: rig.store,
+            configs,
+          }),
+          externalImplementations: true,
+        }, {
+          deadline: rig.clock.now() + 60 * 60_000,
+          stepLimit: mode === "matrix-step-limit" ? 0 : 16,
+        })
+        : await rig.run(60 * 60_000);
+      if (matrixOwned) {
+        assert.equal(
+          rig.github.calls.filter((call) => call === "merge").length,
+          mode === "matrix-deferred" || mode === "matrix-fresh" ? 1 : 0,
+          `completed drained review must advance only within the original bounds: ${
+            JSON.stringify(outcome)
+          }`,
+        );
+        assert.deepEqual(
+          (await rig.snapshot()).work.find((record) =>
+            record.id ===
+              (mode === "matrix-fresh" ? freshMatrixWork.id : matrixWork.id)
+          ),
+          mode === "matrix-fresh" ? freshMatrixWork : matrixWork,
+          "matrix-owned implementation intent stays unchanged and charged",
+        );
+      }
       if (collision) {
         const current = await rig.snapshot();
         assert.deepEqual(
@@ -1193,7 +1290,12 @@ async function postDrainTaskScenario(
       }
       assert.equal(
         outcome.status,
-        mode === "deadline" ? "margin" : "idle",
+        mode === "deadline" || mode === "matrix-deadline" ||
+          mode === "matrix-horizon"
+          ? "margin"
+          : mode === "matrix-step-limit"
+          ? "step_limit"
+          : "idle",
         JSON.stringify(outcome),
       );
     }
@@ -1201,10 +1303,14 @@ async function postDrainTaskScenario(
     assert.equal(rest.submits, 1, "the actual drain published the result");
     let state = await rig.snapshot();
     const positive = mode === "expired" || mode === "future" ||
-      mode === "lost-merge" || mode === "foreign-first";
+      mode === "lost-merge" || mode === "foreign-first" ||
+      mode === "matrix-deferred" || mode === "matrix-fresh";
     assert.equal(
       state.reviews.length,
-      (positive || mode === "missing-acceptance" ? 1 : 0) + (collision ? 1 : 0),
+      (positive || mode === "missing-acceptance" ||
+          mode === "missing-acceptance-capped"
+        ? 1
+        : 0) + (collision ? 1 : 0),
       "a completed result may be retained without authorizing delivery",
     );
     if (mode === "missing-acceptance") {
@@ -1212,8 +1318,9 @@ async function postDrainTaskScenario(
       assert.equal(state.work[0].nextStep, "review");
     }
     if (mode === "missing-acceptance-capped") {
-      assert.equal(state.reviews.length, 0);
-      assert.equal(state.work[0].nextStep, "blocked");
+      assert.equal(state.reviews[0].taskAcceptance, null);
+      assert.equal(state.work[0].nextStep, "review");
+      assert.equal(state.work[0].counters.reviewRounds, attempt);
     }
     assert.deepEqual(state.reservations, charges);
     assert.equal(state.work[0].target.head, head);
@@ -1324,6 +1431,18 @@ Deno.test("entrypoint: post-drain foreign-only key collision never reaches the c
   postDrainTaskScenario("foreign-only"));
 Deno.test("entrypoint: post-drain foreign-first key collision advances only the configured target", () =>
   postDrainTaskScenario("foreign-first"));
+for (
+  const mode of [
+    "matrix-deferred",
+    "matrix-fresh",
+    "matrix-horizon",
+    "matrix-deadline",
+    "matrix-step-limit",
+  ] as const
+) {
+  Deno.test(`entrypoint: post-drain ${mode} keeps delivery and matrix ownership separate`, () =>
+    postDrainTaskScenario(mode));
+}
 for (
   const mode of [
     "wrong-key",
