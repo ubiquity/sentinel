@@ -20,6 +20,7 @@ import {
 import {
   applyHostedRetirements,
   HOSTED_AUTONOMY_RETIRED,
+  hostedIssueKey,
   planHostedRetirements,
 } from "../../ops/hosted-autonomy.ts";
 import { SHA1, SHA2, T0, workRecord } from "../state/helpers.ts";
@@ -498,8 +499,6 @@ Deno.test("selection: candidate records still obey dependency, wait and terminal
 // slots. Every other blocked, open or waiting pull request still does.
 // ---------------------------------------------------------------------------
 
-const RETIRED_ISSUES = new Set([120, 61]);
-
 function prRecord(
   id: string,
   issueNumber: number,
@@ -547,9 +546,13 @@ Deno.test(
     );
     const fresh = freshIssue("issue-ubiquity-ai.ubq.fi-999", 999);
     const initial = snapshot([ai120, sentinel61, humanMerged264, fresh]);
+    const closedIssues = new Set([
+      hostedIssueKey(ai120.repository, 120),
+      hostedIssueKey(sentinel61.repository, 61),
+    ]);
     const plans = planHostedRetirements(
       initial,
-      RETIRED_ISSUES,
+      closedIssues,
       new Set([ai120.id, sentinel61.id]),
     );
     assert.deepEqual(
