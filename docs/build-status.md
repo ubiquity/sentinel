@@ -11,6 +11,37 @@ status, acceptance and write ownership here.
 
 ### Current checkpoint
 
+**Bounded grants now work, and the reviewer keeps refusing an incomplete
+candidate — which is the correct, fail-closed outcome.** Review round 8
+(10:50:11Z) returned another real P2 ("Dotted references are corrupted by the
+zero-width separator": the left boundary does not exclude `.`, so a non-closing
+reference such as `References ubiquity/repo.fixes#123` is rewritten). The task
+was then blocked by its exhausted implementation budget, the grant that should
+have lifted it refused with `target_precondition_mismatch`, and the diagnosis
+found a real deployment defect rather than a data one: the deployed precondition
+still carried the old 0-or-1 grant set (a formatter pass had silently defeated
+that patch), so the production binding's granted value of 2 could never satisfy
+it. Fixed in `800b4bd…` with a production-shaped regression test that fails on
+the old code, promoted as `e2bb6c2…` (CI-green, on `development`).
+
+- Live result of the fix: at 11:18:31Z the one-shot applied the bounded grant —
+  `issue-ubiquity-sentinel-48` returned to `work` with counters 2/0/8, head
+  `65aaa810…`, base `b9a12eb…`, no blocker, no intent and four recorded review
+  receipts (the round-5/6/7/8 findings are now in its own evidence, so the next
+  correction is made with the latest finding in context). The next admission is
+  task/base/attempt 3: an UNUSED reservation identity at this base.
+- Every other guard held: the runtime pins moved to generation 11
+  (`3f500514…`), the install chain gained generation 12, the one-shot's exit
+  contract keeps a bounded refusal from failing the supervisor workflow, and no
+  counter, charge, receipt, reservation or candidate was dropped.
+- Remaining boundary, unchanged in kind: the candidate content must satisfy the
+  reviewer's byte-preservation criterion before any merge; the loop will correct
+  again on its ordinary execution (approximately 12:05Z), re-review the changed
+  candidate (round 9) and only then merge, request the release, obtain the
+  supervisor's prior/candidate proofs, promote and close. The goal therefore
+  stays active, and `docs/build-status.md` remains the only authoritative ledger.
+
+
 **The review pipeline is repaired and the runtime is refusing an incomplete
 candidate, which is the correct outcome.** The counter-granted retry was
 admitted at 09:14:16Z with a NEW reservation identity (task/base/attempt 3), the

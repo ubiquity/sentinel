@@ -1220,6 +1220,23 @@ Deno.test("P1 findings trigger a fresh bounded implementation/candidate/replay p
       SHA3,
       "correction starts from the rejected candidate head",
     );
+    // The correction also carries the EXACT findings of the rejecting review:
+    // without them the same change is re-implemented and the task can never
+    // converge (a real four-round stalemate before this field existed).
+    assert.deepEqual(
+      rig.model.requests[1]?.reviewFindings,
+      [{
+        severity: "P1",
+        path: "src/app.ts",
+        message: "required fix",
+      }],
+      "the correction receives the unresolved review findings",
+    );
+    assert.equal(
+      rig.model.requests[0]?.reviewFindings,
+      undefined,
+      "a first implementation carries no rejection findings",
+    );
     state = await rig.snapshot();
     const work = state.work[0];
     assert.equal(work.nextStep, "review");

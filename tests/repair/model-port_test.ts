@@ -259,6 +259,100 @@ Deno.test("model-port: thread starts with bounded isolated-checkout write capabi
 });
 
 Deno.test(
+  "runtime prompt: a correction carries the exact unresolved review findings",
+  async () => {
+    const session = new FakeCodexSession();
+    const port = new CodexImplementationPort({
+      openSession: () => Promise.resolve(session),
+      checkoutDir: CHECKOUT,
+      checkout: {
+        resolve: () =>
+          Promise.resolve({
+            head: SHA3,
+            checkpointSha: null,
+            changedPaths: ["src/github/text.ts"],
+          }),
+      },
+      modelProvider: "sentinel-host",
+    });
+    const result = await port.runModel({
+      taskId: asWorkItemId("issue-1"),
+      repository: { ...REPO },
+      base: SHA1,
+      checkoutBase: SHA3,
+      issue: { number: 48, title: "title", body: "body" },
+      evidence: [{ kind: "review_receipt", ref: "artifact:x" }],
+      reviewFindings: [
+        {
+          severity: "P2",
+          path: "src/github/text.ts",
+          message: "Colon-separated matching corrupts URL queries.",
+        },
+        { severity: "P1", path: null, message: "Second finding." },
+      ],
+      model: "gpt-5.6-luna",
+      reasoning: "max",
+      maxDurationMs: 5_000,
+      maxOutputChars: 12_345,
+    });
+    assert.ok(result.ok, JSON.stringify(result));
+    const threadStart = session.sent.find(
+      (frame) => frame.method === "thread/start",
+    );
+    const prompt = JSON.stringify(threadStart?.params ?? {});
+    assert.ok(
+      prompt.includes("Unresolved findings of the review that rejected"),
+      "the correction prompt names the rejection",
+    );
+    assert.ok(prompt.includes("[P2] src/github/text.ts"));
+    assert.ok(
+      prompt.includes("Colon-separated matching corrupts URL queries."),
+    );
+    assert.ok(prompt.includes("[P1] (no file)"));
+  },
+);
+
+Deno.test(
+  "runtime prompt: an implementation without findings carries no rejection text",
+  async () => {
+    const session = new FakeCodexSession();
+    const port = new CodexImplementationPort({
+      openSession: () => Promise.resolve(session),
+      checkoutDir: CHECKOUT,
+      checkout: {
+        resolve: () =>
+          Promise.resolve({
+            head: SHA3,
+            checkpointSha: null,
+            changedPaths: ["src/app.ts"],
+          }),
+      },
+      modelProvider: "sentinel-host",
+    });
+    await port.runModel({
+      taskId: asWorkItemId("issue-1"),
+      repository: { ...REPO },
+      base: SHA1,
+      issue: { number: 1, title: "title", body: "body" },
+      evidence: [],
+      model: "gpt-5.6-luna",
+      reasoning: "max",
+      maxDurationMs: 5_000,
+      maxOutputChars: 12_345,
+    });
+    const threadStart = session.sent.find(
+      (frame) => frame.method === "thread/start",
+    );
+    assert.equal(
+      JSON.stringify(threadStart?.params ?? {}).includes(
+        "Unresolved findings of the review",
+      ),
+      false,
+    );
+  },
+);
+
+Deno.test(
   "runtime prompt: thread/start and turn/start carry the runtime implementer role and request bounds",
   async () => {
     const session = new FakeCodexSession();

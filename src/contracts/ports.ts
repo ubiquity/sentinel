@@ -669,6 +669,17 @@ export interface ModelRunRequestV1 {
   checkoutBase?: GitSha;
   issue: { number: number; title: string; body: string } | null;
   evidence: EvidenceRefV1[];
+  /**
+   * Exact unresolved findings of the review that rejected this candidate, when
+   * the run is a CORRECTION. Without them a correction cannot know what the
+   * reviewer objected to and re-implements the same change; they are bounded
+   * severity/path/message triples (the reviewer's own text), never a payload.
+   */
+  reviewFindings?: readonly {
+    severity: string;
+    path: string | null;
+    message: string;
+  }[];
   model: ModelIdV1;
   reasoning: ReasoningEffortV1;
   maxDurationMs: number;

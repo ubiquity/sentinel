@@ -2157,6 +2157,23 @@ function buildPrompt(
       }`,
     );
   }
+  if (
+    request.reviewFindings !== undefined && request.reviewFindings.length > 0
+  ) {
+    // A correction must resolve the EXACT findings of the review that rejected
+    // the current candidate; without them the same change is re-implemented.
+    parts.push(
+      "Unresolved findings of the review that rejected this candidate " +
+        "(fix these in the current checkout):\n" +
+        request.reviewFindings
+          .map((finding) =>
+            `- [${finding.severity}] ${
+              finding.path === null ? "(no file)" : finding.path
+            }: ${finding.message}`
+          )
+          .join("\n"),
+    );
+  }
   parts.push(
     "Runtime implementer role: you are the bounded runtime implementer for " +
       "this task. Edit only the current provided checkout, and only the files " +
