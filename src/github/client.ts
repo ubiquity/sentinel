@@ -1059,8 +1059,9 @@ export class GitHubApiClient {
    * attempt + complete one-page jobs listing + (for a completed runtime step)
    * the trusted signed job log carrying exactly one runtime terminal. A missing
    * or not-yet-complete repair job is `null` (pending); an exact completed
-   * skip/absence is an explicit not_started settlement. Nothing is inferred
-   * from a green workflow alone.
+   * skip/cancellation/timeout/absence is an explicit not_started settlement.
+   * Nothing is inferred from a green workflow alone, and a job that published
+   * no terminal is never health and never a failure.
    */
   async readHostedExecution(
     intent: HostedExecutionIntentV1,
@@ -1112,7 +1113,19 @@ export class GitHubApiClient {
       if (repair.status !== "completed" || repair.completedAt === null) {
         return portOk(null);
       }
-      if (repair.conclusion === "skipped") {
+      // A completed repair job whose conclusion is `skipped`, `cancelled` or
+      // `timed_out` published no runtime terminal: the step never produced one
+      // or was killed before it could. The only honest settlement is an
+      // explicit no-execution proof. Claiming health would be a fabrication and
+      // claiming failure would trigger a rollback for work that never ran;
+      // returning `unavailable` instead would strand the pointer's saved
+      // execution forever, because no later observation of that exact job can
+      // ever produce a terminal.
+      if (
+        repair.conclusion === "skipped" ||
+        repair.conclusion === "cancelled" ||
+        repair.conclusion === "timed_out"
+      ) {
         return this.hostedNotStarted(
           saved,
           repair.id,

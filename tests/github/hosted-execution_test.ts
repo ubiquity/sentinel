@@ -461,7 +461,7 @@ Deno.test("hosted execution: an explicit failed terminal or failed job is a fail
   );
 });
 
-Deno.test("hosted execution: skipped or absent completed repair jobs are explicit not_started", async () => {
+Deno.test("hosted execution: skipped, cancelled, timed-out or absent completed repair jobs are explicit not_started", async () => {
   const skipped = makeRig();
   scriptAttemptAndJobs(
     skipped,
@@ -476,6 +476,34 @@ Deno.test("hosted execution: skipped or absent completed repair jobs are explici
     assert.equal(skippedResult.value.execution.id, intent().id);
     assert.equal(skippedResult.value.evidenceDigest.length, 64);
   }
+
+  const cancelled = makeRig();
+  scriptAttemptAndJobs(
+    cancelled,
+    attemptBody(),
+    jobsBody([jobBody({ conclusion: "cancelled" })]),
+  );
+  const cancelledResult = await cancelled.client.readHostedExecution(intent());
+  assert.ok(
+    cancelledResult.ok && cancelledResult.value?.outcome === "not_started",
+  );
+  if (
+    cancelledResult.ok && cancelledResult.value?.outcome === "not_started"
+  ) {
+    assert.equal(cancelledResult.value.jobId, JOB_ID);
+    assert.equal(cancelledResult.value.finishedAt, JOB_FINISHED);
+  }
+
+  const timedOut = makeRig();
+  scriptAttemptAndJobs(
+    timedOut,
+    attemptBody(),
+    jobsBody([jobBody({ conclusion: "timed_out" })]),
+  );
+  const timedOutResult = await timedOut.client.readHostedExecution(intent());
+  assert.ok(
+    timedOutResult.ok && timedOutResult.value?.outcome === "not_started",
+  );
 
   const absent = makeRig();
   scriptAttemptAndJobs(absent, attemptBody(), jobsBody([]));
