@@ -46,8 +46,8 @@ import { makeRemoteCtx, REPO, reviewReceipt, SHA1 } from "../state/helpers.ts";
 
 const T0 = 1_700_000_000_000;
 const SHA_A = "a".repeat(40) as GitSha;
-const HEAD = "f4678663746a2026e76190d70a3c15786c69705c" as GitSha;
-const BASE = "9fefc45cdf9a339090cd998c4a051f8eb3dd49ae" as GitSha;
+const HEAD = "ae6ff044280a04803958fcd1f6f9304bb894249e" as GitSha;
+const BASE = "f1b5a86b80ca4759ab37307484b223907bd1b1d6" as GitSha;
 const RUNTIME_REVISION = "87193550640078f190ab94d7f8ca0f00bbef9124" as GitSha;
 const RUN_ID = "35173122742";
 const LAUNCHER = "1a117931dd7047ed2c132ff0ae66d899074100e9" as GitSha;
@@ -105,7 +105,7 @@ export function quotaWorkRecord(
         `${ISSUE48_QUOTA_BLOCKER_PREFIX} (structured review unavailable: a command execution item was malformed or contradictory)`,
       since: T0 + 1000,
     },
-    counters: { attempts: 4, retries: 0, reviewRounds: 3 },
+    counters: { attempts: 4, retries: 0, reviewRounds: 5 },
     evidence: [{ kind: "review_receipt", ref: EVIDENCE_REF }],
     intent: null,
     firstSeenAt: T0,
@@ -329,7 +329,8 @@ async function makeRig(
     release,
     binding: {
       targetId: TARGET,
-      counters: { attempts: 4, retries: 0, reviewRounds: 3 },
+      counters: { attempts: 4, retries: 0, reviewRounds: 5 },
+      grantedImplementationAttempts: 1,
       evidenceRef: EVIDENCE_REF,
       reviewIds: [RECEIPT_ID],
       pullRequestNumber: 51,
@@ -407,8 +408,13 @@ Deno.test(
       assert.equal(record.nextStep, "work");
       assert.equal(record.blocker, null);
       assert.equal(record.intent, null);
-      // Counters, evidence, target and the accepted receipt are preserved.
-      assert.deepEqual(record.counters, rig.binding.counters);
+      // Exactly one implementation attempt is granted back; every other
+      // counter, the evidence, the target and the accepted receipt survive.
+      assert.deepEqual(record.counters, {
+        attempts: rig.binding.counters.attempts - 1,
+        retries: rig.binding.counters.retries,
+        reviewRounds: rig.binding.counters.reviewRounds,
+      });
       assert.deepEqual(record.target.head, HEAD);
       assert.deepEqual(record.target.base, BASE);
       assert.deepEqual(record.target.pr, 51);
@@ -456,10 +462,11 @@ Deno.test(
       const recovered = after.value.snapshot.work[0]!;
       assert.equal(recovered.nextStep, "work");
       assert.equal(recovered.wait, null, "the wait is cleared with the block");
-      assert.deepEqual(
-        after.value.snapshot.work[0]!.counters,
-        rig.binding.counters,
-      );
+      assert.deepEqual(after.value.snapshot.work[0]!.counters, {
+        attempts: rig.binding.counters.attempts - 1,
+        retries: rig.binding.counters.retries,
+        reviewRounds: rig.binding.counters.reviewRounds,
+      });
     } finally {
       await cleanup(rig);
     }
@@ -477,8 +484,13 @@ Deno.test(
       expected: string;
     }[] = [
       {
+        name: "granted-budget-outside-the-closed-set",
+        binding: { grantedImplementationAttempts: 2 as unknown as 0 | 1 },
+        expected: "target_precondition_mismatch",
+      },
+      {
         name: "counter-drift",
-        record: { counters: { attempts: 4, retries: 0, reviewRounds: 2 } },
+        record: { counters: { attempts: 4, retries: 0, reviewRounds: 4 } },
         expected: "target_precondition_mismatch",
       },
       {
@@ -493,7 +505,7 @@ Deno.test(
         record: {
           blocker: {
             kind: "review_quota",
-            message: "implementation attempt budget exhausted",
+            message: "repository not configured",
             since: T0 + 1000,
           },
         },
@@ -701,7 +713,7 @@ Deno.test(
   () => {
     const record = quotaWorkRecord();
     const snapshot = repairSnapshot(record);
-    const next = buildNextQuotaSnapshot(snapshot, TARGET, SHA_A, T0 + 5000);
+    const next = buildNextQuotaSnapshot(snapshot, TARGET, SHA_A, T0 + 5000, 1);
     assert.equal(next.stateHead, SHA_A);
     assert.equal(next.sequence, snapshot.sequence + 1);
     assert.equal(next.updatedAt, T0 + 5000);
@@ -709,12 +721,21 @@ Deno.test(
     assert.deepEqual(next.reservations, snapshot.reservations);
     assert.deepEqual(next.releaseRequests, snapshot.releaseRequests);
     const updated = next.work[0]!;
-    const { nextStep, wait, blocker, intent, updatedAt, ...rest } = updated;
+    const {
+      nextStep,
+      wait,
+      blocker,
+      intent,
+      counters,
+      updatedAt,
+      ...rest
+    } = updated;
     const {
       nextStep: _n,
       wait: _w,
       blocker: _b,
       intent: _i,
+      counters: _c,
       updatedAt: _u,
       ...priorRest
     } = record;
@@ -723,10 +744,12 @@ Deno.test(
     assert.equal(blocker, null);
     assert.equal(intent, null);
     assert.equal(updatedAt, T0 + 5000);
+    assert.deepEqual(counters, { attempts: 3, retries: 0, reviewRounds: 5 });
     assert.equal(canonicalStringify(rest), canonicalStringify(priorRest));
     assert.ok(targetPreconditionHolds(record, {
       targetId: TARGET,
-      counters: { attempts: 4, retries: 0, reviewRounds: 3 },
+      counters: { attempts: 4, retries: 0, reviewRounds: 5 },
+      grantedImplementationAttempts: 1,
       evidenceRef: EVIDENCE_REF,
       reviewIds: [RECEIPT_ID],
       pullRequestNumber: 51,
