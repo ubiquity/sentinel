@@ -6,6 +6,7 @@ import { canonicalStringify } from "../../src/contracts/canonical.ts";
 import {
   HOSTED_SUPERVISOR_WORKFLOW_ID,
   HOSTED_SUPERVISOR_WORKFLOW_PATH,
+  parseHostedExecutionSettlementV1,
 } from "../../src/contracts/hosted-supervisor.ts";
 import {
   matrixCellIdV1,
@@ -358,6 +359,13 @@ async function fixture(paginated = false) {
     updated_at: ISO,
   };
   const calls: { url: string; auth: boolean }[] = [];
+  const pagination = {
+    numeric: false,
+    next: null as string | null,
+    repository: { id: 123, full_name: "ubiquity/sentinel" },
+    truncate: false,
+    duplicate: false,
+  };
   const http = createActionsMatrixArtifactHttpTransport((url, init) => {
     const parsed = new URL(url);
     calls.push({ url, auth: Boolean(init?.headers?.authorization) });
@@ -379,6 +387,9 @@ async function fixture(paginated = false) {
     }
     assert.equal(init?.headers?.authorization, "Bearer fake-local-token");
     assert.equal(init?.redirect, "manual");
+    if (parsed.pathname === "/repos/ubiquity/sentinel") {
+      return reply(pagination.repository);
+    }
     if (parsed.pathname.endsWith("/attempts/2")) return reply(attempt);
     if (
       parsed.pathname.endsWith("/artifacts") ||
@@ -387,14 +398,29 @@ async function fixture(paginated = false) {
       const key = parsed.pathname.endsWith("/jobs") ? "jobs" : "artifacts";
       const rows = key === "jobs" ? jobs : artifacts;
       const page = Number(parsed.searchParams.get("page"));
+      const nextPath = pagination.numeric
+        ? parsed.pathname.replace(
+          "/repos/ubiquity/sentinel",
+          "/repositories/123",
+        )
+        : parsed.pathname;
       const next = rows.length > page * 100
-        ? `<${parsed.origin}${parsed.pathname}?per_page=100&page=${
-          page + 1
+        ? `<${
+          pagination.next ??
+            `${parsed.origin}${nextPath}?per_page=100&page=${page + 1}`
         }>; rel="next"`
         : "";
+      const entries: Record<string, unknown>[] = rows.slice(
+        (page - 1) * 100,
+        page * 100,
+      );
+      if (page === 2 && pagination.truncate) entries.pop();
+      if (page === 2 && pagination.duplicate) {
+        entries[entries.length - 1] = { ...rows[0] };
+      }
       return reply({
         total_count: rows.length,
-        [key]: rows.slice((page - 1) * 100, page * 100),
+        [key]: entries,
       }, next ? { link: next } : {});
     }
     const archive = parsed.pathname.match(/\/artifacts\/(\d+)\/zip$/),
@@ -460,6 +486,9 @@ async function fixture(paginated = false) {
     cellMarker,
     archives,
     calls,
+    pagination,
+    http,
+    state,
     transport,
     input,
     setArchive,
@@ -467,6 +496,164 @@ async function fixture(paginated = false) {
     cellName,
   };
 }
+
+Deno.test("matrix artifacts: numeric repository pagination recovers native 100 plus 8 pages", async () => {
+  const rig = await fixture(true);
+  try {
+    rig.pagination.numeric = true;
+    rig.artifacts.push(
+      ...Array.from(
+        { length: 6 },
+        (_, i) => ({ id: i + 3000, name: `extra-${i}` }),
+      ),
+    );
+    const { currentRun: _oldRun, ...input } = rig.input;
+    const waves = await rig.transport.recover(input);
+    assert.equal(rig.artifacts.length, 108);
+    assert.equal(waves.length, 1);
+    assert.equal(waves[0].results.length, 1);
+    assert.deepEqual(
+      await Deno.readFile(`${waves[0].bundlesDir}/${rig.result.bundle!.file}`),
+      rig.bundle,
+    );
+    assert.equal(
+      rig.calls.filter((call) =>
+        new URL(call.url).pathname === "/repos/ubiquity/sentinel"
+      ).length,
+      1,
+    );
+  } finally {
+    await Deno.remove(rig.tmp, { recursive: true });
+  }
+});
+
+Deno.test("matrix artifacts: numeric repository pagination also binds current-run artifacts and job pages", async () => {
+  const rig = await fixture(true);
+  try {
+    rig.pagination.numeric = true;
+    rig.artifacts.push(
+      ...Array.from(
+        { length: 6 },
+        (_, i) => ({ id: i + 3000, name: `extra-${i}` }),
+      ),
+    );
+    rig.jobs.push(
+      ...Array.from(
+        { length: 6 },
+        (_, i) => ({ ...rig.jobs[0], id: i + 4000, name: `extra-job-${i}` }),
+      ),
+    );
+    const waves = await rig.transport.recover(rig.input);
+    assert.equal(waves.length, 1);
+    assert.equal(waves[0].results.length, 1);
+    assert.ok(
+      rig.calls.some((call) =>
+        call.url.includes("/runs/71/artifacts?per_page=100&page=2")
+      ),
+    );
+    assert.ok(
+      rig.calls.some((call) =>
+        call.url.includes("/attempts/2/jobs?per_page=100&page=2")
+      ),
+    );
+    assert.equal(
+      rig.calls.filter((call) =>
+        new URL(call.url).pathname === "/repos/ubiquity/sentinel"
+      ).length,
+      1,
+    );
+  } finally {
+    await Deno.remove(rig.tmp, { recursive: true });
+  }
+});
+
+Deno.test("matrix artifacts: numeric repository pagination refuses foreign identity and malformed boundaries", async (t) => {
+  const valid =
+    "https://api.github.com/repositories/123/actions/artifacts?per_page=100&page=2";
+  const cases: [string, (rig: Awaited<ReturnType<typeof fixture>>) => void][] =
+    [
+      ["other repository ID", (rig) => {
+        rig.pagination.next = valid.replace("/123/", "/456/");
+      }],
+      ["wrong authenticated repository name", (rig) => {
+        rig.pagination.repository.full_name = "ubiquity/other";
+      }],
+      ["wrong authenticated repository ID", (rig) => {
+        rig.pagination.repository.id = 456;
+      }],
+      ["invalid authenticated repository ID", (rig) => {
+        rig.pagination.repository.id = 0;
+      }],
+      ["foreign host", (rig) => {
+        rig.pagination.next = valid.replace(
+          "api.github.com",
+          "foreign.invalid",
+        );
+      }],
+      ["HTTP scheme", (rig) => {
+        rig.pagination.next = valid.replace("https:", "http:");
+      }],
+      ["wrong actions suffix", (rig) => {
+        rig.pagination.next = valid.replace("/artifacts?", "/jobs?");
+      }],
+      ["wrong page size", (rig) => {
+        rig.pagination.next = valid.replace("per_page=100", "per_page=99");
+      }],
+      ["skipped page", (rig) => {
+        rig.pagination.next = valid.replace("page=2", "page=3");
+      }],
+      ["page loop", (rig) => {
+        rig.pagination.next = valid.replace("page=2", "page=1");
+      }],
+      ["extra query", (rig) => {
+        rig.pagination.next = valid + "&other=1";
+      }],
+      ["duplicate query", (rig) => {
+        rig.pagination.next = valid + "&page=2";
+      }],
+      ["fragment", (rig) => {
+        rig.pagination.next = valid + "#other";
+      }],
+      ["duplicate next relation", (rig) => {
+        rig.pagination.next = valid + '>; rel="next", <' + valid;
+      }],
+      ["truncated second page", (rig) => {
+        rig.pagination.truncate = true;
+      }],
+      ["duplicate item ID", (rig) => {
+        rig.pagination.duplicate = true;
+      }],
+    ];
+  for (const [name, change] of cases) {
+    await t.step(name, async () => {
+      const rig = await fixture(true);
+      try {
+        rig.pagination.numeric = true;
+        rig.artifacts.push(
+          ...Array.from(
+            { length: 6 },
+            (_, i) => ({ id: i + 3000, name: `extra-${i}` }),
+          ),
+        );
+        change(rig);
+        const before = canonicalStringify([rig.repair, rig.release]);
+        const { currentRun: _oldRun, ...input } = rig.input;
+        await assert.rejects(
+          () => rig.transport.recover(input),
+          /provenance unavailable or conflicting/,
+        );
+        assert.equal(canonicalStringify([rig.repair, rig.release]), before);
+        assert.ok(
+          rig.calls.every((call) =>
+            new URL(call.url).hostname === "api.github.com"
+          ),
+        );
+      } finally {
+        await Deno.remove(rig.tmp, { recursive: true });
+      }
+    });
+  }
+});
 
 Deno.test("matrix artifacts: authenticated paginated old wave recovers exact bundle after local cells disappeared", async () => {
   const rig = await fixture(true);
@@ -501,6 +688,262 @@ Deno.test("matrix artifacts: authenticated paginated old wave recovers exact bun
     );
   } finally {
     await Deno.remove(rig.tmp, { recursive: true });
+  }
+});
+
+Deno.test("matrix skipped completion: no-runner wire timestamps and adverse guards", async () => {
+  for (
+    const fault of [
+      "none",
+      "executed",
+      "runner",
+      "active",
+      "incomplete",
+      "foreign",
+      "duplicate",
+      "truncated",
+      "before-attempt",
+      "after-attempt",
+      "future",
+      "invalid-start",
+    ]
+  ) {
+    const f = await fixture();
+    const previousCwd = Deno.cwd();
+    Deno.chdir(`${f.tmp}/checkout`);
+    try {
+      const execution = {
+        ...f.release.hostedRuntimes[0].execution!,
+        id: WAVE,
+        ...RUN,
+        purpose: "bootstrap" as const,
+      };
+      f.release.hostedRuntimes[0].execution = execution;
+      f.attempt.status = "completed";
+      f.attempt.updated_at = new Date(T0 + 2_000).toISOString();
+      const skipped = {
+        ...f.jobs[0],
+        id: 111354489906,
+        name: "matrix_cell (${{ matrix.cellId }})",
+        conclusion: "skipped",
+        runner_id: null as number | null,
+        runner_name: null as string | null,
+        started_at: new Date(T0 + 1_000).toISOString(),
+        completed_at: ISO,
+        steps: [],
+      };
+      if (fault === "executed") skipped.conclusion = "success";
+      if (fault === "runner") {
+        skipped.runner_id = 7;
+        skipped.runner_name = "assigned-runner";
+      }
+      if (fault === "active") skipped.status = "in_progress";
+      if (fault === "incomplete") skipped.completed_at = "";
+      if (fault === "foreign") skipped.run_id = 99;
+      if (fault === "before-attempt") {
+        skipped.completed_at = new Date(T0 - 1).toISOString();
+      }
+      if (fault === "after-attempt") {
+        skipped.started_at = new Date(T0 + 3_000).toISOString();
+      }
+      if (fault === "future") {
+        skipped.started_at = new Date(T0 + 120_000).toISOString();
+        skipped.completed_at = skipped.started_at;
+      }
+      if (fault === "invalid-start") skipped.started_at = "not-a-timestamp";
+      f.jobs.push(skipped);
+      if (fault === "duplicate") f.jobs.push(skipped);
+      const transport = createActionsMatrixArtifactTransport({
+        state: f.state,
+        token: "fake-local-token",
+        clock: { now: () => T0 + 10_000 },
+        artifactRoot: `${f.tmp}/skipped`,
+        http: (request) =>
+          fault === "truncated" &&
+            new URL(request.url).pathname.endsWith("/jobs")
+            ? Promise.resolve({
+              status: 200,
+              headers: new Headers(),
+              bodyText: JSON.stringify({
+                total_count: f.jobs.length + 1,
+                jobs: f.jobs,
+              }),
+            })
+            : f.http(request),
+      });
+      if (fault === "none") {
+        assert.equal(
+          await transport.confirmCompletedExecution!(execution),
+          true,
+        );
+      } else {await assert.rejects(() =>
+          transport.confirmCompletedExecution!(execution), fault);}
+    } finally {
+      Deno.chdir(previousCwd);
+      await Deno.remove(f.tmp, { recursive: true });
+    }
+  }
+});
+
+Deno.test("matrix verification completion: exact held verification survives pointer advance", async () => {
+  for (
+    const purpose of ["bootstrap", "prior", "candidate", "rollback"] as const
+  ) {
+    const f = await fixture();
+    const previousCwd = Deno.cwd();
+    Deno.chdir(`${f.tmp}/checkout`);
+    try {
+      const runtime = f.release.hostedRuntimes[0];
+      const execution = {
+        ...runtime.execution!,
+        id: WAVE,
+        ...RUN,
+        purpose,
+        releaseId: purpose === "bootstrap" ? null : "verification-release",
+      };
+      runtime.execution = null;
+      runtime.lastExecutionProof = parseHostedExecutionSettlementV1({
+        execution,
+        workflowId: HOSTED_SUPERVISOR_WORKFLOW_ID,
+        workflowPath: HOSTED_SUPERVISOR_WORKFLOW_PATH,
+        repository: "ubiquity/sentinel",
+        ref: "refs/heads/sentinel-supervisor",
+        jobId: 401,
+        startedAt: T0,
+        finishedAt: T0,
+        observedAt: T0 + 10_000,
+        outcome: "failed",
+        startupReady: false,
+        settled: true,
+        baseSha: null,
+        terminalAt: null,
+        logDigest: "a".repeat(64),
+      });
+      runtime.activeRevision = SHA3;
+      runtime.generation++;
+      f.attempt.status = "completed";
+      const transport = createActionsMatrixArtifactTransport({
+        state: f.state,
+        token: "fake-local-token",
+        http: f.http,
+        clock: { now: () => T0 + 10_000 },
+        artifactRoot: `${f.tmp}/verification`,
+      });
+      assert.equal(await transport.confirmCompletedExecution!(execution), true);
+      runtime.execution = {
+        ...execution,
+        id: "99:1:repair",
+        runId: 99,
+        runAttempt: 1,
+        revision: SHA3,
+        generation: runtime.generation,
+      };
+      await assert.rejects(() =>
+        transport.confirmCompletedExecution!(execution)
+      );
+    } finally {
+      Deno.chdir(previousCwd);
+      await Deno.remove(f.tmp, { recursive: true });
+    }
+  }
+});
+
+Deno.test("matrix completion: exact settled latest authenticates and custody failures refuse", async () => {
+  for (
+    const fault of [
+      "none",
+      "pending",
+      "missing",
+      "foreign-owner",
+      "generation",
+      "revision",
+      "truncated",
+      "unavailable",
+      "drift",
+    ]
+  ) {
+    const f = await fixture();
+    const previousCwd = Deno.cwd();
+    Deno.chdir(`${f.tmp}/checkout`);
+    try {
+      const runtime = f.release.hostedRuntimes[0];
+      const execution = { ...runtime.execution!, id: WAVE, ...RUN };
+      runtime.execution = null;
+      runtime.lastExecutionProof = parseHostedExecutionSettlementV1({
+        execution,
+        workflowId: HOSTED_SUPERVISOR_WORKFLOW_ID,
+        workflowPath: HOSTED_SUPERVISOR_WORKFLOW_PATH,
+        repository: "ubiquity/sentinel",
+        ref: "refs/heads/sentinel-supervisor",
+        jobId: null,
+        finishedAt: T0,
+        observedAt: T0 + 10_000,
+        outcome: "not_started",
+        evidenceDigest: "a".repeat(64),
+      });
+      f.attempt.status = "completed";
+      if (fault === "missing") runtime.lastExecutionProof = null;
+      if (fault === "foreign-owner") {
+        runtime.execution = {
+          ...execution,
+          id: "99:1:repair",
+          runId: 99,
+          runAttempt: 1,
+        };
+      }
+      if (fault === "generation") runtime.generation++;
+      if (fault === "revision") runtime.activeRevision = SHA3;
+      if (fault === "pending") f.attempt.status = "in_progress";
+      const transport = createActionsMatrixArtifactTransport({
+        state: f.state,
+        token: "fake-local-token",
+        clock: { now: () => T0 + 10_000 },
+        artifactRoot: `${f.tmp}/completion`,
+        http: (request) => {
+          if (fault === "unavailable") {
+            return Promise.resolve({
+              status: 503,
+              headers: new Headers(),
+              bodyText: "",
+            });
+          }
+          if (
+            fault === "truncated" &&
+            new URL(request.url).pathname.endsWith("/jobs")
+          ) {
+            return Promise.resolve({
+              status: 200,
+              headers: new Headers(),
+              bodyText: JSON.stringify({
+                total_count: f.jobs.length + 1,
+                jobs: f.jobs,
+              }),
+            });
+          }
+          if (
+            fault === "drift" && new URL(request.url).pathname.endsWith("/jobs")
+          ) {
+            runtime.execution = {
+              ...execution,
+              id: "99:1:repair",
+              runId: 99,
+              runAttempt: 1,
+            };
+          }
+          return f.http(request);
+        },
+      });
+      if (fault === "none") {
+        assert.equal(
+          await transport.confirmCompletedExecution!(execution),
+          true,
+        );
+      } else {await assert.rejects(() =>
+          transport.confirmCompletedExecution!(execution), fault);}
+    } finally {
+      Deno.chdir(previousCwd);
+      await Deno.remove(f.tmp, { recursive: true });
+    }
   }
 });
 

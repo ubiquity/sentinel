@@ -1344,3 +1344,15 @@ Deno.test("ordinary matrix source: existing scoped cooldown gate refuses later t
   assert.equal(rig.http.calls.length, 1);
   assert.ok(rig.gate.admissions.every((scope) => scope === 0));
 });
+
+Deno.test("hosted execution: a matrix cell job name (64-hex cell id) still settles the run", async () => {
+  const rig = makeRig();
+  const cellName = `matrix_cell (${"a".repeat(64)})`;
+  assert.equal(cellName.length, 78);
+  const cell = jobBody({ id: JOB_ID + 500, name: cellName, steps: [] });
+  scriptAttemptAndJobs(rig, attemptBody(), jobsBody([cell, jobBody()]));
+  scriptLog(rig, logText([terminalRecord()]));
+  const proof = settlementProof(await rig.client.readHostedExecution(intent()));
+  assert.equal(proof.outcome, "healthy");
+  assert.equal(proof.jobId, JOB_ID);
+});

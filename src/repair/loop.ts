@@ -482,6 +482,80 @@ export function createRunBounds(
   return { runDeadline, modelCutoff };
 }
 
+/** Matrix intake only: discover sources and assign fresh branches without dispatching lifecycle work. */
+export async function prepareMatrixIntakeV1(
+  deps: RepairCycleDepsV1,
+  options: RepairCycleOptionsV1,
+): Promise<RepairCycleOutcomeV1> {
+  const bounds = createRunBounds(deps, options);
+  if (deps.clock.now() >= bounds.runDeadline) {
+    return { status: "margin", detail: "matrix intake deadline reached" };
+  }
+  const context = await loadSnapshot(deps, bounds);
+  if (context === null) {
+    return { status: "state_error", detail: "repair state unavailable" };
+  }
+  if (deps.clock.now() >= bounds.runDeadline) {
+    return {
+      status: "margin",
+      detail: "matrix intake deadline reached during state read",
+    };
+  }
+  const intake = await pollIntake(deps, context);
+  if (intake.result.kind === "state_error") {
+    return { status: "state_error", detail: intake.result.detail };
+  }
+  const synchronized = await synchronizeSnapshot(deps, context);
+  if (synchronized.status !== "ok") {
+    return {
+      status: "state_error",
+      detail: "matrix intake state moved or is unavailable",
+    };
+  }
+  if (deps.clock.now() >= bounds.runDeadline) {
+    return {
+      status: "margin",
+      detail: "matrix intake deadline reached after source reads",
+    };
+  }
+  const ranked = rankEligibleWork(
+    context.snapshot,
+    deps.configs,
+    deps.clock.now(),
+  );
+  const freshIds = new Set(ranked.ordered.filter((id) => {
+    const record = context.snapshot.work.find((row) => row.id === id);
+    return record !== undefined && record.source.kind === "issue" &&
+      record.nextStep === "work" && record.intent === null &&
+      record.target.branch === null && record.target.head === null &&
+      (record.target.candidateState === undefined ||
+        record.target.candidateState.preserved !== null);
+  }));
+  if (freshIds.size > 0) {
+    const assigned = await persistTransition(deps, context, (draft) => {
+      draft.work = draft.work.map((record) =>
+        freshIds.has(record.id)
+          ? assignTarget(record, {
+            base: record.target.base,
+            branch: candidateBranch(record.id),
+          }, deps.clock.now())
+          : record
+      );
+    });
+    if (assigned.kind !== "progress") {
+      return {
+        status: "state_error",
+        detail: assigned.kind === "state_error"
+          ? assigned.detail
+          : "matrix branch assignment did not persist",
+      };
+    }
+  }
+  return intake.error === null
+    ? { status: "idle", detail: "matrix intake prepared" }
+    : { status: "source_error", detail: intake.error };
+}
+
 /** One run of the bounded repair loop. */
 export async function runRepairCycle(
   deps: RepairCycleDepsV1,
@@ -5856,7 +5930,7 @@ async function executeBaseRefreshIntent(
         deps,
         context,
         clearIntent(
-          markTerminalBlocked(record, "other", RETIRED_MERGED_MESSAGE, at),
+          markBlocked(record, "other", RETIRED_MERGED_MESSAGE, at),
           at,
         ),
       );

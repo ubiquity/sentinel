@@ -921,9 +921,19 @@ export type StateWriteResultV1 =
 
 export interface StateReadView {
   readRepair(): Promise<PortResultV1<StateReadResultV1<RepairStateSnapshotV1>>>;
+  /** Read one strict ancestor of the freshly verified fixed repair ref. */
+  readRepairAt?(input: {
+    commit: GitSha;
+    expectedHead: GitSha;
+  }): Promise<PortResultV1<StateReadResultV1<RepairStateSnapshotV1>>>;
   readRelease(): Promise<
     PortResultV1<StateReadResultV1<ReleaseStateSnapshotV1>>
   >;
+  /** Read one strict ancestor of the freshly verified fixed release ref. */
+  readReleaseAt?(input: {
+    commit: GitSha;
+    expectedHead: GitSha;
+  }): Promise<PortResultV1<StateReadResultV1<ReleaseStateSnapshotV1>>>;
   /**
    * Optional local-activation capability, owned only by hosts that own the
    * private local release scope. It reads the exact strict private receipt for

@@ -1053,7 +1053,7 @@ Deno.test("issue48 recovery: supervisor workflow dependency and locking contract
     maintenance.includes("if: github.ref == 'refs/heads/sentinel-supervisor'"),
   );
   assert.ok(maintenance.includes("runs-on: ubuntu-latest"));
-  assert.ok(maintenance.includes("timeout-minutes: 5"));
+  assert.ok(maintenance.includes("timeout-minutes: 15"));
   assert.ok(maintenance.includes("group: sentinel-repair"));
   assert.ok(maintenance.includes("cancel-in-progress: false"));
   assert.ok(
@@ -1074,8 +1074,14 @@ Deno.test("issue48 recovery: supervisor workflow dependency and locking contract
   // own tests remain in the tree, it is simply no longer wired into the job).
   assert.ok(maintenance.includes("ops/hosted-autonomy.ts"));
   assert.ok(maintenance.includes("--no-lock"));
-  assert.ok(maintenance.includes("--allow-run=git"));
-  assert.ok(maintenance.includes("--allow-net=api.github.com"));
+  assert.match(maintenance, /--allow-run\s/);
+  assert.ok(!maintenance.includes("--allow-run="));
+  assert.match(maintenance, /--allow-env=[^\r\n]*\bNODE_V8_COVERAGE\b/);
+  assert.ok(
+    maintenance.includes(
+      '--allow-net="api.github.com,*.blob.core.windows.net"',
+    ),
+  );
   assert.ok(maintenance.includes("GITHUB_TOKEN: ${{ github.token }}"));
   // The pass authenticates its code-change writes as the `ubiquity-sentinel`
   // App: it mounts the protected environment, resolves the committed targets
@@ -1154,13 +1160,13 @@ Deno.test("issue48 recovery: supervisor workflow dependency and locking contract
     "the maintenance job mounts the protected environment",
   );
 
-  // A maintenance failure must never skip a valid ordinary run: prepare still
-  // runs (always()) and repair requires prepare success explicitly.
+  // Prepare requires successful maintenance so unresolved historical custody
+  // cannot be overwritten; repair still requires prepare success explicitly.
   const prepare = text.slice(prepareAt, repairAt);
   assert.ok(prepare.includes("needs: maintenance"));
   assert.ok(
     prepare.includes(
-      "if: always() && github.ref == 'refs/heads/sentinel-supervisor'",
+      "if: always() && needs.maintenance.result == 'success' && github.ref == 'refs/heads/sentinel-supervisor'",
     ),
   );
   const repair = text.slice(repairAt, finalizeAt);

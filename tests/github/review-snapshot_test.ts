@@ -1438,6 +1438,7 @@ Deno.test(
       );
       assert.ok(!result.ok, "a protected edit must reject");
       if (result.ok) assert.fail("expected rejection");
+      assert.equal(result.error.kind, "invalid");
       contains(result.error.detail, "protected");
     });
 

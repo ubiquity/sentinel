@@ -51,6 +51,7 @@ import {
   planMatrixWave,
   runMatrixCell,
   runMatrixCellEntrypoint,
+  verifyMatrixReceiptV1,
 } from "../../src/host/matrix.ts";
 import {
   createGitBundleExporter,
@@ -85,12 +86,225 @@ const ROOT = decodeURIComponent(HERE.pathname).replace(
   "",
 );
 
+import {
+  applyHostedRetries,
+  planHostedRetries,
+} from "../../ops/hosted-autonomy.ts";
+
 const WAVE = "wave-test-1";
 const LAUNCHER = "1".repeat(40) as GitSha;
 const RUN = { runId: 41, runAttempt: 1, launcherSha: LAUNCHER };
 const ACTUAL = { run: RUN, runtimeSha: LAUNCHER, generation: 1 };
 const PROVIDER = "sentinel-host";
 const DEADLINE = T0 + 60 * 60_000;
+
+Deno.test("matrix runtime: authenticated interrupted output overage stays charged and blocked with strict guards", async () => {
+  const rig = await makeRig([754, 755], 1, {
+    maxDurationMs: 1_800_000,
+    maxOutputChars: 4_000_000,
+  });
+  try {
+    const seeded = await rig.store.writeRepair(
+      seedSnapshot([freshIssue(754, rig.base), freshIssue(755, rig.base)]),
+      null,
+    );
+    assert.ok(seeded.ok && seeded.value.status === "applied");
+    const plan = (await planMatrixWave(rig.deps, rig.planOptions())).plan;
+    const cell = plan.cells.find((row) => row.request.issue?.number === 754)!;
+    const sibling = plan.cells.find((row) =>
+      row.request.issue?.number === 755
+    )!;
+    const ctx = await rig.claimCell(cell);
+    const receipt: ModelRunReceiptV1 = {
+      invocationId: "interrupted-output-bound",
+      outcome: "interrupted",
+      actual: {
+        evidenceKind: "request-runtime",
+        provider: PROVIDER,
+        threadId: "fixture-thread",
+        turnId: "fixture-turn",
+        terminalOrigin: "runtime",
+        observedTerminalStatus: "interrupted",
+        observedModel: cell.request.model,
+        observedReasoning: cell.request.reasoning,
+        durationMs: 480_793,
+        outputChars: 5_081_256,
+      },
+      candidate: null,
+      error: null,
+    };
+    const originalReceipt = canonicalStringify(receipt);
+    ctx.deps.model.runModel = () => Promise.resolve(portOk(receipt));
+    const result = await runMatrixCell(
+      ctx.deps,
+      { waveId: WAVE, run: RUN, cell },
+      ACTUAL,
+      T0,
+    );
+    assert.equal(result.status, "completed");
+    assert.equal(result.bundle, null);
+    assert.equal(
+      verifyMatrixReceiptV1(receipt, cell.request, PROVIDER),
+      false,
+      "exported verifier must continue refusing over-limit receipts",
+    );
+    const before = await snapshot(rig);
+    const negativeReceipts: ModelRunReceiptV1[] = [
+      {
+        ...receipt,
+        outcome: "completed",
+        actual: { ...receipt.actual, observedTerminalStatus: "completed" },
+      },
+      {
+        ...receipt,
+        candidate: {
+          head: SHA2,
+          checkpointSha: null,
+          changedPaths: ["candidate.txt"],
+        },
+      },
+      ...["provider", "observedModel", "observedReasoning", "evidenceKind"].map(
+        (
+          field,
+        ) => ({
+          ...receipt,
+          actual: { ...receipt.actual, [field]: "wrong" },
+        } as ModelRunReceiptV1),
+      ),
+      {
+        ...receipt,
+        actual: { ...receipt.actual, terminalOrigin: "host-timeout" },
+      },
+      {
+        ...receipt,
+        actual: { ...receipt.actual, observedTerminalStatus: "completed" },
+      },
+      { ...receipt, actual: { ...receipt.actual, durationMs: 1_800_001 } },
+      { ...receipt, actual: { ...receipt.actual, durationMs: NaN } },
+      { ...receipt, actual: { ...receipt.actual, outputChars: Infinity } },
+      { ...receipt, actual: { ...receipt.actual, threadId: "" } },
+      { ...receipt, actual: { ...receipt.actual, turnId: "" } },
+    ];
+    const options = {
+      ...rig.ingestOptions(),
+      bundleImporter: {
+        import: () => {
+          throw Error(
+            "negative interrupted attempt must not import candidates",
+          );
+        },
+      },
+    };
+    for (const wrong of negativeReceipts) {
+      const rejected = await ingestMatrixResults(rig.deps, plan, [{
+        ...result,
+        receipt: wrong,
+      }], options);
+      assert.equal(
+        rejected.entries.find((entry) => entry.cellId === cell.cellId)
+          ?.disposition,
+        "receipt_rejected",
+      );
+      assert.deepEqual(await snapshot(rig), before);
+    }
+    const bundled = await ingestMatrixResults(rig.deps, plan, [{
+      ...result,
+      bundle: {
+        file: cell.cellId + ".bundle",
+        digest: "a".repeat(64),
+        head: SHA2,
+        checkpointSha: null,
+      },
+    }], options);
+    assert.equal(
+      bundled.entries.find((entry) => entry.cellId === cell.cellId)
+        ?.disposition,
+      "receipt_rejected",
+    );
+    const ingested = await ingestMatrixResults(
+      rig.deps,
+      plan,
+      [result],
+      options,
+    );
+    assert.equal(
+      ingested.ingested,
+      1,
+      "authenticated terminal noncandidate failure must reach existing failure accounting",
+    );
+    const after = await snapshot(rig);
+    const charge = after.reservations.find((row) =>
+      row.id === cell.reservationId
+    )!;
+    const work = after.work.find((row) => row.id === cell.taskId)!;
+    assert.equal(charge.outcome, "ambiguous");
+    assert.equal(charge.proofRef, null);
+    assert.notEqual(charge.settledAt, null);
+    assert.equal(work.nextStep, "blocked");
+    assert.equal(work.intent?.requestId, cell.reservationId);
+    assert.equal(work.target.head, null);
+    assert.equal(work.target.checkpoint, null);
+    assert.equal(
+      after.reservations.find((row) => row.id === sibling.reservationId)!
+        .outcome,
+      "reserved",
+    );
+    assert.equal(
+      canonicalStringify(result.receipt),
+      originalReceipt,
+      "observed metrics and original evidence remain unchanged",
+    );
+    rig.clock.advance(1000);
+    const replay = await ingestMatrixResults(rig.deps, plan, [result], options);
+    assert.equal(replay.ingested, 0);
+    assert.equal(
+      replay.entries.find((entry) => entry.cellId === cell.cellId)?.disposition,
+      "duplicate",
+    );
+    assert.deepEqual(
+      await snapshot(rig),
+      after,
+      "replay preserves settlement and blocker timestamps without writes",
+    );
+    const read = await rig.store.readRepair();
+    assert.ok(read.ok && read.value.status === "found");
+    const retries = planHostedRetries(read.value.snapshot, rig.clock.now());
+    assert.equal(retries.length, 1);
+    const retried = await rig.store.writeRepair(
+      applyHostedRetries(
+        read.value.snapshot,
+        read.value.head,
+        retries,
+        rig.clock.now(),
+      ),
+      read.value.head,
+    );
+    assert.ok(retried.ok && retried.value.status === "applied");
+    const next = await planMatrixWave(rig.deps, {
+      ...rig.planOptions(),
+      waveId: "next-wave",
+      run: { ...RUN, runId: 42 },
+      plannedAt: rig.clock.now(),
+    });
+    const nextCell = next.plan.cells.find((row) => row.taskId === cell.taskId)!;
+    assert.ok(nextCell && nextCell.reservationId !== cell.reservationId);
+    const beforeStale = await snapshot(rig);
+    const stale = await ingestMatrixResults(rig.deps, plan, [result], options);
+    assert.equal(stale.ingested, 0);
+    assert.deepEqual(
+      await snapshot(rig),
+      beforeStale,
+      "original artifact cannot consume the new retry operation",
+    );
+    assert.deepEqual(
+      beforeStale.reservations.find((row) => row.id === cell.reservationId),
+      charge,
+    );
+    assert.equal(rig.model.requests.length, 0);
+  } finally {
+    await rig.cleanup();
+  }
+});
 
 function issueRow(number: number): GitHubIssueV1 {
   return {
@@ -320,6 +534,7 @@ function activeIntent(
 async function makeRig(
   issueNumbers: number[],
   overlap: number,
+  sessionBound = { maxDurationMs: 240_000, maxOutputChars: 200_000 },
 ): Promise<RigV1> {
   const tmp = await Deno.makeTempDir({
     prefix: "sentinel-matrix-runtime-",
@@ -366,7 +581,7 @@ async function makeRig(
   const configs = repairConfigs({
     adapter: { kind: "github" },
     liveStartLimits: { perHour: null, perSevenDays: null },
-    sessionBound: { maxDurationMs: 240_000, maxOutputChars: 200_000 },
+    sessionBound,
   });
   const budget = new RollingStartBudget({ clock, state: store, configs });
   const githubCooldown = new DurableGitHubCooldownGate({ state: store, clock });
@@ -593,7 +808,11 @@ Deno.test(
         2,
         "only ready records are granted",
       );
-      assert.equal(report.notReady, 1);
+      assert.equal(
+        report.notReady,
+        0,
+        "nonready records are filtered before consideration",
+      );
       const [first, second] = report.plan.cells;
 
       const badRun = await runMatrixCell(
@@ -828,7 +1047,11 @@ Deno.test(
         1,
         "only the ready issue is planned",
       );
-      assert.equal(report.notReady, 3);
+      assert.equal(
+        report.notReady,
+        0,
+        "nonready records are filtered before consideration",
+      );
       assert.equal(report.deferred, 0);
       assert.equal(report.plan.cells[0].taskId, "issue-501");
 

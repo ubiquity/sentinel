@@ -10,13 +10,48 @@
  * committed or read.
  */
 import assert from "node:assert/strict";
+import { Uint8ArrayReader, Uint8ArrayWriter, ZipWriter } from "@zip.js/zip.js";
+import { canonicalStringify } from "../../src/contracts/canonical.ts";
+import {
+  matrixCellIdV1,
+  type MatrixCellResultV1,
+  matrixDigestV1,
+  type MatrixPlanV1,
+} from "../../src/contracts/matrix.ts";
+import {
+  createActionsMatrixArtifactHttpTransport,
+  createActionsMatrixArtifactTransport,
+} from "../../src/host/matrix-artifacts.ts";
+import { GitHubApiClient } from "../../src/github/client.ts";
+import { RollingStartBudget } from "../../src/budget/mod.ts";
+import { HostedRepairCooldownGate } from "../../src/host/hosted-cooldown.ts";
+import {
+  HISTORICAL_MATRIX_QUARANTINE,
+  type HistoricalMatrixQuarantineDepsV1,
+  runActionsMatrixAggregateCycles,
+  runHistoricalMatrixQuarantine,
+} from "../../src/host/matrix-actions.ts";
+import {
+  runHostedSupervisorFinalize,
+  runHostedSupervisorPrepare,
+} from "../../src/host/actions-supervisor.ts";
+import {
+  FakeGithub,
+  FakeIncidents,
+  FakeModel,
+  FakeReplay,
+} from "../repair/helpers.ts";
+import { repositoryConfig } from "../budget/helpers.ts";
+import type { HttpTransportV1 } from "../../src/github/http.ts";
+import type { HostedExecutionIntentV1 } from "../../src/contracts/hosted-supervisor.ts";
+import { parseHostedExecutionSettlementV1 } from "../../src/contracts/hosted-supervisor.ts";
 
 import type { GitSha, WorkItemId } from "../../src/contracts/brands.ts";
 import type {
   RepairStateWriter,
   StateReadView,
 } from "../../src/contracts/ports.ts";
-import { portError } from "../../src/contracts/ports.ts";
+import { portError, portOk } from "../../src/contracts/ports.ts";
 import {
   parseReleaseStateSnapshotV1,
   parseRepairStateSnapshotV1,
@@ -33,6 +68,8 @@ import {
 } from "../../src/contracts/review-receipt.ts";
 import {
   candidateBranch,
+  candidatePreservationRef,
+  implementationIntentKey,
   releaseRequestId,
   reviewOperationKey,
 } from "../../src/repair/keys.ts";
@@ -46,6 +83,7 @@ import {
   applyHostedRetries,
   buildHostedReleaseRequest,
   createHostedAutonomyGitHub,
+  createHostedHistoricalMatrixQuarantine,
   HOSTED_AUTONOMY_MAX_RETRIES,
   HOSTED_AUTONOMY_MAX_REVIEW_ROUNDS,
   HOSTED_AUTONOMY_RETIRED,
@@ -60,6 +98,7 @@ import {
   planHostedRetries,
   revisionIntegratedIntoBase,
   runHostedAutonomy,
+  runHostedAutonomyMain,
 } from "../../ops/hosted-autonomy.ts";
 import type {
   HostedAutonomyGitHubV1,
@@ -69,11 +108,13 @@ import type {
 import type { RepositoryIdentityV1 } from "../../src/contracts/shared.ts";
 import type { ReleaseRequestV1 } from "../../src/contracts/release.ts";
 import {
+  gitRun,
   makeRemoteCtx,
   reservation,
   reviewReceipt,
   SHA1,
   T0,
+  workRecord,
 } from "../state/helpers.ts";
 import { persistHostedReceipt } from "./hosted-receipt-fixture.ts";
 
@@ -576,6 +617,8 @@ async function makeRig(
   prefix: string,
   options: {
     repair?: RepairStateSnapshotV1;
+    /** Scoped archive fixtures use the repository's existing CI read scope. */
+    fixtureDir?: string;
     release?: ReleaseStateSnapshotV1;
     pull?: HostedAutonomyPullV1 | null;
     baseTip?: string | null;
@@ -603,7 +646,10 @@ async function makeRig(
     };
   } = {},
 ): Promise<{ rig: RigV1; github: HostedAutonomyGitHubV1 }> {
-  const tmp = await Deno.makeTempDir({ prefix: `sentinel-${prefix}-` });
+  const tmp = await Deno.makeTempDir({
+    prefix: `sentinel-${prefix}-`,
+    dir: options.fixtureDir,
+  });
   const ctx = await makeRemoteCtx(tmp, ENV);
   const repair = createRepairStateStore({
     scratchDir: `${tmp}/repair`,
@@ -654,6 +700,8 @@ async function makeRig(
     state: {
       readRepair: () => repair.readRepair(),
       readRelease: () => release.readRelease(),
+      readReleaseAt: (input: { commit: GitSha; expectedHead: GitSha }) =>
+        release.readReleaseAt!(input),
       writeRepair: (
         next: RepairStateSnapshotV1,
         expectedHead: GitSha | null,
@@ -730,6 +778,300 @@ async function readRequests(rig: RigV1) {
   if (!read.ok || read.value.status !== "found") throw new Error("unreadable");
   return read.value.snapshot.releaseRequests;
 }
+
+Deno.test("hosted autonomy: a damaged foreign merged PR is recovered only for verified closure", async () => {
+  const original = foreignRecord();
+  const receipt = foreignReceipt();
+  const record = foreignRecord({
+    nextStep: "blocked",
+    blocker: {
+      kind: "other",
+      message: "pull request was merged outside the trusted review path",
+      since: T0 + 4000,
+    },
+    target: {
+      ...original.target,
+      pr: null,
+      candidateState: {
+        preserved: {
+          ref: await candidatePreservationRef(
+            original.repository,
+            original.id,
+            `base_refresh:${FOREIGN_PR}:${HEAD}:${BASE}`,
+          ),
+          head: HEAD,
+          base: BASE,
+          operationKey: `base_refresh:${FOREIGN_PR}:${HEAD}:${BASE}`,
+        },
+        publishedHead: HEAD,
+      },
+    },
+    evidence: [{
+      kind: "review_receipt",
+      ref: `artifact:review-receipt/${receipt.id}`,
+    }],
+  });
+  const charge = reservation("retained-foreign-charge", {
+    taskId: record.id,
+    outcome: "submitted",
+    settledAt: T0 + 3000,
+  });
+  const { rig, github } = await makeRig("foreign-damaged-pr", {
+    repair: repairSnapshot([record], [receipt], [], [charge]),
+    pull: {
+      ...foreignPullFacts({ author: "ubiquity-sentinel[bot]" }),
+      mergedBy: "ubiquity-sentinel[bot]",
+    } as HostedAutonomyPullV1,
+  });
+  try {
+    const result = await run(rig, github);
+    assert.equal(result.status, "applied", JSON.stringify(result));
+    assert.deepEqual(rig.closed, [FOREIGN_TASK.issueNumber]);
+    assert.equal(rig.merges, 0);
+    assert.equal(rig.writes, 1, "recovery and closure share the existing CAS");
+    const read = await rig.state.readRepair();
+    assert.ok(read.ok && read.value.status === "found");
+    if (!read.ok || read.value.status !== "found") {
+      throw new Error("no repair state");
+    }
+    const state = read.value.snapshot;
+    assert.equal(state.work[0].nextStep, "done");
+    assert.deepEqual(state.work[0].target, {
+      ...record.target,
+      pr: FOREIGN_PR,
+    });
+    assert.deepEqual(state.work[0].source, record.source);
+    assert.deepEqual(state.work[0].counters, record.counters);
+    assert.deepEqual(state.work[0].evidence, record.evidence);
+    assert.deepEqual(state.reviews, [receipt]);
+    assert.deepEqual(state.reservations, [charge]);
+    assert.deepEqual(state.releaseRequests, []);
+    const again = await run(rig, github);
+    assert.equal(again.status, "skipped");
+    assert.equal(rig.closed.length, 1);
+    assert.equal(rig.writes, 1);
+    for (
+      const control of [
+        "missing-receipt",
+        "ambiguous-pr",
+        "wrong-scope",
+        "wrong-review-head",
+        "wrong-review-base",
+        "wrong-task",
+        "wrong-reviewer",
+        "quality-only",
+        "p1",
+        "missing-merger",
+        "alternate-merger",
+        "alternate-author",
+        "wrong-pr",
+        "wrong-pull-head",
+        "wrong-parents",
+        "not-integrated",
+        "unmerged",
+        "wrong-branch",
+        "red-checks",
+        "unavailable-checks",
+        "task-drift",
+        "unavailable-task",
+        "unsettled-intent",
+        "missing-preservation",
+        "unpublished-head",
+        "wrong-preserved-ref",
+        "unrelated-blocker",
+        "self-scope",
+      ]
+    ) {
+      let damaged = record;
+      let reviews = [receipt];
+      const pull: HostedAutonomyPullV1 = {
+        ...foreignPullFacts({ author: "ubiquity-sentinel[bot]" }),
+        mergedBy: "ubiquity-sentinel[bot]",
+      };
+      const reviewOverrides: Record<string, unknown> = {};
+      if (control === "missing-receipt") reviews = [];
+      if (control === "ambiguous-pr") {
+        const other = foreignReceipt({
+          id: `review-receipt:${"c".repeat(64)}`,
+          pullRequest: { ...receipt.pullRequest, number: FOREIGN_PR + 1 },
+        });
+        reviews.push(other);
+        damaged = foreignRecord({
+          ...record,
+          evidence: [...record.evidence, {
+            kind: "review_receipt",
+            ref: `artifact:review-receipt/${other.id}`,
+          }],
+        });
+      }
+      if (control === "wrong-scope") {
+        reviewOverrides.repository = { ...FOREIGN_REPO, installationId: 8 };
+      }
+      if (control === "wrong-review-head") {
+        reviewOverrides.pullRequest = { ...receipt.pullRequest, head: SHA1 };
+      }
+      if (control === "wrong-review-base") {
+        reviewOverrides.pullRequest = { ...receipt.pullRequest, base: SHA1 };
+      }
+      if (control === "wrong-task") {
+        reviewOverrides.taskAcceptance = {
+          ...receipt.taskAcceptance!,
+          issueNumber: 121,
+        };
+      }
+      if (control === "wrong-reviewer") {
+        reviewOverrides.expectedReviewer = "github-actions[bot]";
+        reviewOverrides.observedReviewer = "github-actions[bot]";
+      }
+      if (control === "quality-only") reviewOverrides.taskAcceptance = null;
+      if (control === "p1") {
+        reviewOverrides.findings = [finding("P1")];
+        reviewOverrides.unresolvedSeverities = ["P1"];
+      }
+      if (Object.keys(reviewOverrides).length > 0) {
+        reviews = [foreignReceipt(reviewOverrides)];
+      }
+      if (control === "missing-merger") delete pull.mergedBy;
+      if (control === "alternate-merger") pull.mergedBy = "0x4007";
+      if (control === "alternate-author") pull.author = "github-actions[bot]";
+      if (control === "wrong-pr") pull.number++;
+      if (control === "wrong-pull-head") pull.headSha = SHA1;
+      if (control === "wrong-parents") pull.parents = [BASE, SHA1];
+      if (control === "not-integrated") pull.revisionOnBaseBranch = false;
+      if (control === "unmerged") {
+        pull.merged = false;
+        pull.mergeCommitSha = null;
+      }
+      if (control === "wrong-branch") pull.baseRef = "other";
+      if (control === "unsettled-intent") {
+        damaged = foreignRecord({
+          ...record,
+          intent: {
+            kind: "implementation",
+            key: "implementation:unsettled",
+            startedAt: T0,
+            branch: record.target.branch,
+            expectedHead: HEAD,
+            observedBase: BASE,
+            pr: null,
+            requestId: "unknown-reservation",
+            resultId: null,
+          },
+        });
+      }
+      if (control === "missing-preservation") {
+        damaged = foreignRecord({
+          ...record,
+          target: {
+            ...record.target,
+            candidateState: { preserved: null, publishedHead: HEAD },
+          },
+        });
+      }
+      if (control === "unpublished-head") {
+        damaged = foreignRecord({
+          ...record,
+          target: {
+            ...record.target,
+            candidateState: {
+              ...record.target.candidateState!,
+              publishedHead: null,
+            },
+          },
+        });
+      }
+      if (control === "wrong-preserved-ref") {
+        damaged = foreignRecord({
+          ...record,
+          target: {
+            ...record.target,
+            candidateState: {
+              ...record.target.candidateState!,
+              preserved: {
+                ...record.target.candidateState!.preserved!,
+                ref: `refs/heads/sentinel-candidates/${"f".repeat(64)}`,
+              },
+            },
+          },
+        });
+      }
+      if (control === "unrelated-blocker") {
+        damaged = foreignRecord({
+          ...record,
+          blocker: {
+            kind: "other",
+            message: "unrelated terminal blocker",
+            since: T0,
+          },
+        });
+      }
+      if (control === "self-scope") {
+        damaged = foreignRecord({
+          ...record,
+          repository: SELF_REPO,
+          target: {
+            ...record.target,
+            candidateState: {
+              ...record.target.candidateState!,
+              preserved: {
+                ...record.target.candidateState!.preserved!,
+                ref: await candidatePreservationRef(
+                  SELF_REPO,
+                  record.id,
+                  record.target.candidateState!.preserved!.operationKey,
+                ),
+              },
+            },
+          },
+        });
+        reviews = [foreignReceipt({ repository: SELF_REPO })];
+      }
+      const negative = await makeRig(`foreign-damaged-${control}`, {
+        repair: repairSnapshot([damaged], reviews, [], [charge]),
+        pull,
+        foreignCheckGreen: control !== "red-checks",
+        issueTask: control === "unavailable-task"
+          ? () => Promise.resolve(null)
+          : control === "task-drift"
+          ? () =>
+            Promise.resolve({
+              ...FOREIGN_TASK,
+              digest: "d".repeat(64) as never,
+            })
+          : undefined,
+      });
+      const reads: number[] = [];
+      const readPull = negative.github.readPull;
+      negative.github.readPull = (number, branch) => {
+        reads.push(number);
+        return number === FOREIGN_PR
+          ? readPull(number, branch)
+          : Promise.resolve(null);
+      };
+      if (control === "unavailable-checks") {
+        negative.github.hasAllChecksGreen = () =>
+          Promise.reject(new Error("unavailable checks"));
+      }
+      try {
+        const before = await negative.rig.state.readRepair();
+        await run(negative.rig, negative.github);
+        assert.deepEqual(negative.rig.closed, [], control);
+        assert.equal(negative.rig.merges, 0, control);
+        assert.equal(negative.rig.writes, 0, control);
+        assert.deepEqual(
+          await negative.rig.state.readRepair(),
+          before,
+          control,
+        );
+        assert.ok(reads.every((number) => number === FOREIGN_PR), control);
+      } finally {
+        await Deno.remove(negative.rig.tmp, { recursive: true });
+      }
+    }
+  } finally {
+    await Deno.remove(rig.tmp, { recursive: true });
+  }
+});
 
 Deno.test(
   "hosted autonomy: a merged reviewed head records the deterministic release request",
@@ -1883,11 +2225,13 @@ Deno.test(
       base: { ref: "development" },
       user: { login: "github-actions[bot]" },
       number: 51,
+      merged_by: { login: "ubiquity-sentinel[bot]" },
     });
     assert.equal(merged?.merged, true);
     assert.equal(merged?.mergeCommitSha, MERGE);
     assert.equal(merged?.headSha, HEAD);
     assert.equal(merged?.baseRef, "development");
+    assert.equal(merged?.mergedBy, "ubiquity-sentinel[bot]");
     // A merged pull must still name the merge commit it was merged as.
     assert.equal(
       parseHostedAutonomyPull({
@@ -4084,3 +4428,2585 @@ Deno.test(
     await Deno.remove(rig.tmp, { recursive: true });
   },
 );
+
+/** Sanitized advancing admissions, immutable native archives and actual protected maintenance. */
+async function historicalMalformedRig(
+  includeSibling = true,
+  historicalCount = 17,
+) {
+  const launcher = "1".repeat(40) as GitSha;
+  const revision = "2".repeat(40) as GitSha;
+  const run = { runId: 71, runAttempt: 2, launcherSha: launcher };
+  const execution = {
+    id: "71:2:repair",
+    ...run,
+    purpose: "ordinary" as const,
+    revision,
+    generation: 1,
+    releaseId: null,
+    createdAt: T0,
+  };
+  const clock = { now: () => T0 + 60_000 };
+  const records = Array.from({
+    length: historicalCount + (includeSibling ? 1 : 0),
+  }, (_, i) => {
+    const id = `historical-${i}` as WorkItemId;
+    const requestId = (i + 1).toString(16).padStart(64, "0");
+    return workRecord(id, {
+      repository: SELF_REPO,
+      related: { incidentId: null, issueNumber: i + 1 },
+      counters: { attempts: 1, retries: 0, reviewRounds: 0 },
+      target: {
+        base: BASE,
+        head: null,
+        pr: null,
+        branch: candidateBranch(id),
+        checkpoint: null,
+      },
+      intent: {
+        kind: "implementation",
+        key: implementationIntentKey(requestId),
+        startedAt: T0 + i + 1,
+        branch: candidateBranch(id),
+        expectedHead: null,
+        observedBase: BASE,
+        pr: null,
+        requestId,
+        resultId: null,
+      },
+      updatedAt: T0 + i + 1,
+    });
+  });
+  const charges = records.map((record, i) =>
+    reservation(record.intent!.requestId!, {
+      repository: SELF_REPO,
+      taskId: record.id,
+      head: BASE,
+      attempt: 1,
+      createdAt: T0 + i + 1,
+    })
+  );
+  const release = releaseSnapshot();
+  release.hostedRuntimes = [{
+    version: "v1",
+    kind: "hosted_runtime",
+    id: "ubiquity/sentinel:0:production",
+    activeRevision: revision,
+    generation: 1,
+    lastHealthyProof: null,
+    lastExecutionProof: null,
+    nextOrdinaryAt: T0,
+    execution,
+    createdAt: T0,
+    updatedAt: T0,
+  }];
+  const { rig, github } = await makeRig("historical-malformed", {
+    fixtureDir: decodeURIComponent(new URL("../../", import.meta.url).pathname),
+    repair: repairSnapshot(records, [], [], charges),
+    release,
+    pull: null,
+    issueOpen: null,
+    baseTip: BASE,
+  });
+  const checkout = `${rig.tmp}/checkout`;
+  const cloned = await gitRun(rig.tmp, [
+    "clone",
+    "-q",
+    "--branch",
+    "sentinel-state/repair",
+    `${rig.tmp}/remote.git`,
+    checkout,
+  ], ENV);
+  assert(cloned.ok, cloned.stderr);
+  const artifacts: Record<string, unknown>[] = [];
+  const archives = new Map<number, Uint8Array>();
+  const logs = new Map<number, string>();
+  const iso = (at: number) => new Date(at).toISOString();
+  async function archived(id: number, name: string, value: unknown) {
+    const writer = new ZipWriter(new Uint8ArrayWriter(), {
+      useWebWorkers: false,
+    });
+    await writer.add(
+      name.startsWith("sentinel-matrix-plan") ? "plan.json" : "result.json",
+      new Uint8ArrayReader(new TextEncoder().encode(canonicalStringify(value))),
+      { unixMode: 0o100600 },
+    );
+    const bytes = await writer.close();
+    const digest = Array.from(
+      new Uint8Array(await crypto.subtle.digest("SHA-256", bytes.slice())),
+    )
+      .map((b) => b.toString(16).padStart(2, "0")).join("");
+    archives.set(id, bytes);
+    artifacts.push({
+      id,
+      name,
+      size_in_bytes: bytes.length,
+      expired: false,
+      digest: `sha256:${digest}`,
+      workflow_run: {
+        id: run.runId,
+        repository_id: 123,
+        head_repository_id: 123,
+        head_branch: "sentinel-supervisor",
+        head_sha: launcher,
+      },
+    });
+  }
+  const cells = await Promise.all(
+    records.slice(0, historicalCount).map(async (record) => {
+      const request = {
+        taskId: record.id,
+        repository: SELF_REPO,
+        base: BASE,
+        issue: {
+          number: record.related.issueNumber!,
+          title: "sanitized",
+          body: "sanitized",
+        },
+        evidence: [],
+        model: "gpt-reserve",
+        reasoning: "max" as const,
+        maxDurationMs: 10_000,
+        maxOutputChars: 10_000,
+      };
+      return {
+        cellId: await matrixCellIdV1(
+          execution.id,
+          record.id,
+          record.intent!.requestId!,
+        ),
+        taskId: record.id,
+        repository: SELF_REPO,
+        reservationId: record.intent!.requestId!,
+        intentKey: record.intent!.key,
+        expectedBase: BASE,
+        runtimeSha: revision,
+        generation: 1,
+        requestDigest: await matrixDigestV1(request),
+        request,
+      };
+    }),
+  );
+  const plan: MatrixPlanV1 = {
+    version: "v1",
+    kind: "matrix_plan",
+    waveId: execution.id,
+    run,
+    plannedAt: T0,
+    cells,
+  };
+  const job = (id: number, name: string, step: string, failed = false) => ({
+    id,
+    name,
+    run_id: run.runId,
+    run_attempt: run.runAttempt,
+    head_sha: launcher,
+    status: "completed",
+    conclusion: failed ? "failure" : "success",
+    started_at: iso(T0),
+    completed_at: iso(T0 + 30_000),
+    steps: [{
+      name: step,
+      number: 1,
+      status: "completed",
+      conclusion: failed ? "failure" : "success",
+      started_at: iso(T0),
+      completed_at: iso(T0 + 30_000),
+    }],
+  });
+  const jobs = [
+    job(401, "matrix_plan", "Plan isolated issue matrix"),
+    job(499, "repair", "Run selected Sentinel runtime", true),
+  ];
+  logs.set(499, `${iso(T0 + 30_000)} child exited before terminal\n`);
+  async function refreshPlan() {
+    artifacts.splice(0, artifacts.length);
+    await archived(501, "sentinel-matrix-plan-71-2", plan);
+    logs.set(
+      401,
+      `${iso(T0 + 25_000)} ${
+        JSON.stringify({
+          kind: "sentinel_matrix_plan",
+          waveId: execution.id,
+          run,
+          runtimeSha: revision,
+          generation: 1,
+          planDigest: await matrixDigestV1(plan),
+          prepared: cells.length,
+        })
+      }\n`,
+    );
+    for (const [i, cell] of cells.entries()) {
+      const result: MatrixCellResultV1 = {
+        version: "v1",
+        kind: "matrix_cell_result",
+        waveId: execution.id,
+        run,
+        runtimeSha: revision,
+        generation: 1,
+        cellId: cell.cellId,
+        taskId: cell.taskId,
+        repository: SELF_REPO,
+        reservationId: cell.reservationId,
+        intentKey: cell.intentKey,
+        requestDigest: cell.requestDigest,
+        status: "not_started",
+        receipt: null,
+        bundle: null,
+        detail: "sanitized no start",
+        completedAt: T0 + 29_000,
+      };
+      await archived(
+        502 + i,
+        `sentinel-matrix-cell-71-2-${cell.cellId}`,
+        result,
+      );
+      logs.set(
+        402 + i,
+        `${iso(T0 + 29_000)} ${
+          JSON.stringify({
+            kind: "sentinel_matrix_cell",
+            run,
+            runtimeSha: revision,
+            generation: 1,
+            cellId: cell.cellId,
+            reservationId: cell.reservationId,
+            resultDigest: await matrixDigestV1(result),
+            bundleDigest: null,
+            status: "not_started",
+          })
+        }\n`,
+      );
+    }
+  }
+  jobs.push(
+    ...cells.map((cell, i) =>
+      job(402 + i, `matrix_cell (${cell.cellId})`, "Run isolated issue cell")
+    ),
+  );
+  await refreshPlan();
+  let fault: "auth" | "outage" | "missing" | "pending" | null = null;
+  const calls: { url: string; authorization: string | undefined }[] = [];
+  const http = createActionsMatrixArtifactHttpTransport((url, init) => {
+    calls.push({ url, authorization: init?.headers?.authorization });
+    const parsed = new URL(url);
+    if (fault === "outage") {
+      return Promise.resolve(new Response("", { status: 503 }));
+    }
+    const reply = (value: unknown) =>
+      Promise.resolve(new Response(JSON.stringify(value)));
+    if (parsed.hostname.endsWith("blob.core.windows.net")) {
+      assert.equal(init?.headers?.authorization, undefined);
+      assert.equal(init?.redirect, "error");
+      const id = Number(parsed.pathname.split("/").at(-1));
+      return Promise.resolve(
+        new Response(
+          parsed.pathname.startsWith("/archive/")
+            ? archives.get(id)!.slice()
+            : logs.get(id)!,
+        ),
+      );
+    }
+    assert.equal(init?.headers?.authorization, "Bearer offline-native-token");
+    assert(["manual", "error"].includes(init?.redirect ?? ""));
+    if (parsed.pathname.endsWith("/attempts/2")) {
+      return reply({
+        id: run.runId,
+        run_attempt: run.runAttempt,
+        workflow_id: 357012162,
+        path: ".github/workflows/supervisor.yml",
+        event: "workflow_dispatch",
+        head_branch: "sentinel-supervisor",
+        head_sha: fault === "auth" ? BASE : launcher,
+        repository: { id: 123, full_name: "ubiquity/sentinel" },
+        head_repository: { id: 123, full_name: "ubiquity/sentinel" },
+        status: "completed",
+        conclusion: "failure",
+        run_started_at: iso(T0),
+        updated_at: iso(T0 + 30_000),
+      });
+    }
+    if (parsed.pathname.endsWith("/jobs")) {
+      return reply({
+        total_count: jobs.length,
+        jobs: fault === "pending"
+          ? jobs.map((row) =>
+            row.name === "repair"
+              ? {
+                ...row,
+                status: "in_progress",
+                conclusion: null,
+                completed_at: null,
+              }
+              : row
+          )
+          : jobs,
+      });
+    }
+    if (parsed.pathname.endsWith("/artifacts")) {
+      return reply({
+        total_count: fault === "missing" ? 0 : artifacts.length,
+        artifacts: fault === "missing" ? [] : artifacts,
+      });
+    }
+    const archive = parsed.pathname.match(/\/artifacts\/(\d+)\/zip$/);
+    const log = parsed.pathname.match(/\/jobs\/(\d+)\/logs$/);
+    if (archive || log) {
+      return Promise.resolve(
+        new Response(null, {
+          status: 302,
+          headers: {
+            location: `https://productionresultssa1.blob.core.windows.net/${
+              archive ? "archive" : "log"
+            }/${(archive ?? log)![1]}`,
+          },
+        }),
+      );
+    }
+    throw new Error("unscripted offline route");
+  });
+  const client = new GitHubApiClient({
+    repository: SELF_REPO,
+    apiBaseUrl: "https://api.github.com",
+    clock,
+    http,
+    auth: {
+      authorizationHeader: () =>
+        Promise.resolve(portOk("Bearer offline-native-token")),
+    },
+    cooldownGate: new HostedRepairCooldownGate({ state: rig.state, clock }),
+  });
+  const historicalMatrix = {
+    state: rig.state,
+    clock,
+    budget: new RollingStartBudget({ state: rig.state, clock, configs: [] }),
+    readExecution: (saved: typeof execution) =>
+      client.readHostedExecution(saved),
+    transport: createActionsMatrixArtifactTransport({
+      state: rig.state,
+      clock,
+      token: "offline-native-token",
+      artifactRoot: `${rig.tmp}/artifacts`,
+      http,
+    }),
+  };
+  const deps = {
+    state: rig.state,
+    githubFor: rig.githubFor,
+    clock,
+    historicalMatrix,
+  };
+  const checkoutHead = await gitRun(checkout, ["rev-parse", "HEAD"], ENV);
+  assert(checkoutHead.ok);
+  const mainEnv = {
+    GITHUB_REPOSITORY: "ubiquity/sentinel",
+    GITHUB_REF: "refs/heads/sentinel-supervisor",
+    GITHUB_JOB: "maintenance",
+    GITHUB_RUN_ID: "900",
+    GITHUB_RUN_ATTEMPT: "1",
+    GITHUB_WORKFLOW_REF:
+      "ubiquity/sentinel/.github/workflows/supervisor.yml@refs/heads/sentinel-supervisor",
+    GITHUB_SHA: checkoutHead.stdout.trim(),
+    GITHUB_WORKFLOW_SHA: checkoutHead.stdout.trim(),
+    GITHUB_TOKEN: "offline-native-token",
+  };
+  return {
+    rig,
+    github,
+    clock,
+    records,
+    charges,
+    historicalMatrix,
+    plan,
+    cells,
+    refreshPlan,
+    http,
+    client,
+    execution,
+    nativeRun: run,
+    artifacts,
+    archives,
+    logs,
+    jobs,
+    checkout,
+    setFault: (next: typeof fault) => {
+      fault = next;
+    },
+    calls,
+    runMain: async () => {
+      const prior = Deno.cwd();
+      Deno.chdir(checkout);
+      try {
+        return await runHostedAutonomyMain({ env: mainEnv, deps });
+      } finally {
+        Deno.chdir(prior);
+      }
+    },
+    run: async () => {
+      const prior = Deno.cwd();
+      Deno.chdir(checkout);
+      try {
+        return await runHostedAutonomy(deps);
+      } finally {
+        Deno.chdir(prior);
+      }
+    },
+  };
+}
+
+Deno.test("historical malformed wave: protected maintenance quarantines seventeen charged intents", async () => {
+  const f = await historicalMalformedRig();
+  try {
+    const before = await f.rig.state.readRepair();
+    assert(before.ok && before.value.status === "found");
+    const result = await f.run();
+    assert(result.actions.includes("historical-matrix:quarantined:17"));
+    const after = await f.rig.state.readRepair();
+    assert(after.ok && after.value.status === "found");
+    for (let i = 0; i < 17; i++) {
+      const original = f.records[i];
+      const work: WorkRecordV1 = after.value.snapshot.work.find((row) =>
+        row.id === original.id
+      )!;
+      assert.equal(work.nextStep, "blocked");
+      assert.equal(
+        work.blocker?.message,
+        "authenticated historical matrix manifest rejected: reservation_after_manifest; model outcome uncertain",
+      );
+      assert.deepEqual({
+        ...work,
+        nextStep: original.nextStep,
+        blocker: original.blocker,
+        wait: original.wait,
+        updatedAt: original.updatedAt,
+      }, original);
+      const charge: ReturnType<typeof reservation> = after.value.snapshot
+        .reservations.find((row) => row.id === f.charges[i].id)!;
+      assert.equal(charge.outcome, "ambiguous");
+      assert.equal(charge.proofRef, null);
+      assert.deepEqual({
+        ...charge,
+        outcome: f.charges[i].outcome,
+        settledAt: f.charges[i].settledAt,
+      }, f.charges[i]);
+    }
+    assert.deepEqual(
+      after.value.snapshot.work.find((row) => row.id === f.records[17].id),
+      f.records[17],
+    );
+    assert.deepEqual(
+      after.value.snapshot.reservations.find((row) =>
+        row.id === f.charges[17].id
+      ),
+      f.charges[17],
+    );
+    assert.equal(f.rig.merges, 0);
+    assert.deepEqual(f.rig.closed, []);
+    assert.equal(f.plan.plannedAt, T0);
+    assert(
+      f.charges.slice(0, 17).every((row) => row.createdAt > f.plan.plannedAt),
+    );
+    const repeat = await f.run();
+    assert(
+      !repeat.actions.some((action) =>
+        action.startsWith("historical-matrix:quarantined:")
+      ),
+    );
+    const repeated = await f.rig.state.readRepair();
+    assert(repeated.ok && repeated.value.status === "found");
+    assert.deepEqual(repeated.value.snapshot.work, after.value.snapshot.work);
+    assert.deepEqual(
+      repeated.value.snapshot.reservations,
+      after.value.snapshot.reservations,
+    );
+  } finally {
+    await Deno.remove(f.rig.tmp, { recursive: true });
+  }
+});
+
+Deno.test("historical malformed wave: authentication outage and future manifest refuse quarantine", async () => {
+  for (const fault of ["auth", "outage", "future", "pending"] as const) {
+    const f = await historicalMalformedRig();
+    try {
+      if (fault === "future") {
+        f.plan.plannedAt = f.clock.now() + 2_000;
+        await f.refreshPlan();
+      } else f.setFault(fault);
+      const before = await f.rig.state.readRepair();
+      await assert.rejects(f.run);
+      if (fault === "pending") assert.equal(await f.runMain(), 1);
+      const after = await f.rig.state.readRepair();
+      assert.deepEqual(after, before);
+      assert.equal(f.rig.merges, 0);
+    } finally {
+      await Deno.remove(f.rig.tmp, { recursive: true });
+    }
+  }
+});
+
+Deno.test("historical malformed wave: settlement CAS and drift preserve charged identity", async () => {
+  for (const mode of ["settlement", "cas", "drift", "custody"] as const) {
+    const f = await historicalMalformedRig();
+    try {
+      const write = f.rig.state.writeRepair.bind(f.rig.state);
+      const settle = f.historicalMatrix.budget.settleModelStart.bind(
+        f.historicalMatrix.budget,
+      );
+      if (mode === "settlement") {
+        f.historicalMatrix.budget.settleModelStart = () =>
+          Promise.resolve({
+            status: "unavailable",
+            detail: "injected offline refusal",
+          });
+      } else if (mode === "cas") {
+        f.rig.state.writeRepair = (next, expected) =>
+          next.work.some((row) => row.nextStep === "blocked")
+            ? Promise.resolve(
+              portOk({ status: "conflict", currentHead: expected }),
+            )
+            : write(next, expected);
+      } else if (mode === "custody") {
+        f.historicalMatrix.budget.settleModelStart = async (request) => {
+          const result = await settle(request);
+          f.rig.state.readRelease = () =>
+            Promise.resolve(
+              portError("unavailable", "injected saved proof loss"),
+            );
+          return result;
+        };
+      } else {
+        f.historicalMatrix.budget.settleModelStart = async (request) => {
+          const result = await settle(request);
+          const read = await f.rig.state.readRepair();
+          assert(read.ok && read.value.status === "found");
+          const snapshot = read.value.snapshot;
+          const changed = await write({
+            ...snapshot,
+            stateHead: read.value.head,
+            sequence: snapshot.sequence + 1,
+            updatedAt: f.clock.now(),
+            work: snapshot.work.map((row) =>
+              row.id === f.records[0].id
+                ? {
+                  ...row,
+                  counters: {
+                    ...row.counters,
+                    retries: row.counters.retries + 1,
+                  },
+                  updatedAt: f.clock.now(),
+                }
+                : row
+            ),
+          }, read.value.head);
+          assert(changed.ok && changed.value.status === "applied");
+          return result;
+        };
+      }
+      const before = await f.rig.state.readRepair();
+      await assert.rejects(f.run);
+      const after = await f.rig.state.readRepair();
+      assert(after.ok && after.value.status === "found");
+      assert(after.value.snapshot.work.every((row) => row.nextStep === "work"));
+      if (mode === "settlement") assert.deepEqual(after, before);
+      else {
+        assert.equal(after.value.snapshot.reservations[0].outcome, "ambiguous");
+        assert.equal(
+          after.value.snapshot.work[0].counters.retries,
+          mode === "drift" ? 1 : 0,
+        );
+        assert.deepEqual(
+          after.value.snapshot.work[0].intent,
+          f.records[0].intent,
+        );
+      }
+      if (mode === "cas") {
+        f.rig.state.writeRepair = write;
+        const retry = await f.run();
+        assert(retry.actions.includes("historical-matrix:quarantined:17"));
+        const recovered = await f.rig.state.readRepair();
+        assert(recovered.ok && recovered.value.status === "found");
+        assert.equal(
+          recovered.value.snapshot.reservations[0].settledAt,
+          after.value.snapshot.reservations[0].settledAt,
+        );
+        assert.equal(
+          recovered.value.snapshot.work.filter((row) =>
+            row.nextStep === "blocked"
+          ).length,
+          17,
+        );
+      }
+    } finally {
+      await Deno.remove(f.rig.tmp, { recursive: true });
+    }
+  }
+});
+
+Deno.test("historical malformed wave: actual maintenance entrypoint blocks prepare on incomplete quarantine", async () => {
+  const f = await historicalMalformedRig();
+  try {
+    f.setFault("auth");
+    const before = await f.rig.state.readRepair();
+    assert.equal(await f.runMain(), 1);
+    assert.deepEqual(await f.rig.state.readRepair(), before);
+    const workflow = await Deno.readTextFile(
+      new URL("../../.github/workflows/supervisor.yml", import.meta.url),
+    );
+    assert.match(
+      workflow,
+      /prepare:\s*\n\s*needs: maintenance\s*\n\s*if: always\(\) && needs\.maintenance\.result == 'success'/,
+    );
+    assert.equal(
+      isHardAutonomyFailure("historical_quarantine_incomplete"),
+      true,
+    );
+    f.setFault(null);
+    assert.equal(await f.runMain(), 0);
+  } finally {
+    await Deno.remove(f.rig.tmp, { recursive: true });
+  }
+});
+
+Deno.test("historical malformed wave: missing archive and malformed parser never quarantine", async () => {
+  for (
+    const mode of [
+      "missing",
+      "parser",
+      "missing-proof",
+      "valid-applicable",
+    ] as const
+  ) {
+    const f = await historicalMalformedRig();
+    try {
+      const before = await f.rig.state.readRepair();
+      if (mode === "missing") {
+        f.setFault("missing");
+        assert.equal(await f.runMain(), 1);
+        await assert.rejects(f.run);
+      } else if (mode === "missing-proof") {
+        f.historicalMatrix.state = {
+          ...f.rig.state,
+          readRelease: async () => {
+            const read = await f.rig.state.readRelease();
+            if (!read.ok || read.value.status !== "found") return read;
+            return portOk({
+              ...read.value,
+              snapshot: { ...read.value.snapshot, hostedRuntimes: [] },
+            });
+          },
+        };
+        assert.equal(await f.runMain(), 1);
+        await assert.rejects(f.run);
+        assert.equal(f.calls.length, 0);
+      } else if (mode === "valid-applicable") {
+        f.plan.plannedAt = T0 + 1000;
+        await f.refreshPlan();
+        assert.equal(await f.runMain(), 1);
+        await assert.rejects(f.run);
+      } else {
+        Object.assign(f.plan, { kind: "invalid_fixture_kind" });
+        await f.refreshPlan();
+        await assert.rejects(f.run);
+      }
+      assert.deepEqual(await f.rig.state.readRepair(), before);
+      const workflow = await Deno.readTextFile(
+        new URL("../../.github/workflows/supervisor.yml", import.meta.url),
+      );
+      assert.match(
+        workflow,
+        /prepare:\s*\n\s*needs: maintenance\s*\n\s*if: always\(\) && needs\.maintenance\.result == 'success'/,
+      );
+    } finally {
+      await Deno.remove(f.rig.tmp, { recursive: true });
+    }
+  }
+});
+
+Deno.test("historical malformed wave: successor bootstrap overwrites proof and aggregate excludes old rows", async () => {
+  const f = await historicalMalformedRig();
+  try {
+    await f.run();
+    const quarantined = await f.rig.state.readRepair();
+    assert(quarantined.ok && quarantined.value.status === "found");
+    const release = createReleaseStateStore({
+      scratchDir: `${f.rig.tmp}/successor-release`,
+      remoteUrl: `${f.rig.tmp}/remote.git`,
+    });
+    const evidence = {
+      readExecution: f.client.readHostedExecution.bind(f.client),
+      verifyRevision: () => Promise.resolve(portOk(true)),
+      verifyRequest: () => Promise.resolve(portOk(false)),
+    };
+    const settled = await runHostedSupervisorFinalize({
+      state: release,
+      clock: f.clock,
+      run: f.nativeRun,
+      evidence,
+    });
+    assert.equal(settled.status, "idle");
+    const successorRun = {
+      runId: 72,
+      runAttempt: 1,
+      launcherSha: "3".repeat(40) as GitSha,
+    };
+    const prepared = await runHostedSupervisorPrepare({
+      state: release,
+      clock: f.clock,
+      run: successorRun,
+      evidence,
+    });
+    assert(prepared.status === "run", JSON.stringify(prepared));
+    assert.equal(prepared.execution.purpose, "bootstrap");
+    assert.notEqual(prepared.execution.launcherSha, f.execution.launcherSha);
+    await assert.rejects(f.run);
+    const sibling = f.records[17];
+    const request = {
+      taskId: sibling.id,
+      repository: sibling.repository,
+      base: BASE,
+      issue: { number: 18, title: "sanitized", body: "sanitized" },
+      evidence: [],
+      model: "gpt-reserve",
+      reasoning: "max" as const,
+      maxDurationMs: 10_000,
+      maxOutputChars: 10_000,
+    };
+    const cell = {
+      cellId: await matrixCellIdV1(
+        prepared.execution.id,
+        sibling.id,
+        sibling.intent!.requestId!,
+      ),
+      taskId: sibling.id,
+      repository: sibling.repository,
+      reservationId: sibling.intent!.requestId!,
+      intentKey: sibling.intent!.key,
+      expectedBase: BASE,
+      runtimeSha: prepared.execution.revision,
+      generation: prepared.execution.generation,
+      requestDigest: await matrixDigestV1(request),
+      request,
+    };
+    const plan: MatrixPlanV1 = {
+      version: "v1",
+      kind: "matrix_plan",
+      waveId: prepared.execution.id,
+      run: successorRun,
+      plannedAt: f.clock.now(),
+      cells: [cell],
+    };
+    const result: MatrixCellResultV1 = {
+      version: "v1",
+      kind: "matrix_cell_result",
+      waveId: plan.waveId,
+      run: successorRun,
+      runtimeSha: cell.runtimeSha,
+      generation: cell.generation,
+      cellId: cell.cellId,
+      taskId: cell.taskId,
+      repository: cell.repository,
+      reservationId: cell.reservationId,
+      intentKey: cell.intentKey,
+      requestDigest: cell.requestDigest,
+      status: "not_started",
+      receipt: null,
+      bundle: null,
+      detail: "deterministic bootstrap",
+      completedAt: f.clock.now(),
+    };
+    const archives = new Map<number, Uint8Array>();
+    const rows: Record<string, unknown>[] = [];
+    for (
+      const [id, name, filename, value] of [
+        [1501, "sentinel-matrix-plan-72-1", "plan.json", plan],
+        [
+          1502,
+          `sentinel-matrix-cell-72-1-${cell.cellId}`,
+          "result.json",
+          result,
+        ],
+      ] as const
+    ) {
+      const writer = new ZipWriter(new Uint8ArrayWriter(), {
+        useWebWorkers: false,
+      });
+      await writer.add(
+        filename,
+        new Uint8ArrayReader(
+          new TextEncoder().encode(canonicalStringify(value)),
+        ),
+        { unixMode: 0o100600 },
+      );
+      const bytes = await writer.close();
+      archives.set(id, bytes);
+      const hash = Array.from(
+        new Uint8Array(await crypto.subtle.digest("SHA-256", bytes.slice())),
+      )
+        .map((byte) => byte.toString(16).padStart(2, "0")).join("");
+      rows.push({
+        id,
+        name,
+        expired: false,
+        size_in_bytes: bytes.length,
+        digest: `sha256:${hash}`,
+        workflow_run: {
+          id: 72,
+          repository_id: 123,
+          head_repository_id: 123,
+          head_branch: "sentinel-supervisor",
+          head_sha: successorRun.launcherSha,
+        },
+      });
+    }
+    const iso = new Date(f.clock.now()).toISOString();
+    const job = (id: number, name: string, step: string) => ({
+      id,
+      name,
+      run_id: 72,
+      run_attempt: 1,
+      head_sha: successorRun.launcherSha,
+      status: "completed",
+      conclusion: "success",
+      started_at: iso,
+      completed_at: iso,
+      steps: [{
+        name: step,
+        number: 1,
+        status: "completed",
+        conclusion: "success",
+        started_at: iso,
+        completed_at: iso,
+      }],
+    });
+    const jobs = [
+      job(1401, "matrix_plan", "Plan isolated issue matrix"),
+      job(1402, `matrix_cell (${cell.cellId})`, "Run isolated issue cell"),
+      job(1499, "repair", "Run selected Sentinel runtime"),
+    ];
+    const logs = new Map([
+      [
+        1401,
+        `${iso} ${
+          JSON.stringify({
+            kind: "sentinel_matrix_plan",
+            waveId: plan.waveId,
+            run: successorRun,
+            runtimeSha: cell.runtimeSha,
+            generation: cell.generation,
+            planDigest: await matrixDigestV1(plan),
+            prepared: 1,
+          })
+        }\n`,
+      ],
+      [
+        1402,
+        `${iso} ${
+          JSON.stringify({
+            kind: "sentinel_matrix_cell",
+            run: successorRun,
+            runtimeSha: cell.runtimeSha,
+            generation: cell.generation,
+            cellId: cell.cellId,
+            reservationId: cell.reservationId,
+            resultDigest: await matrixDigestV1(result),
+            bundleDigest: null,
+            status: "not_started",
+          })
+        }\n`,
+      ],
+      [
+        1499,
+        `${iso} ${
+          JSON.stringify({
+            version: "v1",
+            kind: "hosted_runtime_terminal",
+            execution: prepared.execution,
+            controllerSha: cell.runtimeSha,
+            startedAt: f.clock.now(),
+            finishedAt: f.clock.now(),
+            outcome: "healthy",
+            startupReady: true,
+            settled: true,
+            baseSha: BASE,
+          })
+        }\n`,
+      ],
+    ]);
+    const currentHttp: HttpTransportV1 = (request) => {
+      const url = new URL(request.url);
+      const response = (value: unknown) =>
+        Promise.resolve({
+          status: 200,
+          headers: new Headers(),
+          bodyText: typeof value === "string" ? value : JSON.stringify(value),
+        });
+      if (url.pathname.endsWith("/runs/72/attempts/1")) {
+        return response({
+          id: 72,
+          run_attempt: 1,
+          workflow_id: 357012162,
+          path: ".github/workflows/supervisor.yml",
+          event: "workflow_dispatch",
+          head_branch: "sentinel-supervisor",
+          head_sha: successorRun.launcherSha,
+          repository: { id: 123, full_name: "ubiquity/sentinel" },
+          head_repository: { id: 123, full_name: "ubiquity/sentinel" },
+          status: "completed",
+          conclusion: "success",
+          run_started_at: iso,
+          updated_at: iso,
+        });
+      }
+      if (url.pathname.endsWith("/runs/72/attempts/1/jobs")) {
+        return response({ total_count: jobs.length, jobs });
+      }
+      if (url.pathname.endsWith("/artifacts")) {
+        return response({
+          total_count: rows.length + f.artifacts.length,
+          artifacts: [...f.artifacts, ...rows],
+        });
+      }
+      const archive = url.pathname.match(/\/artifacts\/(150[12])\/zip$/);
+      const log = url.pathname.match(/\/jobs\/(1401|1402|1499)\/logs$/);
+      if (archive || log) {
+        return Promise.resolve({
+          status: 302,
+          headers: new Headers({
+            location:
+              `https://productionresultssa1.blob.core.windows.net/successor/${
+                archive ? "archive" : "log"
+              }/${(archive ?? log)![1]}`,
+          }),
+          bodyText: "",
+        });
+      }
+      if (url.pathname.startsWith("/successor/")) {
+        assert.equal(request.headers.size, 0);
+        assert.equal(request.redirect, "error");
+        const id = Number(url.pathname.split("/").at(-1));
+        return url.pathname.includes("/archive/")
+          ? Promise.resolve({
+            status: 200,
+            headers: new Headers(),
+            bodyText: "",
+            bodyBytes: archives.get(id)!,
+          })
+          : response(logs.get(id)!);
+      }
+      return f.http(request);
+    };
+    const transport = createActionsMatrixArtifactTransport({
+      state: f.rig.state,
+      clock: f.clock,
+      token: "offline-native-token",
+      artifactRoot: `${f.rig.tmp}/current-artifacts`,
+      http: currentHttp,
+    });
+    const config = repositoryConfig(undefined, undefined, {
+      repository: SELF_REPO,
+      adapter: { kind: "github" },
+      liveStartLimits: { perHour: null, perSevenDays: null },
+    });
+    const model = new FakeModel();
+    const github = new FakeGithub({ baseSha: BASE, openIssues: [] });
+    const oldPlanReads = f.calls.filter((call) =>
+      call.url.endsWith("/artifacts/501/zip")
+    ).length;
+    const prior = Deno.cwd();
+    Deno.chdir(f.checkout);
+    try {
+      const aggregate = await runActionsMatrixAggregateCycles(
+        {
+          clock: f.clock,
+          state: f.rig.state,
+          configs: [config],
+          controllerSha: cell.runtimeSha,
+          githubCooldown: new HostedRepairCooldownGate({
+            state: f.rig.state,
+            clock: f.clock,
+          }),
+          incidents: new FakeIncidents(),
+          replay: new FakeReplay(),
+          model,
+          budget: f.historicalMatrix.budget,
+          deadline: f.clock.now() + 60_000,
+          stepLimit: 1,
+          modelStartsEnabled: false,
+          composeGithub: () => github,
+          host: {
+            execution: prepared.execution,
+            run: successorRun,
+            artifactRoot: `${f.rig.tmp}/current-artifacts`,
+            sourcePathFor: () => f.checkout,
+            expectedProvider: "test",
+            createArtifactTransport: () => Promise.resolve(transport),
+          },
+        },
+        transport,
+        { planDigest: await matrixDigestV1(plan) },
+      );
+      assert.deepEqual(aggregate.failed, []);
+    } finally {
+      Deno.chdir(prior);
+    }
+    assert.deepEqual(model.requests, []);
+    assert.equal(github.pushes.length, 0);
+    assert.equal(
+      f.calls.filter((call) => call.url.endsWith("/artifacts/501/zip")).length,
+      oldPlanReads,
+    );
+    const currentClient = new GitHubApiClient({
+      repository: SELF_REPO,
+      apiBaseUrl: "https://api.github.com",
+      http: currentHttp,
+      clock: f.clock,
+      auth: {
+        authorizationHeader: () =>
+          Promise.resolve(portOk("Bearer offline-native-token")),
+      },
+      cooldownGate: new HostedRepairCooldownGate({
+        state: f.rig.state,
+        clock: f.clock,
+      }),
+    });
+    const finalized = await runHostedSupervisorFinalize({
+      state: release,
+      clock: f.clock,
+      run: successorRun,
+      evidence: {
+        ...evidence,
+        readExecution: currentClient.readHostedExecution.bind(currentClient),
+      },
+    });
+    assert.equal(finalized.status, "idle");
+    const freshRelease = await release.readRelease();
+    assert(freshRelease.ok && freshRelease.value.status === "found");
+    assert.equal(
+      freshRelease.value.snapshot.hostedRuntimes[0].lastExecutionProof
+        ?.execution.id,
+      "72:1:repair",
+    );
+    assert.equal(
+      freshRelease.value.snapshot.hostedRuntimes[0].lastHealthyProof?.execution
+        .id,
+      "72:1:repair",
+    );
+    await f.run();
+    const after = await f.rig.state.readRepair();
+    assert(after.ok && after.value.status === "found");
+    assert.deepEqual(
+      after.value.snapshot.work.filter((row) => row.id !== sibling.id),
+      quarantined.value.snapshot.work.filter((row) => row.id !== sibling.id),
+    );
+    assert.deepEqual(
+      after.value.snapshot.reservations.slice(0, 17),
+      quarantined.value.snapshot.reservations.slice(0, 17),
+    );
+  } finally {
+    await Deno.remove(f.rig.tmp, { recursive: true });
+  }
+});
+
+async function historicalWithNewerCurrent(
+  mode = "settled",
+  overwritten = false,
+) {
+  const f = await historicalMalformedRig();
+  const release = createReleaseStateStore({
+    scratchDir: `${f.rig.tmp}/newer-release`,
+    remoteUrl: `${f.rig.tmp}/remote.git`,
+  });
+  const evidence = {
+    readExecution: f.client.readHostedExecution.bind(f.client),
+    verifyRevision: () => Promise.resolve(portOk(true)),
+    verifyRequest: () => Promise.resolve(portOk(false)),
+  };
+  assert.equal(
+    (await runHostedSupervisorFinalize({
+      state: release,
+      clock: f.clock,
+      run: f.nativeRun,
+      evidence,
+    })).status,
+    "idle",
+  );
+  const saved = await release.readRelease();
+  assert(saved.ok && saved.value.status === "found");
+  f.clock.now = () => T0 + 70_000;
+  let current = {
+    ...f.execution,
+    id: "73:1:repair",
+    runId: 73,
+    runAttempt: 1,
+    launcherSha: "4".repeat(40) as GitSha,
+    createdAt: T0 + 61_000,
+  };
+  const seeded = await release.writeRelease({
+    ...saved.value.snapshot,
+    stateHead: saved.value.head,
+    sequence: saved.value.snapshot.sequence + 1,
+    updatedAt: f.clock.now(),
+    hostedRuntimes: [{
+      ...saved.value.snapshot.hostedRuntimes[0],
+      execution: current,
+      updatedAt: f.clock.now(),
+    }],
+  }, saved.value.head);
+  assert(seeded.ok && seeded.value.status === "applied");
+  if (overwritten) {
+    const latest = await release.readRelease();
+    assert(latest.ok && latest.value.status === "found");
+    const old = saved.value.snapshot.hostedRuntimes[0].lastExecutionProof!;
+    assert(old.outcome !== "not_started");
+    const settled = await release.writeRelease({
+      ...latest.value.snapshot,
+      stateHead: latest.value.head,
+      sequence: latest.value.snapshot.sequence + 1,
+      updatedAt: f.clock.now(),
+      hostedRuntimes: [{
+        ...latest.value.snapshot.hostedRuntimes[0],
+        execution: null,
+        lastExecutionProof: {
+          ...old,
+          execution: current,
+          startedAt: T0 + 62_000,
+          finishedAt: T0 + 65_000,
+          observedAt: f.clock.now(),
+          terminalAt: old.terminalAt === null ? null : T0 + 65_000,
+          logDigest: "9".repeat(64),
+        },
+      }],
+    }, latest.value.head);
+    assert(
+      settled.ok && settled.value.status === "applied",
+      JSON.stringify(settled),
+    );
+    const idle = await release.readRelease();
+    assert(idle.ok && idle.value.status === "found");
+    current = {
+      ...current,
+      id: "75:1:repair",
+      runId: 75,
+      createdAt: T0 + 66_000,
+    };
+    const started = await release.writeRelease({
+      ...idle.value.snapshot,
+      stateHead: idle.value.head,
+      sequence: idle.value.snapshot.sequence + 1,
+      updatedAt: f.clock.now(),
+      hostedRuntimes: [{
+        ...idle.value.snapshot.hostedRuntimes[0],
+        execution: current,
+      }],
+    }, idle.value.head);
+    assert(started.ok && started.value.status === "applied");
+  }
+  const iso = (at: number) => new Date(at).toISOString();
+  const jobs = ["maintenance", "prepare", "matrix_plan"].map((name, i) => ({
+    id: 2401 + i,
+    name,
+    run_id: mode === "wrong-job" && i === 2 ? 99 : current.runId,
+    run_attempt: 1,
+    head_sha: current.launcherSha,
+    status: mode === "pending" && i === 2 ? "in_progress" : "completed",
+    conclusion: mode === "pending" && i === 2
+      ? null
+      : i === 2
+      ? "cancelled"
+      : "success",
+    started_at: iso(T0 + (overwritten ? 67_000 : 62_000)),
+    completed_at: mode === "pending" && i === 2
+      ? null
+      : iso(T0 + (overwritten ? 68_000 : 65_000)),
+    steps: [],
+  }));
+  const currentHttp: HttpTransportV1 = (request) => {
+    const url = new URL(request.url);
+    if (url.pathname.includes(`/runs/${current.runId}/`)) {
+      assert.equal(
+        request.headers.get("authorization"),
+        "Bearer offline-native-token",
+      );
+      if (mode === "unavailable") {
+        return Promise.resolve({
+          status: 503,
+          headers: new Headers(),
+          bodyText: "",
+        });
+      }
+      const value = url.pathname.endsWith("/jobs")
+        ? {
+          total_count: mode === "truncated" ? jobs.length + 1 : jobs.length,
+          jobs: mode === "duplicate" ? [jobs[0], jobs[1], jobs[0]] : jobs,
+        }
+        : {
+          id: current.runId,
+          run_attempt: 1,
+          workflow_id: 357012162,
+          path: ".github/workflows/supervisor.yml",
+          event: "workflow_dispatch",
+          head_branch: "sentinel-supervisor",
+          head_sha: mode === "foreign" ? BASE : current.launcherSha,
+          repository: { id: 123, full_name: "ubiquity/sentinel" },
+          head_repository: { id: 123, full_name: "ubiquity/sentinel" },
+          status: mode === "pending" ? "in_progress" : "completed",
+          conclusion: mode === "pending" ? null : "cancelled",
+          run_started_at: iso(current.createdAt),
+          updated_at: iso(T0 + (overwritten ? 68_000 : 65_000)),
+        };
+      return Promise.resolve({
+        status: 200,
+        headers: new Headers(),
+        bodyText: JSON.stringify(value),
+      });
+    }
+    return f.http(request);
+  };
+  const reader = new GitHubApiClient({
+    repository: SELF_REPO,
+    apiBaseUrl: "https://api.github.com",
+    http: currentHttp,
+    clock: f.clock,
+    auth: {
+      authorizationHeader: () =>
+        Promise.resolve(portOk("Bearer offline-native-token")),
+    },
+    cooldownGate: new HostedRepairCooldownGate({
+      state: f.rig.state,
+      clock: f.clock,
+    }),
+  });
+  const observed: number[] = [];
+  f.historicalMatrix.readExecution = async (execution) => {
+    observed.push(execution.runId);
+    const result = await reader.readHostedExecution(execution);
+    if (
+      execution.runId === current.runId && mode === "wrong-binding" &&
+      result.ok &&
+      result.value !== null
+    ) {
+      return portOk({ ...result.value, execution: f.execution });
+    }
+    if (execution.runId === current.runId && mode === "custody") {
+      f.rig.state.readRelease = () =>
+        Promise.resolve(
+          portError("unavailable", "injected current custody drift"),
+        );
+    }
+    if (execution.runId === current.runId && mode === "old-proof-missing") {
+      f.rig.state.readRelease = async () => {
+        const read = await release.readRelease();
+        if (!read.ok || read.value.status !== "found") return read;
+        return portOk({
+          ...read.value,
+          snapshot: {
+            ...read.value.snapshot,
+            hostedRuntimes: read.value.snapshot.hostedRuntimes.map((row) => ({
+              ...row,
+              lastExecutionProof: null,
+            })),
+          },
+        });
+      };
+    }
+    return result;
+  };
+  f.historicalMatrix.transport = createActionsMatrixArtifactTransport({
+    state: f.rig.state,
+    clock: f.clock,
+    token: "offline-native-token",
+    artifactRoot: `${f.rig.tmp}/artifacts`,
+    http: currentHttp,
+  });
+  return {
+    ...f,
+    release,
+    reader,
+    current,
+    currentHttp,
+    observed,
+    evidence,
+    witness: saved.value,
+  };
+}
+
+Deno.test("historical release witness: overwritten ordinary proof still quarantines exact old wave", async () => {
+  const f = await historicalWithNewerCurrent("settled", true);
+  const priorCwd = Deno.cwd();
+  Deno.chdir(f.checkout);
+  try {
+    const proof = f.witness.snapshot.hostedRuntimes[0].lastExecutionProof!;
+    assert(proof.outcome !== "not_started");
+    const historicalMatrix = createHostedHistoricalMatrixQuarantine({
+      state: f.rig.state,
+      clock: f.clock,
+      token: "offline-native-token",
+      artifactRoot: `${f.rig.tmp}/witness-artifacts`,
+      http: f.currentHttp,
+      artifactHttp: f.currentHttp,
+      historicalReleaseWitnesses: [{
+        commit: f.witness.head,
+        executionId: proof.execution.id,
+        logDigest: proof.logDigest,
+        reservationIds: f.charges.slice(0, 17).map((row) => row.id),
+      }],
+    });
+    const before = await f.release.readRelease();
+    const repairBefore = await f.rig.state.readRepair();
+    await assert.rejects(() =>
+      runHistoricalMatrixQuarantine({
+        ...historicalMatrix,
+        historicalReleaseWitnesses: undefined,
+      }), /historical matrix native settlement unavailable/);
+    assert.deepEqual(await f.rig.state.readRepair(), repairBefore);
+    await assert.rejects(
+      () => runHistoricalMatrixQuarantine(historicalMatrix),
+      /historical matrix native settlement unavailable/,
+    );
+    const afterOld = await f.rig.state.readRepair();
+    assert(afterOld.ok && afterOld.value.status === "found");
+    assert.deepEqual(
+      afterOld.value.snapshot.work.find((row) => row.id === f.records[17].id),
+      f.records[17],
+    );
+    assert(
+      afterOld.value.snapshot.reservations.slice(0, 17).every((row) =>
+        row.outcome === "ambiguous"
+      ),
+    );
+    const requestId = "e".repeat(64);
+    const later = workRecord("later-normal", {
+      ...f.records[17],
+      id: "later-normal",
+      source: { ...f.records[17].source, id: "later-normal" },
+      related: { incidentId: null, issueNumber: 19 },
+      target: {
+        ...f.records[17].target,
+        branch: candidateBranch("later-normal" as WorkItemId),
+      },
+      intent: {
+        ...f.records[17].intent!,
+        requestId,
+        key: implementationIntentKey(requestId),
+        branch: candidateBranch("later-normal" as WorkItemId),
+        startedAt: T0 + 62_001,
+      },
+      updatedAt: T0 + 62_001,
+    });
+    const charge = reservation(requestId, {
+      repository: SELF_REPO,
+      taskId: later.id,
+      head: BASE,
+      createdAt: T0 + 62_001,
+    });
+    const added = await f.rig.state.writeRepair({
+      ...afterOld.value.snapshot,
+      stateHead: afterOld.value.head,
+      sequence: afterOld.value.snapshot.sequence + 1,
+      updatedAt: f.clock.now(),
+      work: [...afterOld.value.snapshot.work, later],
+      reservations: [...afterOld.value.snapshot.reservations, charge],
+    }, afterOld.value.head);
+    assert(added.ok && added.value.status === "applied");
+    const latest = before.ok && before.value.status === "found"
+      ? before.value.snapshot.hostedRuntimes[0].lastExecutionProof!
+      : null;
+    assert(latest && latest.outcome !== "not_started");
+    const readExecution = historicalMatrix.readExecution;
+    historicalMatrix.readExecution = (execution) =>
+      execution.id === latest.execution.id
+        ? Promise.resolve(portOk(latest))
+        : readExecution(execution);
+    const request = {
+      ...f.plan.cells[0].request,
+      taskId: later.id,
+      issue: { number: 19, title: "later", body: "later" },
+    };
+    let normalCalls = 0;
+    historicalMatrix.transport.rejectHistorical = async ({ proof }) => {
+      assert.equal(proof.execution.id, latest.execution.id);
+      normalCalls++;
+      return [{
+        reason: "reservation_after_manifest",
+        proof,
+        planDigest: "d".repeat(64),
+        plannerJobId: 2501,
+        affected: [{
+          request,
+          requestDigest: await matrixDigestV1(request),
+          work: later,
+          workDigest: await matrixDigestV1(later),
+          reservation: charge,
+          reservationDigest: await matrixDigestV1(charge),
+        }],
+      }];
+    };
+    const result = await runHostedAutonomy({
+      state: f.rig.state,
+      githubFor: f.rig.githubFor,
+      clock: f.clock,
+      historicalMatrix,
+    });
+    assert(result.actions.includes("historical-matrix:quarantined:1"));
+    assert.equal(normalCalls, 1);
+    const afterLater = await f.rig.state.readRepair();
+    assert(afterLater.ok && afterLater.value.status === "found");
+    assert.equal(
+      afterLater.value.snapshot.work.find((row) => row.id === later.id)
+        ?.nextStep,
+      "blocked",
+    );
+    assert.deepEqual(
+      afterLater.value.snapshot.work.find((row) => row.id === f.records[17].id),
+      f.records[17],
+    );
+    assert.deepEqual(await f.release.readRelease(), before);
+    console.log(`historical witness native requests: ${f.calls.length}`);
+  } finally {
+    Deno.chdir(priorCwd);
+    await Deno.remove(f.rig.tmp, { recursive: true });
+  }
+});
+
+async function historicalMultiWaveRig(
+  historicalCount = 17,
+  currentCount = 3,
+  finalizeCurrent = true,
+) {
+  const f = await historicalMalformedRig(false, historicalCount);
+  const release = createReleaseStateStore({
+    scratchDir: `${f.rig.tmp}/multi-release`,
+    remoteUrl: `${f.rig.tmp}/remote.git`,
+  });
+  f.clock.now = () => T0 + 30_000;
+  const originalEvidence = {
+    readExecution: f.client.readHostedExecution.bind(f.client),
+    verifyRevision: () => Promise.resolve(portOk(true)),
+    verifyRequest: () => Promise.resolve(portOk(false)),
+  };
+  assert.equal(
+    (await runHostedSupervisorFinalize({
+      state: release,
+      clock: f.clock,
+      run: f.nativeRun,
+      evidence: originalEvidence,
+    })).status,
+    "idle",
+  );
+  const witness = await release.readRelease();
+  assert(witness.ok && witness.value.status === "found");
+  const proof = witness.value.snapshot.hostedRuntimes[0].lastExecutionProof!;
+  assert(proof.outcome !== "not_started");
+  const run = {
+    runId: 73,
+    runAttempt: 1,
+    launcherSha: "4".repeat(40) as GitSha,
+  };
+  const execution = {
+    ...f.execution,
+    ...run,
+    id: "73:1:repair",
+    createdAt: T0 + 31_000,
+  };
+  f.clock.now = () => T0 + 31_000;
+  const started = await release.writeRelease({
+    ...witness.value.snapshot,
+    stateHead: witness.value.head,
+    sequence: witness.value.snapshot.sequence + 1,
+    updatedAt: f.clock.now(),
+    hostedRuntimes: [{
+      ...witness.value.snapshot.hostedRuntimes[0],
+      execution,
+      updatedAt: f.clock.now(),
+    }],
+  }, witness.value.head);
+  assert(started.ok && started.value.status === "applied");
+  const records = Array.from({ length: currentCount }, (_, i) => {
+    const id = `multi-current-${i}` as WorkItemId;
+    const requestId = `${i + 1}`.repeat(64);
+    return workRecord(id, {
+      ...f.records[0],
+      id,
+      source: { ...f.records[0].source, id },
+      related: { incidentId: null, issueNumber: 101 + i },
+      target: { ...f.records[0].target, branch: candidateBranch(id) },
+      intent: {
+        ...f.records[0].intent!,
+        branch: candidateBranch(id),
+        key: implementationIntentKey(requestId),
+        requestId,
+        startedAt: T0 + 32_001 + i,
+      },
+      createdAt: T0 + 32_000,
+      updatedAt: T0 + 32_001 + i,
+    });
+  });
+  const charges = records.map((row, i) =>
+    reservation(row.intent!.requestId!, {
+      repository: SELF_REPO,
+      taskId: row.id,
+      head: BASE,
+      createdAt: T0 + 32_001 + i,
+    })
+  );
+  const repair = await f.rig.state.readRepair();
+  assert(repair.ok && repair.value.status === "found");
+  f.clock.now = () => T0 + 33_000;
+  const added = await f.rig.state.writeRepair({
+    ...repair.value.snapshot,
+    stateHead: repair.value.head,
+    sequence: repair.value.snapshot.sequence + 1,
+    updatedAt: f.clock.now(),
+    work: [...repair.value.snapshot.work, ...records],
+    reservations: [...repair.value.snapshot.reservations, ...charges],
+  }, repair.value.head);
+  assert(added.ok && added.value.status === "applied");
+  const cells = await Promise.all(records.map(async (row) => {
+    const request = {
+      ...f.plan.cells[0].request,
+      taskId: row.id,
+      issue: {
+        number: row.related.issueNumber!,
+        title: "sanitized",
+        body: "sanitized",
+      },
+    };
+    return {
+      ...f.plan.cells[0],
+      cellId: await matrixCellIdV1(
+        execution.id,
+        row.id,
+        row.intent!.requestId!,
+      ),
+      taskId: row.id,
+      reservationId: row.intent!.requestId!,
+      intentKey: row.intent!.key,
+      requestDigest: await matrixDigestV1(request),
+      request,
+    };
+  }));
+  const plan: MatrixPlanV1 = {
+    ...f.plan,
+    waveId: execution.id,
+    run,
+    plannedAt: T0 + 32_000,
+    cells,
+  };
+  const iso = (at: number) => new Date(at).toISOString();
+  const archives = new Map<number, Uint8Array>();
+  const artifacts: Record<string, unknown>[] = [];
+  const logs = new Map<number, string>();
+  async function archived(
+    id: number,
+    name: string,
+    filename: string,
+    value: unknown,
+  ) {
+    const writer = new ZipWriter(new Uint8ArrayWriter(), {
+      useWebWorkers: false,
+    });
+    await writer.add(
+      filename,
+      new Uint8ArrayReader(new TextEncoder().encode(canonicalStringify(value))),
+      { unixMode: 0o100600 },
+    );
+    const bytes = await writer.close();
+    const digest = [
+      ...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes.slice())),
+    ].map((value) => value.toString(16).padStart(2, "0")).join("");
+    archives.set(id, bytes);
+    artifacts.push({
+      id,
+      name,
+      size_in_bytes: bytes.length,
+      expired: false,
+      digest: `sha256:${digest}`,
+      workflow_run: {
+        id: run.runId,
+        repository_id: 123,
+        head_repository_id: 123,
+        head_branch: "sentinel-supervisor",
+        head_sha: run.launcherSha,
+      },
+    });
+  }
+  await archived(901, "sentinel-matrix-plan-73-1", "plan.json", plan);
+  logs.set(
+    801,
+    `${iso(T0 + 49_000)} ${
+      JSON.stringify({
+        kind: "sentinel_matrix_plan",
+        waveId: execution.id,
+        run,
+        runtimeSha: execution.revision,
+        generation: execution.generation,
+        planDigest: await matrixDigestV1(plan),
+        prepared: cells.length,
+      })
+    }\n`,
+  );
+  logs.set(899, `${iso(T0 + 50_000)} child exited before terminal\n`);
+  for (const [i, cell] of cells.entries()) {
+    const result: MatrixCellResultV1 = {
+      version: "v1",
+      kind: "matrix_cell_result",
+      waveId: execution.id,
+      run,
+      runtimeSha: execution.revision,
+      generation: execution.generation,
+      cellId: cell.cellId,
+      taskId: cell.taskId,
+      repository: SELF_REPO,
+      reservationId: cell.reservationId,
+      intentKey: cell.intentKey,
+      requestDigest: cell.requestDigest,
+      status: "not_started",
+      receipt: null,
+      bundle: null,
+      detail: "sanitized no start",
+      completedAt: T0 + 49_000,
+    };
+    await archived(
+      902 + i,
+      `sentinel-matrix-cell-73-1-${cell.cellId}`,
+      "result.json",
+      result,
+    );
+    logs.set(
+      802 + i,
+      `${iso(T0 + 49_000)} ${
+        JSON.stringify({
+          kind: "sentinel_matrix_cell",
+          run,
+          runtimeSha: execution.revision,
+          generation: execution.generation,
+          cellId: cell.cellId,
+          reservationId: cell.reservationId,
+          resultDigest: await matrixDigestV1(result),
+          bundleDigest: null,
+          status: "not_started",
+        })
+      }\n`,
+    );
+  }
+  const jobs = [
+    { id: 801, name: "matrix_plan", step: "Plan isolated issue matrix" },
+    { id: 899, name: "repair", step: "Run selected Sentinel runtime" },
+    ...cells.map((cell, i) => ({
+      id: 802 + i,
+      name: `matrix_cell (${cell.cellId})`,
+      step: "Run isolated issue cell",
+    })),
+  ].map((row) => ({
+    id: row.id,
+    name: row.name,
+    run_id: run.runId,
+    run_attempt: 1,
+    head_sha: run.launcherSha,
+    status: "completed",
+    conclusion: row.id === 899 ? "failure" : "success",
+    started_at: iso(T0 + 31_000),
+    completed_at: iso(T0 + 50_000),
+    steps: [{
+      name: row.step,
+      number: 1,
+      status: "completed",
+      conclusion: row.id === 899 ? "failure" : "success",
+      started_at: iso(T0 + 31_000),
+      completed_at: iso(T0 + 50_000),
+    }],
+  }));
+  let missingPlan = false;
+  let bootstrap:
+    | { execution: HostedExecutionIntentV1; run: typeof run }
+    | null = null;
+  const response = (value: unknown) =>
+    Promise.resolve({
+      status: 200,
+      headers: new Headers(),
+      bodyText: typeof value === "string" ? value : JSON.stringify(value),
+    });
+  const http: HttpTransportV1 = (request) => {
+    const url = new URL(request.url);
+    if (bootstrap && url.pathname.includes(`/runs/${bootstrap.run.runId}/`)) {
+      const saved = bootstrap;
+      const job = {
+        ...jobs[1],
+        id: 999,
+        run_id: saved.run.runId,
+        head_sha: saved.run.launcherSha,
+        conclusion: "success",
+        started_at: iso(f.clock.now()),
+        completed_at: iso(f.clock.now()),
+        steps: [{
+          ...jobs[1].steps[0],
+          conclusion: "success",
+          started_at: iso(f.clock.now()),
+          completed_at: iso(f.clock.now()),
+        }],
+      };
+      return response(
+        url.pathname.endsWith("/jobs") ? { total_count: 1, jobs: [job] } : {
+          id: saved.run.runId,
+          run_attempt: 1,
+          workflow_id: 357012162,
+          path: ".github/workflows/supervisor.yml",
+          event: "workflow_dispatch",
+          head_branch: "sentinel-supervisor",
+          head_sha: saved.run.launcherSha,
+          repository: { id: 123, full_name: "ubiquity/sentinel" },
+          head_repository: { id: 123, full_name: "ubiquity/sentinel" },
+          status: "completed",
+          conclusion: "success",
+          run_started_at: iso(f.clock.now()),
+          updated_at: iso(f.clock.now()),
+        },
+      );
+    }
+    if (bootstrap && url.pathname.endsWith("/jobs/999/logs")) {
+      logs.set(
+        999,
+        `${iso(f.clock.now())} ${
+          JSON.stringify({
+            version: "v1",
+            kind: "hosted_runtime_terminal",
+            execution: bootstrap.execution,
+            controllerSha: bootstrap.execution.revision,
+            startedAt: f.clock.now(),
+            finishedAt: f.clock.now(),
+            outcome: "healthy",
+            startupReady: true,
+            settled: true,
+            baseSha: BASE,
+          })
+        }\n`,
+      );
+    }
+    if (url.pathname.includes("/runs/73/")) {
+      assert.equal(
+        request.headers.get("authorization"),
+        "Bearer offline-native-token",
+      );
+      if (url.pathname.endsWith("/jobs")) {
+        return response({ total_count: jobs.length, jobs });
+      }
+      if (url.pathname.endsWith("/artifacts")) {
+        return response({
+          total_count: missingPlan ? 0 : artifacts.length,
+          artifacts: missingPlan ? [] : artifacts,
+        });
+      }
+      return response({
+        id: 73,
+        run_attempt: 1,
+        workflow_id: 357012162,
+        path: ".github/workflows/supervisor.yml",
+        event: "workflow_dispatch",
+        head_branch: "sentinel-supervisor",
+        head_sha: run.launcherSha,
+        repository: { id: 123, full_name: "ubiquity/sentinel" },
+        head_repository: { id: 123, full_name: "ubiquity/sentinel" },
+        status: "completed",
+        conclusion: "failure",
+        run_started_at: iso(T0 + 31_000),
+        updated_at: iso(T0 + 50_000),
+      });
+    }
+    const archive = url.pathname.match(/\/artifacts\/(90[1-4])\/zip$/);
+    const log = url.pathname.match(/\/jobs\/(80[1-4]|899|999)\/logs$/);
+    if (archive || log) {
+      return Promise.resolve({
+        status: 302,
+        headers: new Headers({
+          location:
+            `https://productionresultssa1.blob.core.windows.net/multiwave/${
+              archive ? "archive" : "log"
+            }/${(archive ?? log)![1]}`,
+        }),
+        bodyText: "",
+      });
+    }
+    if (url.pathname.startsWith("/multiwave/")) {
+      assert.equal(request.headers.size, 0);
+      assert.equal(request.redirect, "error");
+      const id = Number(url.pathname.split("/").at(-1));
+      return url.pathname.includes("/archive/")
+        ? Promise.resolve({
+          status: 200,
+          headers: new Headers(),
+          bodyText: "",
+          bodyBytes: archives.get(id)!,
+        })
+        : response(logs.get(id)!);
+    }
+    return f.http(request);
+  };
+  const client = new GitHubApiClient({
+    repository: SELF_REPO,
+    apiBaseUrl: "https://api.github.com",
+    http,
+    clock: f.clock,
+    auth: {
+      authorizationHeader: () =>
+        Promise.resolve(portOk("Bearer offline-native-token")),
+    },
+    cooldownGate: new HostedRepairCooldownGate({
+      state: f.rig.state,
+      clock: f.clock,
+    }),
+  });
+  const evidence = {
+    ...originalEvidence,
+    readExecution: client.readHostedExecution.bind(client),
+  };
+  f.clock.now = () => T0 + 60_000;
+  if (finalizeCurrent) {
+    assert.equal(
+      (await runHostedSupervisorFinalize({
+        state: release,
+        clock: f.clock,
+        run,
+        evidence,
+      })).status,
+      "idle",
+    );
+  }
+  Object.assign(
+    f.historicalMatrix,
+    createHostedHistoricalMatrixQuarantine({
+      state: f.rig.state,
+      clock: f.clock,
+      token: "offline-native-token",
+      artifactRoot: `${f.rig.tmp}/multi-artifacts`,
+      http,
+      artifactHttp: http,
+      historicalReleaseWitnesses: [{
+        commit: witness.value.head,
+        executionId: proof.execution.id,
+        logDigest: proof.logDigest,
+        reservationIds: f.charges.slice(0, 17).map((row) => row.id),
+      }],
+    }),
+  );
+  return {
+    ...f,
+    release,
+    records,
+    charges,
+    evidence,
+    witness: witness.value,
+    setMissing: (value: boolean) => {
+      missingPlan = value;
+    },
+    setBootstrap: (
+      value: { execution: HostedExecutionIntentV1; run: typeof run },
+    ) => {
+      bootstrap = value;
+    },
+  };
+}
+
+Deno.test("historical closed list: three distinct witnesses then current, retirement and selected missing custody", async () => {
+  for (const mode of ["selected", "retired", "missing"]) {
+    const f = await historicalMultiWaveRig(3, 1);
+    const previousCwd = Deno.cwd();
+    Deno.chdir(f.checkout);
+    try {
+      const before = await f.rig.state.readRepair();
+      assert(before.ok && before.value.status === "found");
+      const old = f.witness.snapshot.hostedRuntimes[0].lastExecutionProof!;
+      assert(old.outcome !== "not_started");
+      const witnesses = f.plan.cells.map((cell, i) => ({
+        commit: `${i + 6}`.repeat(40) as GitSha,
+        proof: {
+          ...old,
+          execution: {
+            ...old.execution,
+            id: `${101 + i}:1:repair`,
+            runId: 101 + i,
+            runAttempt: 1,
+          },
+        },
+        cell,
+      }));
+      const order: number[] = [];
+      f.rig.state.readReleaseAt = (input) => {
+        if (mode === "retired") {
+          throw new Error("completed witness reader must not run");
+        }
+        if (mode === "missing") {
+          return Promise.resolve(
+            portError("unavailable", "selected witness missing"),
+          );
+        }
+        const witness = witnesses.find((row) => row.commit === input.commit)!;
+        return Promise.resolve(portOk({
+          status: "found",
+          head: witness.commit,
+          ref: null,
+          snapshot: {
+            ...f.witness.snapshot,
+            hostedRuntimes: [{
+              ...f.witness.snapshot.hostedRuntimes[0],
+              lastExecutionProof: witness.proof,
+            }],
+          },
+        }));
+      };
+      const readExecution = f.evidence.readExecution;
+      const rejectCurrent = f.historicalMatrix.transport.rejectHistorical!;
+      const deps: HistoricalMatrixQuarantineDepsV1 = {
+        ...f.historicalMatrix,
+        readExecution: (execution) => {
+          const witness = witnesses.find((row) =>
+            row.proof.execution.id === execution.id
+          );
+          if (!witness) return readExecution(execution);
+          if (mode === "retired") {
+            throw new Error("completed witness native read must not run");
+          }
+          return Promise.resolve(portOk(witness.proof));
+        },
+        transport: {
+          ...f.historicalMatrix.transport,
+          rejectHistorical: (input) => {
+            order.push(input.proof.execution.runId);
+            return rejectCurrent(input);
+          },
+        },
+        historicalReleaseWitnesses: witnesses.map((witness) => ({
+          commit: witness.commit,
+          executionId: witness.proof.execution.id,
+          logDigest: witness.proof.logDigest,
+          reservationIds: [witness.cell.reservationId],
+          reject: async (proof) => {
+            if (mode === "retired") {
+              throw new Error("completed witness archive must not run");
+            }
+            order.push(proof.execution.runId);
+            const read = await f.rig.state.readRepair();
+            assert(read.ok && read.value.status === "found");
+            const work = read.value.snapshot.work.find((row) =>
+              row.id === witness.cell.taskId
+            )!;
+            const charge = read.value.snapshot.reservations.find((row) =>
+              row.id === witness.cell.reservationId
+            )!;
+            return [{
+              reason: "reservation_after_manifest",
+              proof,
+              planDigest: "d".repeat(64),
+              plannerJobId: 1000 + proof.execution.runId,
+              affected: [{
+                request: witness.cell.request,
+                requestDigest: witness.cell.requestDigest,
+                work,
+                workDigest: await matrixDigestV1(work),
+                reservation: charge,
+                reservationDigest: await matrixDigestV1(charge),
+              }],
+            }];
+          },
+        })),
+      };
+      if (mode === "retired") {
+        const ids = witnesses.map((row) => row.cell.reservationId);
+        const blocked = await f.rig.state.writeRepair({
+          ...before.value.snapshot,
+          stateHead: before.value.head,
+          sequence: before.value.snapshot.sequence + 1,
+          updatedAt: f.clock.now(),
+          work: before.value.snapshot.work.map((row) =>
+            ids.includes(row.intent?.requestId ?? "")
+              ? {
+                ...row,
+                nextStep: "blocked",
+                blocker: {
+                  kind: "other",
+                  message: HISTORICAL_MATRIX_QUARANTINE,
+                  since: f.clock.now(),
+                },
+                wait: null,
+                updatedAt: f.clock.now(),
+              }
+              : row
+          ),
+        }, before.value.head);
+        assert(blocked.ok && blocked.value.status === "applied");
+      }
+      if (mode === "missing") {
+        await assert.rejects(
+          () => runHistoricalMatrixQuarantine(deps),
+          /release witness unavailable/,
+        );
+        assert.deepEqual(await f.rig.state.readRepair(), before);
+        assert.deepEqual(order, []);
+      } else {
+        assert.equal(
+          await runHistoricalMatrixQuarantine(deps),
+          mode === "selected" ? 4 : 1,
+        );
+        assert.deepEqual(
+          order,
+          mode === "selected" ? [101, 102, 103, 73] : [73],
+        );
+      }
+    } finally {
+      Deno.chdir(previousCwd);
+      await Deno.remove(f.rig.tmp, { recursive: true });
+    }
+  }
+});
+
+Deno.test("historical verification: healthy bootstrap preserves thirteen unrelated intents", async () => {
+  for (
+    const purpose of [
+      "bootstrap",
+      "prior",
+      "candidate",
+      "rollback",
+      "failed-candidate",
+    ] as const
+  ) {
+    const f = await historicalMalformedRig(false, 13);
+    const previousCwd = Deno.cwd();
+    Deno.chdir(f.checkout);
+    try {
+      const failed = purpose === "failed-candidate";
+      const verificationPurpose = failed ? "candidate" : purpose;
+      const execution: HostedExecutionIntentV1 = {
+        ...f.execution,
+        purpose: verificationPurpose,
+        releaseId: verificationPurpose === "bootstrap"
+          ? null
+          : "verification-release",
+      };
+      const job = f.jobs.find((row) => row.id === 499)!;
+      job.conclusion = failed ? "failure" : "success";
+      job.steps[0].conclusion = job.conclusion;
+      f.logs.set(
+        499,
+        `${new Date(T0 + 30_000).toISOString()} ${
+          JSON.stringify({
+            version: "v1",
+            kind: "hosted_runtime_terminal",
+            execution,
+            controllerSha: execution.revision,
+            startedAt: T0,
+            finishedAt: T0 + 30_000,
+            outcome: failed ? "failed" : "healthy",
+            startupReady: !failed,
+            settled: true,
+            baseSha: BASE,
+          })
+        }\n`,
+      );
+      const native = await f.client.readHostedExecution(execution);
+      assert(
+        native.ok && native.value !== null &&
+          native.value.outcome === (failed ? "failed" : "healthy"),
+      );
+      const release = await f.rig.state.readRelease();
+      assert(release.ok && release.value.status === "found");
+      const snapshot = parseReleaseStateSnapshotV1({
+        ...release.value.snapshot,
+        hostedRuntimes: [{
+          ...release.value.snapshot.hostedRuntimes[0],
+          execution: null,
+          lastExecutionProof: native.value,
+          lastHealthyProof: failed ? null : native.value,
+        }],
+      });
+      f.rig.state.readRelease = () =>
+        Promise.resolve(portOk({ ...release.value, snapshot }));
+      f.rig.state.writeRepair = () => {
+        throw new Error("unexpected task write");
+      };
+      f.historicalMatrix.budget.settleModelStart = () => {
+        throw new Error("unexpected charge settlement");
+      };
+      const before = await f.rig.state.readRepair();
+      assert.equal(
+        await runHistoricalMatrixQuarantine({
+          ...f.historicalMatrix,
+          historicalReleaseWitnesses: [],
+        }),
+        0,
+      );
+      assert.deepEqual(await f.rig.state.readRepair(), before);
+    } finally {
+      Deno.chdir(previousCwd);
+      await Deno.remove(f.rig.tmp, { recursive: true });
+    }
+  }
+});
+
+Deno.test("historical verification: missing proof ordinary pending mismatch and drift remain incomplete", async () => {
+  for (
+    const fault of [
+      "missing",
+      "ordinary-artifact",
+      "active-ordinary",
+      "notstarted-ordinary",
+      "pending",
+      "mismatch",
+      "release-drift",
+      "repair-drift",
+    ]
+  ) {
+    const f = await historicalMalformedRig(false, 1);
+    const previousCwd = Deno.cwd();
+    Deno.chdir(f.checkout);
+    try {
+      const purpose = fault === "ordinary-artifact" ? "ordinary" : "bootstrap";
+      const execution = {
+        ...f.execution,
+        purpose: purpose as "ordinary" | "bootstrap",
+      };
+      const job = f.jobs.find((row) => row.id === 499)!;
+      job.conclusion = "success";
+      job.steps[0].conclusion = "success";
+      f.logs.set(
+        499,
+        `${new Date(T0 + 30_000).toISOString()} ${
+          JSON.stringify({
+            version: "v1",
+            kind: "hosted_runtime_terminal",
+            execution,
+            controllerSha: execution.revision,
+            startedAt: T0,
+            finishedAt: T0 + 30_000,
+            outcome: "healthy",
+            startupReady: true,
+            settled: true,
+            baseSha: BASE,
+          })
+        }\n`,
+      );
+      const native = await f.client.readHostedExecution(execution);
+      assert(
+        native.ok && native.value !== null &&
+          native.value.outcome === "healthy",
+      );
+      const release = await f.rig.state.readRelease();
+      assert(release.ok && release.value.status === "found");
+      const active = {
+        ...f.execution,
+        id: "72:1:repair",
+        runId: 72,
+        runAttempt: 1,
+        createdAt: T0 + 31_000,
+      };
+      const snapshot = parseReleaseStateSnapshotV1({
+        ...release.value.snapshot,
+        hostedRuntimes: [{
+          ...release.value.snapshot.hostedRuntimes[0],
+          execution:
+            fault === "active-ordinary" || fault === "notstarted-ordinary"
+              ? active
+              : null,
+          lastExecutionProof: fault === "missing" ? null : native.value,
+          lastHealthyProof: native.value,
+        }],
+      });
+      f.rig.state.readRelease = () =>
+        Promise.resolve(portOk({ ...release.value, snapshot }));
+      f.rig.state.writeRepair = () => {
+        throw new Error("unexpected task write");
+      };
+      f.historicalMatrix.budget.settleModelStart = () => {
+        throw new Error("unexpected charge settlement");
+      };
+      const before = await f.rig.state.readRepair();
+      assert(before.ok && before.value.status === "found");
+      const repairBefore = before.value;
+      if (fault === "ordinary-artifact") f.setFault("missing");
+      if (fault === "pending") f.setFault("pending");
+      if (fault === "notstarted-ordinary") {
+        f.historicalMatrix.transport.confirmCompletedExecution = () =>
+          Promise.resolve(true);
+        f.historicalMatrix.readExecution = () =>
+          Promise.resolve(portOk(parseHostedExecutionSettlementV1({
+            execution: active,
+            workflowId: 357012162,
+            workflowPath: ".github/workflows/supervisor.yml",
+            repository: "ubiquity/sentinel",
+            ref: "refs/heads/sentinel-supervisor",
+            jobId: null,
+            outcome: "not_started",
+            finishedAt: T0 + 40_000,
+            observedAt: f.clock.now(),
+            evidenceDigest: "b".repeat(64),
+          })));
+      }
+      if (
+        fault === "mismatch" || fault === "release-drift" ||
+        fault === "repair-drift"
+      ) {
+        const read = f.historicalMatrix.readExecution;
+        f.historicalMatrix.readExecution = async (input) => {
+          const observed = await read(input);
+          if (fault === "release-drift") {
+            f.rig.state.readRelease = () =>
+              Promise.resolve(
+                portOk({
+                  ...release.value,
+                  snapshot,
+                  head: "f".repeat(40) as GitSha,
+                }),
+              );
+          }
+          if (fault === "repair-drift") {
+            f.rig.state.readRepair = () =>
+              Promise.resolve(
+                portOk({
+                  ...repairBefore,
+                  snapshot: {
+                    ...repairBefore.snapshot,
+                    work: repairBefore.snapshot.work.map((row) => ({
+                      ...row,
+                      updatedAt: row.updatedAt + 1,
+                    })),
+                  },
+                }),
+              );
+          }
+          return fault === "mismatch" && observed.ok &&
+              observed.value !== null &&
+              observed.value.outcome !== "not_started"
+            ? portOk({ ...observed.value, logDigest: "a".repeat(64) })
+            : observed;
+        };
+      }
+      await assert.rejects(
+        () =>
+          runHistoricalMatrixQuarantine({
+            ...f.historicalMatrix,
+            historicalReleaseWitnesses: [],
+          }),
+        /historical matrix|matrix artifact/,
+      );
+    } finally {
+      Deno.chdir(previousCwd);
+      await Deno.remove(f.rig.tmp, { recursive: true });
+    }
+  }
+});
+
+Deno.test("historical multiwave: first maintenance drains old seventeen and newer three before bootstrap", async () => {
+  const f = await historicalMultiWaveRig(17, 3, false);
+  const previousCwd = Deno.cwd();
+  Deno.chdir(f.checkout);
+  try {
+    const releaseBefore = await f.release.readRelease();
+    assert(releaseBefore.ok && releaseBefore.value.status === "found");
+    const current = releaseBefore.value.snapshot.hostedRuntimes[0].execution!;
+    assert.equal(current.runId, 73);
+    assert.equal(
+      releaseBefore.value.snapshot.hostedRuntimes[0].lastExecutionProof
+        ?.execution.runId,
+      71,
+    );
+    assert.equal(
+      await f.historicalMatrix.transport.confirmCompletedExecution!(current),
+      true,
+    );
+    const native = await f.evidence.readExecution(current);
+    assert(
+      native.ok && native.value !== null && native.value.outcome === "failed",
+    );
+    const before = await f.rig.state.readRepair();
+    assert(before.ok && before.value.status === "found");
+    assert.equal(
+      before.value.snapshot.work.filter((row) =>
+        row.intent?.kind === "implementation"
+      ).length,
+      20,
+    );
+    const result = await f.run();
+    assert(
+      result.actions.includes("historical-matrix:quarantined:20"),
+      JSON.stringify(result.actions),
+    );
+    assert.deepEqual(await f.release.readRelease(), releaseBefore);
+    const after = await f.rig.state.readRepair();
+    assert(after.ok && after.value.status === "found");
+    assert.equal(
+      after.value.snapshot.work.filter((row) => row.nextStep === "blocked")
+        .length,
+      20,
+    );
+    assert(
+      after.value.snapshot.reservations.every((row) =>
+        row.outcome === "ambiguous"
+      ),
+    );
+    const successor = {
+      runId: 74,
+      runAttempt: 1,
+      launcherSha: "5".repeat(40) as GitSha,
+    };
+    f.clock.now = () => T0 + 70_000;
+    const prepared = await runHostedSupervisorPrepare({
+      state: f.release,
+      clock: f.clock,
+      run: successor,
+      evidence: f.evidence,
+    });
+    assert(prepared.status === "run", JSON.stringify(prepared));
+    assert.equal(prepared.execution.purpose, "bootstrap");
+    f.setBootstrap({ execution: prepared.execution, run: successor });
+    assert.equal(
+      (await runHostedSupervisorFinalize({
+        state: f.release,
+        clock: f.clock,
+        run: successor,
+        evidence: f.evidence,
+      })).status,
+      "idle",
+    );
+    assert(
+      !((await f.run()).actions.some((action) =>
+        action.startsWith("historical-matrix:quarantined:")
+      )),
+    );
+    assert.deepEqual(await f.rig.state.readRepair(), after);
+  } finally {
+    Deno.chdir(previousCwd);
+    await Deno.remove(f.rig.tmp, { recursive: true });
+  }
+});
+
+Deno.test("historical multiwave: missing newer manifest blocks prepare and retry preserves historical charges", async () => {
+  const f = await historicalMultiWaveRig();
+  try {
+    f.setMissing(true);
+    const releaseBefore = await f.release.readRelease();
+    assert.equal(await f.runMain(), 1);
+    assert.deepEqual(await f.release.readRelease(), releaseBefore);
+    const partial = await f.rig.state.readRepair();
+    assert(partial.ok && partial.value.status === "found");
+    assert.equal(
+      partial.value.snapshot.work.filter((row) => row.nextStep === "blocked")
+        .length,
+      17,
+    );
+    for (const charge of f.charges) {
+      assert.equal(
+        partial.value.snapshot.reservations.find((row) => row.id === charge.id)
+          ?.outcome,
+        "reserved",
+      );
+    }
+    f.setMissing(false);
+    const resumed = await f.run();
+    assert(resumed.actions.includes("historical-matrix:quarantined:3"));
+    const after = await f.rig.state.readRepair();
+    assert(after.ok && after.value.status === "found");
+    assert.equal(
+      after.value.snapshot.work.filter((row) => row.nextStep === "blocked")
+        .length,
+      20,
+    );
+    for (
+      const charge of partial.value.snapshot.reservations.filter((row) =>
+        row.outcome === "ambiguous"
+      )
+    ) {
+      assert.deepEqual(
+        after.value.snapshot.reservations.find((row) => row.id === charge.id),
+        charge,
+      );
+    }
+    assert.deepEqual(await f.release.readRelease(), releaseBefore);
+  } finally {
+    await Deno.remove(f.rig.tmp, { recursive: true });
+  }
+});
+
+Deno.test("historical newer current: settled cancellation protects separately saved older wave before prepare", async () => {
+  const f = await historicalWithNewerCurrent();
+  try {
+    const releaseBefore = await f.release.readRelease();
+    const outcome = await f.run();
+    assert(outcome.actions.includes("historical-matrix:quarantined:17"));
+    assert.deepEqual(f.observed, [73, 71]);
+    assert.deepEqual(await f.release.readRelease(), releaseBefore);
+    const after = await f.rig.state.readRepair();
+    assert(after.ok && after.value.status === "found");
+    for (let i = 0; i < 17; i++) {
+      const original = f.records[i];
+      const work: WorkRecordV1 = after.value.snapshot.work.find((row) =>
+        row.id === original.id
+      )!;
+      assert.equal(work.nextStep, "blocked");
+      assert.deepEqual({
+        ...work,
+        nextStep: original.nextStep,
+        blocker: original.blocker,
+        wait: original.wait,
+        updatedAt: original.updatedAt,
+      }, original);
+      const charge: ReturnType<typeof reservation> = after.value.snapshot
+        .reservations.find((row) => row.id === f.charges[i].id)!;
+      assert.equal(charge.outcome, "ambiguous");
+      assert.deepEqual({
+        ...charge,
+        outcome: f.charges[i].outcome,
+        settledAt: null,
+      }, f.charges[i]);
+    }
+    const prepared = await runHostedSupervisorPrepare({
+      state: f.release,
+      clock: f.clock,
+      run: { runId: 74, runAttempt: 1, launcherSha: f.current.launcherSha },
+      evidence: {
+        ...f.evidence,
+        readExecution: f.reader.readHostedExecution.bind(f.reader),
+      },
+    });
+    assert.equal(prepared.status, "run", JSON.stringify(prepared));
+    const replaced = await f.release.readRelease();
+    assert(replaced.ok && replaced.value.status === "found");
+    assert.equal(
+      replaced.value.snapshot.hostedRuntimes[0].lastExecutionProof?.execution
+        .id,
+      "73:1:repair",
+    );
+    assert.deepEqual(await f.rig.state.readRepair(), after);
+  } finally {
+    await Deno.remove(f.rig.tmp, { recursive: true });
+  }
+});
+
+Deno.test("historical release witness: refusal and partial CAS retry preserve exact charged custody", async () => {
+  for (
+    const fault of [
+      "active",
+      "pin",
+      "native",
+      "missing",
+      "outage",
+      "drift",
+      "cas",
+    ]
+  ) {
+    const f = await historicalWithNewerCurrent(
+      fault === "active" ? "pending" : "settled",
+      true,
+    );
+    const previousCwd = Deno.cwd();
+    Deno.chdir(f.checkout);
+    try {
+      if (fault === "missing" || fault === "outage") f.setFault(fault);
+      const proof = f.witness.snapshot.hostedRuntimes[0].lastExecutionProof!;
+      assert(proof.outcome !== "not_started");
+      const deps = createHostedHistoricalMatrixQuarantine({
+        state: f.rig.state,
+        clock: f.clock,
+        token: "offline-native-token",
+        artifactRoot: `${f.rig.tmp}/refusal-artifacts`,
+        http: f.currentHttp,
+        artifactHttp: f.currentHttp,
+        historicalReleaseWitnesses: [{
+          commit: f.witness.head,
+          executionId: proof.execution.id,
+          logDigest: fault === "pin" ? "a".repeat(64) : proof.logDigest,
+          reservationIds: f.charges.slice(0, 17).map((row) => row.id),
+        }],
+      });
+      const originalWrite = f.rig.state.writeRepair;
+      if (fault === "native") {
+        const read = deps.readExecution;
+        deps.readExecution = async (execution) => {
+          const result = await read(execution);
+          return execution.id === proof.execution.id && result.ok &&
+              result.value !== null && result.value.outcome !== "not_started"
+            ? portOk({ ...result.value, logDigest: "b".repeat(64) })
+            : result;
+        };
+      }
+      if (fault === "cas") {
+        f.rig.state.writeRepair = (next, expected) =>
+          next.work.some((row) => row.nextStep === "blocked")
+            ? Promise.resolve(
+              portOk({ status: "conflict", currentHead: expected }),
+            )
+            : originalWrite(next, expected);
+      }
+      if (fault === "drift") {
+        const settle = deps.budget.settleModelStart.bind(deps.budget);
+        deps.budget.settleModelStart = async (request) => {
+          const result = await settle(request);
+          const current = await f.release.readRelease();
+          assert(current.ok && current.value.status === "found");
+          const moved = await f.release.writeRelease({
+            ...current.value.snapshot,
+            stateHead: current.value.head,
+            sequence: current.value.snapshot.sequence + 1,
+            updatedAt: f.clock.now(),
+            hostedRuntimes: current.value.snapshot.hostedRuntimes.map((
+              row,
+            ) => ({ ...row, nextOrdinaryAt: row.nextOrdinaryAt + 1 })),
+          }, current.value.head);
+          assert(moved.ok && moved.value.status === "applied");
+          return result;
+        };
+      }
+      const before = await f.rig.state.readRepair();
+      await assert.rejects(
+        () => runHistoricalMatrixQuarantine(deps),
+        /historical matrix|matrix artifact/,
+      );
+      const after = await f.rig.state.readRepair();
+      assert(after.ok && after.value.status === "found");
+      assert(after.value.snapshot.work.every((row) => row.nextStep === "work"));
+      if (fault === "cas" || fault === "drift") {
+        assert.equal(after.value.snapshot.reservations[0].outcome, "ambiguous");
+        if (fault === "cas") {
+          f.rig.state.writeRepair = originalWrite;
+          await assert.rejects(
+            () => runHistoricalMatrixQuarantine(deps),
+            /historical matrix native settlement unavailable/,
+          );
+          const retry = await f.rig.state.readRepair();
+          assert(retry.ok && retry.value.status === "found");
+          assert.equal(
+            retry.value.snapshot.reservations[0].settledAt,
+            after.value.snapshot.reservations[0].settledAt,
+          );
+        }
+      } else assert.deepEqual(after, before);
+    } finally {
+      Deno.chdir(previousCwd);
+      await Deno.remove(f.rig.tmp, { recursive: true });
+    }
+  }
+});
+
+Deno.test("historical newer current: unfinished foreign unavailable or drifting current cannot write", async () => {
+  for (
+    const mode of [
+      "pending",
+      "unavailable",
+      "foreign",
+      "wrong-job",
+      "wrong-binding",
+      "custody",
+      "truncated",
+      "duplicate",
+      "old-proof-missing",
+    ]
+  ) {
+    const f = await historicalWithNewerCurrent(mode);
+    try {
+      const before = await f.rig.state.readRepair();
+      assert.equal(await f.runMain(), 1);
+      assert.deepEqual(await f.rig.state.readRepair(), before);
+      assert(!f.observed.includes(71));
+      assert.equal(f.rig.merges, 0);
+    } finally {
+      await Deno.remove(f.rig.tmp, { recursive: true });
+    }
+  }
+});

@@ -9,7 +9,11 @@ import {
   tryParseMatrixPlanV1,
 } from "../contracts/matrix.ts";
 import type { RepositoryConfigV1 } from "../contracts/repository-config.ts";
-import { createRunBounds, type RepairCycleDepsV1 } from "../repair/loop.ts";
+import {
+  createRunBounds,
+  prepareMatrixIntakeV1,
+  type RepairCycleDepsV1,
+} from "../repair/loop.ts";
 import {
   type ActionsRepairHostDepsV1,
   type ActionsTargetCyclesInputV1,
@@ -28,7 +32,529 @@ import {
   createGitBundleExporter,
   createGitBundleImporter,
 } from "./matrix-git.ts";
-import type { MatrixArtifactTransportV1 } from "./matrix-artifact-port.ts";
+import type {
+  MatrixArtifactTransportV1,
+  MatrixRejectedWaveV1,
+} from "./matrix-artifact-port.ts";
+import type { BudgetControllerV1 } from "../budget/mod.ts";
+import type {
+  Clock,
+  PortResultV1,
+  RepairStateWriter,
+  StateReadView,
+} from "../contracts/ports.ts";
+import {
+  HOSTED_RUNTIME_ID,
+  type HostedExecutionIntentV1,
+  type HostedExecutionSettlementV1,
+  type HostedRunProofV1,
+  parseHostedExecutionSettlementV1,
+  parseHostedRunProofV1,
+} from "../contracts/hosted-supervisor.ts";
+import { markBlocked } from "../repair/transitions.ts";
+import { implementationIntentKey } from "../repair/keys.ts";
+import type { BudgetReservationV1 } from "../contracts/budget-reservation.ts";
+import type { GitSha } from "../contracts/brands.ts";
+import {
+  closedCWaveHandledReservations,
+  closedCWaveNeedsRecovery,
+  ingestClosedCWave,
+} from "./modern-matrix-recovery.ts";
+
+export const HISTORICAL_MATRIX_QUARANTINE =
+  "authenticated historical matrix manifest rejected: reservation_after_manifest; model outcome uncertain";
+
+export interface HistoricalMatrixQuarantineDepsV1 {
+  state: StateReadView & RepairStateWriter;
+  clock: Clock;
+  budget: Pick<BudgetControllerV1, "settleModelStart">;
+  transport: MatrixArtifactTransportV1;
+  /** Closed owner-selected release witnesses; never a history scan or fallback. */
+  historicalReleaseWitnesses?: readonly {
+    commit: GitSha;
+    executionId: string;
+    logDigest: string;
+    reservationIds: readonly string[];
+    reject(
+      proof: HostedRunProofV1,
+      expectedHead: GitSha,
+    ): Promise<readonly MatrixRejectedWaveV1[]>;
+  }[];
+  readExecution(
+    execution: HostedExecutionIntentV1,
+  ): Promise<PortResultV1<HostedExecutionSettlementV1 | null>>;
+}
+interface HistoricalProofCustodyV1 {
+  commit: GitSha;
+  expectedHead: GitSha;
+  proofDigest: string;
+}
+function reservationIdentity(row: BudgetReservationV1) {
+  return canonicalStringify({
+    ...row,
+    outcome: "reserved",
+    settledAt: null,
+    proofRef: null,
+  });
+}
+async function proofInCustody(
+  deps: HistoricalMatrixQuarantineDepsV1,
+  proof: HostedRunProofV1,
+  current?: HostedExecutionIntentV1 | null,
+  historical?: HistoricalProofCustodyV1,
+) {
+  const read = await deps.state.readRelease();
+  if (!read.ok || read.value.status !== "found") return false;
+  const runtime = read.value.snapshot.hostedRuntimes.find((row) =>
+    row.id === HOSTED_RUNTIME_ID
+  );
+  const identity = canonicalStringify(proof.execution);
+  if (
+    current !== undefined &&
+    canonicalStringify(runtime?.execution ?? null) !==
+      canonicalStringify(current)
+  ) return false;
+  if (historical) {
+    if (
+      read.value.head !== historical.expectedHead ||
+      !deps.state.readReleaseAt
+    ) return false;
+    const saved = await deps.state.readReleaseAt(historical);
+    if (
+      !saved.ok || saved.value.status !== "found" ||
+      saved.value.head !== historical.commit
+    ) return false;
+    const prior = saved.value.snapshot.hostedRuntimes.find((row) =>
+      row.id === HOSTED_RUNTIME_ID
+    )?.lastExecutionProof;
+    if (
+      !prior || prior.outcome === "not_started" ||
+      await matrixDigestV1({ ...prior, observedAt: 0 }) !==
+        historical.proofDigest ||
+      canonicalStringify({ ...prior, observedAt: proof.observedAt }) !==
+        canonicalStringify(proof)
+    ) return false;
+    // The exact completed native proof was authenticated once for this operation.
+    // Its immutable bytes remain bound by the full historical digest and frozen head.
+    return true;
+  }
+  if (
+    runtime?.execution && canonicalStringify(runtime.execution) === identity
+  ) return true;
+  const prior = runtime?.lastExecutionProof;
+  return prior !== null && prior !== undefined &&
+    prior.outcome !== "not_started" &&
+    canonicalStringify({ ...prior, observedAt: proof.observedAt }) ===
+      canonicalStringify(proof);
+}
+async function quarantineRow(
+  deps: HistoricalMatrixQuarantineDepsV1,
+  wave: MatrixRejectedWaveV1,
+  captured: MatrixRejectedWaveV1["affected"][number],
+  currentExecution: HostedExecutionIntentV1 | null,
+  historical?: HistoricalProofCustodyV1,
+) {
+  if (
+    wave.reason !== "reservation_after_manifest" ||
+    captured.work.nextStep !== "work" ||
+    captured.work.intent?.kind !== "implementation" ||
+    captured.work.target.candidateState !== undefined ||
+    captured.work.intent.requestId !== captured.reservation.id ||
+    captured.work.intent.key !==
+      implementationIntentKey(captured.reservation.id) ||
+    captured.work.intent.observedBase !== captured.reservation.head ||
+    captured.work.target.base !== captured.reservation.head ||
+    captured.work.counters.attempts !== captured.reservation.attempt ||
+    captured.work.id !== captured.reservation.taskId ||
+    captured.request.taskId !== captured.work.id ||
+    captured.request.base !== captured.work.target.base ||
+    canonicalStringify(captured.work.repository) !==
+      canonicalStringify(captured.reservation.repository) ||
+    canonicalStringify(captured.work.repository) !==
+      canonicalStringify(captured.request.repository) ||
+    await matrixDigestV1(captured.request) !== captured.requestDigest ||
+    await matrixDigestV1(captured.work) !== captured.workDigest ||
+    await matrixDigestV1(captured.reservation) !== captured.reservationDigest ||
+    !await proofInCustody(deps, wave.proof, currentExecution, historical)
+  ) throw new Error("historical matrix custody unavailable");
+  const read = await deps.state.readRepair();
+  if (!read.ok || read.value.status !== "found") {
+    throw new Error("historical matrix state unavailable");
+  }
+  const work = read.value.snapshot.work.find((row) =>
+    row.id === captured.work.id &&
+    canonicalStringify(row.repository) ===
+      canonicalStringify(captured.work.repository)
+  );
+  const reservation = read.value.snapshot.reservations.find((row) =>
+    row.id === captured.reservation.id
+  );
+  if (
+    !work || !reservation || work.nextStep !== "work" ||
+    work.intent?.kind !== "implementation" ||
+    work.target.candidateState !== undefined ||
+    await matrixDigestV1(work) !== captured.workDigest ||
+    await matrixDigestV1(reservation) !== captured.reservationDigest ||
+    (reservation.outcome !== "reserved" && reservation.outcome !== "ambiguous")
+  ) {
+    throw new Error("historical matrix captured identity changed");
+  }
+  if (!await proofInCustody(deps, wave.proof, currentExecution, historical)) {
+    throw new Error("historical matrix pre-settlement custody unavailable");
+  }
+  const settled = await deps.budget.settleModelStart({
+    id: reservation.id,
+    outcome: "ambiguous",
+    proofRef: null,
+  });
+  if (
+    (settled.status !== "settled" && settled.status !== "idempotent") ||
+    settled.reservation.outcome !== "ambiguous" ||
+    settled.reservation.settledAt === null ||
+    settled.reservation.proofRef !== null ||
+    reservationIdentity(settled.reservation) !==
+      reservationIdentity(reservation)
+  ) {
+    throw new Error("historical matrix settlement incomplete");
+  }
+  const fresh = await deps.state.readRepair();
+  if (
+    !fresh.ok || fresh.value.status !== "found" ||
+    !await proofInCustody(deps, wave.proof, currentExecution, historical)
+  ) {
+    throw new Error("historical matrix post-settlement custody unavailable");
+  }
+  const current = fresh.value.snapshot.work.find((row) =>
+    row.id === work.id &&
+    canonicalStringify(row.repository) === canonicalStringify(work.repository)
+  );
+  const charged = fresh.value.snapshot.reservations.find((row) =>
+    row.id === reservation.id
+  );
+  if (
+    !current || await matrixDigestV1(current) !== captured.workDigest ||
+    !charged ||
+    canonicalStringify(charged) !== canonicalStringify(settled.reservation)
+  ) {
+    throw new Error("historical matrix post-settlement identity changed");
+  }
+  const now = deps.clock.now();
+  if (!Number.isSafeInteger(now) || now < fresh.value.snapshot.updatedAt) {
+    throw new Error("historical matrix clock unavailable");
+  }
+  const blocked = markBlocked(
+    current,
+    "other",
+    HISTORICAL_MATRIX_QUARANTINE,
+    now,
+  );
+  if (!await proofInCustody(deps, wave.proof, currentExecution, historical)) {
+    throw new Error("historical matrix pre-block custody unavailable");
+  }
+  const write = await deps.state.writeRepair({
+    ...fresh.value.snapshot,
+    stateHead: fresh.value.head,
+    sequence: fresh.value.snapshot.sequence + 1,
+    updatedAt: now,
+    work: fresh.value.snapshot.work.map((row) =>
+      row === current ? blocked : row
+    ),
+  }, fresh.value.head);
+  if (!write.ok || write.value.status !== "applied") {
+    throw new Error("historical matrix block incomplete");
+  }
+  const verified = await deps.state.readRepair();
+  if (
+    !verified.ok || verified.value.status !== "found" ||
+    !await proofInCustody(deps, wave.proof, currentExecution, historical) ||
+    canonicalStringify(
+        verified.value.snapshot.work.find((row) =>
+          row.id === work.id &&
+          canonicalStringify(row.repository) ===
+            canonicalStringify(work.repository)
+        ),
+      ) !== canonicalStringify(blocked) ||
+    canonicalStringify(
+        verified.value.snapshot.reservations.find((row) =>
+          row.id === reservation.id
+        ),
+      ) !== canonicalStringify(charged)
+  ) {
+    throw new Error("historical matrix block readback incomplete");
+  }
+}
+/** Protected repair-owner checkpoint; no model, release-write or ingestion capability. */
+export async function runHistoricalMatrixQuarantine(
+  deps: HistoricalMatrixQuarantineDepsV1,
+): Promise<number> {
+  const repair = await deps.state.readRepair();
+  if (!repair.ok || repair.value.status !== "found") {
+    throw new Error("historical matrix state unavailable");
+  }
+  const [witness, ...remainingWitnesses] = deps.historicalReleaseWitnesses ??
+    [];
+  if (witness) {
+    const selected = repair.value.snapshot.work.filter((row) =>
+      row.intent?.kind === "implementation" && row.nextStep !== "done" &&
+      !(row.nextStep === "blocked" && row.blocker?.kind === "other" &&
+        row.blocker.message === HISTORICAL_MATRIX_QUARANTINE) &&
+      witness.reservationIds.some((id) =>
+        row.intent?.requestId === id ||
+        row.intent?.key === implementationIntentKey(id)
+      )
+    );
+    if (selected.length === 0) {
+      return runHistoricalMatrixQuarantine({
+        ...deps,
+        historicalReleaseWitnesses: remainingWitnesses,
+      });
+    }
+    for (const work of selected) {
+      const reservation = repair.value.snapshot.reservations.find((row) =>
+        row.id === work.intent?.requestId
+      );
+      if (
+        work.nextStep !== "work" || work.target.candidateState !== undefined ||
+        !reservation || !witness.reservationIds.includes(reservation.id) ||
+        work.intent?.key !== implementationIntentKey(reservation.id) ||
+        canonicalStringify(work.repository) !==
+          canonicalStringify(reservation.repository) ||
+        (reservation.outcome !== "reserved" &&
+          reservation.outcome !== "ambiguous")
+      ) {
+        throw new Error(
+          "historical matrix selected reservation binding unavailable",
+        );
+      }
+    }
+  }
+  if (
+    !repair.value.snapshot.work.some((row) =>
+      row.nextStep === "work" && row.intent?.kind === "implementation" &&
+      row.target.candidateState === undefined
+    )
+  ) return 0;
+  const release = await deps.state.readRelease();
+  if (!release.ok || release.value.status !== "found") {
+    throw new Error("historical matrix release unavailable");
+  }
+  const runtime = release.value.snapshot.hostedRuntimes.find((row) =>
+    row.id === HOSTED_RUNTIME_ID
+  );
+  const current = runtime?.execution ?? null;
+  let currentNative: HostedExecutionSettlementV1 | null = null;
+  if (current !== null) {
+    if (
+      !deps.transport.confirmCompletedExecution ||
+      !await deps.transport.confirmCompletedExecution(current)
+    ) {
+      throw new Error("historical matrix current native writers unsettled");
+    }
+    const observed = await deps.readExecution(current);
+    if (!observed.ok || observed.value === null) {
+      throw new Error(
+        "historical matrix current native settlement unavailable",
+      );
+    }
+    currentNative = parseHostedExecutionSettlementV1(observed.value);
+    if (
+      canonicalStringify(currentNative.execution) !==
+        canonicalStringify(current)
+    ) {
+      throw new Error("historical matrix current native binding changed");
+    }
+  }
+  const freshRelease = await deps.state.readRelease();
+  if (!freshRelease.ok || freshRelease.value.status !== "found") {
+    throw new Error("historical matrix saved custody unavailable");
+  }
+  const freshRuntime = freshRelease.value.snapshot.hostedRuntimes.find((row) =>
+    row.id === HOSTED_RUNTIME_ID
+  );
+  if (
+    canonicalStringify(freshRuntime?.execution ?? null) !==
+      canonicalStringify(current)
+  ) {
+    throw new Error("historical matrix current custody changed");
+  }
+  const savedProof = freshRuntime?.lastExecutionProof;
+  let historical: HistoricalProofCustodyV1 | undefined;
+  let witnessedProof: HostedRunProofV1 | undefined;
+  if (witness) {
+    const saved = await deps.state.readReleaseAt?.({
+      commit: witness.commit,
+      expectedHead: freshRelease.value.head,
+    });
+    if (
+      !saved?.ok || saved.value.status !== "found" ||
+      saved.value.head !== witness.commit
+    ) {
+      throw new Error("historical matrix release witness unavailable");
+    }
+    const prior = saved.value.snapshot.hostedRuntimes.find((row) =>
+      row.id === HOSTED_RUNTIME_ID
+    )?.lastExecutionProof;
+    if (
+      !prior || prior.outcome === "not_started" ||
+      prior.execution.purpose !== "ordinary" ||
+      prior.execution.id !== witness.executionId ||
+      prior.logDigest !== witness.logDigest
+    ) {
+      throw new Error("historical matrix release witness binding changed");
+    }
+    witnessedProof = parseHostedRunProofV1(prior);
+    historical = {
+      commit: witness.commit,
+      expectedHead: freshRelease.value.head,
+      proofDigest: await matrixDigestV1({ ...witnessedProof, observedAt: 0 }),
+    };
+  }
+  const execution = witnessedProof?.execution ??
+    (current?.purpose === "ordinary" && currentNative !== null &&
+        currentNative.outcome !== "not_started"
+      ? current
+      : savedProof?.execution.purpose === "ordinary" &&
+          savedProof.outcome !== "not_started"
+      ? savedProof.execution
+      : null);
+  if (!execution) {
+    const verification = current ?? savedProof?.execution;
+    if (
+      verification &&
+      ["bootstrap", "prior", "candidate", "rollback"].includes(
+        verification.purpose,
+      )
+    ) {
+      if (
+        freshRelease.value.head !== release.value.head ||
+        canonicalStringify(freshRuntime) !== canonicalStringify(runtime)
+      ) {
+        throw new Error("historical matrix verification custody changed");
+      }
+      if (
+        current === null && (!deps.transport.confirmCompletedExecution ||
+          !await deps.transport.confirmCompletedExecution(verification))
+      ) {
+        throw new Error(
+          "historical matrix verification completion unavailable",
+        );
+      }
+      const observed = current !== null
+        ? { ok: true as const, value: currentNative }
+        : await deps.readExecution(verification);
+      if (
+        !observed.ok || observed.value === null ||
+        observed.value.outcome === "not_started"
+      ) {
+        throw new Error("historical matrix verification proof unavailable");
+      }
+      const verificationProof = parseHostedRunProofV1(observed.value);
+      if (
+        canonicalStringify(verificationProof.execution) !==
+          canonicalStringify(verification) ||
+        (current === null &&
+          (!savedProof || savedProof.outcome === "not_started" ||
+            canonicalStringify({
+                ...savedProof,
+                observedAt: verificationProof.observedAt,
+              }) !== canonicalStringify(verificationProof)))
+      ) {
+        throw new Error("historical matrix verification binding changed");
+      }
+      const [afterRelease, afterRepair] = await Promise.all([
+        deps.state.readRelease(),
+        deps.state.readRepair(),
+      ]);
+      if (
+        !afterRelease.ok || afterRelease.value.status !== "found" ||
+        afterRelease.value.head !== release.value.head ||
+        canonicalStringify(
+            afterRelease.value.snapshot.hostedRuntimes.find((row) =>
+              row.id === HOSTED_RUNTIME_ID
+            ),
+          ) !== canonicalStringify(runtime) ||
+        !afterRepair.ok || afterRepair.value.status !== "found" ||
+        canonicalStringify(afterRepair.value.snapshot.work) !==
+          canonicalStringify(repair.value.snapshot.work) ||
+        canonicalStringify(afterRepair.value.snapshot.reservations) !==
+          canonicalStringify(repair.value.snapshot.reservations)
+      ) {
+        throw new Error("historical matrix verification observation changed");
+      }
+      return 0;
+    }
+    throw new Error("historical matrix saved execution unavailable");
+  }
+  const native = currentNative &&
+      canonicalStringify(execution) === canonicalStringify(current)
+    ? { ok: true as const, value: currentNative }
+    : await deps.readExecution(execution);
+  if (
+    !native.ok || native.value === null ||
+    native.value.outcome === "not_started"
+  ) {
+    throw new Error("historical matrix native settlement unavailable");
+  }
+  const proof = parseHostedRunProofV1(native.value);
+  if (
+    canonicalStringify(proof.execution) !== canonicalStringify(execution) ||
+    !await proofInCustody(deps, proof, current, historical) ||
+    !deps.transport.rejectHistorical
+  ) {
+    throw new Error("historical matrix native custody unavailable");
+  }
+  const waves = historical
+    ? await witness!.reject(
+      proof,
+      historical.expectedHead,
+    )
+    : await deps.transport.rejectHistorical({ proof });
+  if (historical && waves.length === 0) {
+    throw new Error("historical matrix selected witness rejection unavailable");
+  }
+  if (waves.length === 0) {
+    const fresh = await deps.state.readRepair();
+    if (
+      !fresh.ok || fresh.value.status !== "found" ||
+      !await proofInCustody(deps, proof, current, historical) ||
+      canonicalStringify(fresh.value.snapshot.work) !==
+        canonicalStringify(repair.value.snapshot.work) ||
+      canonicalStringify(fresh.value.snapshot.reservations) !==
+        canonicalStringify(repair.value.snapshot.reservations)
+    ) throw new Error("historical matrix applicability changed");
+  }
+  let count = 0;
+  for (const wave of waves) {
+    if (
+      canonicalStringify(wave.proof) !== canonicalStringify(proof) ||
+      !/^[0-9a-f]{64}$/.test(wave.planDigest) ||
+      !Number.isSafeInteger(wave.plannerJobId) || wave.plannerJobId <= 0
+    ) {
+      throw new Error("historical matrix rejection identity unavailable");
+    }
+    for (const captured of wave.affected) {
+      if (
+        witness && !witness.reservationIds.includes(captured.reservation.id)
+      ) {
+        throw new Error(
+          "historical matrix rejection reservation outside witness",
+        );
+      }
+      await quarantineRow(deps, wave, captured, current, historical);
+      count++;
+    }
+  }
+  if (!await proofInCustody(deps, proof, current, historical)) {
+    throw new Error("historical matrix final custody changed");
+  }
+  if (historical) {
+    count += await runHistoricalMatrixQuarantine({
+      ...deps,
+      historicalReleaseWitnesses: remainingWitnesses,
+    });
+  }
+  return count;
+}
 
 export interface MatrixNativeCarrierV1 {
   /** Digest supplied by native needs.matrix_plan.outputs, outside artifact contents. */
@@ -209,11 +735,27 @@ export async function runActionsMatrixHost(
     runTargetCycles: async (input) => {
       const host = hostOf(input);
       if (job === "matrix_plan") {
-        // Actual intake and lifecycle reconciliation with ZERO implementation/review starts.
+        const deadline = Math.min(
+          input.deadline,
+          childRunDeadlineV1(host.execution.createdAt),
+        );
+        // Only source intake and fresh branch assignment precede the manifest.
+        // The serialized aggregate retains unrelated lifecycle reconciliation.
         const cycles = await runActionsTargetCycles({
           ...input,
+          deadline,
           modelStartsEnabled: false,
           externalImplementations: true,
+          runCycle: async (deps, options) => {
+            const outcome = await prepareMatrixIntakeV1(deps, {
+              ...options,
+              runStartedAt: host.execution.createdAt,
+            });
+            if (outcome.status === "state_error") {
+              throw new Error("matrix intake authoritative state failed");
+            }
+            return outcome;
+          },
         });
         const configs = input.configs.filter((config) =>
           cycles.addressed.includes(
@@ -232,7 +774,8 @@ export async function runActionsMatrixHost(
             run: host.run,
             runtimeSha: input.controllerSha,
             generation: host.execution.generation,
-            deadline: input.deadline,
+            deadline,
+            runStartedAt: host.execution.createdAt,
             plannedAt: input.clock.now(),
             modelStartsEnabled: input.modelStartsEnabled,
             githubForRepository: (repository) =>
@@ -355,16 +898,46 @@ export async function runActionsMatrixAggregateCycles(
   carrier?: MatrixNativeCarrierV1,
 ): Promise<ActionsTargetCyclesResultV1> {
   const host = hostOf(input);
-  const read = await input.state.readRepair();
+  let read = await input.state.readRepair();
   if (!read.ok || read.value.status !== "found") {
     throw new Error("matrix aggregate cannot read authoritative state");
   }
+  if (closedCWaveNeedsRecovery(read.value.snapshot)) {
+    if (!host.readExecution) {
+      throw new Error("C recovery native proof reader unavailable");
+    }
+    const recovered = await ingestClosedCWave({
+      state: input.state,
+      clock: input.clock,
+      configs: input.configs,
+      cycleFor: (config) => targetDeps(input, config),
+      prepareTarget: async (config) => {
+        await input.prepareTarget?.(config);
+      },
+      importerFor: (config, bundlesDir) =>
+        createGitBundleImporter({
+          repositoryDir: host.sourcePathFor(config),
+          bundlesDir,
+        }),
+      transportFor: (state) => host.createArtifactTransport(state),
+      readExecution: host.readExecution,
+    }, false);
+    console.log(
+      JSON.stringify({ kind: "sentinel_closed_c_recovery", ...recovered }),
+    );
+    read = await input.state.readRepair();
+    if (!read.ok || read.value.status !== "found") {
+      throw new Error("C recovery readback unavailable");
+    }
+  }
+  const handled = closedCWaveHandledReservations(read.value.snapshot);
   const requests = read.value.snapshot.work.flatMap((record) => {
     const intent = record.intent;
     if (
+      record.nextStep !== "work" ||
       (intent?.kind !== "implementation" &&
         intent?.kind !== "candidate_preservation") ||
-      intent.requestId === null
+      intent.requestId === null || handled.has(intent.requestId)
     ) {
       return [];
     }
@@ -382,6 +955,7 @@ export async function runActionsMatrixAggregateCycles(
     requests,
     runtimeSha: input.controllerSha,
     launcherSha: host.run.launcherSha,
+    ...(carrier === undefined ? {} : { currentRun: host.run }),
   });
   for (const wave of waves) {
     if (

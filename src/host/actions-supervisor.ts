@@ -62,6 +62,8 @@ import { DenoReplayRuntime } from "../replay/runtime.ts";
 import type { ReplayRuntimeV1 } from "../replay/runtime.ts";
 import { createReleaseStateStore, DenoGitRunner } from "../state/mod.ts";
 import { HostedSupervisorCooldownGate } from "./hosted-cooldown.ts";
+import { createActionsMatrixArtifactTransport } from "./matrix-artifacts.ts";
+import type { MatrixArtifactTransportV1 } from "./matrix-artifact-port.ts";
 import {
   parseHostedEnvironment,
   readCleanGitHead,
@@ -232,6 +234,10 @@ export interface HostedSupervisorEvidencePortV1 {
   readExecution(
     savedIntent: HostedExecutionIntentV1,
   ): Promise<PortResultV1<HostedExecutionSettlementV1 | null>>;
+  /** Recovery-only proof that the exact native attempt and every job completed. */
+  confirmCompletedExecution?(
+    execution: HostedExecutionIntentV1,
+  ): Promise<boolean>;
   verifyRevision(revision: GitSha): Promise<PortResultV1<boolean>>;
   /** Ordinary-only proof of the exact admitted revision's native matrix entrypoint. */
   verifyMatrixOrdinaryRevision?(
@@ -913,6 +919,72 @@ function ordinaryDue(
     healthy.execution.generation === runtime.generation;
 }
 
+/** One model-disabled recovery of the fixed old-controller ordinary failure. */
+function samePointerRecovery(
+  runtime: HostedRuntimeRecordV1,
+): "ordinary" | "verify" | "refused" {
+  const revision = "c79b2b87a6a2dd0adc201895af10806ef7a9c600";
+  const latest = runtime.lastExecutionProof;
+  if (runtime.activeRevision !== revision || runtime.generation !== 59) {
+    return latest?.execution.revision === revision &&
+        latest.execution.generation === 59 && latest.outcome !== "healthy"
+      ? "refused"
+      : "ordinary";
+  }
+  const healthy = runtime.lastHealthyProof;
+  if (latest?.outcome === "healthy") {
+    return healthy !== null && latest.execution.revision === revision &&
+        latest.execution.generation === 59 && sameCanonical(latest, healthy)
+      ? "ordinary"
+      : "refused";
+  }
+  if (
+    healthy === null || healthy.execution.revision !== revision ||
+    healthy.execution.generation !== 59 ||
+    healthy.execution.id !== "37134515396:1:repair" ||
+    healthy.execution.launcherSha !==
+      "bf1d0300f9634feb6541f2d7e96cbfe4bba7dfe0" ||
+    healthy.logDigest !==
+      "c031f4a39f3eac1ff64c8f6bce28eb733ff4dfe1ea5d813dcfb31d08ffce1cf3" ||
+    latest === null ||
+    (latest.outcome !== "not_started" &&
+      (latest.outcome !== "failed" || latest.startupReady ||
+        latest.baseSha !== null)) ||
+    latest.execution.launcherSha !==
+      "6468457a7b293ec489b6e00fa9fef062f7914abe" ||
+    latest.execution.revision !== revision ||
+    latest.execution.generation !== 59 ||
+    latest.execution.purpose !== "ordinary" ||
+    latest.execution.releaseId !== null ||
+    latest.execution.createdAt < healthy.finishedAt ||
+    latest.observedAt < healthy.observedAt
+  ) return "refused";
+  return "verify";
+}
+
+async function authenticateSamePointerRecovery(
+  input: HostedSupervisorInputV1,
+  runtime: HostedRuntimeRecordV1,
+): Promise<boolean> {
+  const latest = runtime.lastExecutionProof;
+  const completed = input.evidence.confirmCompletedExecution;
+  if (latest === null || completed === undefined) return false;
+  try {
+    if (await completed.call(input.evidence, latest.execution) !== true) {
+      return false;
+    }
+    const fresh = await readSettlement(input, latest.execution);
+    return fresh.ok && fresh.settlement.observedAt >= latest.observedAt &&
+      fresh.settlement.observedAt <= input.clock.now() &&
+      sameCanonical(
+        { ...fresh.settlement, observedAt: latest.observedAt },
+        latest,
+      );
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Promotion-source preflight before a healthy prior settlement may persist the
  * promote intent: the reread repair request must canonical-equal the frozen
@@ -1068,6 +1140,34 @@ export async function runHostedSupervisorPrepare(
       continue;
     }
 
+    const samePointer = samePointerRecovery(runtime);
+    if (samePointer === "refused") {
+      return pending("exact same-pointer recovery proof is unavailable");
+    }
+    if (
+      samePointer === "verify" && (
+        releases.some((release) =>
+          !isTerminalPhase(release.phase) || release.pointerIntent !== null
+        ) ||
+        cursor.snapshot?.githubCooldowns.some((cooldown) =>
+          cooldown.retryNotBefore === null ||
+          input.clock.now() < cooldown.retryNotBefore
+        )
+      )
+    ) return pending("exact same-pointer recovery admission is blocked");
+    if (samePointer === "verify") {
+      if (!await authenticateSamePointerRecovery(input, runtime)) {
+        return pending(
+          "exact same-pointer native completion proof is unavailable",
+        );
+      }
+      const current = await readCursor(input);
+      if (
+        current === null || current.head !== cursor.head ||
+        !sameCanonical(current.snapshot, cursor.snapshot)
+      ) return pending(STATIC_CONFLICT);
+    }
+
     const recovery = planPointerRecovery(runtime, releases, input.clock.now());
     if (recovery !== null) {
       // A persisted promote intent is durable, not self-authorizing: before
@@ -1185,10 +1285,10 @@ export async function runHostedSupervisorPrepare(
         cursor,
         runtime,
         releases,
-        "ordinary",
+        samePointer === "verify" ? "bootstrap" : "ordinary",
         runtime.activeRevision,
         null,
-        input.clock.now(),
+        samePointer === "verify" ? undefined : input.clock.now(),
       );
     }
 
@@ -1288,6 +1388,11 @@ export interface HostedSupervisorHostInputV1 {
   http: HttpTransportV1;
   state: StateReadView & ReleaseStateWriter;
   process: ReplayRuntimeV1;
+  /** Existing read-only transport seam; production constructs its native adapter. */
+  matrixArtifacts?: Pick<
+    MatrixArtifactTransportV1,
+    "confirmCompletedExecution"
+  >;
   /** Prepare-only exact output writer; one key=value record per call. */
   writeOutput?: (name: string, value: string) => Promise<void>;
 }
@@ -1353,6 +1458,30 @@ export async function runHostedSupervisorHost(
   });
   const evidence: HostedSupervisorEvidencePortV1 = {
     readExecution: (saved) => client.readHostedExecution(saved),
+    confirmCompletedExecution: async (saved) => {
+      if (input.matrixArtifacts !== undefined) {
+        return await input.matrixArtifacts.confirmCompletedExecution?.(
+          saved,
+        ) ===
+          true;
+      }
+      const artifactRoot = await Deno.makeTempDir({
+        dir: joinPath(input.sourceDir, ".."),
+        prefix: "sentinel-supervisor-completion-",
+      });
+      try {
+        const transport = createActionsMatrixArtifactTransport({
+          state: input.state,
+          token: nativeToken,
+          http: input.http,
+          clock: input.clock,
+          artifactRoot,
+        });
+        return await transport.confirmCompletedExecution?.(saved) === true;
+      } finally {
+        await Deno.remove(artifactRoot, { recursive: true });
+      }
+    },
     verifyRevision: (revision) => client.verifyHostedRevision(revision),
     verifyMatrixOrdinaryRevision: (revision) =>
       client.verifyMatrixOrdinaryRevision(revision),

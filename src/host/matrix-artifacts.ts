@@ -3,12 +3,16 @@ import { Uint8ArrayReader, ZipReader } from "@zip.js/zip.js";
 import { isAbsolute, resolve, sep } from "node:path";
 import {
   HOSTED_ACTIONS_CLOCK_TOLERANCE_MS as TOLERANCE,
+  HOSTED_RUNTIME_ID,
   HOSTED_SUPERVISOR_REF,
   HOSTED_SUPERVISOR_REPOSITORY as REPOSITORY,
   HOSTED_SUPERVISOR_WORKFLOW_ID,
   HOSTED_SUPERVISOR_WORKFLOW_PATH,
   type HostedExecutionIntentV1,
+  type HostedRunProofV1,
+  parseHostedRunProofV1,
 } from "../contracts/hosted-supervisor.ts";
+import { canonicalStringify } from "../contracts/canonical.ts";
 import {
   matrixCellIdV1,
   type MatrixCellPlanV1,
@@ -39,6 +43,7 @@ import type {
   MatrixArtifactRequestV1,
   MatrixArtifactTransportV1,
   MatrixAuthenticatedWaveV1,
+  MatrixRejectedWaveV1,
 } from "./matrix-artifact-port.ts";
 
 const API = `https://api.github.com/repos/${REPOSITORY}/actions`;
@@ -137,9 +142,23 @@ export function createActionsMatrixArtifactTransport(options: {
   clock: Clock;
   artifactRoot: string;
 }): MatrixArtifactTransportV1 {
-  return {
-    async recover(input) {
-      if (input.requests.length === 0) return [];
+  let repositoryId: number | null = null;
+  type RecoveryInput = Parameters<MatrixArtifactTransportV1["recover"]>[0] & {
+    rejectionProof?: HostedRunProofV1;
+    completedExecution?: HostedExecutionIntentV1;
+  };
+  const recovery = {
+    async run(input: RecoveryInput): Promise<{
+      recovered: MatrixAuthenticatedWaveV1[];
+      rejected: MatrixRejectedWaveV1[];
+      completed?: boolean;
+    }> {
+      if (
+        input.requests.length === 0 && !input.rejectionProof &&
+        !input.completedExecution
+      ) {
+        return { recovered: [], rejected: [] };
+      }
       const deadline = createDeadline(120_000);
       const controller = new AbortController();
       let staging: string | null = null;
@@ -167,6 +186,75 @@ export function createActionsMatrixArtifactTransport(options: {
           release.value.status !== "found"
         ) refuse();
         const snapshot = repair.value.snapshot;
+        const completionCustody = input.completedExecution
+          ? canonicalStringify({
+            head: release.value.head,
+            runtime: release.value.snapshot.hostedRuntimes.find((row) =>
+              row.id === HOSTED_RUNTIME_ID
+            ),
+          })
+          : null;
+        if (input.completedExecution) {
+          const runtime = release.value.snapshot.hostedRuntimes.find((row) =>
+            row.id === HOSTED_RUNTIME_ID
+          );
+          const current = runtime?.execution ??
+            runtime?.lastExecutionProof?.execution;
+          if (
+            !current ||
+            canonicalStringify(current) !==
+              canonicalStringify(input.completedExecution) ||
+            (!runtime?.execution &&
+              !["bootstrap", "prior", "candidate", "rollback"].includes(
+                current.purpose,
+              ) &&
+              (runtime?.activeRevision !== current.revision ||
+                runtime.generation !== current.generation))
+          ) refuse();
+        }
+        if (input.rejectionProof) {
+          const proof = parseHostedRunProofV1(input.rejectionProof);
+          const runtime = release.value.snapshot.hostedRuntimes.find((row) =>
+            row.id === HOSTED_RUNTIME_ID
+          );
+          const active = runtime?.execution &&
+            canonicalStringify(runtime.execution) ===
+              canonicalStringify(proof.execution);
+          const savedExecution = active
+            ? runtime?.execution
+            : runtime?.lastExecutionProof?.execution;
+          if (
+            !savedExecution || proof.execution.purpose !== "ordinary" ||
+            canonicalStringify(savedExecution) !==
+              canonicalStringify(proof.execution) ||
+            (!active &&
+              (runtime?.lastExecutionProof?.outcome === "not_started" ||
+                !runtime?.lastExecutionProof ||
+                canonicalStringify({
+                    ...runtime.lastExecutionProof,
+                    observedAt: proof.observedAt,
+                  }) !== canonicalStringify(proof)))
+          ) refuse();
+          input = {
+            ...input,
+            requests: snapshot.work.flatMap((task) => {
+              const intent = task.intent;
+              if (
+                task.nextStep !== "work" || intent?.kind !== "implementation" ||
+                task.target.candidateState !== undefined
+              ) return [];
+              if (intent.requestId === null) refuse();
+              return [{
+                taskId: task.id,
+                repository: task.repository,
+                reservationId: intent.requestId,
+                intentKey: intent.key,
+                expectedBase: task.target.base,
+                attempt: task.counters.attempts,
+              }];
+            }),
+          };
+        }
         const requested = new Map<string, MatrixArtifactRequestV1>();
         for (const request of input.requests) {
           if (requested.has(request.reservationId)) refuse();
@@ -285,10 +373,33 @@ export function createActionsMatrixArtifactTransport(options: {
             items.push(...body[key].map(record));
             if (items.length > total) refuse();
             const link = response.headers.get("link");
-            const next = link?.match(/<([^>]+)>;\s*rel="next"/);
+            const nextLinks = [
+              ...(link?.matchAll(/<([^>]+)>;\s*rel="next"/g) ?? []),
+            ];
+            if (nextLinks.length > 1) refuse();
+            const next = nextLinks[0];
             if (
               next && next[1] !== `${API}${path}?per_page=100&page=${page + 1}`
-            ) refuse();
+            ) {
+              if (!next[1].startsWith("https://api.github.com/repositories/")) {
+                refuse();
+              }
+              if (repositoryId === null) {
+                const repository = await json(
+                  `https://api.github.com/repos/${REPOSITORY}`,
+                );
+                if (repository.full_name !== REPOSITORY) refuse();
+                repositoryId = positive(repository.id);
+              }
+              if (
+                next[1] !==
+                  `https://api.github.com/repositories/${repositoryId}/actions${path}?per_page=100&page=${
+                    page + 1
+                  }`
+              ) {
+                refuse();
+              }
+            }
             if (!next && items.length === total) {
               const ids = items.map((row) => positive(row.id));
               if (new Set(ids).size !== ids.length) refuse();
@@ -298,6 +409,75 @@ export function createActionsMatrixArtifactTransport(options: {
           }
           refuse();
         };
+        if (input.completedExecution) {
+          const execution = input.completedExecution;
+          const attempt = await json(
+            `${API}/runs/${execution.runId}/attempts/${execution.runAttempt}`,
+          );
+          const repo = record(attempt.repository),
+            headRepo = record(attempt.head_repository);
+          if (
+            attempt.id !== execution.runId ||
+            attempt.run_attempt !== execution.runAttempt ||
+            attempt.workflow_id !== HOSTED_SUPERVISOR_WORKFLOW_ID ||
+            attempt.path !== HOSTED_SUPERVISOR_WORKFLOW_PATH ||
+            attempt.event !== "workflow_dispatch" ||
+            attempt.head_branch !==
+              HOSTED_SUPERVISOR_REF.replace("refs/heads/", "") ||
+            attempt.head_sha !== execution.launcherSha ||
+            repo.full_name !== REPOSITORY ||
+            headRepo.full_name !== REPOSITORY || attempt.status !== "completed"
+          ) refuse();
+          positive(repo.id);
+          positive(headRepo.id);
+          const start = instant(attempt.run_started_at);
+          const end = instant(attempt.updated_at);
+          if (
+            end < start ||
+            end < execution.createdAt ||
+            end > options.clock.now() + TOLERANCE
+          ) refuse();
+          const jobs = await pages(
+            `/runs/${execution.runId}/attempts/${execution.runAttempt}/jobs`,
+            "jobs",
+          );
+          for (const job of jobs) {
+            if (
+              job.run_id !== execution.runId ||
+              job.run_attempt !== execution.runAttempt ||
+              job.head_sha !== execution.launcherSha ||
+              job.status !== "completed" ||
+              typeof job.conclusion !== "string" || job.conclusion.length === 0
+            ) refuse();
+            const finished = instant(job.completed_at);
+            const started = job.started_at === null
+              ? null
+              : instant(job.started_at);
+            // Skipped GitHub placeholders without runners have metadata times,
+            // rather than an execution interval; both must remain in the attempt.
+            const skippedWithoutRunner = job.conclusion === "skipped" &&
+              job.runner_id === null && job.runner_name === null;
+            if (
+              finished > end + TOLERANCE ||
+              finished > options.clock.now() + TOLERANCE ||
+              (skippedWithoutRunner
+                ? started === null || started < start || started > end ||
+                  finished < start || finished > end
+                : started !== null && finished < started)
+            ) refuse();
+          }
+          const fresh = await options.state.readRelease();
+          if (
+            !fresh.ok || fresh.value.status !== "found" ||
+            canonicalStringify({
+                head: fresh.value.head,
+                runtime: fresh.value.snapshot.hostedRuntimes.find((row) =>
+                  row.id === HOSTED_RUNTIME_ID
+                ),
+              }) !== completionCustody
+          ) refuse();
+          return { recovered: [], rejected: [], completed: true };
+        }
         const download = async (
           path: string,
           binary: boolean,
@@ -486,11 +666,15 @@ export function createActionsMatrixArtifactTransport(options: {
         if (new Set(plans.map((row) => row.name)).size !== plans.length) {
           refuse();
         }
+        if (input.rejectionProof && requested.size > 0 && plans.length !== 1) {
+          refuse();
+        }
         staging = await Deno.makeTempDir({
           dir: realRoot,
           prefix: "authenticated-wave-",
         });
         const recovered: MatrixAuthenticatedWaveV1[] = [];
+        const rejected: MatrixRejectedWaveV1[] = [];
         const seen = new Set<string>();
         for (const artifact of plans) {
           const [, runId, runAttempt] = (artifact.name as string).match(
@@ -512,7 +696,10 @@ export function createActionsMatrixArtifactTransport(options: {
             ),
           );
           // Artifact contents only select relevant grants; native provenance below remains mandatory.
-          if (!plan.cells.some((cell) => requested.has(cell.reservationId))) {
+          if (
+            !input.rejectionProof &&
+            !plan.cells.some((cell) => requested.has(cell.reservationId))
+          ) {
             continue;
           }
           const attempt = await json(
@@ -582,7 +769,14 @@ export function createActionsMatrixArtifactTransport(options: {
             plan.waveId !== waveId || !sameRun(run, plan.run) ||
             planner.prepared !== plan.cells.length
           ) refuse();
+          if (
+            input.rejectionProof &&
+            (plan.plannedAt < input.rejectionProof.execution.createdAt ||
+              plan.plannedAt > options.clock.now() + TOLERANCE)
+          ) refuse();
           const selected: MatrixCellPlanV1[] = [];
+          const affected: MatrixRejectedWaveV1["affected"][number][] = [];
+          let malformed = false;
           const ids = new Set<string>();
           for (const cell of plan.cells) {
             if (
@@ -628,10 +822,39 @@ export function createActionsMatrixArtifactTransport(options: {
             const reservation = snapshot.reservations.find((row) =>
               row.id === cell.reservationId
             )!;
-            if (
-              reservation.createdAt > plan.plannedAt ||
-              plan.plannedAt > options.clock.now() + TOLERANCE
-            ) refuse();
+            if (plan.plannedAt > options.clock.now() + TOLERANCE) refuse();
+            if (reservation.createdAt > plan.plannedAt) {
+              if (!input.rejectionProof) refuse();
+              malformed = true;
+            }
+            if (input.rejectionProof) {
+              if (
+                task.intent?.kind !== "implementation" ||
+                task.target.candidateState !== undefined ||
+                (task.target.head !== null &&
+                  task.target.head !== task.target.base) ||
+                task.source.kind !== "issue" ||
+                cell.request.issue?.number !== task.related.issueNumber ||
+                canonicalStringify(cell.request.evidence) !==
+                  canonicalStringify(task.evidence) ||
+                (reservation.outcome !== "reserved" &&
+                  reservation.outcome !== "ambiguous") ||
+                plan.plannedAt < input.rejectionProof.execution.createdAt ||
+                reservation.createdAt <
+                  input.rejectionProof.execution.createdAt ||
+                task.intent.startedAt < reservation.createdAt ||
+                task.intent.startedAt > options.clock.now() + TOLERANCE ||
+                reservation.createdAt > options.clock.now() + TOLERANCE
+              ) refuse();
+              affected.push({
+                request: cell.request,
+                requestDigest: cell.requestDigest,
+                work: task,
+                workDigest: await matrixDigestV1(task),
+                reservation,
+                reservationDigest: await matrixDigestV1(reservation),
+              });
+            }
             seen.add(cell.reservationId);
             selected.push(cell);
           }
@@ -644,7 +867,10 @@ export function createActionsMatrixArtifactTransport(options: {
               `sentinel-matrix-cell-${run.runId}-${run.runAttempt}-${cell.cellId}`;
             if (names.filter((value) => value === name).length > 1) refuse();
             const cellArtifact = artifacts.find((row) => row.name === name);
-            if (!cellArtifact) continue; // Missing evidence never establishes non-submission.
+            if (!cellArtifact) {
+              if (input.rejectionProof) refuse();
+              continue; // Missing evidence never establishes non-submission.
+            }
             artifactIdentity(cellArtifact);
             const cellJobs = jobs.filter((job) =>
               job.name === `matrix_cell (${cell.cellId})`
@@ -685,6 +911,10 @@ export function createActionsMatrixArtifactTransport(options: {
               row.id === cell.taskId &&
               sameRepo(row.repository, cell.repository)
             )!;
+            if (
+              input.rejectionProof && (result.status !== "not_started" ||
+                result.receipt !== null || result.bundle !== null)
+            ) refuse();
             if (task.intent?.kind === "candidate_preservation") {
               const reservation = snapshot.reservations.find((row) =>
                 row.id === cell.reservationId
@@ -725,6 +955,19 @@ export function createActionsMatrixArtifactTransport(options: {
             results.push(result);
             cellJobIds.push(positive(cellJobs[0].id));
           }
+          if (input.rejectionProof) {
+            if (!malformed) refuse();
+            if (malformed) {
+              rejected.push({
+                reason: "reservation_after_manifest",
+                proof: input.rejectionProof,
+                planDigest,
+                plannerJobId: positive(planners[0].id),
+                affected,
+              });
+            }
+            continue;
+          }
           recovered.push({
             plan,
             planDigest,
@@ -737,8 +980,11 @@ export function createActionsMatrixArtifactTransport(options: {
             },
           });
         }
+        if (input.rejectionProof && staging) {
+          await Deno.remove(staging, { recursive: true });
+        }
         staging = null;
-        return recovered;
+        return { recovered, rejected };
       } catch {
         controller.abort();
         if (staging) {
@@ -749,6 +995,32 @@ export function createActionsMatrixArtifactTransport(options: {
         controller.abort();
         deadline.dispose();
       }
+    },
+  };
+  return {
+    async confirmCompletedExecution(execution) {
+      return (await recovery.run({
+        requests: [],
+        runtimeSha: execution.revision,
+        launcherSha: execution.launcherSha,
+        completedExecution: execution,
+      })).completed === true;
+    },
+    async recover(input) {
+      return (await recovery.run(input)).recovered;
+    },
+    async rejectHistorical({ proof }) {
+      return (await recovery.run({
+        requests: [],
+        runtimeSha: proof.execution.revision,
+        launcherSha: proof.execution.launcherSha,
+        currentRun: {
+          runId: proof.execution.runId,
+          runAttempt: proof.execution.runAttempt,
+          launcherSha: proof.execution.launcherSha,
+        },
+        rejectionProof: proof,
+      })).rejected;
     },
   };
 }

@@ -7,7 +7,7 @@
  */
 import assert from "node:assert/strict";
 
-import type { GitSha } from "../../src/contracts/brands.ts";
+import type { GitSha, WorkItemId } from "../../src/contracts/brands.ts";
 import { canonicalStringify } from "../../src/contracts/canonical.ts";
 import { parseGitHubCooldownV1 } from "../../src/contracts/github-cooldown.ts";
 import type { GitHubCooldownV1 } from "../../src/contracts/github-cooldown.ts";
@@ -27,8 +27,28 @@ import type {
   HostedRuntimeRecordV1,
 } from "../../src/contracts/hosted-supervisor.ts";
 import { parseReleaseRequestV1 } from "../../src/contracts/release.ts";
-import { parseReleaseStateSnapshotV1 } from "../../src/contracts/state-snapshots.ts";
+import {
+  parseReleaseStateSnapshotV1,
+  parseRepairStateSnapshotV1,
+} from "../../src/contracts/state-snapshots.ts";
+import { portOk } from "../../src/contracts/ports.ts";
+import {
+  candidateBranch,
+  candidatePreservationRef,
+  implementationIntentKey,
+} from "../../src/repair/keys.ts";
+import { runHistoricalMatrixQuarantine } from "../../src/host/matrix-actions.ts";
+import {
+  runHostedSupervisorFinalize,
+  runHostedSupervisorPrepare,
+} from "../../src/host/actions-supervisor.ts";
+import { reservation, workRecord } from "../state/helpers.ts";
 import type { ReleaseStateSnapshotV1 } from "../../src/contracts/state-snapshots.ts";
+import type { RepairStateSnapshotV1 } from "../../src/contracts/state-snapshots.ts";
+import {
+  CLOSED_C_WAVE,
+  type ClosedCWaveBindingV1,
+} from "../../src/host/modern-matrix-recovery.ts";
 import {
   buildOwnerDevelopmentInstallSnapshot,
   OWNER_DEVELOPMENT_INSTALL_ADVANCE_REVISION,
@@ -44,6 +64,7 @@ import {
   OWNER_DEVELOPMENT_INSTALL_GUARD_REVISION,
   OWNER_DEVELOPMENT_INSTALL_HISTORY_REVISION,
   OWNER_DEVELOPMENT_INSTALL_LEDGER_REVISION,
+  OWNER_DEVELOPMENT_INSTALL_MATRIX_RECOVERY_REVISION,
   OWNER_DEVELOPMENT_INSTALL_MODEL_ROUTE_REVISION,
   OWNER_DEVELOPMENT_INSTALL_MULTI_TARGET_REVISION,
   OWNER_DEVELOPMENT_INSTALL_ORIGINAL_GENERATION,
@@ -69,7 +90,11 @@ import {
   planOwnerDevelopmentInstall,
   runOwnerDevelopmentInstallMain,
 } from "../../src/host/owner-development-install.ts";
-import { createReleaseStateStore, DenoGitRunner } from "../../src/state/mod.ts";
+import {
+  createReleaseStateStore,
+  createRepairStateStore,
+  DenoGitRunner,
+} from "../../src/state/mod.ts";
 
 const T0 = 1_700_000_000_000;
 const NOW = T0 + 10_000;
@@ -221,13 +246,518 @@ const RUNTIME55_GENERATION = 55;
 const CONCURRENCY_PRIOR_REVISION =
   "0fcdb5505417798e3ec7626333d4621fff67c26d" as GitSha;
 const CONCURRENCY_REVISION =
-  "219971b4647224fb9d2b3232f761aa48336dd583" as GitSha;
+  "be9946b2e8ef1570df9b07307ca07dfafc471b86" as GitSha;
+// Keep the new pin test-local so RED remains a behavior mismatch.
+const CONCURRENCY_RETRY_REVISION =
+  "c79b2b87a6a2dd0adc201895af10806ef7a9c600" as GitSha;
+const CONCURRENCY_PLANNER_REVISION =
+  "ddc98af7062b63e2b6b0f1e6b877e32f4675d442" as GitSha;
 const ROLLBACK_TARGET_GENERATION = 46;
+
+async function matrixRecoveryState() {
+  const work = CLOSED_C_WAVE.cells.map((cell) =>
+    workRecord(cell.taskId, {
+      createdAt: T0,
+      updatedAt: T0 + 1000,
+      repository: cell.repository,
+      source: {
+        kind: "issue",
+        id: cell.taskId.split("-").at(-1),
+        revision: cell.base,
+      },
+      related: {
+        incidentId: null,
+        issueNumber: Number(cell.taskId.split("-").at(-1)),
+      },
+      failingRevision: null,
+      controller: { sha: CLOSED_C_WAVE.runtimeSha },
+      counters: { attempts: 1, retries: 0, reviewRounds: 0 },
+      target: {
+        base: cell.base,
+        branch: candidateBranch(cell.taskId as WorkItemId),
+        head: null,
+        checkpoint: null,
+        pr: null,
+      },
+      intent: {
+        kind: "implementation",
+        key: implementationIntentKey(cell.reservationId),
+        startedAt: T0,
+        branch: candidateBranch(cell.taskId as WorkItemId),
+        expectedHead: null,
+        observedBase: cell.base,
+        pr: null,
+        requestId: cell.reservationId,
+        resultId: null,
+      },
+    })
+  );
+  const charges = CLOSED_C_WAVE.cells.map((cell) =>
+    reservation(cell.reservationId, {
+      createdAt: T0,
+      repository: cell.repository,
+      taskId: cell.taskId,
+      attempt: 1,
+      head: cell.base,
+    })
+  );
+  for (let index = 0; index < 13; index++) {
+    const requestId = "c".repeat(63) + index.toString(16);
+    const id = "older-unrelated-" + index;
+    const branch = "sentinel/" + id;
+    const repository = {
+      owner: "ubiquity",
+      name: "sentinel",
+      installationId: 0,
+    };
+    work.push(workRecord(id, {
+      repository,
+      createdAt: T0 - 2000,
+      updatedAt: T0 - 1000,
+      source: { kind: "issue", id: String(1000 + index), revision: UNRELATED },
+      related: { incidentId: null, issueNumber: 1000 + index },
+      target: {
+        base: UNRELATED,
+        branch,
+        head: null,
+        checkpoint: null,
+        pr: null,
+      },
+      counters: { attempts: 1, retries: 0, reviewRounds: 0 },
+      intent: {
+        kind: "implementation",
+        key: implementationIntentKey(requestId),
+        startedAt: T0 - 1000,
+        branch,
+        expectedHead: null,
+        observedBase: UNRELATED,
+        pr: null,
+        requestId,
+        resultId: null,
+      },
+    }));
+    charges.push(
+      reservation(requestId, {
+        repository,
+        taskId: id,
+        head: UNRELATED,
+        createdAt: T0 - 1000,
+      }),
+    );
+  }
+  const original = parseRepairStateSnapshotV1({
+    version: "v1",
+    kind: "repair_state_snapshot",
+    sequence: 1,
+    stateHead: null,
+    updatedAt: T0 + 3000,
+    incidents: [],
+    evidence: [],
+    work,
+    reservations: charges,
+    reviews: [],
+    replays: [],
+    releaseRequests: [],
+    githubCooldowns: [],
+  });
+  const ingestedWork = await Promise.all(work.map(async (row, index) => {
+    if (index >= CLOSED_C_WAVE.cells.length) return row;
+    if (index >= 18) {
+      return {
+        ...row,
+        nextStep: "blocked",
+        blocker: {
+          kind: "other",
+          since: NOW,
+          message: "matrix result unavailable",
+        },
+        updatedAt: NOW,
+      };
+    }
+    const head = "b".repeat(40) as GitSha;
+    const protectedCandidate = row.id === "issue-ubiquity-ai.ubq.fi-751";
+    return {
+      ...row,
+      target: {
+        ...row.target,
+        head,
+        checkpoint: null,
+        candidateState: { preserved: null, publishedHead: null },
+      },
+      intent: protectedCandidate ? null : {
+        ...row.intent!,
+        kind: "candidate_preservation",
+        branch: await candidatePreservationRef(
+          row.repository,
+          row.id,
+          row.intent!.key,
+        ),
+        expectedHead: head,
+      },
+      nextStep: protectedCandidate ? "blocked" : "work",
+      blocker: protectedCandidate
+        ? {
+          kind: "other",
+          since: NOW,
+          message: "candidate touches a protected path",
+        }
+        : null,
+      updatedAt: NOW,
+    };
+  }));
+  const ingested = parseRepairStateSnapshotV1({
+    ...original,
+    sequence: 2,
+    updatedAt: NOW,
+    work: ingestedWork,
+    reservations: charges.map((row, index) =>
+      index >= CLOSED_C_WAVE.cells.length ? row : ({
+        ...row,
+        outcome: index < 18 ? "submitted" : "ambiguous",
+        settledAt: NOW,
+      })
+    ),
+  });
+  return { original, ingested };
+}
+
+for (const useSourcePin of [false, true]) {
+  Deno.test(
+    useSourcePin
+      ? "owner install matrix recovery: default source pin installs reviewed R3, bootstrap, rollback and never reinstall"
+      : "owner install matrix recovery: exact metadata and charges install, bootstrap, rollback and never reinstall",
+    async () => {
+      const candidate = useSourcePin
+        ? "37a66d790eff29e9d946fe0df127bda42f986ada" as GitSha
+        : "a".repeat(40) as GitSha;
+      if (useSourcePin) {
+        assert.equal(
+          OWNER_DEVELOPMENT_INSTALL_MATRIX_RECOVERY_REVISION,
+          candidate,
+        );
+      }
+      const own = parseHostedRunProofV1({
+        ...hostedProof({
+          runId: 37170000000,
+          purpose: "bootstrap",
+          releaseId: null,
+          revision: CLOSED_C_WAVE.runtimeSha,
+          generation: 60,
+          outcome: "healthy",
+        }),
+        execution: {
+          ...hostedProof({
+            runId: 37170000000,
+            purpose: "bootstrap",
+            releaseId: null,
+            revision: CLOSED_C_WAVE.runtimeSha,
+            generation: 60,
+            outcome: "healthy",
+          }).execution,
+          createdAt: T0 - 5000,
+        },
+        startedAt: T0 - 4000,
+        finishedAt: T0 - 3000,
+        observedAt: T0 - 2000,
+        terminalAt: T0 - 3500,
+      });
+      const failure = parseHostedRunProofV1({
+        ...hostedProof({
+          runId: CLOSED_C_WAVE.run.runId,
+          purpose: "ordinary",
+          releaseId: null,
+          revision: CLOSED_C_WAVE.runtimeSha,
+          generation: 60,
+          outcome: "failed",
+        }),
+        execution: {
+          ...hostedProof({
+            runId: CLOSED_C_WAVE.run.runId,
+            purpose: "ordinary",
+            releaseId: null,
+            revision: CLOSED_C_WAVE.runtimeSha,
+            generation: 60,
+            outcome: "failed",
+          }).execution,
+          launcherSha: CLOSED_C_WAVE.run.launcherSha,
+        },
+      });
+      const state = releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: CLOSED_C_WAVE.runtimeSha,
+          generation: 60,
+          healthyProof: own,
+          executionProof: failure,
+        }),
+      });
+      const cells = await matrixRecoveryState();
+      for (const failedBootstrap of [false, true]) {
+        const fixture = await concurrencyInstallerFixture(
+          state,
+          undefined,
+          candidate,
+          { ...cells, binding: CLOSED_C_WAVE, useSourcePin },
+        );
+        try {
+          const repair = await fixture.readRepair();
+          assert.equal(await fixture.run(), 0);
+          assert.equal(fixture.reports.at(-1)?.status, "installed");
+          assert.equal(fixture.reports.at(-1)?.candidateGeneration, 61);
+          assert.equal(fixture.patches(), 1);
+          assert.deepEqual(await fixture.readRepair(), repair);
+          assert.equal(await fixture.run(), 0);
+          assert.equal(fixture.reports.at(-1)?.status, "waiting");
+          const run = {
+            runId: 37190000000,
+            runAttempt: 1,
+            launcherSha: LAUNCHER,
+          };
+          const prepared = await runHostedSupervisorPrepare({
+            state: fixture.releaseStore,
+            clock: { now: () => NOW + 100 },
+            run,
+            evidence: {
+              readExecution: () => Promise.resolve(portOk(null)),
+              verifyRevision: () => Promise.resolve(portOk(true)),
+              verifyRequest: () => Promise.resolve(portOk(false)),
+            },
+          });
+          assert.equal(prepared.status, "run");
+          if (prepared.status !== "run") throw new Error("missing bootstrap");
+          assert.equal(prepared.execution.purpose, "bootstrap");
+          assert.equal(prepared.execution.revision, candidate);
+          assert.equal(prepared.execution.generation, 61);
+          const proof = parseHostedRunProofV1({
+            ...failure,
+            execution: prepared.execution,
+            startedAt: NOW + 200,
+            finishedAt: NOW + 300,
+            observedAt: NOW + 400,
+            outcome: failedBootstrap ? "failed" : "healthy",
+            startupReady: !failedBootstrap,
+            baseSha: failedBootstrap ? null : candidate,
+            terminalAt: failedBootstrap ? null : NOW + 250,
+          });
+          const finalized = await runHostedSupervisorFinalize({
+            state: fixture.releaseStore,
+            clock: { now: () => NOW + 400 },
+            run,
+            evidence: {
+              readExecution: () => Promise.resolve(portOk(proof)),
+              verifyRevision: () => Promise.resolve(portOk(true)),
+              verifyRequest: () => Promise.resolve(portOk(false)),
+            },
+          });
+          assert.equal(finalized.status, "idle");
+          fixture.setNow(NOW + 500);
+          assert.equal(await fixture.run(), 0);
+          assert.equal(
+            fixture.reports.at(-1)?.status,
+            failedBootstrap ? "rolled_back" : "no_change",
+          );
+          assert.equal(fixture.patches(), failedBootstrap ? 2 : 1);
+          const after = await fixture.read();
+          assert.ok(after.ok && after.value.status === "found");
+          assert.equal(
+            after.value.snapshot.hostedRuntimes[0].generation,
+            failedBootstrap ? 62 : 61,
+          );
+          assert.deepEqual(await fixture.readRepair(), repair);
+          if (failedBootstrap) {
+            fixture.expireArchives();
+            assert.deepEqual(
+              after.value.snapshot.hostedRuntimes[0].lastHealthyProof,
+              own,
+            );
+            assert.equal(await fixture.run(), 0);
+            assert.equal(fixture.reports.at(-1)?.status, "waiting");
+            assert.equal(fixture.patches(), 2);
+            const restoredRun = { ...run, runId: run.runId + 1 };
+            const restored = await runHostedSupervisorPrepare({
+              state: fixture.releaseStore,
+              clock: { now: () => NOW + 600 },
+              run: restoredRun,
+              evidence: {
+                readExecution: () => Promise.resolve(portOk(null)),
+                verifyRevision: () => Promise.resolve(portOk(true)),
+                verifyRequest: () => Promise.resolve(portOk(false)),
+              },
+            });
+            assert.equal(restored.status, "run");
+            if (restored.status !== "run") {
+              throw new Error("missing restored verification");
+            }
+            assert.equal(restored.execution.purpose, "bootstrap");
+            assert.equal(restored.execution.generation, 62);
+            assert.equal(restored.execution.revision, CLOSED_C_WAVE.runtimeSha);
+            const restoredFailure = parseHostedRunProofV1({
+              ...failure,
+              execution: restored.execution,
+              startedAt: NOW + 700,
+              finishedAt: NOW + 800,
+              observedAt: NOW + 900,
+            });
+            const settledRollback = await runHostedSupervisorFinalize({
+              state: fixture.releaseStore,
+              clock: { now: () => NOW + 900 },
+              run: restoredRun,
+              evidence: {
+                readExecution: () => Promise.resolve(portOk(restoredFailure)),
+                verifyRevision: () => Promise.resolve(portOk(true)),
+                verifyRequest: () => Promise.resolve(portOk(false)),
+              },
+            });
+            assert.equal(settledRollback.status, "idle");
+            fixture.setNow(NOW + 1000);
+            assert.equal(await fixture.run(), 0);
+            assert.equal(fixture.reports.at(-1)?.status, "waiting");
+            assert.equal(
+              fixture.patches(),
+              2,
+              "failed restored verification cannot reinstall or advance to generation 63",
+            );
+            assert.deepEqual(await fixture.readRepair(), repair);
+          } else {
+            fixture.expireArchives();
+            const ordinaryRun = { ...run, runId: run.runId + 2 };
+            const ordinary = await runHostedSupervisorPrepare({
+              state: fixture.releaseStore,
+              clock: { now: () => NOW + 600 },
+              run: ordinaryRun,
+              evidence: {
+                readExecution: () => Promise.resolve(portOk(null)),
+                verifyRevision: () => Promise.resolve(portOk(true)),
+                verifyMatrixOrdinaryRevision: () =>
+                  Promise.resolve(portOk(true)),
+                verifyRequest: () => Promise.resolve(portOk(false)),
+              },
+            });
+            assert.equal(ordinary.status, "run");
+            if (ordinary.status !== "run") {
+              throw new Error("missing ordinary61");
+            }
+            assert.equal(ordinary.execution.purpose, "ordinary");
+            const ordinaryFailure = parseHostedRunProofV1({
+              ...failure,
+              execution: ordinary.execution,
+              startedAt: NOW + 700,
+              finishedAt: NOW + 800,
+              observedAt: NOW + 900,
+            });
+            const failed = await runHostedSupervisorFinalize({
+              state: fixture.releaseStore,
+              clock: { now: () => NOW + 900 },
+              run: ordinaryRun,
+              evidence: {
+                readExecution: () => Promise.resolve(portOk(ordinaryFailure)),
+                verifyRevision: () => Promise.resolve(portOk(true)),
+                verifyRequest: () => Promise.resolve(portOk(false)),
+              },
+            });
+            assert.equal(failed.status, "idle");
+            fixture.setNow(NOW + 1000);
+            assert.equal(await fixture.run(), 0);
+            assert.equal(
+              fixture.reports.at(-1)?.status,
+              "rolled_back",
+              "healthy61 then failed ordinary61 restores C62 after original archives disappear",
+            );
+            const restored = await fixture.read();
+            assert.ok(restored.ok && restored.value.status === "found");
+            assert.equal(
+              restored.value.snapshot.hostedRuntimes[0].generation,
+              62,
+            );
+            assert.deepEqual(
+              restored.value.snapshot.hostedRuntimes[0].lastHealthyProof,
+              proof,
+              "healthy61 history must remain verbatim",
+            );
+            assert.deepEqual(
+              restored.value.snapshot.hostedRuntimes[0].lastExecutionProof,
+              ordinaryFailure,
+            );
+            assert.equal(await fixture.run(), 0);
+            assert.equal(fixture.reports.at(-1)?.status, "waiting");
+            assert.equal(fixture.patches(), 2);
+            assert.deepEqual(await fixture.readRepair(), repair);
+          }
+          assert.ok(
+            fixture.requests.filter((row) => row.method === "GET").every((
+              row,
+            ) => !row.path.includes("/logs") && !row.path.includes("/zip")),
+          );
+        } finally {
+          await fixture.close();
+        }
+      }
+      for (
+        const refusal of [
+          "ci",
+          "parent",
+          "readback",
+          "native",
+          "repair-active",
+          "repair-unknown",
+          "repair-expired",
+        ] as const
+      ) {
+        const repairHold = refusal.startsWith("repair-");
+        const fixture = await concurrencyInstallerFixture(
+          state,
+          refusal === "native" || repairHold
+            ? undefined
+            : refusal as "ci" | "parent" | "readback",
+          candidate,
+          {
+            ...cells,
+            ingested: repairHold
+              ? parseRepairStateSnapshotV1({
+                ...cells.ingested,
+                githubCooldowns: [cooldown(
+                  refusal === "repair-unknown"
+                    ? null
+                    : refusal === "repair-active"
+                    ? NOW + 1000
+                    : NOW - 1,
+                )],
+              })
+              : cells.ingested,
+            binding: CLOSED_C_WAVE,
+            nativeRefusal: refusal === "native",
+            useSourcePin,
+          },
+        );
+        try {
+          assert.equal(await fixture.run(), 0);
+          if (refusal === "repair-expired") {
+            assert.equal(fixture.reports.at(-1)?.status, "installed");
+          } else assert.notEqual(fixture.reports.at(-1)?.status, "installed");
+          assert.equal(
+            fixture.patches(),
+            refusal === "readback" || refusal === "repair-expired" ? 1 : 0,
+          );
+        } finally {
+          await fixture.close();
+        }
+      }
+    },
+  );
+}
 
 /** Real production entrypoint, fake GitHub transport, real private Git objects. */
 async function concurrencyInstallerFixture(
   snapshot: ReleaseStateSnapshotV1,
   refusal?: "ancestry" | "ci" | "parent" | "readback" | "artifact",
+  candidateRevision: GitSha = CONCURRENCY_REVISION,
+  matrixRecovery?: {
+    binding: ClosedCWaveBindingV1;
+    original: RepairStateSnapshotV1;
+    ingested: RepairStateSnapshotV1;
+    nativeRefusal?: boolean;
+    /** Omit only the candidate override; keep the real-Git fixture binding. */
+    useSourcePin?: boolean;
+  },
 ) {
   const directory = await Deno.makeTempDir({
     prefix: "sentinel-owner57-",
@@ -238,6 +768,8 @@ async function concurrencyInstallerFixture(
   const originalFetch = globalThis.fetch;
   const originalLog = console.log;
   const originalNow = Date.now;
+  let fixtureNow = NOW;
+  let archivesUnavailable = false;
   const originalCwd = Deno.cwd();
   const originalEnvironmentGet = Deno.env.get;
   const environment: Record<string, string> = {
@@ -359,6 +891,48 @@ async function concurrencyInstallerFixture(
       "refs/heads/sentinel-state/repair",
       initialHead,
     ]);
+    let recoveryBinding: ClosedCWaveBindingV1 | undefined;
+    let expectedRepairHead = initialHead;
+    if (matrixRecovery !== undefined) {
+      await git([
+        ...gitArgs,
+        "update-ref",
+        "-d",
+        "refs/heads/sentinel-state/repair",
+        initialHead,
+      ]);
+      const repairStore = createRepairStateStore({
+        remoteUrl: remote,
+        scratchDir: `${directory}/matrix-repair`,
+        runner: new DenoGitRunner(`${directory}/matrix-home`),
+      });
+      const original = await repairStore.writeRepair(
+        matrixRecovery.original,
+        null,
+      );
+      assert.ok(
+        original.ok && original.value.status === "applied",
+        JSON.stringify(original),
+      );
+      const ingested = await repairStore.writeRepair(
+        parseRepairStateSnapshotV1({
+          ...matrixRecovery.ingested,
+          stateHead: original.value.head,
+          sequence: 2,
+        }),
+        original.value.head,
+      );
+      assert.ok(
+        ingested.ok && ingested.value.status === "applied",
+        JSON.stringify(ingested),
+      );
+      expectedRepairHead = ingested.value.head;
+      recoveryBinding = {
+        ...matrixRecovery.binding,
+        repairCommit: original.value.head,
+        releaseCommit: initialHead,
+      };
+    }
     if (refusal === "artifact") {
       const blob = await git(
         [...gitArgs, "hash-object", "-w", "--stdin"],
@@ -455,14 +1029,71 @@ async function concurrencyInstallerFixture(
       const method = init?.method ?? "GET";
       const body = init?.body ? JSON.parse(String(init.body)) : {};
       requests.push({ method, path: url.pathname, body });
+      if (
+        matrixRecovery !== undefined && url.pathname.includes("/actions/runs/")
+      ) {
+        const latest = await store.readRelease();
+        assert.ok(latest.ok && latest.value.status === "found");
+        const producer = snapshot.hostedRuntimes[0].lastExecutionProof!;
+        const currentProof = latest.value.snapshot.hostedRuntimes[0]
+          .lastExecutionProof!;
+        const proof =
+          url.pathname.includes(String(currentProof.execution.runId))
+            ? currentProof
+            : producer;
+        if (url.pathname.endsWith("/jobs")) {
+          return response({
+            total_count: 1,
+            jobs: [{
+              id: proof.jobId,
+              status: matrixRecovery.nativeRefusal
+                ? "in_progress"
+                : "completed",
+            }],
+          });
+        }
+        if (url.pathname.endsWith("/artifacts")) {
+          if (archivesUnavailable) {
+            return response({ total_count: 0, artifacts: [] });
+          }
+          const binding = recoveryBinding!;
+          return response({
+            total_count: binding.cells.length + 1,
+            artifacts: [
+              {
+                id: 1,
+                name:
+                  `sentinel-matrix-plan-${binding.run.runId}-${binding.run.runAttempt}`,
+                expired: false,
+                digest: `sha256:${binding.planZipDigest ?? DIGEST}`,
+              },
+              ...binding.cells.map((cell, index) => ({
+                id: index + 2,
+                name:
+                  `sentinel-matrix-cell-${binding.run.runId}-${binding.run.runAttempt}-${cell.cellId}`,
+                expired: false,
+                digest: `sha256:${DIGEST}`,
+              })),
+            ],
+          });
+        }
+        return response({
+          id: proof.execution.runId,
+          run_attempt: proof.execution.runAttempt,
+          head_sha: proof.execution.launcherSha,
+          workflow_id: proof.workflowId,
+          head_branch: "sentinel-supervisor",
+          status: "completed",
+        });
+      }
       if (url.pathname.includes("/compare/")) {
         assert.ok(
-          url.pathname.endsWith(`${CONCURRENCY_REVISION}...development`),
+          url.pathname.endsWith(`${candidateRevision}...development`),
         );
         return response({
           status: refusal === "ancestry" ? "diverged" : "ahead",
-          base_commit: { sha: CONCURRENCY_REVISION },
-          merge_base_commit: { sha: CONCURRENCY_REVISION },
+          base_commit: { sha: candidateRevision },
+          merge_base_commit: { sha: candidateRevision },
           ahead_by: 1,
           behind_by: 0,
           total_commits: 1,
@@ -475,7 +1106,7 @@ async function concurrencyInstallerFixture(
             name: "test-local",
             status: "completed",
             conclusion: refusal === "ci" ? "failure" : "success",
-            head_sha: CONCURRENCY_REVISION,
+            head_sha: candidateRevision,
           }],
         });
       }
@@ -569,13 +1200,18 @@ async function concurrencyInstallerFixture(
         assert.ok(createdCommit !== null);
         assert.deepEqual(body, { sha: createdCommit, force: false });
         patches++;
-        await git([...gitArgs, "update-ref", ref, body.sha, beforeHead]);
+        const expected = await git([
+          ...gitArgs,
+          "rev-parse",
+          `${createdCommit}^`,
+        ]);
+        await git([...gitArgs, "update-ref", ref, body.sha, expected]);
         return response({ object: { sha: body.sha } });
       }
       throw new Error(`unexpected offline request: ${method} ${url.pathname}`);
     };
     console.log = (value: unknown) => reports.push(JSON.parse(String(value)));
-    Date.now = () => NOW;
+    Date.now = () => fixtureNow;
     Deno.env.get = (name) => {
       if (Object.hasOwn(environment, name)) return environment[name];
       assert.ok(name === "PATH" || name === "NODE_V8_COVERAGE");
@@ -587,10 +1223,26 @@ async function concurrencyInstallerFixture(
       beforeHead,
       requests,
       reports,
-      run: runOwnerDevelopmentInstallMain,
+      run: () =>
+        runOwnerDevelopmentInstallMain(
+          recoveryBinding === undefined ? undefined : {
+            ...(matrixRecovery?.useSourcePin
+              ? {}
+              : { matrixRecoveryRevision: candidateRevision }),
+            matrixRecoveryBinding: recoveryBinding,
+          },
+        ),
       patches: () => patches,
       head: () => git([...gitArgs, "rev-parse", ref]),
       read: () => store.readRelease(),
+      readRepair: () => store.readRepair(),
+      releaseStore: store,
+      setNow: (value: number) => {
+        fixtureNow = value;
+      },
+      expireArchives: () => {
+        archivesUnavailable = true;
+      },
       message: () => git([...gitArgs, "log", "-1", "--format=%B", ref]),
       close: async () => {
         assert.equal(
@@ -599,7 +1251,7 @@ async function concurrencyInstallerFixture(
             "rev-parse",
             "refs/heads/sentinel-state/repair",
           ]),
-          initialHead,
+          expectedRepairHead,
         );
         Deno.Command = originalCommand;
         globalThis.fetch = originalFetch;
@@ -6051,7 +6703,7 @@ Deno.test(
 );
 
 Deno.test(
-  "owner install runtime57: real installer rolls exact failed57 back only to saved0fc at terminal58 once",
+  "owner install runtime57: real installer restores saved0fc at58 once before its own health",
   async () => {
     const prior = healthyProof(CONCURRENCY_PRIOR_REVISION, 56, 37106475267);
     const runtime = runtimeRecord({
@@ -6088,7 +6740,7 @@ Deno.test(
       assert.deepEqual(restored.hostedReleases, state.hostedReleases);
       assert.deepEqual(restored.hostedRuntimes[0].lastHealthyProof, prior);
       assert.equal(await fixture.run(), 0);
-      assert.equal(fixture.reports.at(-1)?.status, "no_change");
+      assert.equal(fixture.reports.at(-1)?.status, "waiting");
       assert.equal(fixture.patches(), 1);
       const proven58 = healthyProof(CONCURRENCY_PRIOR_REVISION, 58, 903);
       assert.equal(
@@ -6100,7 +6752,7 @@ Deno.test(
             lastExecutionProof: proven58,
           }],
         }, NOW).status,
-        "no_change",
+        "install",
       );
     } finally {
       await fixture.close();
@@ -6263,6 +6915,880 @@ Deno.test(
           assert.ok(
             fixture.requests.every((request) => request.method === "GET"),
           );
+        }
+      } finally {
+        await fixture.close();
+      }
+    }
+  },
+);
+
+Deno.test(
+  "owner install runtime59: own healthy58 installs the fixed successor once with saved bootstrap proof",
+  async () => {
+    const prior = hostedProof({
+      runId: 37126530084,
+      purpose: "bootstrap",
+      releaseId: null,
+      revision: CONCURRENCY_PRIOR_REVISION,
+      generation: 58,
+      outcome: "healthy",
+    });
+    const state = releaseSnapshot({
+      runtime: runtimeRecord({
+        revision: CONCURRENCY_PRIOR_REVISION,
+        generation: 58,
+        healthyProof: prior,
+        executionProof: prior,
+      }),
+      hostedReleases: [acceptedRelease()],
+      cooldowns: [cooldown(NOW - 1)],
+    });
+    const fixture = await concurrencyInstallerFixture(
+      state,
+      undefined,
+      CONCURRENCY_RETRY_REVISION,
+    );
+    try {
+      assert.equal(await fixture.run(), 0);
+      assert.equal(fixture.reports.at(-1)?.status, "installed");
+      assert.equal(
+        fixture.reports.at(-1)?.candidateRevision,
+        CONCURRENCY_RETRY_REVISION,
+      );
+      assert.equal(fixture.reports.at(-1)?.candidateGeneration, 59);
+      assert.equal(fixture.patches(), 1);
+      const read = await fixture.read();
+      if (!read.ok || read.value.status !== "found") {
+        throw new Error("missing installed successor");
+      }
+      const installed = read.value.snapshot;
+      assert.equal(
+        installed.hostedRuntimes[0].activeRevision,
+        CONCURRENCY_RETRY_REVISION,
+      );
+      assert.equal(installed.hostedRuntimes[0].generation, 59);
+      assert.deepEqual(installed.hostedRuntimes[0].lastHealthyProof, prior);
+      assert.deepEqual(installed.hostedReleases, state.hostedReleases);
+      assert.deepEqual(installed.githubCooldowns, state.githubCooldowns);
+      const recorded = JSON.parse(
+        (await fixture.message()).trim().split("\n").at(-1)!,
+      );
+      assert.equal(recorded.stateHead, fixture.beforeHead);
+      assert.equal(recorded.priorRevision, CONCURRENCY_PRIOR_REVISION);
+      assert.equal(recorded.priorGeneration, 58);
+      assert.equal(recorded.nextRevision, CONCURRENCY_RETRY_REVISION);
+      assert.equal(recorded.nextGeneration, 59);
+      assert.deepEqual(recorded.priorHealthyProof, prior);
+      assert.equal(await fixture.run(), 0);
+      assert.equal(fixture.reports.at(-1)?.status, "waiting");
+      assert.equal(fixture.patches(), 1);
+    } finally {
+      await fixture.close();
+    }
+  },
+);
+
+Deno.test(
+  "owner install runtime59: exact failed59 restores only saved healthy0fc58 once at terminal60",
+  async () => {
+    const prior = healthyProof(CONCURRENCY_PRIOR_REVISION, 58, 37126530084);
+    const runtime = runtimeRecord({
+      revision: CONCURRENCY_RETRY_REVISION,
+      generation: 59,
+      healthyProof: prior,
+      executionProof: failedProof(CONCURRENCY_RETRY_REVISION, 59, 1002),
+    });
+    const state = releaseSnapshot({
+      runtime,
+      hostedReleases: [acceptedRelease()],
+    });
+    const fixture = await concurrencyInstallerFixture(
+      state,
+      undefined,
+      CONCURRENCY_RETRY_REVISION,
+    );
+    try {
+      assert.equal(await fixture.run(), 0);
+      assert.equal(fixture.reports.at(-1)?.status, "rolled_back");
+      assert.equal(
+        fixture.reports.at(-1)?.candidateRevision,
+        CONCURRENCY_PRIOR_REVISION,
+      );
+      assert.equal(fixture.reports.at(-1)?.candidateGeneration, 60);
+      assert.equal(fixture.patches(), 1);
+      assert.ok(
+        !fixture.requests.some((request) =>
+          request.path.includes("/compare/") ||
+          request.path.includes("/check-runs")
+        ),
+      );
+      const read = await fixture.read();
+      if (!read.ok || read.value.status !== "found") {
+        throw new Error("missing successor rollback");
+      }
+      assert.deepEqual(
+        read.value.snapshot.hostedRuntimes[0].lastHealthyProof,
+        prior,
+      );
+      assert.deepEqual(
+        read.value.snapshot.hostedReleases,
+        state.hostedReleases,
+      );
+      assert.equal(await fixture.run(), 0);
+      assert.equal(fixture.reports.at(-1)?.status, "no_change");
+      assert.equal(fixture.patches(), 1);
+    } finally {
+      await fixture.close();
+    }
+    for (
+      const proof of [
+        null,
+        healthyProof(CONCURRENCY_PRIOR_REVISION, 56),
+        healthyProof(UNRELATED, 58),
+        healthyProof(CONCURRENCY_RETRY_REVISION, 59),
+      ]
+    ) {
+      assert.equal(
+        planOwnerDevelopmentInstall(
+          releaseSnapshot({ runtime: { ...runtime, lastHealthyProof: proof } }),
+          NOW,
+        ).status,
+        "waiting",
+      );
+    }
+    for (
+      const proof of [
+        null,
+        notStartedProof(CONCURRENCY_RETRY_REVISION, 59),
+        failedProof(CONCURRENCY_RETRY_REVISION, 58),
+        failedProof(UNRELATED, 59),
+      ]
+    ) {
+      assert.equal(
+        planOwnerDevelopmentInstall(
+          releaseSnapshot({
+            runtime: { ...runtime, lastExecutionProof: proof },
+          }),
+          NOW,
+        ).status,
+        "waiting",
+      );
+    }
+  },
+);
+
+Deno.test(
+  "owner install runtime59: real consumer preserves proof owner CI CAS and terminal guards",
+  async () => {
+    const prior = healthyProof(CONCURRENCY_PRIOR_REVISION, 58, 37126530084);
+    const runtime = runtimeRecord({
+      revision: CONCURRENCY_PRIOR_REVISION,
+      generation: 58,
+      healthyProof: prior,
+      executionProof: prior,
+    });
+    const healthy = releaseSnapshot({ runtime });
+    const accepted59 = healthyProof(CONCURRENCY_RETRY_REVISION, 59, 1003);
+    const restored60 = healthyProof(CONCURRENCY_PRIOR_REVISION, 60, 1004);
+    const cases: {
+      state: ReleaseStateSnapshotV1;
+      refusal?: Parameters<typeof concurrencyInstallerFixture>[1];
+      status: string;
+      patches?: number;
+    }[] = [
+      {
+        state: releaseSnapshot({
+          runtime: { ...runtime, lastHealthyProof: null },
+        }),
+        status: "waiting",
+      },
+      {
+        state: releaseSnapshot({
+          runtime: {
+            ...runtime,
+            lastHealthyProof: healthyProof(CONCURRENCY_PRIOR_REVISION, 56),
+          },
+        }),
+        status: "waiting",
+      },
+      {
+        state: releaseSnapshot({
+          runtime: { ...runtime, lastExecutionProof: null },
+        }),
+        status: "waiting",
+      },
+      {
+        state: releaseSnapshot({
+          runtime: {
+            ...runtime,
+            lastExecutionProof: failedProof(CONCURRENCY_PRIOR_REVISION, 58),
+          },
+        }),
+        status: "waiting",
+      },
+      {
+        state: releaseSnapshot({
+          runtime: {
+            ...runtime,
+            lastExecutionProof: parseHostedRunProofV1({
+              ...prior,
+              observedAt: T0 + 2500,
+            }),
+          },
+        }),
+        status: "waiting",
+      },
+      {
+        state: releaseSnapshot({
+          runtime: {
+            ...runtime,
+            execution: executionIntent(CONCURRENCY_PRIOR_REVISION, 58),
+          },
+        }),
+        status: "waiting",
+      },
+      {
+        state: releaseSnapshot({
+          runtime,
+          hostedReleases: [requestedRelease()],
+        }),
+        status: "waiting",
+      },
+      {
+        state: releaseSnapshot({ runtime, cooldowns: [cooldown(null)] }),
+        status: "waiting",
+      },
+      {
+        state: releaseSnapshot({ runtime, cooldowns: [cooldown(NOW + 1)] }),
+        status: "waiting",
+      },
+      {
+        state: releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: CONCURRENCY_RETRY_REVISION,
+            generation: 59,
+            healthyProof: accepted59,
+            executionProof: accepted59,
+          }),
+        }),
+        status: "installed",
+        patches: 1,
+      },
+      {
+        state: releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: CONCURRENCY_PRIOR_REVISION,
+            generation: 60,
+            healthyProof: restored60,
+            executionProof: restored60,
+          }),
+        }),
+        status: "no_change",
+      },
+      { state: healthy, refusal: "ancestry", status: "waiting" },
+      { state: healthy, refusal: "ci", status: "waiting" },
+      { state: healthy, refusal: "artifact", status: "waiting" },
+      { state: healthy, refusal: "parent", status: "failed" },
+      { state: healthy, refusal: "readback", status: "failed", patches: 1 },
+    ];
+    for (const entry of cases) {
+      const fixture = await concurrencyInstallerFixture(
+        entry.state,
+        entry.refusal,
+        entry.status === "installed"
+          ? CONCURRENCY_PLANNER_REVISION
+          : CONCURRENCY_RETRY_REVISION,
+      );
+      try {
+        assert.equal(await fixture.run(), 0);
+        assert.equal(
+          fixture.reports.at(-1)?.status,
+          entry.status,
+          entry.refusal,
+        );
+        assert.equal(fixture.patches(), entry.patches ?? 0, entry.refusal);
+        if (entry.status === "installed") {
+          assert.equal(
+            fixture.reports.at(-1)?.candidateRevision,
+            CONCURRENCY_PLANNER_REVISION,
+          );
+          assert.equal(fixture.reports.at(-1)?.candidateGeneration, 60);
+        } else if (entry.refusal !== "parent" && entry.refusal !== "readback") {
+          assert.equal(await fixture.head(), fixture.beforeHead);
+        }
+        if (
+          entry.status !== "installed" &&
+          (entry.refusal === undefined || entry.refusal === "artifact")
+        ) {
+          assert.equal(fixture.requests.length, 0);
+        }
+      } finally {
+        await fixture.close();
+      }
+    }
+  },
+);
+
+Deno.test(
+  "owner install runtime60: verified maintenance preserves unrelated admission through installation and rollback",
+  async () => {
+    for (const failedCandidate of [false, true]) {
+      const prior = hostedProof({
+        runId: 1200,
+        purpose: "bootstrap",
+        releaseId: null,
+        revision: CONCURRENCY_RETRY_REVISION,
+        generation: 59,
+        outcome: "healthy",
+      });
+      const latest = failedCandidate
+        ? hostedProof({
+          runId: 1201,
+          purpose: "bootstrap",
+          releaseId: null,
+          revision: CONCURRENCY_PLANNER_REVISION,
+          generation: 60,
+          outcome: "failed",
+        })
+        : prior;
+      const fixture = await concurrencyInstallerFixture(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: failedCandidate
+              ? CONCURRENCY_PLANNER_REVISION
+              : CONCURRENCY_RETRY_REVISION,
+            generation: failedCandidate ? 60 : 59,
+            healthyProof: prior,
+            executionProof: latest,
+          }),
+          hostedReleases: [acceptedRelease()],
+        }),
+        undefined,
+        CONCURRENCY_PLANNER_REVISION,
+      );
+      const remote = `${Deno.cwd()}/remote.git`;
+      const repairRef = "refs/heads/sentinel-state/repair";
+      const command = async (args: string[]) => {
+        const result = await new Deno.Command("git", {
+          args: ["--git-dir", remote, ...args],
+          stdout: "piped",
+          stderr: "piped",
+        }).output();
+        assert.equal(result.code, 0, new TextDecoder().decode(result.stderr));
+      };
+      try {
+        await command(["update-ref", "-d", repairRef, fixture.initialHead]);
+        const repair = createRepairStateStore({
+          remoteUrl: remote,
+          scratchDir: `${Deno.cwd()}/unrelated-repair`,
+        });
+        const release = createReleaseStateStore({
+          remoteUrl: remote,
+          scratchDir: `${Deno.cwd()}/prepare-release`,
+        });
+        const requestId = "e".repeat(64);
+        const work = workRecord("unrelated-existing-admission", {
+          createdAt: T0 - 2000,
+          updatedAt: T0 - 1000,
+          target: {
+            base: UNRELATED,
+            branch: "sentinel/unrelated-existing-admission",
+            checkpoint: null,
+            head: null,
+            pr: null,
+          },
+          intent: {
+            kind: "implementation",
+            key: implementationIntentKey(requestId),
+            startedAt: T0 - 1000,
+            branch: "sentinel/unrelated-existing-admission",
+            expectedHead: null,
+            observedBase: UNRELATED,
+            pr: null,
+            requestId,
+            resultId: null,
+          },
+          counters: { attempts: 1, retries: 0, reviewRounds: 0 },
+        });
+        const charge = reservation(requestId, {
+          taskId: work.id,
+          head: UNRELATED,
+          createdAt: T0 - 1000,
+        });
+        const seeded = await repair.writeRepair(
+          parseRepairStateSnapshotV1({
+            version: "v1",
+            kind: "repair_state_snapshot",
+            stateHead: null,
+            sequence: 1,
+            updatedAt: T0,
+            incidents: [],
+            evidence: [],
+            work: [work],
+            reservations: [charge],
+            reviews: [],
+            replays: [],
+            releaseRequests: [],
+            githubCooldowns: [],
+          }),
+          null,
+        );
+        assert(
+          seeded.ok && seeded.value.status === "applied",
+          JSON.stringify(seeded),
+        );
+        const originalRepair = await repair.readRepair();
+        let nativeReads = 0;
+        let completionReads = 0;
+        const maintenance = async () => {
+          const before = await fixture.read();
+          assert(before.ok && before.value.status === "found");
+          const saved =
+            before.value.snapshot.hostedRuntimes[0].lastExecutionProof;
+          assert(saved && saved.outcome !== "not_started");
+          const result = await runHistoricalMatrixQuarantine({
+            state: {
+              readRepair: () => repair.readRepair(),
+              readRelease: () => fixture.read(),
+              writeRepair: () => {
+                throw new Error("verification must not write repair state");
+              },
+            },
+            clock: { now: () => NOW },
+            budget: {
+              settleModelStart: () => {
+                throw new Error(
+                  "verification must not settle unrelated admission",
+                );
+              },
+            },
+            historicalReleaseWitnesses: [{
+              commit: STATE_HEAD,
+              executionId: "1199:1:repair",
+              logDigest: DIGEST,
+              reservationIds: Array.from(
+                { length: 55 },
+                (_, i) => i.toString(16).padStart(64, "0"),
+              ),
+              reject: () => {
+                throw new Error(
+                  "unrelated admission is outside closed legacy55",
+                );
+              },
+            }],
+            transport: {
+              confirmCompletedExecution: (execution) => {
+                assert.deepEqual(execution, saved.execution);
+                completionReads++;
+                return Promise.resolve(true);
+              },
+              rejectHistorical: () => {
+                throw new Error(
+                  "verification proof cannot authorize ordinary quarantine",
+                );
+              },
+              recover: () => {
+                throw new Error("verification cannot ingest artifacts");
+              },
+            },
+            readExecution: (execution) => {
+              assert.deepEqual(execution, saved.execution);
+              nativeReads++;
+              return Promise.resolve(portOk({ ...saved, observedAt: NOW }));
+            },
+          });
+          assert.equal(result, 0);
+          assert.deepEqual(
+            await fixture.read(),
+            before,
+            "maintenance preserves pointer and both proof slots",
+          );
+          assert.deepEqual(
+            await repair.readRepair(),
+            originalRepair,
+            "unrelated task, intent and charge remain exact",
+          );
+        };
+        await maintenance();
+        assert.equal(await fixture.run(), 0);
+        assert.equal(
+          fixture.reports.at(-1)?.status,
+          failedCandidate ? "rolled_back" : "installed",
+        );
+        assert.equal(
+          fixture.reports.at(-1)?.candidateGeneration,
+          failedCandidate ? 61 : 60,
+        );
+        assert.equal(
+          fixture.reports.at(-1)?.candidateRevision,
+          failedCandidate
+            ? CONCURRENCY_RETRY_REVISION
+            : CONCURRENCY_PLANNER_REVISION,
+        );
+        assert.equal(fixture.patches(), 1);
+        await maintenance();
+        assert.equal(nativeReads, 2);
+        assert.equal(completionReads, 2);
+        const prepared = await runHostedSupervisorPrepare({
+          state: release,
+          clock: { now: () => NOW + 100 },
+          run: {
+            runId: failedCandidate ? 1203 : 1202,
+            runAttempt: 1,
+            launcherSha: LAUNCHER,
+          },
+          evidence: {
+            readExecution: () => Promise.resolve(portOk(null)),
+            verifyRevision: () => Promise.resolve(portOk(true)),
+            verifyRequest: () => Promise.resolve(portOk(false)),
+          },
+        });
+        assert.equal(prepared.status, "run");
+        if (prepared.status !== "run") {
+          throw new Error("exact installed pointer must admit verification");
+        }
+        assert.equal(prepared.execution.generation, failedCandidate ? 61 : 60);
+        assert.equal(
+          prepared.execution.revision,
+          failedCandidate
+            ? CONCURRENCY_RETRY_REVISION
+            : CONCURRENCY_PLANNER_REVISION,
+        );
+        assert.equal(
+          prepared.execution.purpose,
+          "bootstrap",
+          "verification cannot enable ordinary model starts",
+        );
+        assert.deepEqual(await repair.readRepair(), originalRepair);
+      } finally {
+        await command(["update-ref", repairRef, fixture.initialHead]);
+        await fixture.close();
+      }
+    }
+  },
+);
+
+Deno.test(
+  "owner install runtime60: own healthy59 installs the exact planner once with saved bootstrap proof",
+  async () => {
+    const prior = hostedProof({
+      runId: 37134515396,
+      purpose: "bootstrap",
+      releaseId: null,
+      revision: CONCURRENCY_RETRY_REVISION,
+      generation: 59,
+      outcome: "healthy",
+    });
+    const state = releaseSnapshot({
+      runtime: runtimeRecord({
+        revision: CONCURRENCY_RETRY_REVISION,
+        generation: 59,
+        healthyProof: prior,
+        executionProof: prior,
+      }),
+      hostedReleases: [acceptedRelease()],
+      cooldowns: [cooldown(NOW - 1)],
+    });
+    const fixture = await concurrencyInstallerFixture(
+      state,
+      undefined,
+      CONCURRENCY_PLANNER_REVISION,
+    );
+    try {
+      assert.equal(await fixture.run(), 0);
+      assert.equal(fixture.reports.at(-1)?.status, "installed");
+      assert.equal(
+        fixture.reports.at(-1)?.candidateRevision,
+        CONCURRENCY_PLANNER_REVISION,
+      );
+      assert.equal(fixture.reports.at(-1)?.candidateGeneration, 60);
+      assert.equal(fixture.patches(), 1);
+      const read = await fixture.read();
+      if (!read.ok || read.value.status !== "found") {
+        throw new Error("missing installed planner");
+      }
+      assert.equal(
+        read.value.snapshot.hostedRuntimes[0].activeRevision,
+        CONCURRENCY_PLANNER_REVISION,
+      );
+      assert.equal(read.value.snapshot.hostedRuntimes[0].generation, 60);
+      assert.deepEqual(
+        read.value.snapshot.hostedRuntimes[0].lastHealthyProof,
+        prior,
+      );
+      assert.deepEqual(
+        read.value.snapshot.hostedReleases,
+        state.hostedReleases,
+      );
+      assert.deepEqual(
+        read.value.snapshot.githubCooldowns,
+        state.githubCooldowns,
+      );
+      const recorded = JSON.parse(
+        (await fixture.message()).trim().split("\n").at(-1)!,
+      );
+      assert.equal(recorded.stateHead, fixture.beforeHead);
+      assert.equal(recorded.priorRevision, CONCURRENCY_RETRY_REVISION);
+      assert.equal(recorded.priorGeneration, 59);
+      assert.equal(recorded.nextRevision, CONCURRENCY_PLANNER_REVISION);
+      assert.equal(recorded.nextGeneration, 60);
+      assert.deepEqual(recorded.priorHealthyProof, prior);
+      assert.equal(await fixture.run(), 0);
+      assert.equal(fixture.reports.at(-1)?.status, "waiting");
+      assert.equal(fixture.patches(), 1);
+    } finally {
+      await fixture.close();
+    }
+  },
+);
+
+Deno.test(
+  "owner install runtime60: exact failed60 restores only saved healthyc79 at terminal61 once",
+  async () => {
+    const prior = healthyProof(CONCURRENCY_RETRY_REVISION, 59, 37134515396);
+    const runtime = runtimeRecord({
+      revision: CONCURRENCY_PLANNER_REVISION,
+      generation: 60,
+      healthyProof: prior,
+      executionProof: failedProof(CONCURRENCY_PLANNER_REVISION, 60, 1102),
+    });
+    const state = releaseSnapshot({
+      runtime,
+      hostedReleases: [acceptedRelease()],
+    });
+    const fixture = await concurrencyInstallerFixture(
+      state,
+      undefined,
+      CONCURRENCY_PLANNER_REVISION,
+    );
+    try {
+      assert.equal(await fixture.run(), 0);
+      assert.equal(fixture.reports.at(-1)?.status, "rolled_back");
+      assert.equal(
+        fixture.reports.at(-1)?.candidateRevision,
+        CONCURRENCY_RETRY_REVISION,
+      );
+      assert.equal(fixture.reports.at(-1)?.candidateGeneration, 61);
+      assert.equal(fixture.patches(), 1);
+      assert.ok(
+        !fixture.requests.some((request) =>
+          request.path.includes("/compare/") ||
+          request.path.includes("/check-runs")
+        ),
+      );
+      const read = await fixture.read();
+      if (!read.ok || read.value.status !== "found") {
+        throw new Error("missing planner rollback");
+      }
+      assert.deepEqual(
+        read.value.snapshot.hostedRuntimes[0].lastHealthyProof,
+        prior,
+      );
+      assert.deepEqual(
+        read.value.snapshot.hostedReleases,
+        state.hostedReleases,
+      );
+      assert.equal(await fixture.run(), 0);
+      assert.equal(fixture.reports.at(-1)?.status, "no_change");
+      assert.equal(fixture.patches(), 1);
+    } finally {
+      await fixture.close();
+    }
+    for (
+      const proof of [
+        null,
+        healthyProof(CONCURRENCY_PRIOR_REVISION, 58),
+        healthyProof(CONCURRENCY_RETRY_REVISION, 58),
+        healthyProof(UNRELATED, 59),
+        healthyProof(CONCURRENCY_PLANNER_REVISION, 60),
+      ]
+    ) {
+      assert.equal(
+        planOwnerDevelopmentInstall(
+          releaseSnapshot({ runtime: { ...runtime, lastHealthyProof: proof } }),
+          NOW,
+        ).status,
+        "waiting",
+      );
+    }
+    for (
+      const proof of [
+        null,
+        notStartedProof(CONCURRENCY_PLANNER_REVISION, 60),
+        failedProof(CONCURRENCY_PLANNER_REVISION, 59),
+        failedProof(UNRELATED, 60),
+      ]
+    ) {
+      assert.equal(
+        planOwnerDevelopmentInstall(
+          releaseSnapshot({
+            runtime: { ...runtime, lastExecutionProof: proof },
+          }),
+          NOW,
+        ).status,
+        "waiting",
+      );
+    }
+  },
+);
+
+Deno.test(
+  "owner install runtime60: actual consumer refuses current ordinary stale proof CI conflicts and preserves distinct terminal pointers",
+  async () => {
+    const prior = healthyProof(CONCURRENCY_RETRY_REVISION, 59, 37134515396);
+    const runtime = runtimeRecord({
+      revision: CONCURRENCY_RETRY_REVISION,
+      generation: 59,
+      healthyProof: prior,
+      executionProof: prior,
+    });
+    const healthy = releaseSnapshot({ runtime });
+    const accepted60 = healthyProof(CONCURRENCY_PLANNER_REVISION, 60, 1103);
+    const restored61 = healthyProof(CONCURRENCY_RETRY_REVISION, 61, 1104);
+    const cases: {
+      state: ReleaseStateSnapshotV1;
+      refusal?: Parameters<typeof concurrencyInstallerFixture>[1];
+      status: string;
+      patches?: number;
+    }[] = [
+      {
+        state: releaseSnapshot({
+          runtime: { ...runtime, lastHealthyProof: null },
+        }),
+        status: "waiting",
+      },
+      {
+        state: releaseSnapshot({
+          runtime: {
+            ...runtime,
+            lastHealthyProof: healthyProof(CONCURRENCY_PRIOR_REVISION, 58),
+          },
+        }),
+        status: "waiting",
+      },
+      {
+        state: releaseSnapshot({
+          runtime: { ...runtime, lastExecutionProof: null },
+        }),
+        status: "waiting",
+      },
+      {
+        state: releaseSnapshot({
+          runtime: {
+            ...runtime,
+            lastExecutionProof: failedProof(CONCURRENCY_RETRY_REVISION, 59),
+          },
+        }),
+        status: "waiting",
+      },
+      {
+        state: releaseSnapshot({
+          runtime: {
+            ...runtime,
+            lastExecutionProof: parseHostedRunProofV1({
+              ...prior,
+              observedAt: T0 + 2500,
+            }),
+          },
+        }),
+        status: "waiting",
+      },
+      {
+        state: releaseSnapshot({
+          runtime: {
+            ...runtime,
+            execution: parseHostedExecutionIntentV1({
+              ...executionIntent(CONCURRENCY_RETRY_REVISION, 59),
+              id: "37136320870:1:repair",
+              runId: 37136320870,
+            }),
+          },
+        }),
+        status: "waiting",
+      },
+      {
+        state: releaseSnapshot({
+          runtime,
+          hostedReleases: [requestedRelease()],
+        }),
+        status: "waiting",
+      },
+      {
+        state: releaseSnapshot({ runtime, cooldowns: [cooldown(null)] }),
+        status: "waiting",
+      },
+      {
+        state: releaseSnapshot({ runtime, cooldowns: [cooldown(NOW + 1)] }),
+        status: "waiting",
+      },
+      {
+        state: releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: CONCURRENCY_PLANNER_REVISION,
+            generation: 60,
+            healthyProof: accepted60,
+            executionProof: accepted60,
+          }),
+        }),
+        status: "no_change",
+      },
+      {
+        state: releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: CONCURRENCY_RETRY_REVISION,
+            generation: 61,
+            healthyProof: restored61,
+            executionProof: restored61,
+          }),
+        }),
+        status: "no_change",
+      },
+      {
+        state: releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: CONCURRENCY_PRIOR_REVISION,
+            generation: 60,
+            healthyProof: healthyProof(CONCURRENCY_PRIOR_REVISION, 60),
+          }),
+        }),
+        status: "no_change",
+      },
+      {
+        state: releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: UNRELATED,
+            generation: 62,
+            healthyProof: healthyProof(UNRELATED, 62),
+          }),
+        }),
+        status: "no_change",
+      },
+      { state: healthy, refusal: "ancestry", status: "waiting" },
+      { state: healthy, refusal: "ci", status: "waiting" },
+      { state: healthy, refusal: "artifact", status: "waiting" },
+      { state: healthy, refusal: "parent", status: "failed" },
+      { state: healthy, refusal: "readback", status: "failed", patches: 1 },
+    ];
+    for (const entry of cases) {
+      const fixture = await concurrencyInstallerFixture(
+        entry.state,
+        entry.refusal,
+        CONCURRENCY_PLANNER_REVISION,
+      );
+      try {
+        assert.equal(await fixture.run(), 0);
+        assert.equal(
+          fixture.reports.at(-1)?.status,
+          entry.status,
+          entry.refusal,
+        );
+        assert.equal(fixture.patches(), entry.patches ?? 0, entry.refusal);
+        if (entry.refusal !== "parent" && entry.refusal !== "readback") {
+          assert.equal(await fixture.head(), fixture.beforeHead);
+        }
+        if (entry.refusal === undefined || entry.refusal === "artifact") {
+          assert.equal(fixture.requests.length, 0);
         }
       } finally {
         await fixture.close();
