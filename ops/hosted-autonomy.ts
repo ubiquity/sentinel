@@ -78,6 +78,14 @@ export const HOSTED_AUTONOMY_MAX_RETRIES = 200;
 /** The runtime's own implementation-attempt ceiling. */
 export const HOSTED_AUTONOMY_MAX_IMPLEMENTATION_ATTEMPTS = 4;
 
+/**
+ * Static blocker message for a record whose source issue no longer exists. It
+ * deliberately matches none of the retryable prefixes, so the retry pass never
+ * revives it.
+ */
+export const HOSTED_AUTONOMY_RETIRED =
+  "source issue is closed; the repair no longer exists";
+
 /** The trusted publication identity of autonomously repaired pull requests. */
 export const HOSTED_AUTONOMY_TRUSTED_AUTHOR = "github-actions[bot]";
 
@@ -133,6 +141,7 @@ export type HostedAutonomyReasonV1 =
   | "merge_not_observed"
   | "already_recorded"
   | "closed_issues"
+  | "retired_records"
   | "foreign_author"
   | "release_not_terminal"
   | "clock_invalid"
@@ -574,6 +583,60 @@ export function planHostedClosures(
   return plans;
 }
 
+/**
+ * Records whose source issue is closed or gone and which produced nothing (no
+ * pull request): the work no longer exists, so the record is parked as blocked
+ * with a static reason that the retry pass refuses to clear. Only records with
+ * no pull request are parked — a record with an open pull request still has a
+ * delivery path.
+ */
+export function planHostedRetirements(
+  snapshot: RepairStateSnapshotV1,
+  closedIssues: ReadonlySet<number>,
+): { id: string; issueNumber: number }[] {
+  const plans: { id: string; issueNumber: number }[] = [];
+  for (const record of snapshot.work) {
+    if (record.nextStep === "done" || record.nextStep === "blocked") continue;
+    const issueNumber = record.related.issueNumber;
+    if (issueNumber === null || !closedIssues.has(issueNumber)) continue;
+    if (record.target.pr !== null) continue;
+    plans.push({ id: record.id, issueNumber });
+  }
+  return plans;
+}
+
+/** Park the given records with the immutable retirement reason (pure). */
+export function applyHostedRetirements(
+  snapshot: RepairStateSnapshotV1,
+  head: GitSha,
+  plans: readonly { id: string; issueNumber: number }[],
+  now: number,
+): RepairStateSnapshotV1 {
+  const ids = new Set(plans.map((plan) => plan.id));
+  return parseRepairStateSnapshotV1({
+    ...snapshot,
+    stateHead: head,
+    sequence: snapshot.sequence + 1,
+    updatedAt: now,
+    work: snapshot.work.map((record) =>
+      ids.has(record.id)
+        ? {
+          ...record,
+          nextStep: "blocked",
+          wait: null,
+          blocker: {
+            kind: "other",
+            message: HOSTED_AUTONOMY_RETIRED,
+            since: now,
+          },
+          intent: null,
+          updatedAt: now,
+        }
+        : record
+    ),
+  });
+}
+
 /** Mark the given records done (pure). */
 export function applyHostedClosures(
   snapshot: RepairStateSnapshotV1,
@@ -911,6 +974,60 @@ export async function runHostedAutonomy(
 
   // ---- closure pass -------------------------------------------------------
   const released = acceptedReleases(releaseRead.value.snapshot.hostedReleases);
+  const retirements = planHostedRetirements(snapshot, closedIssues).slice(0, 5);
+  if (retirements.length > 0) {
+    const now = deps.clock.now();
+    if (!Number.isSafeInteger(now) || now < snapshot.updatedAt) {
+      return skipped("clock_invalid", observedHead, actions);
+    }
+    let next: RepairStateSnapshotV1;
+    try {
+      next = applyHostedRetirements(
+        snapshot,
+        observedHead as GitSha,
+        retirements,
+        now,
+      );
+    } catch {
+      return skipped("snapshot_invalid", observedHead, actions);
+    }
+    let write: PortResultV1<StateWriteResultV1> | null;
+    try {
+      write = await deps.state.writeRepair(next, observedHead as GitSha);
+    } catch {
+      return failed("write_unavailable", observedHead, actions);
+    }
+    if (write === null || !write.ok) {
+      return failed("write_unavailable", observedHead, actions);
+    }
+    if (write.value.status === "conflict") {
+      return skipped("write_conflict", observedHead, actions);
+    }
+    if (write.value.status === "ambiguous") {
+      return failed("write_ambiguous", observedHead, actions);
+    }
+    const readback = await readRepairSafely(deps.state);
+    if (
+      readback === null || !readback.ok ||
+      readback.value.status !== "found" ||
+      readback.value.head !== write.value.head ||
+      canonicalStringify(readback.value.snapshot) !== canonicalStringify(next)
+    ) {
+      return failed("readback_unverified", observedHead, actions);
+    }
+    for (const plan of retirements) {
+      actions.push(`retire:${plan.id}:issue=${plan.issueNumber}`);
+    }
+    return {
+      kind: "hosted_autonomy",
+      status: "applied",
+      reason: "retired_records",
+      beforeHead: observedHead,
+      appliedHead: write.value.head,
+      actions,
+      revisions,
+    };
+  }
   const closures = planHostedClosures(snapshot, released).slice(0, 5);
   if (closures.length > 0) {
     for (const plan of closures) {
