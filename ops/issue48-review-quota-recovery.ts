@@ -105,22 +105,23 @@ export interface Issue48QuotaRecoveryBindingV1 {
 }
 
 /**
- * Reviewed production pins, read from the live state on 2026-09-17 02:15Z.
+ * Reviewed production pins, read from the live state on 2026-09-17 04:30Z (the
+ * post-refresh head and base of review round 4).
  * The repair ref head is deliberately NOT pinned: it moves on every runtime
  * cycle, so the expected-head CAS plus the exact work-item preconditions and
  * the full readback are what authorize the single write.
  */
 export const ISSUE48_QUOTA_PRODUCTION_BINDING: Issue48QuotaRecoveryBindingV1 = {
   targetId: "issue-ubiquity-sentinel-48" as WorkItemId,
-  counters: { attempts: 4, retries: 0, reviewRounds: 3 },
+  counters: { attempts: 4, retries: 0, reviewRounds: 4 },
   evidenceRef:
     "artifact:review-receipt/review-receipt:2e4e595978d5ca887abcad4a31b0ac94ea7d548227792f85b0d210078d3c1446",
   reviewIds: [
     "review-receipt:2e4e595978d5ca887abcad4a31b0ac94ea7d548227792f85b0d210078d3c1446",
   ],
   pullRequestNumber: 51,
-  pullRequestHead: "f4678663746a2026e76190d70a3c15786c69705c" as GitSha,
-  pullRequestBase: "9fefc45cdf9a339090cd998c4a051f8eb3dd49ae" as GitSha,
+  pullRequestHead: "956879153ddfdddb2bb1e826f1ab552284afd546" as GitSha,
+  pullRequestBase: "bd558bae583d3a7fcc352a1fa312c36b95e48a4b" as GitSha,
   repository: ISSUE48_QUOTA_REPOSITORY,
   runtimeId: "ubiquity/sentinel:0:production",
   runtimeRevision: "87193550640078f190ab94d7f8ca0f00bbef9124" as GitSha,

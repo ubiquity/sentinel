@@ -228,20 +228,44 @@ function isBoundedCommand(value: unknown): value is string {
 }
 
 /**
- * Provenance of one installed `commandExecution` item: only the ordinary agent
- * shell tool is accepted. An omitted `source` is the installed agent default;
- * any other value, or a plugin/script binding field, is different provenance
- * and refused. `commandActions` remains best-effort classification and is never
- * used as an authority check.
+ * Agent-originated `commandExecution` sources of the installed 0.154 protocol.
+ *
+ * The protocol enumerates exactly `agent`, `userShell`, `unifiedExecStartup`
+ * and `unifiedExecInteraction`. The first and the two unified-exec values are
+ * the SAME agent shell tool (the unified-exec transport runs it over a
+ * persistent process); `userShell` is a human-typed command and is therefore
+ * not agent evidence. An omitted source is the installed agent default.
+ */
+const AGENT_COMMAND_SOURCES: ReadonlySet<string> = new Set([
+  "agent",
+  "unifiedExecStartup",
+  "unifiedExecInteraction",
+]);
+
+/**
+ * Provenance of one installed `commandExecution` item: only agent-originated
+ * shell execution is accepted. An omitted/null `source` is the installed agent
+ * default; every other enumerated agent source is accepted verbatim so a start
+ * and its completion must still carry the SAME provenance; `userShell` and any
+ * unknown value, and every plugin/script binding field, are refused.
+ * `commandActions` remains best-effort classification and is never used as an
+ * authority check.
  */
 function commandItemProvenance(
   item: Record<string, unknown>,
 ): string | null {
   const source = item.source;
-  if (source !== undefined && source !== "agent") return null;
+  if (source === undefined || source === null) {
+    if (item.pluginId !== undefined && item.pluginId !== null) return null;
+    if (item.scriptPath !== undefined && item.scriptPath !== null) return null;
+    return "agent";
+  }
+  if (typeof source !== "string" || !AGENT_COMMAND_SOURCES.has(source)) {
+    return null;
+  }
   if (item.pluginId !== undefined && item.pluginId !== null) return null;
   if (item.scriptPath !== undefined && item.scriptPath !== null) return null;
-  return "agent";
+  return source;
 }
 
 /**
@@ -803,6 +827,46 @@ class PreparedStructuredReview implements PreparedStructuredReviewV1 {
     this.settleNow();
   }
 
+  /**
+   * One bounded, content-free fingerprint line for a REFUSED command item.
+   *
+   * The durable disposition can only carry a static reason, so this is the
+   * only place a refusal is diagnosable: it reports the structural predicates
+   * that decided the refusal (never the command, its output, a path or any
+   * other payload) as a single run-log line. It never runs for an accepted
+   * item.
+   */
+  private reportRefusedCommandItem(
+    site: string,
+    item: Record<string, unknown>,
+  ): void {
+    const source = item.source;
+    const provenance = commandItemProvenance(item);
+    console.log(JSON.stringify({
+      event: "sentinel_review_command_item_refused",
+      site,
+      type: item.type === "commandExecution" ? "commandExecution" : "other",
+      status: typeof item.status === "string" ? item.status : null,
+      idBounded: isBoundedId(item.id),
+      commandBounded: isBoundedCommand(item.command),
+      commandChars: typeof item.command === "string"
+        ? item.command.length
+        : null,
+      hasActions: Array.isArray(item.commandActions),
+      cwdMatches: typeof item.cwd === "string" && item.cwd === this.sessionCwd,
+      source: typeof source === "string" ? source : null,
+      provenance: provenance === null ? "refused" : "agent-origin",
+      pluginId: item.pluginId === undefined || item.pluginId === null
+        ? "absent"
+        : "present",
+      scriptPath: item.scriptPath === undefined || item.scriptPath === null
+        ? "absent"
+        : "present",
+      knownItem: typeof item.id === "string" &&
+        this.commandItems.has(item.id),
+    }));
+  }
+
   private onNotification(event: CodexServerNotificationV1): void {
     this.eventCount++;
     if (this.eventCount > MAX_EVENT_COUNT) {
@@ -1083,10 +1147,12 @@ class PreparedStructuredReview implements PreparedStructuredReviewV1 {
       item.status !== "inProgress" || typeof cwd !== "string" ||
       cwd !== this.sessionCwd || source === null
     ) {
+      this.reportRefusedCommandItem("start", item);
       this.failEvidence(COMMAND_ITEM_DETAIL);
       return;
     }
     if (this.commandItems.has(id)) {
+      this.reportRefusedCommandItem("duplicate-start", item);
       this.failEvidence(COMMAND_ITEM_DETAIL);
       return;
     }
@@ -1120,6 +1186,7 @@ class PreparedStructuredReview implements PreparedStructuredReviewV1 {
       (status !== "completed" && status !== "failed") ||
       typeof cwd !== "string" || cwd !== this.sessionCwd || source === null
     ) {
+      this.reportRefusedCommandItem("completion", item);
       this.failEvidence(COMMAND_ITEM_DETAIL);
       return;
     }
@@ -1129,6 +1196,7 @@ class PreparedStructuredReview implements PreparedStructuredReviewV1 {
       active.command !== command || active.cwd !== cwd ||
       active.source !== source
     ) {
+      this.reportRefusedCommandItem("completion-mismatch", item);
       this.failEvidence(COMMAND_ITEM_DETAIL);
       return;
     }

@@ -4,7 +4,8 @@
  * This fixed trusted operation performs at most one pointer movement in the
  * hosted release state: original generation 5 -> reader generation 6 ->
  * aggregate generation 7 -> review recovery generation 8 -> review-step
- * reconciliation generation 9, plus a one-time
+ * reconciliation generation 9 -> reviewer provenance generation 10, plus a
+ * one-time
  * rollback of an exact failed candidate to its recorded previously healthy
  * revision. It is NOT a runtime redesign and NOT a recurring global gate: every other state is a zero-write
  * waiting/no-change outcome so the unchanged protected supervisor continues
@@ -95,6 +96,13 @@ export const OWNER_DEVELOPMENT_INSTALL_RECOVERY_GENERATION = 8;
 export const OWNER_DEVELOPMENT_INSTALL_REVIEW_STEP_REVISION =
   "87193550640078f190ab94d7f8ca0f00bbef9124" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_REVIEW_STEP_GENERATION = 9;
+/**
+ * Exact revision accepting the agent unified-exec command sources in review
+ * evidence, installed only after the review-step generation 9 healthy proof.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_REVIEWER_REVISION =
+  "80384fc3668c246297621aa1c588c0e49ea516c6" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_REVIEWER_GENERATION = 10;
 
 const API_BASE = "https://api.github.com";
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -341,10 +349,49 @@ export function planOwnerDevelopmentInstall(
       );
     }
     if (healthy !== null) {
-      return noChange("the owner development installation is complete");
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_REVIEWER_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_REVIEWER_GENERATION,
+        healthy,
+        "install the reviewer provenance revision after the review-step healthy proof",
+      );
     }
     return waiting(
       "the review-step generation 9 healthy proof is not recorded",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_REVIEWER_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_REVIEWER_GENERATION
+  ) {
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_REVIEW_STEP_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_REVIEW_STEP_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded review-step healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_REVIEW_STEP_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed reviewer provenance candidate to its recorded prior",
+      );
+    }
+    if (healthy !== null) {
+      return noChange("the owner development installation is complete");
+    }
+    return waiting(
+      "the reviewer provenance generation 10 healthy proof is not recorded",
     );
   }
 

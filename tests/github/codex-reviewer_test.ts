@@ -1024,6 +1024,89 @@ Deno.test(
 );
 
 Deno.test(
+  "reviewer: the unified-exec agent shell sources are accepted and userShell is not",
+  async () => {
+    // The installed 0.154 protocol enumerates `agent`, `userShell`,
+    // `unifiedExecStartup` and `unifiedExecInteraction`. The unified-exec
+    // values are the SAME agent shell tool over its persistent-process
+    // transport, so a review in which the agent uses it must still complete;
+    // a human `userShell` command is not agent evidence and must not.
+    for (const source of ["unifiedExecStartup", "unifiedExecInteraction"]) {
+      const session = new ScriptedCodexSession();
+      session.plan = (scripted) => {
+        scripted.emit("item/started", {
+          threadId: "thread-1",
+          turnId: scripted.turnId,
+          item: commandItem("cmd-1", "inProgress", { source }),
+        });
+        scripted.emit("item/commandExecution/outputDelta", {
+          threadId: "thread-1",
+          turnId: scripted.turnId,
+          itemId: "cmd-1",
+          delta: ACCOUNT_CONTENT,
+        });
+        scripted.emit("item/completed", {
+          threadId: "thread-1",
+          turnId: scripted.turnId,
+          item: commandItem("cmd-1", "completed", { source }),
+        });
+        scripted.emit(
+          "item/completed",
+          agentMessage(
+            scripted.turnId,
+            "item-final",
+            JSON.stringify(CLEAN_RESULT),
+          ),
+        );
+        scripted.emit("turn/completed", turnCompleted(scripted.turnId));
+      };
+      const outcome = await startReview(session, await snapshotFixture());
+      assert.equal(outcome.status, "clean", source);
+      assert.equal(outcome.execution?.turnId, "turn-1");
+    }
+
+    // A completion that changes the source is still contradictory.
+    const mismatched = new ScriptedCodexSession();
+    mismatched.plan = (scripted) => {
+      scripted.emit("item/started", {
+        threadId: "thread-1",
+        turnId: scripted.turnId,
+        item: commandItem("cmd-1", "inProgress", {
+          source: "unifiedExecStartup",
+        }),
+      });
+      scripted.emit("item/completed", {
+        threadId: "thread-1",
+        turnId: scripted.turnId,
+        item: commandItem("cmd-1", "completed", { source: "agent" }),
+      });
+      scripted.emit("turn/completed", turnCompleted(scripted.turnId));
+    };
+    const mismatchRefused = await startReview(
+      mismatched,
+      await snapshotFixture(),
+    );
+    assert.equal(mismatchRefused.status, "unavailable");
+    contains(mismatchRefused.detail ?? "", "command execution item");
+
+    for (const source of ["userShell", "unifiedExecUnknown"]) {
+      const session = new ScriptedCodexSession();
+      session.plan = (scripted) => {
+        scripted.emit("item/started", {
+          threadId: "thread-1",
+          turnId: scripted.turnId,
+          item: commandItem("cmd-1", "inProgress", { source }),
+        });
+        scripted.emit("turn/completed", turnCompleted(scripted.turnId));
+      };
+      const refused = await startReview(session, await snapshotFixture());
+      assert.equal(refused.status, "unavailable", source);
+      contains(refused.detail ?? "", "command execution item");
+    }
+  },
+);
+
+Deno.test(
   "reviewer: unfinished commands, malformed or wrong command identities and interruptions never yield clean",
   async () => {
     // A started command without a completed settlement.
