@@ -4,6 +4,14 @@ Owner planning session: 2026-09-06 America/New_York; created across 2026-09-07 0
 
 ## 1. Outcome and scope
 
+Owner policy update, 2026-09-14 14:17 UTC: raise the shared Luna model-start
+cap from one to 60 per rolling hour. This supersedes the one-start hourly cap
+below. Keep gpt-5.6-luna with max reasoning, 168 starts per rolling seven days,
+shared charging for implementation/review/retry/continuation, the existing
+ordinary-run cadence, and every historical reservation. The trusted integration
+owner updates and verifies the deployed policy through reviewed source; runtime
+model workers cannot change live admission authority.
+
 Owner clarification, 2026-09-14 12:39 UTC: GitHub Actions is the runtime, and
 the immediate repair target is ubiquity/sentinel itself. This supersedes the
 immediately preceding suggestion to target ai.ubq.fi for this execution. Use
