@@ -162,6 +162,12 @@ export interface CohortCountsV1 {
   upstreamWideCount: number;
   /** Entries consumed that could not be classified as evidence. */
   unreadableCount: number;
+  /**
+   * Distinct terminal request ids without an accepted event in this scan.
+   * These outcomes may belong to a different sampling window, so the caller
+   * must treat the sample as incomplete instead of dropping the outcome.
+   */
+  unresolvedOutcomeCount: number;
 }
 
 /**
@@ -172,12 +178,13 @@ export interface CohortCountsV1 {
  * The failure classifications are joined to THE SAME request cohort that
  * provides the denominator: only a request whose accepted event was observed
  * in this scan may contribute a failure classification. A terminal without a
- * matching accepted event belongs to another window's cohort (its request
- * was accepted earlier or accepted-event evidence is missing) and therefore
- * contributes neither a failure nor the denominator — otherwise a request
- * crossing a window boundary would produce failure counts outside the
- * denominator (e.g. `requestCount: 0, fiveXxCount: 1`) and inconsistent
- * metrics. A scan with only such terminals is complete with zero counts.
+ * matching accepted event may belong to another window's cohort (its request
+ * was accepted earlier) or may have missing accepted-event evidence. It is
+ * therefore excluded from both the denominator and failure counts, and the
+ * unresolved outcome is reported so the caller marks the scan incomplete.
+ * This preserves the failure as an explicit evidence gap rather than silently
+ * allowing it to disappear across sampling windows or emitting inconsistent
+ * metrics such as `requestCount: 0, fiveXxCount: 1`.
  *
  * Classification follows the owner-configured rules only:
  * - five_xx:     terminal HTTP status >= 500
@@ -191,6 +198,7 @@ export class CohortAccumulatorV1 {
   private readonly timeoutIds = new Set<string>();
   private readonly streamIds = new Set<string>();
   private readonly upstreamIds = new Set<string>();
+  private readonly terminalIds = new Set<string>();
   private unreadableCount = 0;
 
   add(parse: CohortParseV1, kinds: CohortKindsV1): void {
@@ -204,6 +212,7 @@ export class CohortAccumulatorV1 {
       return;
     }
     const terminal = parse.event;
+    this.terminalIds.add(terminal.requestId);
     if (terminal.status >= 500) this.fiveXxIds.add(terminal.requestId);
     if (
       terminal.failureKind !== null &&
@@ -237,6 +246,8 @@ export class CohortAccumulatorV1 {
       streamFailureCount: inCohort(this.streamIds),
       upstreamWideCount: inCohort(this.upstreamIds),
       unreadableCount: this.unreadableCount,
+      unresolvedOutcomeCount:
+        [...this.terminalIds].filter((id) => !this.acceptedIds.has(id)).length,
     };
   }
 }
@@ -303,4 +314,5 @@ export const emptyCohortCounts = (): CohortCountsV1 => ({
   streamFailureCount: 0,
   upstreamWideCount: 0,
   unreadableCount: 0,
+  unresolvedOutcomeCount: 0,
 });

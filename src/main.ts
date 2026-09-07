@@ -40,7 +40,11 @@ import type {
   ReplayPort,
   StateReadView,
 } from "./contracts/ports.ts";
-import { type RepairCycleOutcomeV1, runRepairCycle } from "./repair/loop.ts";
+import {
+  type RepairCycleOutcomeV1,
+  type ReplayFixtureIdentitySourceV1,
+  runRepairCycle,
+} from "./repair/loop.ts";
 
 /** The trusted capability set one repair entrypoint run receives. */
 export interface RepairEntrypointDepsV1 {
@@ -56,6 +60,8 @@ export interface RepairEntrypointDepsV1 {
   github: GitHubPort;
   incidents: IncidentAdapter;
   replay: ReplayPort;
+  /** Trusted fixture test-identity lookup paired with the replay resolver. */
+  fixtureIdentities?: ReplayFixtureIdentitySourceV1;
   model: ImplementationPort;
   /** The one durable model-start admission controller. */
   budget: BudgetControllerV1;
@@ -102,6 +108,7 @@ export function runRepairEntrypoint(
       github: deps.github,
       incidents: deps.incidents,
       replay: deps.replay,
+      fixtureIdentities: deps.fixtureIdentities,
       model: deps.model,
       budget: deps.budget,
     },

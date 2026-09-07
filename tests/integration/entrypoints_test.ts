@@ -62,7 +62,6 @@ import {
   makeRepairRig,
   repairConfigs,
   REPO,
-  runReleaseWindowToEnd,
   SHA1,
   SHA2,
   SHA3,
@@ -273,7 +272,6 @@ Deno.test(
           JSON.stringify(begun.value),
         );
       }
-      released.clock.advance(1);
       const promoted = await released.run();
       assert.ok(promoted.ok, JSON.stringify(promoted));
       if (promoted.ok) {
@@ -286,14 +284,14 @@ Deno.test(
       assert.equal(released.promoteCalls(), 1, "one promotion");
       let records = await released.records();
       assert.equal(records.length, 1);
-      assert.equal(records[0]!.phase, "monitoring");
+      // A scheduled entrypoint keeps the active monitoring window alive and
+      // completes all 60 required 30-second samples before returning.
+      assert.equal(records[0]!.phase, "accepted");
       assert.equal(records[0]!.receipts.promote?.ok, true);
       assert.equal(records[0]!.receipts.promote?.statusCode, 204);
       assert.equal(records[0]!.candidate.identity.gitSha, SHA3);
       assert.equal(records[0]!.prior.identity.gitSha, SHA2);
       assert.equal(records[0]!.candidate.identity.revisionId, DEP_2.revisionId);
-
-      await runReleaseWindowToEnd(released);
       records = await released.records();
       assert.equal(records[0]!.phase, "accepted");
       const acceptance = records[0]!.acceptance;

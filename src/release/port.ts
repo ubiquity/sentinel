@@ -410,6 +410,13 @@ export class DenoReleaseRESTClient implements DenoReleasePort {
     if (reason === null && counts.unreadableCount > 0) {
       reason = "log scan contained unreadable entries";
     }
+    if (reason === null && counts.unresolvedOutcomeCount > 0) {
+      // A terminal whose accepted event is outside this exact window is a
+      // request outcome we cannot safely join to this sample. Preserve the
+      // gap explicitly; silently dropping it would make a long-running
+      // failure disappear from acceptance telemetry.
+      reason = "log scan contained unresolved request outcomes";
+    }
     if (reason !== null) {
       // The observed aggregates are preserved with the incompleteness made
       // explicit; a partial scan is never a complete zero-count sample and a

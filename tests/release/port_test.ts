@@ -412,7 +412,7 @@ Deno.test("port: unreadable log entries make coverage incomplete but preserve co
   assert.equal(sample.value.coverage.status, "incomplete");
 });
 
-Deno.test("port: terminals outside the window cohort never make metrics inconsistent", async () => {
+Deno.test("port: terminals outside the window cohort mark an explicit evidence gap", async () => {
   const transport = new ScriptedTransport();
   logRoute(transport, {
     accept: 100,
@@ -433,14 +433,19 @@ Deno.test("port: terminals outside the window cohort never make metrics inconsis
   if (!sample.ok) return;
   // The failing request `acc-0` belongs to the accepted cohort; the three
   // orphan terminals (accepted event outside the window) are excluded from
-  // BOTH the denominator and the failure counts: counts stay consistent and
-  // the metrics parser accepts the sample (no failure > denominator).
+  // BOTH the denominator and the failure counts. Their outcomes are retained
+  // as an explicit incomplete-coverage reason, so a cross-window failure
+  // cannot disappear into an apparently healthy sample.
   assert.equal(sample.value.requestCount, 100);
   assert.equal(sample.value.fiveXxCount, 1);
   assert.equal(sample.value.timeoutCount, 0);
   assert.equal(sample.value.streamFailureCount, 0);
   assert.equal(sample.value.upstreamWideFault, false);
-  assert.deepEqual(sample.value.coverage, { status: "complete" });
+  assert.deepEqual(sample.value.coverage, {
+    status: "incomplete",
+    reason: "log scan contained unresolved request outcomes",
+    nextCursor: null,
+  });
 });
 
 Deno.test("port: auth failure of the REST read is a typed fault, not an empty result", async () => {

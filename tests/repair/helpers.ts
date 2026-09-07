@@ -8,7 +8,7 @@
  */
 import assert from "node:assert/strict";
 
-import type { GitSha } from "../../src/contracts/brands.ts";
+import type { FixtureDigest, GitSha } from "../../src/contracts/brands.ts";
 import type {
   Clock,
   GitHubIssueV1,
@@ -169,6 +169,7 @@ export class MemoryState implements StateReadView, RepairStateWriter {
 export interface FakeGithubOptionsV1 {
   baseSha?: GitSha;
   issues?: Partial<GitHubIssueV1>[];
+  openIssues?: Partial<GitHubIssueV1>[];
   pullRequest?: Partial<GitHubPullRequestV1> | null;
   /** Exact SHA served for the candidate branch ref when no push preceded it. */
   branchRefSha?: GitSha | null;
@@ -221,7 +222,20 @@ export class FakeGithub implements GitHubPort {
   }
 
   listOpenIssues(): Promise<PortResultV1<GitHubIssueV1[]>> {
-    return Promise.resolve(portOk([]));
+    this.calls.push("listOpenIssues");
+    return Promise.resolve(
+      portOk((this.options.openIssues ?? []).map((issue) => ({
+        number: issue.number ?? 0,
+        title: issue.title ?? `issue ${issue.number ?? 0}`,
+        body: issue.body ?? "",
+        state: issue.state ?? "open",
+        author: issue.author ?? null,
+        labels: issue.labels ?? [],
+        createdAt: issue.createdAt ?? T0,
+        updatedAt: issue.updatedAt ?? T0,
+        closedAt: issue.closedAt ?? null,
+      }))),
+    );
   }
 
   findPullRequestByHeadRef(
@@ -537,6 +551,8 @@ export class FakeIncidents implements IncidentAdapter {
 export interface FakeReplayOptionsV1 {
   before?: Partial<IsolatedReplayResultV1>;
   after?: Partial<IsolatedReplayResultV1>;
+  /** Trusted fixture identity returned to the repair loop. */
+  testIds?: string[];
   /** Force the before run to a port error. */
   beforeFail?: boolean;
   afterFail?: boolean;
@@ -549,6 +565,15 @@ export class FakeReplay implements ReplayPort {
 
   constructor(options: FakeReplayOptionsV1 = {}) {
     this.options = options;
+  }
+
+  resolveTestIds(
+    _fixtureRef: string,
+    _fixtureDigest: FixtureDigest,
+  ): Promise<PortResultV1<readonly string[]>> {
+    return Promise.resolve(
+      portOk(this.options.testIds ?? ["repair:regression"]),
+    );
   }
 
   runReplay(

@@ -903,6 +903,86 @@ Deno.test("P1 findings trigger a fresh bounded implementation/candidate/replay p
   }
 });
 
+Deno.test(
+  "open GitHub issue intake creates one deterministic record and deduplicates repeated rows",
+  async () => {
+    const rig = await makeRig("issueintake", {
+      summaries: false,
+      github: {
+        openIssues: [
+          {
+            number: 42,
+            title: "repair the failing request",
+            labels: ["P1", "priority:9"],
+            createdAt: T0 - 300,
+          },
+          {
+            number: 42,
+            title: "duplicate listing with different metadata",
+            labels: ["P2"],
+            createdAt: T0 - 200,
+          },
+          {
+            number: 43,
+            title: "closed issue is not intake work",
+            state: "closed",
+            createdAt: T0 - 100,
+          },
+        ],
+      },
+    });
+    try {
+      // Keep the first run at intake so the assertion covers the durable
+      // record creation without spending a model start on the new issue.
+      const first = await rig.run(1);
+      assert.equal(first.status, "margin", JSON.stringify(first));
+      let state = await rig.snapshot();
+      assert.equal(state.incidents.length, 0);
+      assert.equal(state.work.length, 1);
+      const issue = state.work[0];
+      assert.equal(issue.source.kind, "issue");
+      assert.equal(issue.source.id, "42");
+      assert.equal(issue.related.issueNumber, 42);
+      assert.equal(issue.source.revision, SHA1);
+      assert.equal(issue.target.base, SHA1);
+      assert.deepEqual(issue.classification, {
+        severity: "P1",
+        priority: 9,
+      });
+      assert.equal(rig.model.requests.length, 0);
+      assert.equal(
+        rig.github.calls.filter((call) => call === "listOpenIssues").length,
+        1,
+      );
+      assert.equal(
+        rig.github.calls.filter((call) =>
+          call === "readRef:refs/heads/development"
+        ).length,
+        1,
+        "base is read once for the repository",
+      );
+
+      // The same open issue is observed again, including the duplicate row,
+      // but its deterministic repository/number identity prevents a second
+      // record or a second checkpoint.
+      const sequence = state.sequence;
+      const second = await rig.run(1);
+      assert.equal(second.status, "margin", JSON.stringify(second));
+      state = await rig.snapshot();
+      assert.equal(state.sequence, sequence);
+      assert.equal(state.work.length, 1);
+      assert.equal(state.work[0].id, issue.id);
+      assert.equal(rig.model.requests.length, 0);
+      assert.equal(
+        rig.github.calls.filter((call) => call === "listOpenIssues").length,
+        2,
+      );
+    } finally {
+      await rig.ctx.cleanup();
+    }
+  },
+);
+
 Deno.test("closure failure retries closure only", async () => {
   // Closure applies to issue tasks; seed an issue work record (no incidents).
   const rig = await makeRig("closure", {

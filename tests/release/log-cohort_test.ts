@@ -94,6 +94,7 @@ Deno.test("cohort: terminal classification follows the configured rules only", (
   assert.equal(counts.streamFailureCount, 1);
   assert.equal(counts.upstreamWideCount, 1);
   assert.equal(counts.unreadableCount, 0);
+  assert.equal(counts.unresolvedOutcomeCount, 0);
 });
 
 Deno.test("cohort: a terminal outside the accepted cohort contributes nothing", () => {
@@ -126,6 +127,7 @@ Deno.test("cohort: a terminal outside the accepted cohort contributes nothing", 
   assert.equal(counts.streamFailureCount, 0);
   assert.equal(counts.upstreamWideCount, 0);
   assert.equal(counts.unreadableCount, 0);
+  assert.equal(counts.unresolvedOutcomeCount, 1);
 });
 
 Deno.test("cohort: a terminals-only scan emits consistent zero counts, never inconsistent metrics", () => {
@@ -152,6 +154,7 @@ Deno.test("cohort: a terminals-only scan emits consistent zero counts, never inc
   assert.equal(counts.streamFailureCount, 0);
   assert.equal(counts.upstreamWideCount, 0);
   assert.equal(counts.unreadableCount, 0);
+  assert.equal(counts.unresolvedOutcomeCount, 1);
 });
 
 Deno.test("cohort: duplicates are deduplicated per request id", () => {
@@ -174,6 +177,7 @@ Deno.test("cohort: duplicates are deduplicated per request id", () => {
   const counts = accumulator.counts();
   assert.equal(counts.acceptedCount, 1);
   assert.equal(counts.fiveXxCount, 1);
+  assert.equal(counts.unresolvedOutcomeCount, 0);
 });
 
 Deno.test("cohort: wrong identity or malformed evidence is unreadable, never counted", () => {
@@ -208,6 +212,7 @@ Deno.test("cohort: wrong identity or malformed evidence is unreadable, never cou
   const counts = accumulator.counts();
   assert.equal(counts.acceptedCount, 0);
   assert.equal(counts.unreadableCount, 3);
+  assert.equal(counts.unresolvedOutcomeCount, 0);
 });
 
 Deno.test("cohort: oversized and non-string fields are unreadable", () => {

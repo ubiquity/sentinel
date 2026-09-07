@@ -12,7 +12,7 @@
  * transport, no storage alternative and no inference policy of its own.
  */
 
-import type { GitSha } from "../contracts/brands.ts";
+import type { FixtureDigest, GitSha } from "../contracts/brands.ts";
 import type {
   Clock,
   GitHubPort,
@@ -68,6 +68,7 @@ import {
   clearIntent,
   countReviewRound,
   createIncidentWork,
+  createIssueWork,
   markBlocked,
   markDone,
   noteCandidate,
@@ -107,9 +108,23 @@ export interface RepairCycleDepsV1 {
   github: GitHubPort;
   incidents: IncidentAdapter;
   replay: ReplayPort;
+  /**
+   * Trusted fixture metadata source. The frozen ReplayPort intentionally only
+   * executes a request; its resolver remains host-owned. A host may also
+   * expose this method on the injected replay object for one shared adapter.
+   */
+  fixtureIdentities?: ReplayFixtureIdentitySourceV1;
   model: ImplementationPort;
   /** The one production admission controller (RollingStartBudget). */
   budget: BudgetControllerV1;
+}
+
+/** Read-only trusted identity lookup paired with the concrete fixture resolver. */
+export interface ReplayFixtureIdentitySourceV1 {
+  resolveTestIds(
+    fixtureRef: string,
+    fixtureDigest: FixtureDigest,
+  ): Promise<PortResultV1<readonly string[]>>;
 }
 
 export interface RepairCycleOptionsV1 {
@@ -160,7 +175,7 @@ export async function runRepairCycle(
     const context: LoopContextV1 = loaded;
 
     if (steps === 0) {
-      const intake = await pollIncidents(deps, context);
+      const intake = await pollIntake(deps, context);
       sourceError = intake.error;
       if (intake.changed) {
         if (intake.result.kind !== "progress") {
@@ -335,7 +350,7 @@ function persistWork(
 }
 
 // ---------------------------------------------------------------------------
-// Intake: deterministic incident polling; a failed read is never empty.
+// Intake: deterministic incident and issue polling; a failed read is never empty.
 // ---------------------------------------------------------------------------
 
 interface IntakeResultV1 {
@@ -344,7 +359,7 @@ interface IntakeResultV1 {
   error: string | null;
 }
 
-async function pollIncidents(
+async function pollIntake(
   deps: RepairCycleDepsV1,
   context: LoopContextV1,
 ): Promise<IntakeResultV1> {
@@ -421,6 +436,62 @@ async function pollIncidents(
     }
     if (page.value.nextCursor === null) break;
     cursor = page.value.nextCursor;
+  }
+
+  // The injected GitHub port targets one configured repository. The frozen
+  // GitHubIssueV1 carries no repository field, so associate its rows with the
+  // sole configuration for this cycle. A multi-repository host must inject a
+  // separately targeted cycle rather than guessing an issue's repository.
+  const issueRepository = deps.configs.length === 1
+    ? deps.configs[0].repository
+    : null;
+  if (issueRepository !== null) {
+    const issues = await deps.github.listOpenIssues();
+    if (!issues.ok) {
+      error = `issue source unavailable: ${issues.error.kind}`;
+    } else {
+      const seenIssues = new Set<string>();
+      const baseByRepository = new Map<string, GitSha | null>();
+      for (const issue of issues.value) {
+        if (issue.state !== "open") continue;
+        const issueKey =
+          `${issueRepository.owner}/${issueRepository.name}#${issue.number}`;
+        if (seenIssues.has(issueKey)) continue;
+        seenIssues.add(issueKey);
+        const existing = context.snapshot.work.find(
+          (record) =>
+            record.source.kind === "issue" &&
+            record.repository.owner === issueRepository.owner &&
+            record.repository.name === issueRepository.name &&
+            record.source.id === String(issue.number),
+        );
+        if (existing !== undefined) continue;
+
+        const repositoryKey =
+          `${issueRepository.owner}/${issueRepository.name}`;
+        let base = baseByRepository.get(repositoryKey);
+        if (base === undefined) {
+          base = await readBase(deps, issueRepository);
+          baseByRepository.set(repositoryKey, base);
+        }
+        if (base === null) {
+          error = `base unavailable for ${issueRepository.name}`;
+          continue;
+        }
+        newWork.push(createIssueWork({
+          number: issue.number,
+          title: issue.title,
+          labels: issue.labels,
+          createdAt: issue.createdAt,
+        }, {
+          controllerSha: deps.controllerSha,
+          repository: issueRepository,
+          observedBase: base,
+          now,
+        }));
+        changed = true;
+      }
+    }
   }
 
   if (!changed && updatedWork.size === 0 && newSummaries.size === 0) {
@@ -510,6 +581,7 @@ interface CarryV1 {
   beforeRun: IsolatedReplayResultV1 | null;
   fixtureRef: string | null;
   fixtureDigest: string | null;
+  testIds: string[] | null;
   replayCommandId: string | null;
   beforeReason: string;
 }
@@ -569,6 +641,7 @@ async function executeWorkStep(
     beforeRun: null,
     fixtureRef: null,
     fixtureDigest: null,
+    testIds: null,
     replayCommandId: null,
     beforeReason: "",
   };
@@ -736,8 +809,17 @@ async function ensureBeforeReplay(
     };
     carry.fixtureRef = already.fixture.ref;
     carry.fixtureDigest = already.fixture.digest;
+    carry.testIds = usableTestIds(already.fixture.testIds);
     carry.replayCommandId = already.commands.replay;
     carry.beforeReason = already.expected.beforeReason;
+    if (carry.testIds === null) {
+      return markBlocked(
+        record,
+        "missing_evidence",
+        "saved replay result has no trusted fixture test identity",
+        deps.clock.now(),
+      );
+    }
     return null;
   }
   const evidence = snapshot.evidence.find(
@@ -769,6 +851,27 @@ async function ensureBeforeReplay(
       deps.clock.now(),
     );
   }
+  const testIds = await resolveFixtureTestIds(
+    deps,
+    replay.fixtureRef,
+    fixtureDigest,
+  );
+  if (testIds.kind === "wait") {
+    return setWait(
+      record,
+      { reason: "unavailable", since: deps.clock.now(), until: null },
+      deps.clock.now(),
+    );
+  }
+  if (testIds.kind === "invalid") {
+    return markBlocked(
+      record,
+      "missing_evidence",
+      "fixture has no trusted test identity",
+      deps.clock.now(),
+    );
+  }
+  carry.testIds = testIds.value;
   const run = await deps.replay.runReplay({
     taskId: record.id,
     repository: record.repository,
@@ -776,7 +879,7 @@ async function ensureBeforeReplay(
     commandId: replay.commandId,
     fixtureRef: replay.fixtureRef,
     fixtureDigest,
-    testIds: [],
+    testIds: testIds.value,
     outputLimitBytes: MAX_OUTPUT_LIMIT_BYTES,
   });
   if (!run.ok) {
@@ -913,6 +1016,18 @@ async function candidateValidated(
       ),
     };
   }
+  const testIds = carry.testIds;
+  if (testIds === null) {
+    return {
+      kind: "blocked",
+      record: markBlocked(
+        record,
+        "missing_evidence",
+        "fixture test identity was not carried from before replay",
+        deps.clock.now(),
+      ),
+    };
+  }
   const run = await deps.replay.runReplay({
     taskId: record.id,
     repository: record.repository,
@@ -920,7 +1035,7 @@ async function candidateValidated(
     commandId: config.commands.test,
     fixtureRef: evidence.replay.fixtureRef,
     fixtureDigest,
-    testIds: [],
+    testIds,
     outputLimitBytes: MAX_OUTPUT_LIMIT_BYTES,
   });
   if (!run.ok || run.value.outcome === "unavailable") {
@@ -977,7 +1092,8 @@ async function buildReplayResult(
 ): Promise<ReplayResultV1 | null> {
   if (
     carry.beforeRun === null || carry.fixtureRef === null ||
-    carry.fixtureDigest === null || carry.replayCommandId === null ||
+    carry.fixtureDigest === null || carry.testIds === null ||
+    carry.replayCommandId === null ||
     record.failingRevision === null || record.target.head === null
   ) {
     return null;
@@ -1001,7 +1117,7 @@ async function buildReplayResult(
     fixture: {
       ref: carry.fixtureRef,
       digest: carry.fixtureDigest,
-      testIds: [],
+      testIds: carry.testIds,
     },
     commands: { replay: carry.replayCommandId, test: config.commands.test },
     expected: { beforeReason: carry.beforeReason },
@@ -2392,6 +2508,61 @@ async function retryClosure(
 // ---------------------------------------------------------------------------
 // Helpers (deterministic; no product logic in fakes).
 // ---------------------------------------------------------------------------
+
+type FixtureTestIdsResultV1 =
+  | { kind: "ok"; value: string[] }
+  | { kind: "invalid" }
+  | { kind: "wait" };
+
+/**
+ * Resolve fixture identities only through a trusted host capability. The
+ * ReplayPort contract deliberately does not expose its internal resolver, so
+ * an absent capability is missing evidence rather than permission to invent a
+ * test id. A replay object may implement the same read-only capability when
+ * the host uses one object for both execution and fixture resolution.
+ */
+async function resolveFixtureTestIds(
+  deps: RepairCycleDepsV1,
+  fixtureRef: string,
+  fixtureDigest: FixtureDigest,
+): Promise<FixtureTestIdsResultV1> {
+  const replayWithIdentity = deps.replay as
+    & ReplayPort
+    & Partial<ReplayFixtureIdentitySourceV1>;
+  const resolveTestIds = deps.fixtureIdentities?.resolveTestIds ??
+    (typeof replayWithIdentity.resolveTestIds === "function"
+      ? replayWithIdentity.resolveTestIds.bind(replayWithIdentity)
+      : null);
+  if (resolveTestIds === null) return { kind: "invalid" };
+  let resolved: PortResultV1<readonly string[]>;
+  try {
+    resolved = await resolveTestIds(fixtureRef, fixtureDigest);
+  } catch {
+    return { kind: "wait" };
+  }
+  if (!resolved.ok) return { kind: "wait" };
+  const value = usableTestIds(resolved.value);
+  return value === null ? { kind: "invalid" } : { kind: "ok", value };
+}
+
+/** Validate the small identity shape before handing it to ReplayPort. */
+function usableTestIds(value: readonly string[]): string[] | null {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 64) {
+    return null;
+  }
+  const seen = new Set<string>();
+  for (const id of value) {
+    if (
+      typeof id !== "string" ||
+      !/^[A-Za-z0-9._:-]{1,64}$/.test(id) ||
+      seen.has(id)
+    ) {
+      return null;
+    }
+    seen.add(id);
+  }
+  return [...value];
+}
 
 async function readIssueForModel(
   deps: RepairCycleDepsV1,

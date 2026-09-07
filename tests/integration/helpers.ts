@@ -309,9 +309,13 @@ export function integrationLogRoute(
         stream: boolean | null,
         streamTerminalType: string | null,
       ) => {
+        const requestId = `${revisionId}-acc-${failIndex}`;
         logs.push(
           terminalEvent({
-            requestId: `${revisionId}-term-${failIndex++}`,
+            // The gateway emits one accepted event and one terminal event for
+            // each request. Keep failures in the same window cohort so the
+            // release port can join their outcomes to the denominator.
+            requestId,
             timestamp: start + failIndex,
             identity,
             status,
@@ -320,6 +324,7 @@ export function integrationLogRoute(
             streamTerminalType,
           }),
         );
+        failIndex++;
       };
       for (let i = 0; i < (fails.fiveXx ?? 0); i++) {
         pushFail(502, null, null, null);
@@ -416,6 +421,13 @@ export function makeReleaseRig(
       // Only an explicitly injected resolver is passed; otherwise the
       // entrypoint's production default (unavailable) is active.
       resolver: options.resolver,
+      // The production entrypoint waits on real 30-second timers. Advance the
+      // deterministic integration clock instead so the same scheduled loop
+      // is exercised without a 30-minute wall-clock test.
+      wait: (durationMs) => {
+        clock.advance(durationMs);
+        return Promise.resolve();
+      },
     });
   const records = async (): Promise<ReleaseRecordV1[]> => {
     const read = await store.readRelease();
