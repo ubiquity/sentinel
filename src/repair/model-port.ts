@@ -103,6 +103,7 @@ export class LocalCheckoutResolver implements CheckoutResolverV1 {
     if (ancestor === null || ancestor.trim() !== "") return null;
     const files = await this.git([
       "diff",
+      "--no-renames",
       "--name-only",
       `${this.baseSha}..${headSha}`,
     ]);

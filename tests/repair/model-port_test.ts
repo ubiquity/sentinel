@@ -9,11 +9,15 @@
 import assert from "node:assert/strict";
 
 import { asWorkItemId } from "../../src/contracts/brands.ts";
+import type { GitSha } from "../../src/contracts/brands.ts";
 import type { CodexSessionV1 } from "../../src/repair/codex-transport.ts";
 import type { CodexServerNotificationV1 } from "../../src/repair/codex-transport.ts";
-import { CodexImplementationPort } from "../../src/repair/model-port.ts";
+import {
+  CodexImplementationPort,
+  LocalCheckoutResolver,
+} from "../../src/repair/model-port.ts";
 import type { ActualSessionEvidenceV1 } from "../../src/repair/model-port.ts";
-import { REPO, SHA1, SHA3 } from "../state/helpers.ts";
+import { gitRun, REPO, SHA1, SHA3, testGitEnv } from "../state/helpers.ts";
 
 const CHECKOUT = "/tmp/sentinel-model-checkout";
 
@@ -182,3 +186,48 @@ Deno.test("model-port: a missing trusted receipt fails closed and still closes t
     "fail-closed run still settles the session",
   );
 });
+
+Deno.test(
+  "model-port: checkout inventory includes both sides of a source rename",
+  async () => {
+    const root = await Deno.makeTempDir({ prefix: "sentinel-model-rename-" });
+    const home = `${root}/home`;
+    await Deno.mkdir(home);
+    const env = testGitEnv(home);
+    const run = (args: string[]) => gitRun(root, args, env);
+    const sha = async (ref: string): Promise<GitSha> => {
+      const result = await run(["rev-parse", ref]);
+      assert.ok(result.ok, result.stderr);
+      return result.stdout.trim() as GitSha;
+    };
+
+    try {
+      const initialized = await run(["init", "-q"]);
+      assert.ok(initialized.ok, initialized.stderr);
+      await Deno.mkdir(`${root}/src`);
+      await Deno.writeTextFile(`${root}/src/protected.ts`, "protected\n");
+      let result = await run(["add", "-A"]);
+      assert.ok(result.ok, result.stderr);
+      result = await run(["commit", "-q", "-m", "base"]);
+      assert.ok(result.ok, result.stderr);
+      const base = await sha("HEAD");
+
+      result = await run(["mv", "src/protected.ts", "src/renamed.ts"]);
+      assert.ok(result.ok, result.stderr);
+      result = await run(["commit", "-q", "-m", "rename"]);
+      assert.ok(result.ok, result.stderr);
+      const head = await sha("HEAD");
+
+      const resolved = await new LocalCheckoutResolver(root, base).resolve();
+      assert.ok(resolved, "the local checkout identity resolves");
+      assert.equal(resolved?.head, head);
+      assert.deepEqual(
+        [...(resolved?.changedPaths ?? [])].sort(),
+        ["src/protected.ts", "src/renamed.ts"],
+        "protected source removals and destination additions are both visible",
+      );
+    } finally {
+      await Deno.remove(root, { recursive: true }).catch(() => {});
+    }
+  },
+);
