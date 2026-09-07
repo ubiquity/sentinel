@@ -267,3 +267,9 @@ Remote identity/visibility, credential access, live rolling budgets, retention/s
 - Local review command: `codex review --base development`, exact canonical worktree `/Users/nv/repos/ubiquity/sentinel/.codex-worktrees/master-plan-gfa795549e5`, reviewed HEAD `af09b80997bd9ff8ad4ef61317709ea359e85bce`, exit 0.
 - Review produced seven substantiated P1 findings and four P2 findings spanning merge/release identity checks, correction execution, model transport shutdown/write serialization, acceptance continuity and health evidence, baseline handling, PR-cap logic and log cohort accounting. The reviewer supplied independent credential-free reproductions; no finding was auto-dismissed.
 - Delivery is blocked at the review gate until P1 findings are corrected and the exact integrated candidate is revalidated. No correction writer, GitHub publication, deployment, target mutation or live model call has been started from this checkpoint.
+
+## Review correction integration (2026-09-07 08:29 UTC)
+
+- m04 correction tip `acfd3ddc8fdecb2f89db323cff485dae6adb3f67` and m05 correction tip `3327897f2a2c7ce8b755fc97e79da71ca14cf34e` were independently tested and merged with ancestry preserved into canonical `0d997f12ee29760161f97c609ecb35aa578a384e`.
+- m04 repair tests passed 25/25, including bounded app-server writes/termination, fresh correction implementation, exact merge/release identity, and existing-PR cap handling. m05 release tests passed 57/57, including monitoring gaps, healthy managed responses, baseline insufficiency, verified Cloudflare handling and request-cohort accounting.
+- Correction worker lanes remain dirty only with pre-existing or task-created disposable test directories; source changes are committed and accepted tips are canonical ancestors. No target writes, publication, deployment or live model calls occurred.
