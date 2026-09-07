@@ -66,6 +66,10 @@ export type ReceiptVerifierV1 = (
 /** The default verifier never certifies; nothing is ever synthesized. */
 export const unavailableReceiptVerifier: ReceiptVerifierV1 = () => null;
 
+/** Exact existing typed `unavailable` detail for the unverified-receipt boundary. */
+const UNAVAILABLE_RECEIPT_DETAIL =
+  "model receipt unavailable: actual provider model/effort could not be verified at this boundary";
+
 /** Local credential-free checkout identity resolution (no remote, no creds). */
 export interface CheckoutResolverV1 {
   resolve(): Promise<
@@ -172,6 +176,14 @@ export class CodexImplementationPort implements ImplementationPort {
   async runModel(
     request: ModelRunRequestV1,
   ): Promise<PortResultV1<ModelRunReceiptV1>> {
+    if (this.verifier === unavailableReceiptVerifier) {
+      // The default (or explicitly supplied unavailable) verifier never
+      // certifies actual provider model/effort: fail closed with the existing
+      // typed `unavailable` before any session opens or model work begins.
+      // Only a configured verifier can earn the session; a configured
+      // verifier is never invoked without real session evidence.
+      return portError("unavailable", UNAVAILABLE_RECEIPT_DETAIL);
+    }
     let session: CodexSessionV1 | null = null;
     const invocationId = `codex-${request.taskId}-${Date.now()}`;
     try {
@@ -421,10 +433,7 @@ export class CodexImplementationPort implements ImplementationPort {
     };
     const verified = this.verifier(evidence);
     if (verified === null) {
-      return portError(
-        "unavailable",
-        "model receipt unavailable: actual provider model/effort could not be verified at this boundary",
-      );
+      return portError("unavailable", UNAVAILABLE_RECEIPT_DETAIL);
     }
     if (
       verified.observedModel !== request.model ||

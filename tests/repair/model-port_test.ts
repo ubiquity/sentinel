@@ -10,11 +10,13 @@ import assert from "node:assert/strict";
 
 import { asWorkItemId } from "../../src/contracts/brands.ts";
 import type { GitSha } from "../../src/contracts/brands.ts";
+import type { ModelRunRequestV1 } from "../../src/contracts/ports.ts";
 import type { CodexSessionV1 } from "../../src/repair/codex-transport.ts";
 import type { CodexServerNotificationV1 } from "../../src/repair/codex-transport.ts";
 import {
   CodexImplementationPort,
   LocalCheckoutResolver,
+  unavailableReceiptVerifier,
 } from "../../src/repair/model-port.ts";
 import type { ActualSessionEvidenceV1 } from "../../src/repair/model-port.ts";
 import { gitRun, REPO, SHA1, SHA3, testGitEnv } from "../state/helpers.ts";
@@ -155,6 +157,51 @@ Deno.test("model-port: thread starts with bounded isolated-checkout write capabi
     "the trusted-host verifier observed the session evidence",
   );
 });
+
+Deno.test(
+  "model-port: unavailable verifier fails closed before any session opens",
+  async () => {
+    const request: ModelRunRequestV1 = {
+      taskId: asWorkItemId("issue-3"),
+      repository: { ...REPO },
+      base: SHA1,
+      issue: null,
+      evidence: [],
+      model: "gpt-5.6-luna",
+      reasoning: "max",
+      maxDurationMs: 5_000,
+      maxOutputChars: 10_000,
+    };
+    // Neither an absent nor the exported unavailable verifier may cause any
+    // session (or other model work) to begin: the existing typed unavailable
+    // result is returned before openSession is ever invoked.
+    for (const supplied of [undefined, unavailableReceiptVerifier]) {
+      let opened = 0;
+      const port = new CodexImplementationPort({
+        openSession: () => {
+          opened++;
+          throw new Error("no session may open without a certifying verifier");
+        },
+        checkoutDir: CHECKOUT,
+        receiptVerifier: supplied,
+      });
+      const result = await port.runModel(request);
+      assert.ok(!result.ok, JSON.stringify(result));
+      if (!result.ok) {
+        assert.equal(result.error.kind, "unavailable");
+        assert.equal(
+          result.error.detail,
+          "model receipt unavailable: actual provider model/effort could not be verified at this boundary",
+        );
+      }
+      assert.equal(
+        opened,
+        0,
+        "no session opens and no model work begins without a configured verifier",
+      );
+    }
+  },
+);
 
 Deno.test("model-port: a missing trusted receipt fails closed and still closes the session", async () => {
   const session = new FakeCodexSession();
