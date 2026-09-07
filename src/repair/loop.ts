@@ -709,7 +709,21 @@ async function ensureEvidence(
     };
   }
   const existing = snapshot.evidence.find((item) => item.id === incidentId);
-  if (existing !== undefined) return { record: null, evidence: null };
+  if (existing !== undefined) {
+    const now = deps.clock.now();
+    if (existing.artifacts.some((artifact) => artifact.expiresAt <= now)) {
+      return {
+        record: markBlocked(
+          record,
+          "evidence_expired",
+          "incident artifact expired",
+          now,
+        ),
+        evidence: null,
+      };
+    }
+    return { record: null, evidence: null };
+  }
   const read = await deps.incidents.readIncident(incidentId);
   if (!read.ok) {
     return {

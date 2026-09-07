@@ -1206,6 +1206,52 @@ function seededSnapshot(
   };
 }
 
+Deno.test("retained expired incident evidence blocks before replay", async () => {
+  const rig = await makeRig("expired-retained", { summaries: false });
+  try {
+    const retained = evidenceFixture();
+    const expiredEvidence = {
+      ...retained,
+      artifacts: retained.artifacts.map((artifact) => ({
+        ...artifact,
+        expiresAt: T0,
+      })),
+    };
+    const taskId = asWorkItemId("expired-retained");
+    const seed = seededSnapshot([
+      workRecord("expired-retained", {
+        source: { kind: "incident", id: "inc-a", revision: SHA2 },
+        related: { incidentId: "inc-a", issueNumber: null },
+        fingerprint: FINGERPRINT,
+        failingRevision: SHA2,
+        target: {
+          base: SHA1,
+          branch: candidateBranch(taskId),
+          checkpoint: null,
+          head: null,
+          pr: null,
+        },
+      }),
+    ], {
+      incidents: [summaryFixture()],
+      evidence: [expiredEvidence],
+    });
+    const written = await rig.store.writeRepair(seed, null);
+    assert.ok(written.ok && written.value.status === "applied");
+
+    const outcome = await rig.run();
+    assert.equal(outcome.status, "idle", JSON.stringify(outcome));
+    const state = await rig.snapshot();
+    assert.equal(state.work[0].nextStep, "blocked");
+    assert.equal(state.work[0].blocker?.kind, "evidence_expired");
+    assert.equal(state.work[0].blocker?.message, "incident artifact expired");
+    assert.equal(rig.replay.requests.length, 0);
+    assert.equal(rig.model.requests.length, 0);
+  } finally {
+    await rig.ctx.cleanup();
+  }
+});
+
 /** Issue task in the delivery phase with the given reviewed head and PR. */
 function deliveryRecord(
   head: GitSha,
