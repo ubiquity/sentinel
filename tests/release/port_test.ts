@@ -7,6 +7,7 @@ import { portOk } from "../../src/contracts/ports.ts";
 import type { DenoAuthProviderV1 } from "../../src/release/http.ts";
 import { DenoReleaseRESTClient } from "../../src/release/port.ts";
 import {
+  acceptedEvent,
   asTransport,
   CUSTOM_URL,
   DEP_0,
@@ -18,6 +19,7 @@ import {
   promoteRoute,
   ScriptedTransport,
   T0,
+  terminalEvent,
   TestClock,
 } from "./helpers.ts";
 
@@ -392,6 +394,111 @@ Deno.test("port: log sampling before the trusted lag is missing, never zero", as
   assert.equal(sample.value.fiveXxCount, null);
   assert.equal(sample.value.coverage.status, "incomplete");
 });
+
+Deno.test(
+  "port: malformed or empty next cursors are typed failures, never completion",
+  async () => {
+    for (const nextCursor of ["", 7, {}] as unknown[]) {
+      const transport = new ScriptedTransport();
+      transport.route({
+        method: "GET",
+        pathname: `/v2/apps/${transport.config.projectId}/logs`,
+        respond: () => ({
+          kind: "response",
+          status: 200,
+          body: JSON.stringify({ logs: [], next_cursor: nextCursor }),
+        }),
+      });
+      const port = client(transport, new TestClock(T0 + 35_001));
+      const sample = await port.sampleMetrics({
+        baseUrl: MANAGED_URL,
+        metricsPath: "/health",
+        identity: DEP_1,
+        windowStart: T0,
+        windowEnd: T0 + 30_000,
+        domain: "ai.ubq.fi",
+      });
+      assert.ok(!sample.ok);
+      if (!sample.ok) {
+        assert.equal(sample.error.kind, "invalid");
+        assert.equal(
+          sample.error.detail,
+          "log response has a malformed next cursor",
+        );
+      }
+    }
+  },
+);
+
+Deno.test(
+  "port: malformed continuation cursor preserves partial logs as incomplete",
+  async () => {
+    const transport = new ScriptedTransport();
+    transport.route({
+      method: "GET",
+      pathname: `/v2/apps/${transport.config.projectId}/logs`,
+      respond: (url) => {
+        if (url.searchParams.get("cursor") === null) {
+          const accepted = acceptedEvent({
+            requestId: "cursor-accepted",
+            identity: DEP_1,
+            timestamp: T0,
+          });
+          const terminal = terminalEvent({
+            requestId: "cursor-accepted",
+            identity: DEP_1,
+            timestamp: T0,
+            status: 200,
+          });
+          return {
+            kind: "response",
+            status: 200,
+            body: JSON.stringify({
+              logs: [
+                {
+                  timestamp: new Date(T0).toISOString(),
+                  level: "info",
+                  message: accepted,
+                  revision_id: DEP_1.revisionId,
+                },
+                {
+                  timestamp: new Date(T0 + 1).toISOString(),
+                  level: "info",
+                  message: terminal,
+                  revision_id: DEP_1.revisionId,
+                },
+              ],
+              next_cursor: "page-2",
+            }),
+          };
+        }
+        return {
+          kind: "response",
+          status: 200,
+          body: JSON.stringify({ logs: [], next_cursor: "" }),
+        };
+      },
+    });
+    const port = client(transport, new TestClock(T0 + 35_001));
+    const sample = await port.sampleMetrics({
+      baseUrl: MANAGED_URL,
+      metricsPath: "/health",
+      identity: DEP_1,
+      windowStart: T0,
+      windowEnd: T0 + 30_000,
+      domain: "ai.ubq.fi",
+    });
+    assert.ok(sample.ok);
+    if (!sample.ok) return;
+    assert.equal(sample.value.requestCount, 1);
+    assert.equal(sample.value.fiveXxCount, 0);
+    assert.deepEqual(sample.value.coverage, {
+      status: "incomplete",
+      reason: "log pagination was interrupted",
+      nextCursor: null,
+    });
+  },
+);
 
 Deno.test("port: unreadable log entries make coverage incomplete but preserve counts", async () => {
   const transport = new ScriptedTransport();

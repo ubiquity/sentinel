@@ -792,11 +792,14 @@ export class DenoReleaseRESTClient implements DenoReleasePort {
       }
       entries.push({ message });
     }
-    const nextCursor = obj.next_cursor === null || obj.next_cursor === undefined
-      ? null
-      : typeof obj.next_cursor === "string" && obj.next_cursor.length > 0
-      ? obj.next_cursor
-      : null;
+    const rawNextCursor = obj.next_cursor;
+    if (rawNextCursor === null) {
+      return portOk({ entries, unreadableEntries, nextCursor: null });
+    }
+    if (typeof rawNextCursor !== "string" || rawNextCursor.length === 0) {
+      return portError("invalid", "log response has a malformed next cursor");
+    }
+    const nextCursor = rawNextCursor;
     return portOk({ entries, unreadableEntries, nextCursor });
   }
 }
