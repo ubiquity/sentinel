@@ -229,3 +229,7 @@ Remote identity/visibility, credential access, live rolling budgets, retention/s
 - m05 release lane completed naturally with terminal READY handback. Worker tip `adb0315` was created without worker push and ancestry-preservingly merged into canonical. Owned source/tests are exactly `src/release/**` and `tests/release/**`.
 - Primary independent release verification passed 46 tests, zero failed, in 1m33s; report `/tmp/sentinel-gfa795549e5/m05-independent-tests.txt`. Worker-owned fmt/lint/type and diff checks also passed. This is local module evidence only; build-receipt integration and Wave C entrypoint wiring remain incomplete.
 - m04 repair continuation remains active in its recorded lane and has not reached acceptance. Its latest bounded review-loss probe exposed a contract-timestamp fixture failure and did not pass; no m04 changes were integrated.
+
+## m04 bounded probe intervention (2026-09-07 06:11 UTC)
+
+- The continuation's review-loss probe (`reviewlost3`) failed with a contract timestamp fixture error and remained in `nextStep=review`; the corrected reruns (`reviewlost4` and `reviewlost5`) each exceeded the declared 45-second bound without terminal output. Primary stopped only the affected test children under task-owned authority and verified they settled; the DSH worker and lane edits remain preserved and active. m04 is unaccepted and must return a direct, unfiltered passing lifecycle checkpoint before integration.
