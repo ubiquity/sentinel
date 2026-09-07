@@ -5,9 +5,9 @@
   "tasks": {
     "fmt": "deno fmt",
     "lint": "deno lint",
-    "check": "deno check src/contracts/mod.ts",
-    "test": "deno test --allow-read=tests/fixtures/contracts tests/contracts/",
-    "test:local": "deno run --allow-env=PATH --allow-run=deno --allow-write test-local.ts"
+    "check": "deno check src/contracts/mod.ts src/state/mod.ts",
+    "test": "deno test --allow-read=. --allow-run=deno --allow-run=git --allow-write --allow-env=PATH tests/contracts/ tests/state/",
+    "test:local": "deno run --allow-env=PATH --allow-run=deno --allow-run=git --allow-write test-local.ts"
   },
   "fmt": {
     "include": [

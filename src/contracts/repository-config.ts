@@ -206,14 +206,17 @@ export function parseRepositoryConfigV1(input: unknown): RepositoryConfigV1 {
   );
 
   const commandRegistry = parseCommandRegistryV1(obj.commandRegistry);
-  if (commandRegistry.commands[replay] === undefined) {
+  // Own-property lookup only: a configured id like "constructor" or
+  // "toString" with an empty registry must never resolve to an inherited
+  // Object.prototype member and silently pass for a missing command.
+  if (!Object.hasOwn(commandRegistry.commands, replay)) {
     fail(
       "$.commandRegistry",
       "invalid_lifecycle",
       "configured replay command is missing from the registry",
     );
   }
-  if (commandRegistry.commands[test] === undefined) {
+  if (!Object.hasOwn(commandRegistry.commands, test)) {
     fail(
       "$.commandRegistry",
       "invalid_lifecycle",

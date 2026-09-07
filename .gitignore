@@ -7,3 +7,7 @@
 
 # Hermetic test-local temp home
 /sentinel-test-local-*/
+# State suite disposable repositories and scratch dirs
+/sentinel-state-test-*/
+# Harness failure-path disposable cwd
+/sentinel-harness-failure-*/

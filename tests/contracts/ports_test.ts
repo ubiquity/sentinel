@@ -469,13 +469,20 @@ const _releaseFake: DenoReleasePort = {
   },
   sampleMetrics() {
     return resolved(portOk({
-      sampledAt: 1786000000000,
+      identity: {
+        gitSha: SHA,
+        revisionId: "dep-0001",
+      },
+      windowStart: 1786000070000,
+      windowEnd: 1786000100000,
+      sampledAt: 1786000100000,
       domain: null,
       requestCount: null,
       fiveXxCount: null,
       timeoutCount: null,
       streamFailureCount: null,
       upstreamWideFault: null,
+      coverage: { status: "complete" },
     }));
   },
 };

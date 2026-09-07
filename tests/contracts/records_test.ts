@@ -42,6 +42,10 @@ const VALID: { file: string; parser: ParserOf<unknown> }[] = [
   { file: "replay-result-v1.json", parser: parseReplayResultV1 },
   { file: "release-request-v1.json", parser: parseReleaseRequestV1 },
   { file: "release-record-v1.json", parser: parseReleaseRecordV1 },
+  {
+    file: "release-record-accepted-v1.json",
+    parser: parseReleaseRecordV1,
+  },
   { file: "repair-state-snapshot-v1.json", parser: parseRepairStateSnapshotV1 },
   {
     file: "release-state-snapshot-v1.json",
@@ -176,6 +180,42 @@ const INVALID: {
     parser: parseRepositoryConfigV1,
     code: "invalid_pattern",
     path: "$.secretRef",
+  },
+  {
+    file: "secret-ref-traversal.json",
+    parser: parseRepositoryConfigV1,
+    code: "invalid_pattern",
+    path: "$.secretRef",
+  },
+  {
+    file: "secret-ref-filesystem.json",
+    parser: parseRepositoryConfigV1,
+    code: "invalid_pattern",
+    path: "$.secretRef",
+  },
+  {
+    file: "artifact-ref-http.json",
+    parser: parseIncidentEvidenceV1,
+    code: "invalid_pattern",
+    path: "$.artifacts[0].ref",
+  },
+  {
+    file: "artifact-ref-dot-segment.json",
+    parser: parseIncidentEvidenceV1,
+    code: "invalid_pattern",
+    path: "$.artifacts[0].ref",
+  },
+  {
+    file: "release-window-inverted.json",
+    parser: parseReleaseRecordV1,
+    code: "invalid_lifecycle",
+    path: "$.acceptance.samples[0].windowEnd",
+  },
+  {
+    file: "release-incomplete-coverage.json",
+    parser: parseReleaseRecordV1,
+    code: "invalid_lifecycle",
+    path: "$.acceptance.samples[0].coverage",
   },
   {
     file: "intent-freeform-detail.json",
@@ -409,31 +449,139 @@ Deno.test("command registry binds argv arrays with bounded runtime, never shell 
   if (!badArg.ok) assert.equal(badArg.issues[0]?.code, "invalid_pattern");
 });
 
-Deno.test("metrics samples: denominator-bounded counts, missing telemetry is null", () => {
+Deno.test("repository config command lookup rejects inherited prototype members", async () => {
+  const raw =
+    (await readFixture("valid", "repository-config-v1.json")) as Record<
+      string,
+      unknown
+    >;
+  // A config referencing a prototype member name against an empty registry
+  // must fail closed instead of resolving to Object.prototype.constructor.
+  const emptyRegistry = structuredClone(raw);
+  (emptyRegistry.commands as Record<string, unknown>).replay = "constructor";
+  (emptyRegistry.commands as Record<string, unknown>).test = "constructor";
+  (emptyRegistry.commandRegistry as { commands: Record<string, unknown> })
+    .commands = {};
+  const result = tryParse(parseRepositoryConfigV1, emptyRegistry);
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.issues[0]?.code, "invalid_lifecycle");
+  // An OWN registry entry with the same name is a valid own command id.
+  const ownEntry = structuredClone(raw);
+  (ownEntry.commands as Record<string, unknown>).replay = "constructor";
+  (ownEntry.commandRegistry as { commands: Record<string, unknown> }).commands =
+    {
+      constructor: {
+        executable: "deno",
+        args: ["run", "test"],
+        maxDurationMs: 1000,
+        maxOutputBytes: 1024,
+      },
+      test_ci: {
+        executable: "deno",
+        args: ["task", "test-local"],
+        maxDurationMs: 1800000,
+        maxOutputBytes: 4194304,
+      },
+    };
+  assert.equal(tryParse(parseRepositoryConfigV1, ownEntry).ok, true);
+});
+
+Deno.test("accepted release record persists identity/window/coverage evidence", async () => {
+  const record = parseReleaseRecordV1(
+    await readFixture("valid", "release-record-accepted-v1.json"),
+  );
+  assert.equal(record.phase, "accepted");
+  assert.ok(record.acceptance?.passed);
+  const baseline = record.acceptance!.baseline[0];
+  assert.equal(baseline.identity.revisionId, "dep-0000");
+  assert.equal(baseline.coverage.status, "complete");
+  assert.ok(
+    record.acceptance!.samples.every(
+      (s) =>
+        s.windowStart < s.windowEnd && s.windowEnd <= s.sampledAt &&
+        s.coverage.status === "complete" &&
+        s.identity.revisionId === "dep-0001",
+    ),
+  );
+});
+
+Deno.test("metrics samples: exact identity/window/coverage plus bounded counts", () => {
+  const identity = {
+    gitSha: "a1b2c3d4e5f60718293a4b5c6d7e8f901a2b3c4d",
+    revisionId: "dep-0001",
+  };
   const sample = parseMetricsSample(
     {
-      sampledAt: 1786000000000,
+      identity,
+      windowStart: 1786000070000,
+      windowEnd: 1786000100000,
+      sampledAt: 1786000100000,
       domain: null,
       requestCount: 100,
       fiveXxCount: 1,
       timeoutCount: 0,
       streamFailureCount: 0,
       upstreamWideFault: false,
+      coverage: { status: "complete" },
     },
     "$",
   );
   assert.equal(sample.requestCount, 100);
+  assert.equal(sample.identity.gitSha, identity.gitSha);
+  assert.equal(sample.windowEnd, 1786000100000);
+  assert.equal(sample.coverage.status, "complete");
+  // A window must satisfy windowStart < windowEnd <= sampledAt.
+  const inverted = tryParse(
+    (input) => parseMetricsSample(input, "$"),
+    {
+      identity,
+      windowStart: 1786000100000,
+      windowEnd: 1786000100000,
+      sampledAt: 1786000100000,
+      domain: null,
+      requestCount: 100,
+      fiveXxCount: 0,
+      timeoutCount: 0,
+      streamFailureCount: 0,
+      upstreamWideFault: false,
+      coverage: { status: "complete" },
+    },
+  );
+  assert.equal(inverted.ok, false);
+  if (!inverted.ok) assert.equal(inverted.issues[0]?.path, "$.windowEnd");
+  const afterEnd = tryParse(
+    (input) => parseMetricsSample(input, "$"),
+    {
+      identity,
+      windowStart: 1786000120000,
+      windowEnd: 1786000150000,
+      sampledAt: 1786000100000,
+      domain: null,
+      requestCount: 100,
+      fiveXxCount: 0,
+      timeoutCount: 0,
+      streamFailureCount: 0,
+      upstreamWideFault: false,
+      coverage: { status: "complete" },
+    },
+  );
+  assert.equal(afterEnd.ok, false);
+  if (!afterEnd.ok) assert.equal(afterEnd.issues[0]?.path, "$.sampledAt");
   // A count above the denominator is a corrupted sample.
   const over = tryParse(
     (input) => parseMetricsSample(input, "$"),
     {
-      sampledAt: 1786000000000,
+      identity,
+      windowStart: 1786000070000,
+      windowEnd: 1786000100000,
+      sampledAt: 1786000100000,
       domain: null,
       requestCount: 10,
       fiveXxCount: 11,
       timeoutCount: 0,
       streamFailureCount: 0,
       upstreamWideFault: false,
+      coverage: { status: "complete" },
     },
   );
   assert.equal(over.ok, false);
@@ -442,31 +590,134 @@ Deno.test("metrics samples: denominator-bounded counts, missing telemetry is nul
   const missing = tryParse(
     (input) => parseMetricsSample(input, "$"),
     {
-      sampledAt: 1786000000000,
+      identity,
+      windowStart: 1786000070000,
+      windowEnd: 1786000100000,
+      sampledAt: 1786000100000,
       domain: null,
       requestCount: null,
       fiveXxCount: 0,
       timeoutCount: null,
       streamFailureCount: null,
       upstreamWideFault: null,
+      coverage: { status: "complete" },
     },
   );
   assert.equal(missing.ok, false);
-  // Fully missing telemetry is explicit nulls.
+  // Fully missing telemetry is explicit nulls; identity/window/coverage persist.
   const unavailable = parseMetricsSample(
     {
-      sampledAt: 1786000000000,
+      identity,
+      windowStart: 1786000070000,
+      windowEnd: 1786000100000,
+      sampledAt: 1786000100000,
       domain: null,
       requestCount: null,
       fiveXxCount: null,
       timeoutCount: null,
       streamFailureCount: null,
       upstreamWideFault: null,
+      coverage: {
+        status: "incomplete",
+        reason: "source lag",
+        nextCursor: "p-1",
+      },
     },
     "$",
   );
   assert.equal(unavailable.requestCount, null);
   assert.equal(unavailable.upstreamWideFault, null);
+  assert.equal(unavailable.identity.revisionId, "dep-0001");
+  assert.equal(unavailable.coverage.status, "incomplete");
+});
+
+Deno.test("accepted release telemetry binds every sample and baseline to exact identities", async () => {
+  const raw = (await readFixture(
+    "valid",
+    "release-record-accepted-v1.json",
+  )) as Record<string, unknown>;
+  const acceptance = raw.acceptance as {
+    samples: Record<string, unknown>[];
+    baseline: Record<string, unknown>[];
+  };
+  const baseline = acceptance.baseline[0].identity as Record<
+    string,
+    unknown
+  >;
+  const sample = acceptance.samples[0].identity as Record<string, unknown>;
+  const wrongSample = structuredClone(raw);
+  ((wrongSample.acceptance as { samples: Record<string, unknown>[] }).samples[0]
+    .identity as Record<string, unknown>).gitSha = "0".repeat(40);
+  const wrongSha = tryParse(parseReleaseRecordV1, wrongSample);
+  assert.equal(wrongSha.ok, false);
+  if (!wrongSha.ok) {
+    assert.equal(wrongSha.issues[0]?.path, "$.acceptance.samples[0].identity");
+  }
+  const wrongRev = structuredClone(raw);
+  ((wrongRev.acceptance as { samples: Record<string, unknown>[] }).samples[0]
+    .identity as Record<string, unknown>).revisionId = "dep-other";
+  const wrongRevision = tryParse(parseReleaseRecordV1, wrongRev);
+  assert.equal(wrongRevision.ok, false);
+  if (!wrongRevision.ok) {
+    assert.equal(
+      wrongRevision.issues[0]?.path,
+      "$.acceptance.samples[0].identity",
+    );
+  }
+  const wrongBaseline = structuredClone(raw);
+  ((wrongBaseline.acceptance as { baseline: Record<string, unknown>[] })
+    .baseline[0].identity as Record<string, unknown>).revisionId = "dep-other";
+  const wrongBaselineRevision = tryParse(parseReleaseRecordV1, wrongBaseline);
+  assert.equal(wrongBaselineRevision.ok, false);
+  if (!wrongBaselineRevision.ok) {
+    assert.equal(
+      wrongBaselineRevision.issues[0]?.path,
+      "$.acceptance.baseline[0].identity",
+    );
+  }
+  // Sanity: the untouched fixture still parses.
+  assert.equal(tryParse(parseReleaseRecordV1, raw).ok, true);
+  assert.equal(baseline.gitSha, "c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00");
+  assert.equal(sample.gitSha, "a1b2c3d4e5f60718293a4b5c6d7e8f901a2b3c4d");
+});
+
+Deno.test("incomplete coverage is persistable for passed:false diagnostics only", async () => {
+  const raw = (await readFixture(
+    "invalid",
+    "release-incomplete-coverage.json",
+  )) as Record<string, unknown>;
+  // passed:true with incomplete coverage stays invalid.
+  assert.equal(tryParse(parseReleaseRecordV1, raw).ok, false);
+  // A diagnostic acceptance (passed:false) persists the incomplete evidence.
+  const diagnostic = structuredClone(raw);
+  diagnostic.phase = "monitoring";
+  (diagnostic.acceptance as Record<string, unknown>).passed = false;
+  const persisted = tryParse(parseReleaseRecordV1, diagnostic);
+  assert.equal(persisted.ok, true);
+});
+
+Deno.test("budget proof refs are restricted refs, never URLs or traversal", async () => {
+  const base = (await readFixture(
+    "valid",
+    "budget-reservation-v1.json",
+  )) as Record<string, unknown>;
+  const withProof = (proofRef: string) => {
+    const mutant = structuredClone(base);
+    mutant.outcome = "confirmed_not_submitted";
+    mutant.settledAt = 1786002000000;
+    mutant.proofRef = proofRef;
+    return tryParse(parseBudgetReservationV1, mutant);
+  };
+  // An opaque storage ref is a valid proof.
+  assert.equal(withProof("artifact://proof/reservation-0001").ok, true);
+  // A URL is never a proof ref.
+  const url = withProof("https://example.com/proof");
+  assert.equal(url.ok, false);
+  if (!url.ok) assert.equal(url.issues[0]?.path, "$.proofRef");
+  // Traversal and absolute filesystem refs are never proof refs.
+  assert.equal(withProof("secret:../file").ok, false);
+  assert.equal(withProof("secret:/etc/passwd").ok, false);
+  assert.equal(withProof("artifact://inbox/../proof").ok, false);
 });
 
 Deno.test("global live start limits: one policy, conflicts refuse inference", async () => {

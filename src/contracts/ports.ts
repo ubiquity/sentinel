@@ -22,6 +22,7 @@ import type {
 import type {
   DeploymentIdentityV1,
   EvidenceRefV1,
+  IncidentCoverageV1,
   MetricsSampleV1,
   RepositoryIdentityV1,
 } from "./shared.ts";
@@ -262,6 +263,12 @@ export interface GitHubPort {
 
 export interface IncidentPageV1 {
   items: IncidentSummaryV1[];
+  /**
+   * Coverage of the discovery scan that produced this page, independent of
+   * whether items is empty: an empty page may be incomplete coverage, and a
+   * failed source read is never a successful empty page.
+   */
+  coverage: IncidentCoverageV1;
   /** Cursor of the next page; null when pagination was exhausted. */
   nextCursor: string | null;
 }
@@ -452,6 +459,15 @@ export interface HealthSampleV1 {
 export interface MetricsSampleConfigV1 {
   baseUrl: string;
   metricsPath: string;
+  /**
+   * Exact deployment identity (Git SHA + revision id) the window belongs to;
+   * a sample window is never inferred from the current wall clock on resume.
+   */
+  identity: DeploymentIdentityV1;
+  /** Inclusive start of the exact telemetry window; nonnegative. */
+  windowStart: number;
+  /** Exclusive end of the telemetry window; windowStart < windowEnd. */
+  windowEnd: number;
   domain: string | null;
 }
 

@@ -122,12 +122,24 @@ export function parseDeploymentIdentity(
 }
 
 /**
- * One actual telemetry sample: the denominator `requestCount` plus the
- * failure counts, all bounded by the denominator, plus the upstream-wide fault
- * flag. Missing telemetry is an explicit null (or a whole unavailable port
- * result) — never silently reported as a 0-rate sample. No raw request data.
+ * One actual telemetry sample for an exact deployment identity and exact
+ * telemetry window. The sample carries the DeploymentIdentityV1 it proves
+ * (gitSha + revisionId are one identity, never alternatives), the explicit
+ * windowStart/windowEnd it covers (never inferred from the current wall clock
+ * on resume), and the coverage of the source scan that produced it. The
+ * denominator `requestCount` plus the failure counts are all bounded by the
+ * denominator, plus the upstream-wide fault flag. Missing telemetry is an
+ * explicit null (or a whole unavailable port result) — never silently
+ * reported as a 0-rate sample. No raw request data.
  */
 export interface MetricsSampleV1 {
+  /** Exact deployment identity this sample was observed against. */
+  identity: DeploymentIdentityV1;
+  /** Inclusive start of the exact telemetry window; nonnegative. */
+  windowStart: number;
+  /** Exclusive end of the exact telemetry window; windowStart < windowEnd. */
+  windowEnd: number;
+  /** When the observation was made; it never predates the window end. */
   sampledAt: number;
   domain: string | null;
   requestCount: number | null;
@@ -136,9 +148,14 @@ export interface MetricsSampleV1 {
   streamFailureCount: number | null;
   /** True when the failure was upstream-wide, not a per-request defect. */
   upstreamWideFault: boolean | null;
+  /** Coverage of the source scan producing this sample. */
+  coverage: IncidentCoverageV1;
 }
 
 const METRICS_SAMPLE_KEYS = [
+  "identity",
+  "windowStart",
+  "windowEnd",
   "sampledAt",
   "domain",
   "requestCount",
@@ -146,16 +163,38 @@ const METRICS_SAMPLE_KEYS = [
   "timeoutCount",
   "streamFailureCount",
   "upstreamWideFault",
+  "coverage",
 ] as const;
 
-/** Parse one metrics sample with fail-closed count/denominator rules. */
+/** Parse one metrics sample with fail-closed count/denominator/window rules. */
 export function parseMetricsSample(
   input: unknown,
   path: string,
 ): MetricsSampleV1 {
   const obj = expectRecord(input, path);
   expectExactKeys(obj, METRICS_SAMPLE_KEYS, path);
+  const identity = parseDeploymentIdentity(obj.identity, `${path}.identity`);
+  const windowStart = expectTimestampOf(
+    obj.windowStart,
+    `${path}.windowStart`,
+  );
+  const windowEnd = expectTimestampOf(obj.windowEnd, `${path}.windowEnd`);
+  if (windowEnd <= windowStart) {
+    fail(
+      `${path}.windowEnd`,
+      "invalid_lifecycle",
+      "window end must follow the window start",
+    );
+  }
   const sampledAt = expectTimestampOf(obj.sampledAt, `${path}.sampledAt`);
+  if (sampledAt < windowEnd) {
+    fail(
+      `${path}.sampledAt`,
+      "invalid_lifecycle",
+      "sample time cannot precede the recorded window end",
+    );
+  }
+  const coverage = parseIncidentCoverage(obj.coverage, `${path}.coverage`);
   const domain = expectNullableString(
     obj.domain,
     `${path}.domain`,
@@ -212,6 +251,9 @@ export function parseMetricsSample(
     }
   }
   return {
+    identity,
+    windowStart,
+    windowEnd,
     sampledAt,
     domain,
     requestCount,
@@ -219,6 +261,7 @@ export function parseMetricsSample(
     timeoutCount,
     streamFailureCount,
     upstreamWideFault,
+    coverage,
   };
 }
 
@@ -258,15 +301,24 @@ function expectNullableBoolean(value: unknown, path: string): boolean | null {
 }
 
 /**
- * Restricted storage/credential reference: an opaque scheme:path-ish token.
- * A signed credential URL, query string, fragment or userinfo is never a
- * reference — those would leak secrets into public Git state. Pattern allows
- * A-Za-z0-9 plus `._:/+-` only.
+ * Restricted storage/credential reference: an opaque storage record name,
+ * never a network URL, absolute filesystem path or traversal. A signed
+ * credential URL, query string, fragment or userinfo is never a reference —
+ * those would leak secrets into public Git state; actual URL endpoints belong
+ * in configured adapter URLs, never in secret/artifact refs. Only the opaque
+ * storage schemes `artifact`, `fixture` and `secret` may use the
+ * `scheme://` authority form, and the authority is an opaque storage
+ * namespace name that may not carry a port (so no host:port endpoint form).
+ * `.`/`..` segments (including after an opaque scheme delimiter) are
+ * rejected, so a reference can never traverse outside its storage root. Pattern allows A-Za-z0-9 plus
+ * `._:/+-` only; query/fragment/userinfo characters are outside it.
  */
 const RESTRICTED_REF_RE = /^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,511}$/;
+const OPAQUE_REF_SCHEMES = ["artifact", "fixture", "secret"] as const;
+const OPAQUE_AUTHORITY_RE = /^[A-Za-z0-9_.-]+$/;
 
 export function expectRestrictedRef(value: unknown, path: string): string {
-  return expectPattern(
+  const text = expectPattern(
     value,
     path,
     RESTRICTED_REF_RE,
@@ -274,6 +326,68 @@ export function expectRestrictedRef(value: unknown, path: string): string {
     "expected restricted storage reference (no URL/query/userinfo)",
     MaxText.ref,
   );
+  expectRestrictedRefShape(text, path);
+  return text;
+}
+
+function expectRestrictedRefShape(text: string, path: string): void {
+  const schemeMatch = /^([A-Za-z][A-Za-z0-9+.-]*):/.exec(text);
+  let segments: string[];
+  let authoritySegment: string | null = null;
+  if (schemeMatch === null) {
+    segments = text.split("/");
+  } else {
+    const scheme = schemeMatch[1].toLowerCase();
+    if (!(OPAQUE_REF_SCHEMES as readonly string[]).includes(scheme)) {
+      fail(
+        path,
+        "invalid_pattern",
+        "expected an opaque storage reference scheme, not a URL or file scheme",
+      );
+    }
+    const rest = text.slice(schemeMatch[0].length);
+    if (rest.length === 0) {
+      fail(path, "invalid_pattern", "expected a non-empty reference body");
+    }
+    if (rest.startsWith("//")) {
+      // Authority form: an opaque storage namespace name. A port-bearing or
+      // colon-containing authority is a network endpoint — never a ref.
+      const slash = rest.indexOf("/", 2);
+      const authority = slash === -1 ? rest.slice(2) : rest.slice(2, slash);
+      if (
+        !OPAQUE_AUTHORITY_RE.test(authority) || authority.includes(":")
+      ) {
+        fail(
+          path,
+          "invalid_pattern",
+          "expected an opaque storage authority name",
+        );
+      }
+      segments = slash === -1 ? [] : rest.slice(slash + 1).split("/");
+      authoritySegment = authority;
+    } else if (rest.startsWith("/")) {
+      // scheme:/ absolute filesystem form; a ref is never a file path.
+      fail(
+        path,
+        "invalid_pattern",
+        "expected an opaque reference without an absolute path",
+      );
+    } else {
+      segments = rest.split("/");
+    }
+  }
+  const checkSegments = authoritySegment === null
+    ? segments
+    : [authoritySegment, ...segments];
+  for (const segment of checkSegments) {
+    if (segment === "." || segment === "..") {
+      fail(
+        path,
+        "invalid_pattern",
+        "expected a reference without . or .. path segments",
+      );
+    }
+  }
 }
 
 /**

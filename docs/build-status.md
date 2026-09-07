@@ -70,3 +70,30 @@ Remote identity/visibility, credential access, live rolling budgets, retention/s
 - Wrong reviewer rejection and distinct prior Git SHA/Deno revision identity independently verified. Source is checkpointed as a draft, NOT frozen F or integrated acceptance.
 - Remaining pre-F fixes: command lookup currently accepts inherited constructor when registry is empty; restricted refs still admit plain HTTPS URLs and dot segments; metrics inputs/samples need explicit revision/window/coverage; harness failure path must await temporary-home cleanup rather than exit from inside try.
 - Next bounded Wave A writer: finish these seams and implement real Git state plus rolling-hour/seven-day budget with actual local bare-repository conflict tests. One writer, canonical lane. Wave B remains prohibited until full F is validated and recorded.
+
+## Wave A state writer (2026-09-07 01:13 UTC)
+
+- Draft contract checkpoint: a603da2af60822d0a8aa2790ec822b09c3c82718; canonical clean immediately after commit. This is not F.
+- State assignment: /tmp/sentinel-gfa795549e5/foundation-state-assignment.txt, exact base a603da2af60822d0a8aa2790ec822b09c3c82718, canonical lane only. Scope includes real Git state and named pre-F contract/harness fixes; src/budget is deferred to the next bounded assignment.
+- Active process PID 46277, exec session 59968, persisted DSH session 58e2eca5-8557-4080-a288-3a860eb1bb08. Required provider/model/max header, canonical cwd and NODE_ENV=production verified; stripped launch has no unrelated deployment credential.
+- Restricted stream /tmp/sentinel-gfa795549e5/foundation-state.stream.jsonl. Revalidate actual process/session state on continuation; a timeout or ledger record alone is not terminal evidence.
+- Expected first edit/compile within 10 minutes and focused result around 30 minutes. Required proof uses real disposable local bare Git repositories, not FakeStateStore semantics. Identical concurrent writes must not both grant fresh admission; lost push responses must reconcile by exact remote identity. No force pushes, production state branches or external calls in tests.
+- Rolling budgets, frozen F, all Wave B modules, integrated review and live delivery remain incomplete. Goal-turn classification: progress (canonical lane creation, committed draft contracts, independent test evidence and active state implementation).
+
+## State draft validation and correction (2026-09-07 01:51 UTC)
+
+- State writer exited naturally with code 0 and terminal completed; wrapper session-b2da8d79-1b35-4c4e-82c1-0755760b14a3, persisted session 58e2eca5-8557-4080-a288-3a860eb1bb08. Required model/max reverified. No competing writer remains in this lane.
+- Primary independently ran credential-free test:local: 98 passed, 0 failed, formatting/lint/type checks passed. Exact current source remains a dirty draft on a603da2, not frozen F. Report /tmp/sentinel-gfa795549e5/state-primary-check.txt.
+- Primary real-Git recovery probe confirmed legitimate incident updates, ambiguous-to-submitted reservation resolution and same-phase monitoring writes are incorrectly rejected. Wrong-revision acceptance samples parse successfully, and a thrown transport exception escapes the typed port. The draft is not accepted for foundation freeze.
+- Bounded correction assignment /tmp/sentinel-gfa795549e5/state-correction-assignment.txt fixes those demonstrated lifecycle defects plus strict remote tree validation. Preserve the existing draft; no broad rewrite, project publication or target activity. Primary probe /tmp/sentinel-gfa795549e5/state-primary-probe.ts uses only disposable local Git remotes.
+- Next budget assignment notes prepared at /tmp/sentinel-gfa795549e5/budget-acceptance-notes.txt; launch only after corrected state is independently accepted. No Wave B lanes yet.
+- Correction run launched after prior writer exit: PID 68054, persistent exec session 49244, persisted DSH session 5eb281e1-c4d9-4870-9419-a49e3f4dd80d. Exact canonical cwd, NODE_ENV=production and no deployment credential in launch environment verified. Required deepseek-official/deepseek-v4-flash-vision-exp/max actual header verified. Stream /tmp/sentinel-gfa795549e5/state-correction.stream.jsonl; expected focused result 15-20 minutes. Resume this handle rather than starting another writer.
+
+## Corrected state checkpoint (2026-09-07 02:24 UTC)
+
+- Correction writer exited naturally, code 0, terminal completed (wrapper session-b9018ae1-ab70-4a31-98f8-dddefd716313; persisted 5eb281e1-c4d9-4870-9419-a49e3f4dd80d). Required model/max header reverified.
+- Independent credential-free test:local passed 109 tests, formatting/lint/type checks included. Report /tmp/sentinel-gfa795549e5/state-corrected-primary-check.txt. No project state branches or external test calls.
+- Independent real-Git probe confirms incident update, ambiguous-to-submitted reconciliation and same-phase monitoring now apply; wrong telemetry identity is rejected; thrown transport yields sanitized unavailable. Probe result /tmp/sentinel-gfa795549e5/state-corrected-probe-result.txt.
+- Checkpoint includes a known remaining pre-F edge: the initial snapshot can contain duplicate artifact refs because duplicate validation currently runs only on an existing-state transition. Move this invariant into the IncidentEvidence parser and test both first write and raw remote read in the next foundation/budget assignment. Probe v2 demonstrates the gap. This checkpoint is not frozen F.
+- Budget implementation remains absent. Next writer owns src/budget plus that narrow parser guard, before full Wave A acceptance and F. No Wave B, review, remote publication or deployment yet.
+- Read-only Codex interface research saved at /tmp/sentinel-gfa795549e5/codex-runtime-interface-research.md. Official app-server docs fetched; installed 0.153.4 schema generated offline. Review completion is final text plus terminal turn, not by itself a structured clean receipt. Actual clean-review/activation boundary remains unresolved; no Codex model or review call submitted.

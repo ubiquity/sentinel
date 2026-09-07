@@ -9,7 +9,7 @@
 
 import { asWorkItemId } from "./brands.ts";
 import type { GitSha, WorkItemId } from "./brands.ts";
-import { parseRepositoryIdentity } from "./shared.ts";
+import { expectRestrictedRef, parseRepositoryIdentity } from "./shared.ts";
 import type { RepositoryIdentityV1 } from "./shared.ts";
 import {
   expectEnum,
@@ -103,11 +103,12 @@ export function parseBudgetReservationV1(input: unknown): BudgetReservationV1 {
     "$.outcome",
   );
   const settledAt = expectNullableTimestamp(obj.settledAt, "$.settledAt");
-  const proofRef = expectNullableString(
-    obj.proofRef,
-    "$.proofRef",
-    MaxText.ref,
-  );
+  // A proof ref is an opaque restricted storage reference (never a URL or
+  // traversal): it points into the trusted evidence store, not at a network
+  // endpoint or filesystem path that could leak a secret into public state.
+  const proofRef = obj.proofRef === null
+    ? null
+    : expectRestrictedRef(obj.proofRef, "$.proofRef");
 
   if (outcome === "reserved") {
     if (settledAt !== null) {
@@ -167,13 +168,4 @@ export function parseBudgetReservationV1(input: unknown): BudgetReservationV1 {
 function expectNullableTimestamp(value: unknown, path: string): number | null {
   if (value === null) return null;
   return expectTimestamp(value, path);
-}
-
-function expectNullableString(
-  value: unknown,
-  path: string,
-  maxLength: number,
-): string | null {
-  if (value === null) return null;
-  return expectNonEmptyString(value, path, maxLength);
 }

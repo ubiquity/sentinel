@@ -46,9 +46,17 @@ typed `RecordParseError` (`code`, `path`, `message`) or, through
   length only — never the invalid input value, which may be an arbitrary secret
   (`expectSha256Hex`, `describeValue` and all `fail` messages follow this).
 - **Restricted refs only.** Every storage/credential reference field validates
-  against the restricted-ref shape (`^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,511}$`): no
-  URL query/fragment/userinfo, so a signed credential URL can never be persisted
-  into public Git state.
+  against the restricted-ref shape: an opaque storage record name, never a
+  network URL, absolute filesystem path or traversal. Refs follow
+  `^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,511}$` with structural rules: only the opaque
+  storage schemes `artifact`, `fixture` and `secret` may use the `scheme://`
+  authority form (any other scheme — including `http`/`https`/ `file`/`git` — is
+  rejected, and the authority may not carry a port); `scheme:/` absolute
+  filesystem forms are rejected; `.`/`..` path segments (including after an
+  opaque scheme delimiter) are rejected; URL query/fragment/userinfo characters
+  (`?`, `#`, `@`) are outside the charset. A signed credential URL can never be
+  persisted into public Git state, and actual URL endpoints belong in configured
+  adapter URLs, never in secret/artifact refs.
 
 ## 2. Identity brands and digest separation
 
@@ -112,21 +120,21 @@ All records have `version: "v1"` and a `kind`; fields below are complete.
 Per-repository configuration; the only credential surface is a restricted
 reference — no secret literal is allowed in any field.
 
-| Field                   | Type                                             | Semantics                                                                                                                                                                                                    |
-| ----------------------- | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `repository`            | `{ owner, name, installationId }`                | GitHub identity + App installation reference                                                                                                                                                                 |
-| `baseBranch`            | string                                           | primary source branch                                                                                                                                                                                        |
-| `adapter`               | `{ kind: "gateway", baseUrl }`                   | exact adapter kind — only `"gateway"` in v1                                                                                                                                                                  |
-| `commands.replay/.test` | `CommandId`                                      | trusted command IDs only; the config never carries shell argv (model-supplied commands are outside the contract)                                                                                             |
-| `commandRegistry`       | `CommandRegistryV1`                              | required concrete registry (file/injected config — never env/flag); references the same IDs and is checked to contain them                                                                                   |
-| `protectedPaths`        | string[]                                         | path prefixes that must never be modified                                                                                                                                                                    |
-| `build.projectId`       | string \| null                                   | Deno Deploy project id; null = not deployed                                                                                                                                                                  |
-| `build.acceptance`      | object \| null                                   | `healthPath`, `metricsPath`, `managedBodyMarker`, `managedHeaders` (non-secret identity markers), `domain`                                                                                                   |
-| `secretRef`             | string \| null                                   | restricted storage reference to host-injected credentials; must be a ref, never a literal URL/query/userinfo                                                                                                 |
-| `liveStartLimits`       | `{ perHour, perSevenDays }` \| null              | rolling model-start caps; **null = inference not enabled**; `perHour <= perSevenDays` enforced                                                                                                               |
-| `sessionBound`          | `{ maxDurationMs, maxOutputChars }` \| null      | declared supported session bounds                                                                                                                                                                            |
-| `retention`             | `{ evidenceMaxAgeMs, evidenceMaxBytes }` \| null | owner-approved evidence retention bound                                                                                                                                                                      |
-| `stabilityPolicy`       | object \| null                                   | declared metrics/denominators, `windowMs`/`sampleIntervalMs`, `minSamples`, `minRequests`, baseline window/samples, owner thresholds; empty threshold list rejected; `sampleIntervalMs <= windowMs` enforced |
+| Field                   | Type                                             | Semantics                                                                                                                                                                                                                                                                                           |
+| ----------------------- | ------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `repository`            | `{ owner, name, installationId }`                | GitHub identity + App installation reference                                                                                                                                                                                                                                                        |
+| `baseBranch`            | string                                           | primary source branch                                                                                                                                                                                                                                                                               |
+| `adapter`               | `{ kind: "gateway", baseUrl }`                   | exact adapter kind — only `"gateway"` in v1                                                                                                                                                                                                                                                         |
+| `commands.replay/.test` | `CommandId`                                      | trusted command IDs only; the config never carries shell argv (model-supplied commands are outside the contract). Registry lookup is **own-property only**: a configured id like `constructor` against an empty registry is rejected instead of resolving to an inherited `Object.prototype` member |
+| `commandRegistry`       | `CommandRegistryV1`                              | required concrete registry (file/injected config — never env/flag); references the same IDs and is checked to contain them                                                                                                                                                                          |
+| `protectedPaths`        | string[]                                         | path prefixes that must never be modified                                                                                                                                                                                                                                                           |
+| `build.projectId`       | string \| null                                   | Deno Deploy project id; null = not deployed                                                                                                                                                                                                                                                         |
+| `build.acceptance`      | object \| null                                   | `healthPath`, `metricsPath`, `managedBodyMarker`, `managedHeaders` (non-secret identity markers), `domain`                                                                                                                                                                                          |
+| `secretRef`             | string \| null                                   | restricted storage reference to host-injected credentials; must be a ref, never a literal URL/query/userinfo                                                                                                                                                                                        |
+| `liveStartLimits`       | `{ perHour, perSevenDays }` \| null              | rolling model-start caps; **null = inference not enabled**; `perHour <= perSevenDays` enforced                                                                                                                                                                                                      |
+| `sessionBound`          | `{ maxDurationMs, maxOutputChars }` \| null      | declared supported session bounds                                                                                                                                                                                                                                                                   |
+| `retention`             | `{ evidenceMaxAgeMs, evidenceMaxBytes }` \| null | owner-approved evidence retention bound                                                                                                                                                                                                                                                             |
+| `stabilityPolicy`       | object \| null                                   | declared metrics/denominators, `windowMs`/`sampleIntervalMs`, `minSamples`, `minRequests`, baseline window/samples, owner thresholds; empty threshold list rejected; `sampleIntervalMs <= windowMs` enforced                                                                                        |
 
 `CommandRegistryV1 { version, commands }` binds each `CommandId` to
 `CommandSpecV1 { executable, args, maxDurationMs, maxOutputBytes }`:
@@ -255,7 +263,14 @@ persistence failure prevents invocation.
   `"reserved"` is the interim state (`settledAt: null`). Terminal outcomes
   require `settledAt >= createdAt`. `"submitted"` and `"ambiguous"` remain
   **charged**; `"confirmed_not_submitted"` is the only uncharged terminal and
-  requires a non-null `proofRef` (and no other outcome may carry one).
+  requires a non-null `proofRef` (and no other outcome may carry one). The
+  `proofRef` is an opaque restricted storage reference (never a URL, filesystem
+  path or traversal): it points into the trusted evidence store, not at a
+  network endpoint that could leak into public state. Reconciliation:
+  `ambiguous` → `submitted` is valid (still charged), and an `ambiguous` →
+  `confirmed_not_submitted` refund still requires the proof ref; the recorded
+  settlement time may advance, never move backward, and an equal repeated
+  settlement is idempotent.
 
 ### ReplayResultV1 (`kind: "replay_result"`)
 
@@ -320,10 +335,25 @@ Owned exclusively by the deterministic release workflow.
   arrays — never a bare boolean), and `thresholdResults` record
   observed/`baselineRate` against `maxRate` and `maxIncrease`. Missing telemetry
   is explicit `null` inside a sample, never a 0-rate picture.
-- `MetricsSampleV1 { sampledAt, domain, requestCount, fiveXxCount,
-  timeoutCount, streamFailureCount, upstreamWideFault }`:
-  counts are bounded by the denominator (`requestCount`), a null denominator
-  forces all counts and the flag null, and no raw request data is stored.
+- `MetricsSampleV1`:
+  `{ identity: DeploymentIdentityV1, windowStart, windowEnd, sampledAt,
+  domain, requestCount, fiveXxCount, timeoutCount, streamFailureCount,
+  upstreamWideFault, coverage: IncidentCoverageV1 }`:
+  each sample binds the exact deployment identity it proves (Git SHA + Deno
+  revision id, never one without the other), the explicit inclusive/ exclusive
+  telemetry window it covers (`windowStart < windowEnd <=
+  sampledAt`, never
+  inferred from the current wall clock on resume), and the coverage of the
+  source scan that produced it. Counts are bounded by the denominator
+  (`requestCount`), a null denominator forces all counts and the flag null, and
+  no raw request data is stored. Within an acceptance result every acceptance
+  sample must record the exact acceptance identity and every baseline sample the
+  exact recorded prior identity — a wrong Git SHA or Deno revision id in either
+  collection is rejected. Incomplete coverage can never support a passing
+  acceptance: `parseReleaseRecordV1` rejects `passed: true` results whose
+  baseline or samples declare incomplete coverage, while `passed: false`
+  diagnostics persist their incomplete coverage instead of discarding the
+  failure evidence.
 - `receipts { promote, rollback, error }`: promote receipts record the status
   code and the observed exact identity; `"rolled_back"` requires an ok rollback
   receipt restoring exactly the recorded prior identity and a verified observed
@@ -361,6 +391,9 @@ the callers rely on:
   authoritative empty list is `ok: true, value: []`. `readIncident` /
   `readArtifact` use `null` for _gone/expired_ and `ok: false` for transport
   failure, so `evidence_expired` block reasons stay distinct from outages.
+  `IncidentPageV1` carries explicit `coverage` independent of whether `items` is
+  empty: an empty page may still be incomplete coverage, and a failed source
+  read is never a successful empty page.
 - **Ambiguous ≠ failed.** Writes return `outcome: "applied" | "ambiguous"` (pull
   request creation, push, review request) — ambiguous means the effect may have
   been applied and the caller must reconcile against exact authoritative state
@@ -405,7 +438,10 @@ the callers rely on:
   "found"). Build/deployment/health/promotion identities are all
   `DeploymentIdentityV1` — the Git SHA plus the exact Deno deployment id.
   Health/metrics sampling returns explicit samples; missing telemetry is `null`
-  in the sample, never interpreted as zero.
+  in the sample, never interpreted as zero. `MetricsSampleConfigV1` carries the
+  exact `identity` plus an explicit `windowStart`/`windowEnd`
+  (`windowStart < windowEnd`) so a sample is never a clock-derived guess, and
+  every returned `MetricsSampleV1` binds that identity, window and its coverage.
 - **Implementation.** `ImplementationPort.runModel` takes a bounded pinned
   request (`model: "gpt-5.6-luna"`, `reasoning: "max"`, `maxDurationMs`,
   `maxOutputChars`, bounded evidence refs, secret-free base) and returns an
@@ -425,6 +461,79 @@ the callers rely on:
 | WorkRecordV1, BudgetReservationV1, ReleaseRequestV1, ReviewReceiptV1, ReplayResultV1, IncidentSummaryV1, IncidentEvidenceV1 | `sentinel-state/repair` snapshot                             |
 | ReleaseRecordV1                                                                                                             | `sentinel-state/release` snapshot                            |
 | Incident evidence payloads                                                                                                  | restricted encrypted artifact storage (refs only in records) |
+
+### Git state implementation (`src/state/mod.ts`, foundation-owned)
+
+The production `GitStateStore` (role `repair` | `release`) reads both fixed refs
+and writes only its own:
+
+- Fixed refs `refs/heads/sentinel-state/repair` and
+  `refs/heads/sentinel-state/release`. The store never imports, switches or
+  resets the canonical/target checkout and never creates a local branch: every
+  operation runs in a private temporary workdir under the explicitly provided
+  scratch directory (no shared index/FETCH_HEAD, so concurrent uses cannot race
+  on scratch state).
+- One commit per write, containing `manifest.json` (exact keys
+  `version/kind/sequence/updatedAt/stateHead`) plus one canonical JSON file per
+  record under role-specific collection directories (`incidents/`, `evidence/`,
+  `work/`, `reservations/`, `reviews/`, `replays/`, `releaseRequests/` for
+  repair; `releases/` for release), named by `sha256(record.id)` — digest
+  filenames mean no id can traverse or collide.
+- Reads validate the full record tree: manifest schema, exact collection layout,
+  exact record keys/schema via the frozen parsers, unique ids, digest filenames
+  matching the record id, and manifest `stateHead` against the actual commit
+  parent. The returned `head` is the state commit; the snapshot `stateHead`
+  stays the separate parent identity.
+- Writes are strict expected-head CAS: the snapshot `stateHead` must equal the
+  expected head, the expected head must match the fetched ref, and the candidate
+  commit is formed by plumbing with that exact parent. The push is a plain
+  non-force push; a mismatch is a conflict (reread, never overwrite). Every
+  commit message carries a unique trusted write nonce (generated per write,
+  never from owner config/env/flag), so two identical same-second candidates can
+  never produce the same commit; exactly one caller receives the fresh applied
+  authorization.
+- A failed push is never retried blindly: the store re-reads the authoritative
+  ref and reports applied (response lost but applied), conflict (someone else
+  won), ambiguous (unknown), or a typed transport error. Absent refs are
+  `ls-remote` success with no match; auth/network failures are typed errors,
+  never an empty state. `ls-remote` output is validated exactly: zero matching
+  records is truly absent, while malformed, nonmatching or duplicate responses
+  are invalid rather than empty. A throwing transport is translated into a
+  sanitized typed failure (no exception text, path or URL leaks); a push whose
+  response is thrown — or thrown away after success — is reconciled against the
+  authoritative ref: applied only when the same unique candidate is current,
+  conflict only on a proved competing outcome, otherwise ambiguous. A failed
+  verification read after an attempted push is ambiguous, never a false "not
+  applied" error. State trees are validated strictly: every file (manifest and
+  records) must be a full regular blob (mode `100644`; symlink and executable
+  files are rejected) and exactly the canonical JSON bytes this store writes
+  (`canonicalStringify(parsed)` + newline), so duplicate JSON keys, reordered
+  keys or formatting drift are rejected instead of reparsed.
+- Transitions fail closed: prior records are never silently dropped; work
+  source/repository/controller SHA/failing revision/source snapshot identity are
+  immutable and `done` work is terminal; reservations keep their identity/time
+  and settled states never revert (only `ambiguous` → `submitted`, still
+  charged, or `ambiguous` → `confirmed_not_submitted` with the proof ref; the
+  settlement time never moves backward and equal repeated settlement is
+  idempotent); release request identity is immutable and terminal requests
+  cannot restart; release record candidate/prior/request identity is immutable
+  and accepted/rolled-back/failed releases are terminal. Incident summaries keep
+  id/repository/fingerprint/firstSeenAt/failingRevision fixed with
+  `count`/`lastSeenAt` nondecreasing, provenance source/endpoint fixed and
+  `capturedAt` nondecreasing while severity/context/coverage/evidenceRef stay
+  updateable; incident evidence keeps identity and provenance fixed, prior
+  artifacts exactly present with new distinct refs appended (duplicate artifact
+  refs invalid) and replay metadata may appear and then fill `fixtureDigest`/
+  `reproducedAt` once without ever replacing non-null identity, while coverage
+  stays updateable; review receipts keep request/reviewer/PR/submittedAt fixed
+  with `observedAt` nondecreasing, pending or unavailable receipts may be
+  observed into completion, and completed receipts stay immutable; replay
+  results are immutable. Release records support same-phase persistence across
+  `requested`/`promoting`/`monitoring` (repeated samples, saved intent,
+  interrupted-coverage restarts) with per-record `updatedAt` nondecreasing;
+  forward phase transitions remain allowed and backward resets forbidden.
+  Snapshot sequence increases by exactly one and `updatedAt` never moves
+  backward.
 
 ## 7. Fixtures and tests
 

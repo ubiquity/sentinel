@@ -414,7 +414,8 @@ export function parseReleaseRecordV1(input: unknown): ReleaseRecordV1 {
   const acceptance = expectNullable(
     obj.acceptance,
     "$.acceptance",
-    parseAcceptance,
+    (input, path) =>
+      parseAcceptance(input, path, candidate.identity, prior.identity),
   );
   const receipts = parseReceipts(obj.receipts, "$.receipts");
 
@@ -617,7 +618,12 @@ function parseMonitoring(input: unknown, path: string): ReleaseMonitoringV1 {
   return { startedAt, samples, continuous, lastSampleAt };
 }
 
-function parseAcceptance(input: unknown, path: string): AcceptanceResultV1 {
+function parseAcceptance(
+  input: unknown,
+  path: string,
+  candidateIdentity: DeploymentIdentityV1,
+  priorIdentity: DeploymentIdentityV1,
+): AcceptanceResultV1 {
   const obj = expectRecord(input, path);
   expectExactKeys(obj, ACCEPTANCE_KEYS, path);
   const identity = parseDeploymentIdentity(obj.identity, `${path}.identity`);
@@ -644,6 +650,13 @@ function parseAcceptance(input: unknown, path: string): AcceptanceResultV1 {
     `${path}.thresholdResults`,
   );
   const passed = expectBooleanOf(obj.passed, `${path}.passed`);
+  if (!sameIdentity(identity, candidateIdentity)) {
+    fail(
+      `${path}.identity`,
+      "invalid_lifecycle",
+      "acceptance must reference the exact candidate identity",
+    );
+  }
   if (baseline.length < 1) {
     fail(path, "invalid_lifecycle", "acceptance requires baseline evidence");
   }
@@ -653,6 +666,50 @@ function parseAcceptance(input: unknown, path: string): AcceptanceResultV1 {
       "invalid_lifecycle",
       "acceptance requires at least one sample",
     );
+  }
+  // Telemetry proves an exact identity: every acceptance sample must record
+  // the exact candidate identity and every baseline sample the exact recorded
+  // prior identity. A wrong Git SHA OR Deno revision id is binding, never an
+  // approximation; a diagnostic under the wrong identity is not this release's
+  // evidence.
+  for (const [index, sample] of samples.entries()) {
+    if (!sameIdentity(sample.identity, identity)) {
+      fail(
+        `${path}.samples[${index}].identity`,
+        "invalid_lifecycle",
+        "acceptance samples must record the exact acceptance identity",
+      );
+    }
+  }
+  for (const [index, sample] of baseline.entries()) {
+    if (!sameIdentity(sample.identity, priorIdentity)) {
+      fail(
+        `${path}.baseline[${index}].identity`,
+        "invalid_lifecycle",
+        "baseline samples must record the exact recorded prior identity",
+      );
+    }
+  }
+  // A passing acceptance is only supportable by complete coverage; a
+  // diagnostic acceptance (passed: false) persists its failure evidence even
+  // with incomplete coverage instead of discarding it.
+  if (passed) {
+    for (
+      const [listName, list] of [
+        ["baseline", baseline],
+        ["samples", samples],
+      ] as const
+    ) {
+      for (const [index, sample] of list.entries()) {
+        if (sample.coverage.status !== "complete") {
+          fail(
+            `${path}.${listName}[${index}].coverage`,
+            "invalid_lifecycle",
+            "incomplete coverage cannot support acceptance",
+          );
+        }
+      }
+    }
   }
   return {
     identity,

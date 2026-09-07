@@ -28,6 +28,7 @@ import {
   tryParse,
 } from "../../src/contracts/validation.ts";
 import { parseWorkRecordV1 } from "../../src/contracts/work-record.ts";
+import { expectRestrictedRef } from "../../src/contracts/shared.ts";
 
 function rejected(
   fn: () => unknown,
@@ -174,6 +175,58 @@ Deno.test("command ids: lowercase snake ids only", () => {
   assert.equal(expectCommandId("replay_capture", "$.c"), "replay_capture");
   rejected(() => expectCommandId("Replay_capture", "$.c"), "invalid_pattern");
   rejected(() => expectCommandId("rm -rf /", "$.c"), "invalid_pattern");
+});
+
+Deno.test("restricted refs: opaque storage refs only, never URLs or traversal", () => {
+  for (
+    const ok of [
+      "replay/rec-0001",
+      "artifact://inbox/inc-2026-09-07-0001.pgp",
+      "fixture://x.json",
+      "fixture://captures/inc-2026-09-07-0001/upstream.json",
+      "secret://host/injected/sentinel-github-app",
+      "secret:vault-key",
+    ]
+  ) {
+    assert.equal(expectRestrictedRef(ok, "$.ref"), ok);
+  }
+  // URL endpoints, file paths, traversal and port-bearing authorities are
+  // never references.
+  const bad = [
+    "https://example.com/path",
+    "http://ai.ubq.fi/x",
+    "HTTPS://example.com/x",
+    "file:/etc/passwd",
+    "secret:/etc/passwd",
+    "secret:../file",
+    "secret:./file",
+    "artifact://inbox/../out.pgp",
+    "artifact://inbox/./out.pgp",
+    "artifact://host:8080/x",
+    "git://host/x",
+    "a://b",
+    "secret:",
+    "replay/../x",
+    "replay/./x",
+    "artifact://inbox/x?token=1",
+    "artifact://user:pw@inbox/x",
+    "artifact://inbox/x#frag",
+    "artifact://../x",
+  ];
+  for (const value of bad) {
+    const issue = rejected(
+      () => expectRestrictedRef(value, "$.ref"),
+      "invalid_pattern",
+      "$.ref",
+    );
+    // Fail-closed messages never echo the invalid reference value.
+    assert.ok(!issue.message.includes(value));
+    assert.ok(
+      !issue.message.includes("example.com") &&
+        !issue.message.includes("/etc/passwd") &&
+        !issue.message.includes("secret"),
+    );
+  }
 });
 
 Deno.test("arrays: bounded and typed per item", () => {
