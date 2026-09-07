@@ -444,8 +444,13 @@ export async function runReleaseWindowToEnd(rig: ReleaseRigV1): Promise<void> {
     throw new Error("missing window start");
   }
   const startedAt = record.monitoring.startedAt;
-  rig.clock.at(startedAt + 35_000 + 59 * 30_000);
-  await rig.run();
+  // The release controller must restart after a missed monitoring gap; drive
+  // each due slot explicitly so this integration proves continuous coverage
+  // rather than relying on historical logs to fill an unattended window.
+  for (let index = 0; index < 60; index++) {
+    rig.clock.at(startedAt + 35_000 + index * 30_000);
+    await rig.run();
+  }
 }
 
 // ---------------------------------------------------------------------------
