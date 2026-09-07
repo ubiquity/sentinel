@@ -177,7 +177,16 @@ export class ScriptedTransport {
   deployed: DeploymentIdentityV1 = DEP_0;
   /** Mutable per-test behavior. */
   customStatus: number = 200;
+  /**
+   * When true, a 403 custom response carries the full identified Cloudflare
+   * challenge header set (server: cloudflare, cf-mitigated: challenge,
+   * cf-ray); when false it is a bare origin 403.
+   */
   customCloudflare: boolean = false;
+  /** Custom-domain transport failure (the probe is unobservable). */
+  customReject: boolean = false;
+  /** Managed health 200 with valid identity headers but a missing body marker. */
+  managedBodyMissing: boolean = false;
   identityOverride: DeploymentIdentityV1 | null = null;
   customIdentityOverride: DeploymentIdentityV1 | null = null;
   /** When true, the logs endpoint rejects (transport failure). */
@@ -230,12 +239,17 @@ export class ScriptedTransport {
   }
 
   private customHealthResponse(): RouteResponseV1 {
-    if (this.customStatus === 403) {
+    if (this.customReject) return { kind: "reject" };
+    if (this.customStatus !== 200) {
       return {
         kind: "response",
-        status: 403,
-        headers: this.customCloudflare
-          ? { server: "cloudflare", "cf-ray": "abc123" }
+        status: this.customStatus,
+        headers: this.customStatus === 403 && this.customCloudflare
+          ? {
+            server: "cloudflare",
+            "cf-mitigated": "challenge",
+            "cf-ray": "abc123",
+          }
           : {},
         body: "Forbidden",
       };
@@ -259,8 +273,10 @@ export class ScriptedTransport {
         [GIT_SHA_HEADER]: identity.gitSha,
         [REVISION_HEADER]: identity.revisionId,
       },
-      body:
-        `{"status":"available","release":{"git_sha":"${identity.gitSha}","deployment_id":"${identity.revisionId}"}}`,
+      body: this.managedBodyMissing
+        ? `{"status":"maintenance","release":{"git_sha":"${identity.gitSha}","deployment_id":"${identity.revisionId}"}}`
+        :
+          `{"status":"available","release":{"git_sha":"${identity.gitSha}","deployment_id":"${identity.revisionId}"}}`,
     };
   }
 
@@ -527,7 +543,10 @@ export function terminalEvent(
  * A logs route serving a deterministic cohort for the exact revision +
  * window: `accept` accepted events and `fails` failing terminals (with the
  * given 5xx/timeout/stream/upstream split), plus optional unreadable entries
- * to force incomplete coverage.
+ * to force incomplete coverage. Failure terminals reference ACCEPTED request
+ * ids of the same cohort (the gateway emits one accepted + one terminal per
+ * request); `orphanTerminals` adds terminals whose accepted event is outside
+ * the window, which must never contribute to the cohort's failure counts.
  */
 export function logRoute(
   transport: ScriptedTransport,
@@ -546,6 +565,10 @@ export function logRoute(
       stream?: number;
       upstream?: number;
     };
+    /** Terminal events with no accepted event in this window. */
+    orphanTerminals?: number;
+    /** Revision ids whose log queries must fail (transport rejection). */
+    rejectRevisionIds?: string[];
     unreadable?: number;
   },
 ): void {
@@ -555,6 +578,9 @@ export function logRoute(
     (url) => {
       if (transport.logsReject) return { kind: "reject" };
       const revisionId = url.searchParams.get("revision_id") ?? "dep-0000";
+      if (options.rejectRevisionIds?.includes(revisionId)) {
+        return { kind: "reject" };
+      }
       const start = Date.parse(url.searchParams.get("start") ?? "0");
       const gitSha = revisionId === DEP_1.revisionId
         ? DEP_1.gitSha
@@ -581,9 +607,15 @@ export function logRoute(
         stream: boolean | null,
         streamTerminalType: string | null,
       ) => {
+        // A failing request is still part of the accepted cohort: its
+        // terminal references the accepted request id (the gateway emits one
+        // accepted + one terminal per request).
+        const requestId = failIndex < options.accept
+          ? `${revisionId}-acc-${failIndex}`
+          : `${revisionId}-orphan-${failIndex}`;
         logs.push(
           terminalEvent({
-            requestId: `${revisionId}-term-${failIndex++}`,
+            requestId,
             timestamp: start + failIndex,
             identity,
             status,
@@ -592,6 +624,7 @@ export function logRoute(
             streamTerminalType,
           }),
         );
+        failIndex++;
       };
       for (let i = 0; i < (fails.fiveXx ?? 0); i++) {
         pushFail(502, null, null, null);
@@ -604,6 +637,17 @@ export function logRoute(
       }
       for (let i = 0; i < (fails.upstream ?? 0); i++) {
         pushFail(502, "upstream_error", null, null);
+      }
+      for (let i = 0; i < (options.orphanTerminals ?? 0); i++) {
+        const requestId = `${revisionId}-outside-${i}`;
+        logs.push(
+          terminalEvent({
+            requestId,
+            timestamp: start + i,
+            identity,
+            status: 502,
+          }),
+        );
       }
       for (let i = 0; i < (options.unreadable ?? 0); i++) {
         logs.push("[ai.ubq.fi] request_accepted {broken");

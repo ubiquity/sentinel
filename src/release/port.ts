@@ -303,20 +303,27 @@ export class DenoReleaseRESTClient implements DenoReleasePort {
     }
     const status = response.value.status;
     const bodyText = new TextDecoder().decode(response.value.body);
+    const headers = new Headers();
+    for (const [name, value] of response.value.headers) {
+      headers.set(name, value);
+    }
     if (status !== 200) {
+      const verifiedCloudflare = status === 403
+        ? isVerifiedCloudflareChallenge(headers)
+        : false;
       return portOk({
         at: this.clock.now(),
         status: "degraded",
         httpStatus: status,
         bodyMarkerPresent: null,
-        headersMatch: null,
+        // For a 403 this reports whether the response is the target's
+        // identified Cloudflare Bot Fight Mode challenge (server: cloudflare,
+        // cf-mitigated: challenge, cf-ray present). Any other non-200 keeps
+        // the null sentinel (no header verification was possible).
+        headersMatch: status === 403 ? verifiedCloudflare : null,
         identity: null,
         domain: config.domain,
       });
-    }
-    const headers = new Headers();
-    for (const [name, value] of response.value.headers) {
-      headers.set(name, value);
     }
     const bodyMarkerPresent = bodyText.includes(
       config.managedBodyMarker,
@@ -865,6 +872,22 @@ function headerEquals(
   value: string,
 ): boolean {
   return (headers.get(name) ?? null) === value;
+}
+
+/**
+ * The target's identified Cloudflare warning exception: an HTTP 403 that is
+ * demonstrably a Cloudflare Bot Fight Mode challenge (the gateway runner was
+ * challenged, not the application). Identification requires the Cloudflare
+ * `server` and `cf-mitigated: challenge` headers plus a non-empty `cf-ray`;
+ * a 403 without all three is an application/origin 403 and is never
+ * claimed to be a Cloudflare challenge.
+ */
+function isVerifiedCloudflareChallenge(headers: Headers): boolean {
+  const server = headers.get("server")?.trim().toLowerCase() ?? "";
+  const mitigation = headers.get("cf-mitigated")?.trim().toLowerCase() ?? "";
+  const ray = headers.get("cf-ray")?.trim() ?? "";
+  return server === "cloudflare" && mitigation === "challenge" &&
+    ray.length > 0;
 }
 
 function toRfc3339(ms: number): string {
