@@ -249,3 +249,8 @@ Remote identity/visibility, credential access, live rolling budgets, retention/s
 - m01 transport correction completed naturally with terminal READY handback. Primary independently passed fmt/lint/check plus 86 GitHub tests, zero failed, in 11s; evidence `/tmp/sentinel-gfa795549e5/m01-primary-tests-v3.txt` and paired check reports.
 - m01 tip `95f2db1` was committed in its isolated lane and ancestry-preservingly merged into canonical. Exact-ref race rejection, descendant process-group settlement, bounded transport/output, and sanitized failures are now module-integrated. The stale v1 probe remains obsolete because it omits `expectedRef`; the corrected v3 probe and real bare-remote tests are the authoritative evidence.
 - Wave B modules m01-m05 are integrated locally. No Codex review, GitHub publication, deployment, target mutation, or live delivery proof has occurred. Wave C production entrypoint wiring and integrated lifecycle acceptance are next.
+
+## Wave C integration launch (2026-09-07 06:39 UTC)
+
+- Created isolated integration lane `/Users/nv/repos/ubiquity/sentinel/.codex-worktrees/master-plan-wave-c-20260907` on `codex/master-plan-wave-c-20260907` from canonical tip `2a3fcc4`. Assignment `/tmp/sentinel-gfa795549e5/wave-c-assignment-v1.txt` owns only entrypoints, root task registration, workflow/config wiring, and integration tests/docs; no module or frozen-contract edits.
+- DSH integration writer is active as wrapper/child PIDs 32371/32386 with stream `/tmp/sentinel-gfa795549e5/wave-c-integration-v1.stream.jsonl`. Required `NODE_ENV=production` and existing inference credential were supplied; no deployment or target credentials/calls are authorized.
