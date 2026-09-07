@@ -150,3 +150,9 @@ Remote identity/visibility, credential access, live rolling budgets, retention/s
 - Primary independently ran final credential-free test:local: 150 passed, zero failed, fmt/lint/type checks passed in 37 seconds. Evidence /tmp/sentinel-gfa795549e5/foundation-F-primary-check.txt. Budget real Git race/restart/refund/lost-response coverage and corrected failure probes retained. Diff inspection/check passed.
 - Foundation accepted for exact F freeze: strict shared contracts, real Git state, durable rolling budget, merge/base/review binding, fake-port polling smoke skeleton, explicit Wave C entrypoint ownership and proposed gateway producer/consumer fixture. This is local foundation proof only, not reviewed/merged/deployed/live completion.
 - Next: create m01-github, m02-evidence and m03-replay at exact resulting F; at most three implementation writers, each isolated. Primary integrates in m01/m02/m03 order when ready without holding unrelated modules. m04/m05 follow as capacity opens; m06 remains postponed pending target ownership. No remote publication or activation.
+
+## Frozen F and Wave B lanes (2026-09-07 03:37 UTC)
+
+- Exact validated foundation F: c63d3b90b69fb1b4710fe31f3689bcf1d4a99552. Canonical clean at freeze. Worker bases are immutable F, not the later ledger-only canonical tip.
+- Created recorded lanes from exact F: m01-github/master-plan-m01-github-a86bd3790da, m02-evidence/master-plan-m02-evidence-afb9652dea8, m03-replay/master-plan-m03-replay-ac17fc34d9a, each on matching codex/ branch under root .codex-worktrees. Ownership exactly MASTER-PLAN scopes; no shared/root edits authorized.
+- Immutable assignments /tmp/sentinel-gfa795549e5/m01-github-assignment-v2.txt, m02-evidence-assignment-v2.txt, m03-replay-assignment-v2.txt incorporate updated control/subagent rules. At most one optional DSH-native read-only child per module, no write child lanes. Total three implementation writers; single production runtime writer unchanged.
