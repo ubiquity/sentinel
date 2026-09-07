@@ -15,7 +15,10 @@
  * The port never invents CLI flags/stdin controls or unsupported protocol
  * methods: thread and turn parameters come from the frozen installed schema
  * (`thread/start`, `turn/start`, `turn/interrupt`, `turn/completed`), terminal
- * settlement is awaited, and every owned timer and stream is cleared.
+ * settlement is awaited, and every owned timer and stream is cleared. The
+ * thread sandbox is the narrowest write-capable mode (`workspace-write` over
+ * the isolated checkout cwd): the session can produce its commit inside the
+ * checkout but holds no read access outside it and no approval authority.
  */
 
 import type { GitSha } from "../contracts/brands.ts";
@@ -234,7 +237,11 @@ export class CodexImplementationPort implements ImplementationPort {
     const response = await session.send("thread/start", {
       model: request.model,
       cwd: this.options.checkoutDir,
-      sandbox: "read-only",
+      // Bounded isolated-checkout write capability: the session may write
+      // within the secret-free checkout only (the thread cwd is the checkout
+      // root); the host approval policy stays "never" and no other sandbox is
+      // granted. "read-only" would make the requested commit impossible.
+      sandbox: "workspace-write",
       approvalPolicy: "never",
       ephemeral: true,
       baseInstructions: prompt,

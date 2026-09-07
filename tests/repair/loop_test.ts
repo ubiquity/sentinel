@@ -14,8 +14,12 @@ import {
   createReleaseStateStore,
   createRepairStateStore,
 } from "../../src/state/mod.ts";
+import type { GitSha } from "../../src/contracts/brands.ts";
+import { parseReviewReceiptV1 } from "../../src/contracts/review-receipt.ts";
+import type { ReviewReceiptV1 } from "../../src/contracts/review-receipt.ts";
 import type { RepairStateSnapshotV1 } from "../../src/contracts/state-snapshots.ts";
 import type { ReleaseStateSnapshotV1 } from "../../src/contracts/state-snapshots.ts";
+import type { WorkRecordV1 } from "../../src/contracts/work-record.ts";
 import { runRepairCycle } from "../../src/repair/loop.ts";
 import {
   DEP_0,
@@ -24,6 +28,7 @@ import {
   incidentSummary,
   makeRemoteCtx,
   monitoredReleaseRecord,
+  releaseRequest,
   SHA1,
   SHA2,
   SHA3,
@@ -50,6 +55,8 @@ const ROOT = decodeURIComponent(HERE.pathname).replace(
 const FINGERPRINT = "d".repeat(64);
 const FINGERPRINT_B = "1".repeat(64);
 const EVIDENCE_ID = "inc-a";
+/** Second candidate head used by the P1 correction path. */
+const SHA4 = "7f0b28dc5c6f8a1a2b3c4d5e6f7a8b9c0d1e2f3a" as GitSha;
 
 function summaryFixture(): ReturnType<typeof incidentSummary> {
   return incidentSummary("inc-a", {
@@ -762,10 +769,24 @@ Deno.test("review request ambiguous/failed stays charged once and never resubmit
   }
 });
 
-Deno.test("P1 findings, no-verdict and protected paths fail closed", async () => {
-  const rig = await makeRig("failings");
+Deno.test("P1 findings trigger a fresh bounded implementation/candidate/replay path", async () => {
+  const rig = await makeRig("p1fresh", {
+    model: { heads: [SHA3, SHA4] },
+  });
   try {
-    await rig.run();
+    // Run 1: the first candidate (SHA3) reaches the review wait.
+    const first = await rig.run();
+    assert.equal(first.status, "idle", JSON.stringify(first));
+    assert.equal(rig.model.requests.length, 1);
+    let state = await rig.snapshot();
+    assert.equal(state.work[0].nextStep, "review");
+    assert.equal(state.work[0].target.head, SHA3);
+
+    // A P1 finding arrives on the observed head: it never merges and never
+    // re-requests a review of the SAME rejected candidate. Instead the record
+    // forgets the rejected head and runs a fresh bounded implementation,
+    // validates the new candidate through the replay path and only then
+    // updates the same PR and requests a review of the NEW head.
     rig.clock.advance(15 * 60_000 + 1);
     rig.github.completeReview([{
       id: "finding-1",
@@ -776,73 +797,109 @@ Deno.test("P1 findings, no-verdict and protected paths fail closed", async () =>
       resolved: false,
       resolutionEvidence: null,
     }], rig.clock.now());
-    await rig.run();
-    const state = await rig.snapshot();
-    // A P1 finding never merges: it opens a fresh correction round (a new
-    // admitted review request) and the exact merge gate stays closed.
+    const second = await rig.run();
+    assert.equal(second.status, "idle", JSON.stringify(second));
     assert.equal(
-      state.work[0].nextStep,
-      "review",
-      "correction waits for its own round",
+      rig.model.requests.length,
+      2,
+      "a P1 finding opens exactly one fresh implementation",
     );
+    state = await rig.snapshot();
+    const work = state.work[0];
+    assert.equal(work.nextStep, "review");
+    assert.equal(work.target.head, SHA4, "corrected candidate head");
+    assert.equal(work.target.pr, 7, "correction lands on the same PR");
+    assert.equal(work.counters.attempts, 2);
+    assert.equal(work.counters.reviewRounds, 2, "fresh correction round");
     assert.equal(
       rig.github.calls.includes("merge"),
       false,
       "P1 must never merge",
     );
+    // The new candidate went through the before/after replay path with exact
+    // original + candidate identities (a fresh candidate, not the old one).
+    assert.equal(state.replays.length, 2);
+    const newer = state.replays.find(
+      (result) => result.candidate.revision === SHA4,
+    );
+    assert.ok(newer, "fresh candidate has a durable replay result");
+    assert.equal(newer?.candidate.outcome, "passed");
+    assert.equal(newer?.original.revision, SHA2);
+    assert.equal(newer?.original.outcome, "failed");
+    assert.equal(newer?.original.failure?.intended, true);
+    // The corrected head is pushed onto the same branch and requested for
+    // review once; no duplicate PR is created.
+    assert.deepEqual(
+      rig.github.pushes.map((push) => push.sha),
+      [SHA3, SHA4],
+      "new head pushed once to the existing branch",
+    );
     assert.equal(
-      state.work[0].counters.reviewRounds,
-      2,
-      "fresh correction round",
+      rig.github.calls.filter((call) => call === "createPr").length,
+      1,
+      "no duplicate PR publication",
     );
     assert.equal(
       rig.github.calls.filter((call) => call === "requestReview").length,
       2,
-      "correction round requests its own review",
+      "one review request per corrected head",
     );
     assert.equal(
       state.reservations.filter((reservation) =>
         reservation.outcome === "submitted"
       ).length,
-      3,
-      "implementation + review + correction review are charged",
+      4,
+      "implementation + review + retry implementation + correction review are each charged once",
+    );
+    // The rejected head is not silently forgotten: the review receipt remains
+    // attached as evidence and the P1 finding is recorded.
+    assert.ok(
+      work.evidence.some((ref) => ref.kind === "review_receipt"),
+      "P1 review receipt is retained as evidence",
+    );
+    assert.ok(
+      state.reviews.some((review) =>
+        review.outcome === "completed" &&
+        review.unresolvedSeverities.includes("P1")
+      ),
+      "P1 finding is durably recorded",
     );
   } finally {
     await rig.ctx.cleanup();
   }
 
   // No-verdict review observation keeps waiting (not an attempt or request).
-  const rig2 = await makeRig("noverdict", {
+  const rig3 = await makeRig("noverdict", {
     github: { reviewUnavailable: true },
   });
   try {
-    await rig2.run();
-    rig2.clock.advance(15 * 60_000 + 1);
-    const before = rig2.model.requests.length;
-    const reviewed = await rig2.run();
+    await rig3.run();
+    rig3.clock.advance(15 * 60_000 + 1);
+    const before = rig3.model.requests.length;
+    const reviewed = await rig3.run();
     assert.equal(reviewed.status, "idle", JSON.stringify(reviewed));
-    const state2 = await rig2.snapshot();
+    const state3 = await rig3.snapshot();
     assert.ok(
-      state2.work[0].wait?.reason === "review_pending" ||
-        state2.work[0].wait?.reason === "unavailable",
+      state3.work[0].wait?.reason === "review_pending" ||
+        state3.work[0].wait?.reason === "unavailable",
     );
-    assert.equal(rig2.model.requests.length, before);
+    assert.equal(rig3.model.requests.length, before);
   } finally {
-    await rig2.ctx.cleanup();
+    await rig3.ctx.cleanup();
   }
 
   // Protected path: candidate blocked before any publication.
-  const rig3 = await makeRig("protected", {
+  const rig4 = await makeRig("protected", {
     model: { changedPaths: ["src/handler.ts"] },
   });
   try {
-    await rig3.run();
-    const state3 = await rig3.snapshot();
-    assert.equal(state3.work[0].nextStep, "blocked");
-    assert.equal(rig3.github.pushes.length, 0);
-    assert.equal(state3.reservations[0].outcome, "submitted", "charged");
+    await rig4.run();
+    const state4 = await rig4.snapshot();
+    assert.equal(state4.work[0].nextStep, "blocked");
+    assert.equal(rig4.github.pushes.length, 0);
+    assert.equal(state4.reservations[0].outcome, "submitted", "charged");
   } finally {
-    await rig3.ctx.cleanup();
+    await rig4.ctx.cleanup();
   }
 });
 
@@ -902,6 +959,326 @@ Deno.test("closure failure retries closure only", async () => {
     assert.equal(closeCallsAfter, 2);
     assert.equal(rig.github.calls.filter((call) => call === "merge").length, 1);
     assert.equal(rig.model.requests.length, 1);
+  } finally {
+    await rig.ctx.cleanup();
+  }
+});
+
+/** Seeded snapshot for focused delivery/merge cases (sequence 1). */
+function seededSnapshot(
+  work: WorkRecordV1[],
+  extra: Partial<RepairStateSnapshotV1> = {},
+): RepairStateSnapshotV1 {
+  return {
+    version: "v1",
+    kind: "repair_state_snapshot",
+    stateHead: null,
+    sequence: 1,
+    updatedAt: T0,
+    incidents: [],
+    evidence: [],
+    work,
+    reservations: [],
+    reviews: [],
+    replays: [],
+    releaseRequests: [],
+    ...extra,
+  };
+}
+
+/** Issue task in the delivery phase with the given reviewed head and PR. */
+function deliveryRecord(
+  head: GitSha,
+  overrides: Record<string, unknown> = {},
+): WorkRecordV1 {
+  return workRecord("issue-1", {
+    source: { kind: "issue", id: "1", revision: SHA1 },
+    related: { incidentId: null, issueNumber: 1 },
+    target: {
+      base: SHA1,
+      branch: "sentinel/repair/issue-1",
+      checkpoint: null,
+      head,
+      pr: 7,
+    },
+    nextStep: "delivery",
+    counters: { attempts: 1, retries: 0, reviewRounds: 1 },
+    ...overrides,
+  });
+}
+
+/** Completed clean review receipt bound to the exact reviewed PR/head/base. */
+function completedReceipt(
+  pullRequest: number,
+  head: GitSha,
+  base: GitSha,
+  overrides: Record<string, unknown> = {},
+): ReviewReceiptV1 {
+  return parseReviewReceiptV1({
+    version: "v1",
+    kind: "review_receipt",
+    id: `review-receipt:${pullRequest}:${head}`,
+    requestId: "review-req-1",
+    expectedReviewer: "chatgpt-codex-connector[bot]",
+    observedReviewer: "chatgpt-codex-connector[bot]",
+    repository: { owner: "ubiquity", name: "ai.ubq.fi", installationId: 7 },
+    pullRequest: { number: pullRequest, head, base },
+    outcome: "completed",
+    resultId: "result-1",
+    summary: null,
+    findings: [],
+    findingsUncounted: 0,
+    unresolvedSeverities: [],
+    submittedAt: T0,
+    completedAt: T0 + 1000,
+    observedAt: T0 + 1001,
+    ...overrides,
+  });
+}
+
+Deno.test("merge reconciliation rejects an observed merged head different from the reviewed head", async () => {
+  const rig = await makeRig("mergehead", {
+    summaries: false,
+    github: {
+      // The PR was merged, but at a head this task never reviewed (SHA2).
+      pullRequest: { state: "merged", head: SHA2, mergeSha: SHA2 },
+    },
+  });
+  try {
+    const seed = seededSnapshot([deliveryRecord(SHA3, {
+      intent: {
+        kind: "merge",
+        key: `merge:7:${SHA3}`,
+        startedAt: T0,
+        branch: "sentinel/repair/issue-1",
+        expectedHead: SHA3,
+        observedBase: SHA1,
+        pr: 7,
+        requestId: "review-req-1",
+        resultId: "result-1",
+      },
+    })]);
+    const written = await rig.store.writeRepair(seed, null);
+    assert.ok(written.ok && written.value.status === "applied");
+
+    const outcome = await rig.run();
+    assert.equal(outcome.status, "idle", JSON.stringify(outcome));
+    const state = await rig.snapshot();
+    assert.equal(
+      state.work[0].nextStep,
+      "blocked",
+      "a mismatched merged head fails closed",
+    );
+    assert.equal(
+      state.work[0].blocker?.message,
+      "observed merged head identity mismatch",
+    );
+    assert.equal(
+      rig.github.calls.filter((call) => call === "merge").length,
+      0,
+      "no merge is retried after the contradiction",
+    );
+    assert.equal(
+      state.releaseRequests.length,
+      0,
+      "no release request is fabricated for the wrong merged head",
+    );
+  } finally {
+    await rig.ctx.cleanup();
+  }
+});
+
+Deno.test("delivery matches an existing release request by source PR/head and retains the merged revision", async () => {
+  const rig = await makeRig("rrlookup", { summaries: false });
+  try {
+    const seed = seededSnapshot(
+      [deliveryRecord(SHA3)],
+      {
+        releaseRequests: [releaseRequest("release-7", {
+          // Merged revision differs from the reviewed head: the lookup must
+          // NOT match on `revision` — it matches source PR/head instead.
+          revision: SHA2,
+          source: {
+            pullRequest: 7,
+            reviewRequestId: "review-req-1",
+            reviewReceiptId: null,
+            head: SHA3,
+            base: SHA1,
+          },
+        })],
+      },
+    );
+    const written = await rig.store.writeRepair(seed, null);
+    assert.ok(written.ok && written.value.status === "applied");
+
+    const outcome = await rig.run();
+    assert.equal(outcome.status, "idle", JSON.stringify(outcome));
+    const state = await rig.snapshot();
+    assert.equal(
+      rig.github.calls.filter((call) => call === "merge").length,
+      0,
+      "the existing release request suspends a new merge",
+    );
+    assert.equal(
+      state.releaseRequests.length,
+      1,
+      "no duplicate release request is created",
+    );
+    assert.equal(
+      state.releaseRequests[0].revision,
+      SHA2,
+      "the merged revision is retained inside the matched request",
+    );
+    assert.equal(
+      state.releaseRequests[0].source.head,
+      SHA3,
+      "the source PR/head identity matched the saved reviewed head",
+    );
+    assert.equal(state.work[0].nextStep, "delivery");
+    assert.equal(
+      state.work[0].wait?.reason,
+      "unavailable",
+      "waits for release acceptance of the exact matched request",
+    );
+  } finally {
+    await rig.ctx.cleanup();
+  }
+});
+
+Deno.test("merged-but-ambiguous merge reconciliation builds one release request with the merged revision", async () => {
+  const rig = await makeRig("rrmissing", {
+    summaries: false,
+    github: {
+      // Direct merge response lost; the remote then shows the exact merged
+      // head this task reviewed, with a distinct merge SHA.
+      mergeOutcome: { outcome: "ambiguous", head: null, mergeSha: null },
+      pullRequest: { state: "merged", head: SHA3, mergeSha: SHA2 },
+    },
+  });
+  try {
+    const seed = seededSnapshot(
+      [deliveryRecord(SHA3)],
+      {
+        reviews: [completedReceipt(7, SHA3, SHA1)],
+      },
+    );
+    const written = await rig.store.writeRepair(seed, null);
+    assert.ok(written.ok && written.value.status === "applied");
+
+    // The same bounded run first attempts the merge (ambiguous), then
+    // reconciles by observing the merged PR and builds the release request.
+    const first = await rig.run();
+    assert.equal(first.status, "idle", JSON.stringify(first));
+    assert.equal(
+      rig.github.calls.filter((call) => call === "merge").length,
+      1,
+      "exactly one merge attempt, reconciled by observation",
+    );
+    let state = await rig.snapshot();
+    assert.equal(state.releaseRequests.length, 1);
+    assert.equal(state.work[0].intent, null, "merge intent reconciled");
+    assert.equal(
+      state.releaseRequests[0].revision,
+      SHA2,
+      "request revision is the exact merged revision",
+    );
+    assert.equal(
+      state.releaseRequests[0].source.head,
+      SHA3,
+      "request source head is the reviewed candidate head",
+    );
+    assert.equal(state.releaseRequests[0].source.pullRequest, 7);
+
+    // A later run observes the exact matched request: no blind re-merge, no
+    // duplicate request.
+    const second = await rig.run();
+    assert.equal(second.status, "idle", JSON.stringify(second));
+    state = await rig.snapshot();
+    assert.equal(
+      rig.github.calls.filter((call) => call === "merge").length,
+      1,
+      "no re-merge while the request is open",
+    );
+    assert.equal(state.releaseRequests.length, 1);
+  } finally {
+    await rig.ctx.cleanup();
+  }
+});
+
+Deno.test("existing-PR corrections are not blocked by the unfinished-PR cap", async () => {
+  const rig = await makeRig("expricap", {
+    summaries: false,
+    github: { branchRefSha: SHA3 },
+  });
+  try {
+    const openPrRecords: WorkRecordV1[] = Array.from(
+      { length: 3 },
+      (_, index) =>
+        workRecord(`issue-${index + 100}`, {
+          source: { kind: "issue", id: `${index + 100}`, revision: SHA1 },
+          related: {
+            incidentId: null,
+            issueNumber: index + 100,
+          },
+          nextStep: "review",
+          wait: {
+            reason: "review_pending",
+            since: T0,
+            until: T0 + 3600_000,
+          },
+          target: {
+            base: SHA1,
+            branch: `sentinel/repair/issue-${index + 100}`,
+            checkpoint: null,
+            head: SHA2,
+            pr: 20 + index,
+          },
+        }),
+    );
+    const correction = workRecord("issue-1", {
+      source: { kind: "issue", id: "1", revision: SHA1 },
+      related: { incidentId: null, issueNumber: 1 },
+      classification: { severity: "P2", priority: 9 },
+      target: {
+        base: SHA1,
+        branch: "sentinel/repair/issue-1",
+        checkpoint: null,
+        head: SHA3,
+        pr: 7,
+      },
+      nextStep: "work",
+      counters: { attempts: 1, retries: 0, reviewRounds: 1 },
+    });
+    const seed = seededSnapshot([...openPrRecords, correction]);
+    const written = await rig.store.writeRepair(seed, null);
+    assert.ok(written.ok && written.value.status === "applied");
+
+    const outcome = await rig.run();
+    assert.equal(outcome.status, "idle", JSON.stringify(outcome));
+    const state = await rig.snapshot();
+    const corrected = state.work.find((record) => record.id === correction.id);
+    assert.ok(corrected, "correction record exists");
+    assert.equal(
+      corrected?.nextStep,
+      "review",
+      "the correction published and requested its own review",
+    );
+    assert.equal(corrected?.target.head, SHA3);
+    assert.equal(
+      rig.github.pushes.length,
+      1,
+      "the corrected head was pushed to its existing branch",
+    );
+    assert.equal(
+      rig.github.calls.filter((call) => call === "requestReview").length,
+      1,
+      "one review request for the corrected head",
+    );
+    assert.equal(
+      rig.github.calls.filter((call) => call === "createPr").length,
+      0,
+      "no new PR is published",
+    );
   } finally {
     await rig.ctx.cleanup();
   }

@@ -360,7 +360,14 @@ export function advanceToDelivery(
   });
 }
 
-/** An unresolved P0/P1 (or new head) requires a fresh correction round. */
+/**
+ * An unresolved P0/P1 requires a fresh bounded correction round. The frozen
+ * contract requires a target head whenever a PR is published, so the rejected
+ * head stays recorded here; the work step detects the rejection from the
+ * durable review-receipt evidence and runs a NEW implementation session that
+ * notes a new candidate head before any publication (the rejected head is
+ * never re-published or re-reviewed).
+ */
 export function advanceToCorrection(
   record: WorkRecordV1,
   now: number,

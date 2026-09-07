@@ -170,6 +170,8 @@ export interface FakeGithubOptionsV1 {
   baseSha?: GitSha;
   issues?: Partial<GitHubIssueV1>[];
   pullRequest?: Partial<GitHubPullRequestV1> | null;
+  /** Exact SHA served for the candidate branch ref when no push preceded it. */
+  branchRefSha?: GitSha | null;
   review?: Partial<ReviewObservationV1> | null;
   reviewUnavailable?: boolean;
   pushOutcome?: "applied" | "ambiguous";
@@ -262,6 +264,14 @@ export class FakeGithub implements GitHubPort {
         ref,
         sha: this.options.baseSha ?? SHA1,
       }));
+    }
+    if (
+      this.options.branchRefSha !== null &&
+      this.options.branchRefSha !== undefined
+    ) {
+      // A pre-existing candidate branch (e.g. an existing-PR correction with
+      // no push recorded by this fake yet).
+      return Promise.resolve(portOk({ ref, sha: this.options.branchRefSha }));
     }
     // Candidate branch: present once a push was applied.
     if (this.pushes.length > 0) {
@@ -435,7 +445,7 @@ export class FakeGithub implements GitHubPort {
   }
 
   private pullRequest(): GitHubPullRequestV1 {
-    return {
+    const base: GitHubPullRequestV1 = {
       number: 7,
       title: "Sentinel repair",
       body: "Refs placeholder",
@@ -451,6 +461,7 @@ export class FakeGithub implements GitHubPort {
       mergedAt: this.releasedHead === null ? null : T0,
       reviewDecision: "approved",
     };
+    return { ...base, ...this.options.pullRequest };
   }
 }
 
@@ -590,6 +601,8 @@ export class FakeReplay implements ReplayPort {
 
 export interface FakeModelOptionsV1 {
   head?: GitSha | null;
+  /** Per-call candidate heads in order; the last value repeats. */
+  heads?: GitSha[];
   changedPaths?: string[];
   checkoutSha?: GitSha | null;
   outcome?: ModelRunReceiptV1["outcome"];
@@ -620,7 +633,10 @@ export class FakeModel implements ImplementationPort {
         "model receipt unavailable: actual provider model/effort could not be verified at this boundary",
       ));
     }
-    const head = this.options.head ?? SHA2;
+    const index = this.requests.length - 1;
+    const head = this.options.heads !== undefined
+      ? this.options.heads[Math.min(index, this.options.heads.length - 1)]
+      : (this.options.head ?? SHA2);
     const completed = this.options.outcome !== "failed" &&
       this.options.outcome !== "interrupted";
     return Promise.resolve(portOk({
