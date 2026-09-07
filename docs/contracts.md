@@ -209,10 +209,12 @@ refs with digest/size/expiry.
 
 - `repository`: the repository the incident/evidence belongs to (identity, not
   just endpoint URL).
-- `coverage`: `{ status: "complete" }` (pagination exhausted) or
-  `{ status: "incomplete", reason, nextCursor }`; complete records carry no
-  `nextCursor` (unknown key otherwise). A failed source read is a port error,
-  **never** an empty successful result.
+- `coverage`: `{ status: "complete" }` (the page's source contribution was
+  successfully read/covered — never a claim that no more pages exist) or
+  `{ status: "incomplete", reason, nextCursor }` (a genuine missing/gapped
+  source contribution; its `nextCursor` is the producer's continuation cursor);
+  complete records carry no `nextCursor` (unknown key otherwise). A failed
+  source read is a port error, **never** an empty successful result.
 - `IncidentArtifactRefV1`: `{ ref, digest, sizeBytes, expiresAt, contentType }`;
   `expiresAt >= capturedAt` enforced; `ref` is a restricted reference (no
   URL/query/userinfo), so a signed credential URL never reaches Git state.
@@ -920,7 +922,20 @@ Success response `200`:
 | ---------- | -------------------- | ----------------------------------------------------------------------------------- |
 | `data`     | row array            | rows in schema below; empty is a real value only when the scan genuinely found none |
 | `cursor`   | string \| null       | next page cursor; `null` when pagination is exhausted                               |
-| `coverage` | `IncidentCoverageV1` | coverage of the scan producing this page; it also belongs to each mapped summary    |
+| `coverage` | `IncidentCoverageV1` | correctness/completeness of THIS page's source contribution (below)                 |
+
+**Exact page semantics.** `coverage` and `cursor` are independent axes, never
+contradictory: a fully covered page may carry a non-null `cursor` when another
+page is available, and a non-null cursor never downgrades that page to
+`incomplete`. The producer reports `complete` for every successful page read,
+not only for the final page; it reports `incomplete` only for a genuine source
+gap (with the bounded reason), which consumers keep fail-closed and never erase
+by exhausting pagination. Pagination exhaustion is signaled by `cursor: null`
+alone. Consumers follow non-null cursors under finite page-count and
+repeated-cursor guards (the repair loop's own intake bounds — the adapter's
+private `readIncident` scan bounds do not protect the consumer); empty pages are
+real pages and never a fault. A page's coverage also belongs to each mapped
+summary.
 
 A missing/unreachable producer endpoint is a port error (`unavailable`), never
 an empty successful page — the adapter can never mistake an outage for "no
@@ -974,8 +989,10 @@ summary record itself carries no expiry field.
 ### `readIncident` procedure (read-only)
 
 1. Request the index with `incident_id=<id>` and `limit=1`, exhausting pages
-   until `cursor: null` and coverage complete; never assume a larger page is
-   supported.
+   until `cursor: null`; never assume a larger page is supported, and never
+   treat a non-null cursor as incomplete coverage — a later `complete` page
+   cannot erase an earlier genuine `incomplete` page (the adapter aggregates the
+   scan's overall coverage conservatively).
 2. Fetch the referenced capture through the existing authentic replay export
    (`incident_id` plus an explicit safe interval `after_ms >= 0`,
    `before_ms >= after_ms`), exhausting `limit=1` pages.

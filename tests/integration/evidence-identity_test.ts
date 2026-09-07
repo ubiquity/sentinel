@@ -693,6 +693,235 @@ Deno.test(
 );
 
 // ---------------------------------------------------------------------------
+// Pagination fail-closed scenarios: real GatewayIncidentAdapter -> real
+// runRepairEntrypoint -> temporary real Git state. The producer is scripted
+// and read-only; every responder carries an emergency request bound so a
+// broken implementation fails fast instead of hanging (the injected clock may
+// be frozen and never cross the run deadline). No model/replay fabrication.
+// ---------------------------------------------------------------------------
+
+interface IntakeGatewayRigV1 {
+  gateway: Awaited<ReturnType<typeof makeGatewayRig>>;
+  store: ReturnType<typeof createRepairStateStore>;
+  model: FakeModel;
+  replay: FakeReplay;
+  run(): Promise<Awaited<ReturnType<typeof runRepairEntrypoint>>>;
+  snapshot(): Promise<RepairStateSnapshotV1>;
+  cleanup(): Promise<void>;
+}
+
+async function makeIntakeGatewayRig(
+  prefix: string,
+  responder: (url: URL) => Response | Promise<Response>,
+  options: { clock?: FakeClock } = {},
+): Promise<IntakeGatewayRigV1> {
+  const ctx = await makeIntegrationCtx(prefix);
+  const clock = options.clock ?? new FakeClock(T0);
+  const gateway = await makeGatewayRig(responder, { clock });
+  const store = createRepairStateStore({
+    scratchDir: `${ctx.tmp}/scratch-repair`,
+    remoteUrl: ctx.remoteUrl,
+  });
+  const configs = repairConfigs({
+    sessionBound: { maxDurationMs: 240_000, maxOutputChars: 200_000 },
+  });
+  const budget = new RollingStartBudget({ clock, state: store, configs });
+  const github = new FakeGithub({ baseSha: SHA1 });
+  const replay = new FakeReplay();
+  const model = new FakeModel();
+  const run = () =>
+    runRepairEntrypoint({
+      clock,
+      state: store,
+      configs,
+      controllerSha: SHA1,
+      github,
+      incidents: gateway.adapter,
+      replay,
+      model,
+      budget,
+    }, {
+      deadline: clock.now() + 600_000,
+      stepLimit: 16,
+    });
+  const snapshot = async () => {
+    const read = await store.readRepair();
+    assert.ok(read.ok && read.value.status === "found", JSON.stringify(read));
+    if (!read.ok || read.value.status !== "found") {
+      throw new Error("no repair state");
+    }
+    return read.value.snapshot;
+  };
+  return {
+    gateway,
+    store,
+    model,
+    replay,
+    run,
+    snapshot,
+    cleanup: async () => {
+      await gateway.cleanup();
+      await ctx.cleanup();
+    },
+  };
+}
+
+Deno.test(
+  "repair loop: a repeated index cursor through the real adapter is a bounded source error",
+  async () => {
+    let requests = 0;
+    const rig = await makeIntakeGatewayRig("pagination-cursor-cycle", (url) => {
+      assert.equal(url.pathname, INDEX_PATH);
+      requests++;
+      // Emergency bound: never a hang even if the consumer loses its guard.
+      assert.ok(requests <= 4, "emergency intake request bound reached");
+      // Empty pages with a continuing cursor: a cycle must be detected and
+      // surfaced, never followed forever and never converted into exhaustion.
+      return jsonResponse(makeIndexPage([], "c1"));
+    });
+    try {
+      const outcome = await rig.run();
+      assert.equal(outcome.status, "source_error", JSON.stringify(outcome));
+      assert.equal(
+        outcome.status === "source_error" ? outcome.detail : null,
+        "incident source cursor repeated without progress",
+      );
+      assert.equal(requests, 2, "the cycle is detected at the repeated cursor");
+      const state = await rig.snapshot();
+      assert.equal(state.sequence, 1, "no partial intake checkpoint");
+      assert.equal(state.incidents.length, 0, "no incident invented");
+      assert.equal(state.work.length, 0);
+      assert.equal(rig.model.requests.length, 0, "no model call");
+      assert.equal(rig.replay.requests.length, 0, "no replay fabrication");
+      assert.ok(
+        rig.gateway.transport.requests.every(
+          (request) =>
+            request.method === "GET" &&
+            request.headers.get("authorization") === "Bearer synthetic-token",
+        ),
+        "every discovery request is authenticated",
+      );
+      rig.gateway.transport.assertReadOnly([INDEX_PATH]);
+      rig.gateway.transport.assertNoWriteEndpoints();
+    } finally {
+      await rig.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "repair loop: an incomplete index page through the real adapter never becomes normal exhaustion",
+  async () => {
+    let requests = 0;
+    const rig = await makeIntakeGatewayRig("pagination-incomplete", (url) => {
+      assert.equal(url.pathname, INDEX_PATH);
+      requests++;
+      assert.ok(requests <= 4, "emergency intake request bound reached");
+      return jsonResponse(
+        makeIndexPage([], null, {
+          status: "incomplete",
+          reason: "source gap",
+          nextCursor: "p2",
+        }),
+      );
+    });
+    try {
+      const outcome = await rig.run();
+      assert.equal(outcome.status, "source_error", JSON.stringify(outcome));
+      assert.equal(
+        outcome.status === "source_error" ? outcome.detail : null,
+        "incident discovery coverage incomplete",
+      );
+      assert.equal(requests, 1, "incomplete coverage stops the scan");
+      const state = await rig.snapshot();
+      assert.equal(state.sequence, 1, "no partial intake checkpoint");
+      assert.equal(state.incidents.length, 0);
+      assert.equal(state.work.length, 0);
+      assert.equal(rig.model.requests.length, 0);
+      assert.equal(rig.replay.requests.length, 0);
+      rig.gateway.transport.assertReadOnly([INDEX_PATH]);
+    } finally {
+      await rig.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "repair loop: a malformed index page through the real adapter is explicit, never an empty success",
+  async () => {
+    let requests = 0;
+    const rig = await makeIntakeGatewayRig("pagination-malformed", (url) => {
+      assert.equal(url.pathname, INDEX_PATH);
+      requests++;
+      assert.ok(requests <= 4, "emergency intake request bound reached");
+      // Out-of-format identity (and an unknown payload key): the strict wire
+      // parser must fail closed before any successful empty page is produced.
+      return jsonResponse({
+        data: [{
+          incident_id: "sentinel-synth-0001",
+          arbitrary: "raw",
+        }],
+        cursor: null,
+        coverage: { status: "complete" },
+      });
+    });
+    try {
+      const outcome = await rig.run();
+      assert.equal(outcome.status, "source_error", JSON.stringify(outcome));
+      assert.equal(
+        outcome.status === "source_error" ? outcome.detail : null,
+        "incident source unavailable: invalid",
+      );
+      assert.equal(requests, 1);
+      const state = await rig.snapshot();
+      assert.equal(state.sequence, 1);
+      assert.equal(state.incidents.length, 0);
+      assert.equal(state.work.length, 0);
+      assert.equal(rig.model.requests.length, 0);
+      assert.equal(rig.replay.requests.length, 0);
+      rig.gateway.transport.assertReadOnly([INDEX_PATH]);
+    } finally {
+      await rig.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "repair loop: a frozen clock and endless distinct cursors stop at the finite page bound",
+  async () => {
+    // The injected clock never advances, so the run deadline can never bound
+    // the scan; only the consumer's own finite page count can stop it.
+    let requests = 0;
+    const rig = await makeIntakeGatewayRig("pagination-page-bound", (url) => {
+      assert.equal(url.pathname, INDEX_PATH);
+      requests++;
+      // Emergency bound: a broken implementation is rejected at 132 requests
+      // instead of spinning forever.
+      assert.ok(requests <= 132, "emergency intake request bound reached");
+      return jsonResponse(makeIndexPage([], `c${requests}`));
+    });
+    try {
+      const outcome = await rig.run();
+      assert.equal(outcome.status, "source_error", JSON.stringify(outcome));
+      assert.equal(
+        outcome.status === "source_error" ? outcome.detail : null,
+        "incident source pagination exceeded the page bound",
+      );
+      assert.equal(requests, 128, "the finite 128-page bound is enforced");
+      const state = await rig.snapshot();
+      assert.equal(state.sequence, 1);
+      assert.equal(state.incidents.length, 0);
+      assert.equal(state.work.length, 0);
+      assert.equal(rig.model.requests.length, 0);
+      assert.equal(rig.replay.requests.length, 0);
+      rig.gateway.transport.assertReadOnly([INDEX_PATH]);
+    } finally {
+      await rig.cleanup();
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
 // Local helpers for the seeded-state scenarios.
 // ---------------------------------------------------------------------------
 

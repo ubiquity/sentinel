@@ -85,6 +85,14 @@ export const EXPECTED_REVIEWER = "chatgpt-codex-connector[bot]";
 
 // Private finite constants (no new env/secret/CLI surface is introduced).
 const INCIDENT_PAGE_LIMIT = 20;
+// Finite incident-scan page bound for the ACTUAL intake consumer. The gateway
+// adapter's private readIncident scan enforces its own bounds, but those do
+// not protect this pagination loop; a misbehaving producer (empty pages,
+// never-terminating cursor, an injected frozen clock that never crosses the
+// run deadline) must stop here instead of spinning. Same deterministic bound
+// as the adapter's private scan (GATEWAY_MAX_SCAN_PAGES); local constant, no
+// cross-module dependency and no new configuration surface.
+const MAX_INCIDENT_SCAN_PAGES = 128;
 const REVIEW_POLL_MS = 15 * 60_000;
 const CHECK_POLL_MS = 5 * 60_000;
 const RELEASE_POLL_MS = 5 * 60_000;
@@ -513,12 +521,34 @@ async function pollIntake(
     RepairStateSnapshotV1["incidents"][number]
   >();
 
+  // Scanner guards for this consumer: repeated cursors and an unbounded page
+  // run are never normal exhaustion — they are source faults and trip the
+  // existing source-error path. The run deadline alone cannot bound the scan
+  // when the injected clock does not advance (frozen clock), and an empty page
+  // is a real page that may legitimately continue (the producer's filtered
+  // scan can return an empty slice with a continuation cursor), so it is
+  // followed only under these finite guards — never converted into success.
+  const seenCursors = new Set<string>();
+  let pages = 0;
+
   for (;;) {
     // No new intake read may start at/after the total run deadline: every
     // page read is awaited wall-clock time, so the bounds are rechecked
     // between pages. A stop preserves whatever was already collected; the
     // next run resumes the same scan.
     if (deps.clock.now() >= context.bounds.runDeadline) {
+      break;
+    }
+    if (cursor !== null) {
+      if (seenCursors.has(cursor)) {
+        error = "incident source cursor repeated without progress";
+        break;
+      }
+      seenCursors.add(cursor);
+    }
+    pages += 1;
+    if (pages > MAX_INCIDENT_SCAN_PAGES) {
+      error = "incident source pagination exceeded the page bound";
       break;
     }
     const page = await deps.incidents.listUnresolvedIncidents(

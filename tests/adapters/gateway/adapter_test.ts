@@ -35,6 +35,7 @@ import {
   CAPTURE_ID_B,
   FakeClock,
   FINGERPRINT_A,
+  FINGERPRINT_B,
   INCIDENT_A,
   INCIDENT_B,
   jsonResponse,
@@ -228,6 +229,54 @@ Deno.test("adapter: empty discovery page is a real success, 404 is unavailable",
     const missingResult = await adapter.listUnresolvedIncidents(null, 1);
     assert.ok(!missingResult.ok && missingResult.error.kind === "unavailable");
     transport.assertReadOnly([INDEX_PATH]);
+  } finally {
+    await removeRoot(root);
+  }
+});
+
+Deno.test("adapter: a complete page with a continuation cursor maps both axes", async () => {
+  const requested: (string | null)[] = [];
+  const { adapter, root, transport } = await makeAdapter((url) => {
+    requested.push(url.searchParams.get("cursor"));
+    return jsonResponse(
+      url.searchParams.get("cursor") === "p2"
+        ? makeIndexPage([makeIndexRow({
+          incident_id: INCIDENT_B,
+          fingerprint: FINGERPRINT_B,
+          severity: "P0",
+        })])
+        : makeIndexPage([makeIndexRow()], "p2"),
+    );
+  });
+  try {
+    // Coverage is page/source correctness while the cursor is normal
+    // continuation: a complete page with another page available must be a
+    // valid discovery result, not a contradictory fault.
+    const first = await adapter.listUnresolvedIncidents(null, 1);
+    assert.ok(first.ok, JSON.stringify(first));
+    if (!first.ok) return;
+    assert.equal(first.value.items.length, 1);
+    assert.equal(first.value.items[0]!.id, INCIDENT_A);
+    assert.deepEqual(first.value.coverage, { status: "complete" });
+    assert.equal(first.value.nextCursor, "p2");
+    const second = await adapter.listUnresolvedIncidents("p2", 1);
+    assert.ok(second.ok, JSON.stringify(second));
+    if (!second.ok) return;
+    assert.deepEqual(second.value.coverage, { status: "complete" });
+    assert.equal(second.value.nextCursor, null);
+    assert.equal(second.value.items.length, 1);
+    assert.equal(second.value.items[0]!.id, INCIDENT_B);
+    assert.equal(second.value.items[0]!.severity, "P0");
+    assert.deepEqual(requested, [null, "p2"]);
+    transport.assertReadOnly([INDEX_PATH]);
+    transport.assertNoWriteEndpoints();
+    assert.ok(
+      transport.requests.every(
+        (request) =>
+          request.headers.get("authorization") === "Bearer synthetic-token",
+      ),
+      "every discovery request carries the injected credential",
+    );
   } finally {
     await removeRoot(root);
   }
