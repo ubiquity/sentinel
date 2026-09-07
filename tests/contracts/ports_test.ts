@@ -28,12 +28,23 @@ import type {
 } from "../../src/contracts/ports.ts";
 import { portError, portOk, SystemClock } from "../../src/contracts/ports.ts";
 import type { Clock } from "../../src/contracts/ports.ts";
+import { parseIncidentSummaryV1 } from "../../src/contracts/incident.ts";
+import type { IncidentSummaryV1 } from "../../src/contracts/incident.ts";
+import type {
+  IncidentCoverageV1,
+  RepositoryIdentityV1,
+} from "../../src/contracts/shared.ts";
 import type {
   ReleaseStateSnapshotV1,
   RepairStateSnapshotV1,
 } from "../../src/contracts/state-snapshots.ts";
 import { parseReviewReceiptV1 } from "../../src/contracts/review-receipt.ts";
 import type { ReviewReceiptV1 } from "../../src/contracts/review-receipt.ts";
+import {
+  expectExactKeys,
+  expectRecord,
+  RecordParseError,
+} from "../../src/contracts/validation.ts";
 import type { WorkRecordV1 } from "../../src/contracts/work-record.ts";
 import { parseWorkRecordV1 } from "../../src/contracts/work-record.ts";
 
@@ -620,4 +631,440 @@ Deno.test("fake ports are callable and return documented kinds", async () => {
   assert.ok(merge.ok && merge.value.outcome === "blocked");
   const dep = await _releaseFake.readCurrentDeployment("p");
   assert.ok(dep.ok && dep.value.status === "unknown");
+});
+
+// ---------------------------------------------------------------------------
+// Minimal fake-port loop skeleton (plan §8, Wave A): the shape of one polling
+// pass over the frozen ports, driven by the existing canned fakes. It records
+// the calls it makes, runs two deterministic ticking passes, and exits at an
+// unchanged review wait. This is a contract smoke skeleton ONLY — it holds no
+// selection logic, no budget admission, no state write and no model port; the
+// real selection/loop state machine belongs to m04 and the release state
+// machine to m05 (see docs/contracts.md §10 for entrypoint ownership).
+// ---------------------------------------------------------------------------
+
+interface SmokeLoopDepsV1 {
+  /** Read-only repair snapshot access; a writer is never handed to the loop. */
+  repair: Pick<StateReadView, "readRepair">;
+  /** Canned authoritative source read + review observation (m01 fake). */
+  github: Pick<GitHubPort, "readIssue" | "observeReview">;
+  replay: ReplayPort;
+  clock: Clock;
+}
+
+interface SmokePollV1 {
+  /** Ordered record of every port call made during this pass. */
+  trace: string[];
+  /** True when the observed review is still pending: the wait stays unchanged. */
+  waitUnchanged: boolean;
+}
+
+/** One scripted poll: repair read, source read, replay, review observation. */
+async function smokePoll(
+  deps: SmokeLoopDepsV1,
+  tick: number,
+  waiting: WorkRecordV1,
+): Promise<SmokePollV1> {
+  const trace: string[] = [];
+  const at = deps.clock.now();
+  const read = await deps.repair.readRepair();
+  trace.push(
+    `tick:${tick}@${at}:repair-read:${read.ok ? "found" : "unavailable"}`,
+  );
+  const source = await deps.github.readIssue(waiting.related.issueNumber ?? 1);
+  trace.push(`tick:${tick}@${at}:source-read:${source.ok ? "ok" : "error"}`);
+  const replayResult = await deps.replay.runReplay({
+    taskId: waiting.id,
+    repository: waiting.repository,
+    revision: waiting.failingRevision ?? waiting.target.base,
+    commandId: commandId("test_ci"),
+    fixtureRef: "fixture://sentinel/synth-0001.json",
+    fixtureDigest: digest("cc".repeat(32)),
+    testIds: ["test_ci"],
+    outputLimitBytes: 4096,
+  });
+  trace.push(
+    `tick:${tick}@${at}:replay:${
+      replayResult.ok ? replayResult.value.outcome : "error"
+    }`,
+  );
+  const observed = await deps.github.observeReview({
+    operationKey: `review:${waiting.id}`,
+    prNumber: waiting.target.pr ?? 1,
+    head: waiting.target.head ?? waiting.failingRevision ?? SHA,
+  });
+  trace.push(
+    `tick:${tick}@${at}:review-observe:${
+      observed.ok ? observed.value.status : "unavailable"
+    }`,
+  );
+  return {
+    trace,
+    waitUnchanged: observed.ok && observed.value.status === "pending",
+  };
+}
+
+const T0 = 1786000000000;
+
+Deno.test(
+  "fake-port loop skeleton: two ticks exit at an unchanged review wait, no model or sleep",
+  async () => {
+    const clock = new FakeClock(T0);
+    const store = new FakeStateStore();
+    const replay = new RecordingReplayPort(
+      portOk({
+        outcome: "passed",
+        exitCode: 0,
+        output: {
+          stdoutDigest: digest("bb".repeat(32)),
+          stderrDigest: null,
+          truncated: false,
+        },
+        failure: null,
+        limitations: [],
+        startedAt: T0,
+        endedAt: T0 + 1000,
+      }),
+    );
+
+    // One work item sitting in the review wait: the source/replay evidence is
+    // done; the wait reason is review_pending until T0 + 1h.
+    const waiting: WorkRecordV1 = {
+      ...MINIMAL_WORK,
+      id: workId("i:2"),
+      nextStep: "review",
+      wait: { reason: "review_pending", since: T0, until: T0 + 3_600_000 },
+    };
+    const repairSnapshot: RepairStateSnapshotV1 = {
+      version: "v1",
+      kind: "repair_state_snapshot",
+      stateHead: null,
+      sequence: 1,
+      updatedAt: T0,
+      incidents: [],
+      evidence: [],
+      work: [waiting],
+      reservations: [],
+      reviews: [],
+      replays: [],
+      releaseRequests: [],
+    };
+    await store.writeRepair(repairSnapshot, null);
+    const releaseSnapshot: ReleaseStateSnapshotV1 = {
+      version: "v1",
+      kind: "release_state_snapshot",
+      stateHead: null,
+      sequence: 1,
+      updatedAt: T0,
+      releases: [],
+    };
+    await store.writeRelease(releaseSnapshot, null);
+    assert.equal(store.repairWrites, 1);
+    assert.equal(store.releaseWrites, 1);
+
+    // Capability separation at the smoke boundary: the loop reads the repair
+    // snapshot only, and the release read stays an independent capability.
+    const repairRead: Pick<StateReadView, "readRepair"> = store;
+    const releaseRead: Pick<StateReadView, "readRelease"> = store;
+    // @ts-expect-error a repair read capability never carries release reads
+    repairRead.readRelease;
+    // @ts-expect-error a release read capability never carries repair reads
+    releaseRead.readRepair;
+    const deps: SmokeLoopDepsV1 = {
+      repair: repairRead,
+      github: _githubFake,
+      replay,
+      clock,
+    };
+    // @ts-expect-error the smoke loop has no model port (admission is never in scope here)
+    deps.runModel;
+    // @ts-expect-error the smoke loop has no state write capability
+    deps.repair.writeRepair;
+
+    // Two deterministic polling ticks; the canned review stays pending, so
+    // both pass ends at the same wait and the loop advances nothing.
+    const trace: string[] = [];
+    const exits: string[] = [];
+    for (let tick = 1; tick <= 2; tick++) {
+      const poll = await smokePoll(deps, tick, waiting);
+      trace.push(...poll.trace);
+      exits.push(
+        `tick:${tick}:${poll.waitUnchanged ? "unchanged" : "changed"}`,
+      );
+      // Independent release read: its own branch, never repair records.
+      const release = await releaseRead.readRelease();
+      assert.ok(release.ok && release.value.status === "found");
+      if (release.ok && release.value.status === "found") {
+        assert.deepEqual(release.value.snapshot.releases, []);
+        assert.ok(!("work" in release.value.snapshot));
+      }
+      clock.advance(60_000);
+    }
+
+    assert.deepEqual(exits, ["tick:1:unchanged", "tick:2:unchanged"]);
+    assert.deepEqual(trace, [
+      `tick:1@${T0}:repair-read:found`,
+      `tick:1@${T0}:source-read:ok`,
+      `tick:1@${T0}:replay:passed`,
+      `tick:1@${T0}:review-observe:pending`,
+      `tick:2@${T0 + 60_000}:repair-read:found`,
+      `tick:2@${T0 + 60_000}:source-read:ok`,
+      `tick:2@${T0 + 60_000}:replay:passed`,
+      `tick:2@${T0 + 60_000}:review-observe:pending`,
+    ]);
+    // Both ticks issued one deterministic replay for the same identity.
+    assert.equal(replay.requests.length, 2);
+    assert.deepEqual(replay.requests[1], replay.requests[0]);
+    // The loop wrote nothing: only the two seed writes happened.
+    assert.equal(store.repairWrites, 1);
+    assert.equal(store.releaseWrites, 1);
+    // The wait and lifecycle are byte-identical after the loop; the clock moved
+    // only by explicit ticks (no real sleeping, no model call).
+    const finalRead = await store.readRepair();
+    assert.ok(finalRead.ok && finalRead.value.status === "found");
+    if (finalRead.ok && finalRead.value.status === "found") {
+      assert.equal(finalRead.value.snapshot.work[0]?.nextStep, "review");
+      assert.deepEqual(finalRead.value.snapshot.work[0]?.wait, waiting.wait);
+    }
+    assert.equal(clock.now(), T0 + 120_000);
+  },
+);
+
+Deno.test(
+  "release read capability is independent of repair state across the same ticks",
+  async () => {
+    const store = new FakeStateStore();
+    await store.writeRepair({
+      version: "v1",
+      kind: "repair_state_snapshot",
+      stateHead: null,
+      sequence: 1,
+      updatedAt: T0,
+      incidents: [],
+      evidence: [],
+      work: [MINIMAL_WORK],
+      reservations: [],
+      reviews: [],
+      replays: [],
+      releaseRequests: [],
+    }, null);
+    await store.writeRelease({
+      version: "v1",
+      kind: "release_state_snapshot",
+      stateHead: null,
+      sequence: 1,
+      updatedAt: T0,
+      releases: [],
+    }, null);
+
+    const releaseRead: Pick<StateReadView, "readRelease"> = store;
+    // @ts-expect-error release reads never expose the repair snapshot
+    releaseRead.readRepair;
+    const release = await releaseRead.readRelease();
+    assert.ok(release.ok && release.value.status === "found");
+    if (release.ok && release.value.status === "found") {
+      assert.ok(!("work" in release.value.snapshot));
+      assert.equal(release.value.snapshot.sequence, 1);
+    }
+    // Repair branch still holds its own records, untouched by the release read.
+    const repair = await store.readRepair();
+    assert.ok(repair.ok && repair.value.status === "found");
+    if (repair.ok && repair.value.status === "found") {
+      assert.ok(!("releases" in repair.value.snapshot));
+      assert.equal(repair.value.snapshot.work.length, 1);
+    }
+    assert.equal(store.releaseWrites, 1);
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Proposed gateway producer index mapping (docs/contracts.md §11): the
+// synthetic wire fixture maps into the frozen IncidentSummaryV1 records. The
+// conversion is test-only; m02 owns the real production adapter. No new shared
+// port interface is added, and this fixture proves producer/consumer schema
+// mapping only — never live discovery.
+// ---------------------------------------------------------------------------
+
+/** Exact wire keys; unknown keys fail closed at the mapping boundary. */
+const GATEWAY_ROW_KEYS = [
+  "incident_id",
+  "fingerprint",
+  "severity",
+  "first_seen_at_ms",
+  "last_seen_at_ms",
+  "count",
+  "failing_revision",
+  "error_type",
+  "context",
+  "provenance",
+  "evidence_ref",
+  "evidence_expires_at_ms",
+] as const;
+const GATEWAY_CONTEXT_KEYS = ["message", "location", "sample"] as const;
+const GATEWAY_PROVENANCE_KEYS = [
+  "endpoint",
+  "captured_at_ms",
+  "captured_by",
+] as const;
+const GATEWAY_EVIDENCE_REF_KEYS = ["ref", "digest"] as const;
+/**
+ * The target's existing incident identity format: `src/sentinel_incident_outbox.ts`
+ * `INCIDENT_ID` at the recorded setup snapshot
+ * (`aafb7ee0598699bb7fb8a72ea133693ed64462da`). The frozen generic incident
+ * parser accepts bounded text, so this mapping boundary pins the exact format
+ * the gateway replay export actually requires; rows outside it fail closed.
+ */
+const GATEWAY_INCIDENT_ID =
+  /^provider-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+/** Exact wire row shape of the proposed gateway index page. */
+interface GatewayIndexRowV1 {
+  incident_id: string;
+  fingerprint: string;
+  severity: string;
+  first_seen_at_ms: number;
+  last_seen_at_ms: number;
+  count: number;
+  failing_revision: string | null;
+  error_type: string;
+  context: { message: string; location: string | null; sample: string[] };
+  provenance: {
+    endpoint: string;
+    captured_at_ms: number;
+    captured_by: string | null;
+  };
+  evidence_ref: { ref: string; digest: string } | null;
+  evidence_expires_at_ms: number | null;
+}
+
+/** Test-only wire row → IncidentSummaryV1 conversion (m02 owns the adapter). */
+function gatewayRowToSummary(
+  input: unknown,
+  repository: RepositoryIdentityV1,
+  coverage: IncidentCoverageV1,
+): IncidentSummaryV1 {
+  const row = expectRecord(input, "$");
+  expectExactKeys(row, GATEWAY_ROW_KEYS, "$");
+  const context = expectRecord(row.context, "$.context");
+  expectExactKeys(context, GATEWAY_CONTEXT_KEYS, "$.context");
+  const provenance = expectRecord(row.provenance, "$.provenance");
+  expectExactKeys(provenance, GATEWAY_PROVENANCE_KEYS, "$.provenance");
+  let evidenceRef: { ref: string; digest: string | null } | null = null;
+  if (row.evidence_ref !== null) {
+    const evidence = expectRecord(row.evidence_ref, "$.evidence_ref");
+    expectExactKeys(evidence, GATEWAY_EVIDENCE_REF_KEYS, "$.evidence_ref");
+    evidenceRef = {
+      ref: evidence.ref as string,
+      digest: evidence.digest as string | null,
+    };
+  }
+  // Repository identity and provenance.source are trusted adapter
+  // configuration/constants, never wire fields; evidence expiry is consumed by
+  // the evidence stage (artifacts[].expiresAt), not carried on the summary.
+  const summary: Record<string, unknown> = {
+    version: "v1",
+    kind: "incident_summary",
+    repository,
+    id: row.incident_id,
+    fingerprint: row.fingerprint,
+    severity: row.severity,
+    firstSeenAt: row.first_seen_at_ms,
+    lastSeenAt: row.last_seen_at_ms,
+    count: row.count,
+    failingRevision: row.failing_revision,
+    errorType: row.error_type,
+    context: {
+      message: context.message,
+      location: context.location,
+      sample: context.sample,
+    },
+    provenance: {
+      source: "gateway",
+      endpoint: provenance.endpoint,
+      capturedAt: provenance.captured_at_ms,
+      capturedBy: provenance.captured_by,
+    },
+    coverage,
+    evidenceRef,
+  };
+  // The frozen parser is the authority: every value is re-validated here.
+  return parseIncidentSummaryV1(summary);
+}
+
+Deno.test("gateway index fixture maps into frozen IncidentSummaryV1 records", async () => {
+  const page = JSON.parse(
+    await Deno.readTextFile(
+      new URL("../fixtures/contracts/gateway-index-v1.json", import.meta.url),
+    ),
+  ) as {
+    data: GatewayIndexRowV1[];
+    cursor: string | null;
+    coverage: IncidentCoverageV1;
+  };
+  assert.equal(page.coverage.status, "complete");
+  assert.equal(page.cursor, null);
+  // Every fixture id must already satisfy the target's existing incident id
+  // format, and the old synthetic form is rejected: the generic incident
+  // parser is permissive, so this pins the format the replay export accepts.
+  for (const row of page.data) {
+    assert.ok(
+      GATEWAY_INCIDENT_ID.test(row.incident_id),
+      `fixture incident_id ${row.incident_id} is not in the target provider-UUID format`,
+    );
+  }
+  assert.equal(GATEWAY_INCIDENT_ID.test("sentinel-synth-0001"), false);
+  const repository: RepositoryIdentityV1 = {
+    owner: "ubiquity",
+    name: "ai.ubq.fi",
+    installationId: 12345,
+  };
+  const summaries = page.data.map((row) =>
+    gatewayRowToSummary(row, repository, page.coverage)
+  );
+  assert.equal(summaries.length, 2);
+
+  const first = summaries[0];
+  assert.equal(first.id, "provider-00000000-0000-4000-8000-000000000001");
+  assert.equal(first.fingerprint, page.data[0].fingerprint);
+  assert.equal(first.severity, "P1");
+  assert.equal(first.count, 7);
+  assert.equal(first.failingRevision, page.data[0].failing_revision);
+  assert.equal(first.provenance.source, "gateway");
+  assert.equal(first.provenance.endpoint, "https://ai.ubq.fi");
+  assert.equal(
+    first.evidenceRef?.ref,
+    "artifact://sentinel/synth-0001/capture-1.pgp",
+  );
+  assert.equal(
+    first.evidenceRef?.digest,
+    page.data[0].evidence_ref?.digest ?? null,
+  );
+  // Page coverage belongs to each mapped summary.
+  assert.deepEqual(first.coverage, { status: "complete" });
+
+  const second = summaries[1];
+  // Missing failing revision / evidence blocks later replay stages, never
+  // discovery: the row still maps, with explicit nulls (never fabricated).
+  assert.equal(second.failingRevision, null);
+  assert.equal(second.evidenceRef, null);
+  assert.equal(second.count, 1);
+
+  // Fail closed: unknown row keys and malformed values are rejected at the
+  // mapping boundary before any summary can be produced.
+  assert.throws(() =>
+    gatewayRowToSummary(
+      { ...(page.data[0] as object), claim_url: "https://not-a-row-key" },
+      repository,
+      page.coverage,
+    )
+  );
+  assert.throws(
+    () =>
+      gatewayRowToSummary(
+        { ...(page.data[0] as object), count: 0 },
+        repository,
+        page.coverage,
+      ),
+    (error: unknown) => error instanceof RecordParseError,
+  );
 });

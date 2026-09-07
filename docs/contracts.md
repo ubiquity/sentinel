@@ -153,7 +153,10 @@ acceptance is claimed (a checked module rule, not a config value).
 `{ status: "disabled" }`, `{ status: "enabled", limits }`, or
 `{ status: "conflict", repositories }`. Caps are one owner configuration across
 all repositories; conflicting per-repository limits refuse inference and
-per-repo independent caps are never used.
+per-repo independent caps are never used. This helper is **cap agreement only,
+never admission**: it only derives the one agreed global policy from the
+complete config set; a model start is granted exclusively by
+`RollingStartBudget.reserveModelStart` returning `admitted` (§10).
 
 ### WorkRecordV1 (`kind: "work"`)
 
@@ -700,6 +703,11 @@ artifact ref, duplicate snapshot ids, bad time, bad count, invalid lifecycle
 transitions, invalid coverage, invalid budget settlement, missing replay
 limitation, invalid config limits, coercion and enum violations).
 `tests/fixtures/contracts/canonical/` pins canonical determinism.
+`tests/fixtures/contracts/gateway-index-v1.json` is the single synthetic fixture
+for the **proposed** gateway producer index (§11). It is parsed only by the
+test-only wire-to-record conversion in `tests/contracts/ports_test.ts`; it is
+not a claim that any target implements the endpoint and proves nothing about
+live discovery.
 
 `tests/contracts/` exercises the actual exported parsers (never duplicated
 validation logic): fixture round-trip reveals parse/serialize stability, every
@@ -711,8 +719,11 @@ unavailable/malformed/mismatched reviews, repository and reviewer policy
 binding, uncounted findings, unresolved P0/P1), and the minimal fake-port test
 pins result-kind discrimination, state capability separation,
 ambiguous-vs-conflict outcomes, one-based attempts and global budget conflict
-refusal. Fakes record calls and return canned results — no product logic lives
-in test fakes.
+refusal, the fake-port loop smoke skeleton (two deterministic ticks, repair
+read/source/replay/review-wait plus an independent release read, unchanged-wait
+exit with no model call or write, §10) and the gateway-index fixture mapping
+into frozen `IncidentSummaryV1` records (§11). Fakes record calls and return
+canned results — no product logic lives in test fakes.
 
 `tests/budget/` covers the budget controller: pure rolling-window arithmetic
 (strict `(now - duration, now]` boundaries, overlapping caps, several excess
@@ -774,3 +785,183 @@ const hex = await canonicalStringifySha256(finding);
 
 Runtime entrypoints should use the throwing parsers (a bad record must stop the
 loop); state readers that fork on unknown content use `tryParse`.
+
+## 10. Runtime entrypoint ownership (Wave C)
+
+Wave A registers the boundary only: no production entrypoint file is created by
+the foundation, and **no fake `src/main.ts` / `src/release-main.ts` stub may
+exist**. The real entrypoints are Wave C-owned:
+
+| Entrypoint                               | Owner                                        | Capabilities received                                                                                                                                                                                      | Never receives                                                                                    |
+| ---------------------------------------- | -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `src/main.ts` — repair polling workflow  | Wave C primary                               | `StateReadView & RepairStateWriter` (repair snapshot only), the complete trusted repository config set, `Clock`, `GitHubPort`, `IncidentAdapter`, `ReplayPort`, `ImplementationPort`, `RollingStartBudget` | `ReleaseStateWriter` / `ReleaseStateSnapshotV1`, `DenoReleasePort`, release records               |
+| `src/release-main.ts` — release workflow | Wave C primary (exclusive release ownership) | `StateReadView & ReleaseStateWriter` (release snapshot only), deploy identity configuration, `DenoReleasePort`, `Clock`                                                                                    | repair write capability, work records, budget reservations, `ImplementationPort`, model admission |
+
+The two workflows poll independently; the read-only `StateReadView` is the only
+shared surface, and a release consumer never receives repair write capability
+(or vice versa), matching the port capabilities in §5. The repair writer never
+promotes and never mutates release-state records; the release writer never edits
+application code or repair-budget records.
+
+**Model admission.** Only a durable `RollingStartBudget.reserveModelStart(...)`
+result of `{ status: "admitted" }` — one new `BudgetReservationV1` applied to
+the authoritative repair branch before any start — permits
+`ImplementationPort.runModel`. Every other variant (`duplicate`, `deferred`,
+`disabled`, `conflict`, `ambiguous`, `unavailable`, `invalid`) never grants a
+start, and an ambiguous/conflicting response is reconciled by rereading the
+durable reservation. `resolveGlobalLiveStartLimits(configs)` is **cap agreement
+only, never admission**: it derives the one agreed global policy
+(disabled/enabled/conflict) for configuration and scheduling purposes; an
+`enabled` result without a durable `admitted` reservation is never a model
+start. The repair entrypoint charges every model invocation — implementation,
+continuation, retry and review request — through the same global controller
+(§7).
+
+**Wave A fake-loop smoke contract.** `tests/contracts/ports_test.ts` contains
+the compiled fake-port loop skeleton: a scripted two-tick sequence over the
+canned fakes (repair read → source read → deterministic replay → review
+observation, plus an independent release read) that records every call, exits at
+an unchanged `review_pending` wait, advances time only by explicit ticks, never
+calls a model port and never holds a state writer. It is a contract smoke
+skeleton only — not production repair logic, not accepted end-to-end runtime;
+the real selection/loop state machine belongs to m04 and the release state
+machine to m05. Its deps carry `Pick<StateReadView, "readRepair">` plus
+source/review/replay/clock ports with no `ImplementationPort` and no writer
+capability, which is exactly the boundary §10 documents for Wave C.
+
+## 11. Proposed gateway producer HTTP contract
+
+**Status: proposed and frozen as a producer/consumer mapping contract — not
+implemented by the current target.** At the recorded setup snapshot the gateway
+repository (`ubiquity/ai.ubq.fi`, root `development` at
+`aafb7ee0598699bb7fb8a72ea133693ed64462da`) exposes the existing super-admin
+replay export but has **no unresolved-discovery index**: captures and the
+incident outbox expire after 48 hours, the old Sentinel runtime owner remains
+active, and no target writes are authorized here. m06-gateway may implement this
+schema only after target-ownership reconciliation and owner approval. The
+synthetic fixture `tests/fixtures/contracts/gateway-index-v1.json` maps rows
+into frozen `IncidentSummaryV1` records through the test-only conversion (§8);
+it proves schema mapping only, never live discovery, and no new shared port
+interface is added (m02's `IncidentAdapter` returns the existing
+`IncidentPageV1`).
+
+### Existing replay export (unmodified)
+
+`GET /admin/sentinel/replay-captures` — super-admin authentication; query
+`after_ms >= 0` and `before_ms >= after_ms` must both be supplied explicitly;
+page limit `1` is required (the gateway does not support larger pages); optional
+`cursor` and `incident_id`; success is
+`{ data: [{ manifest, chunks }], cursor }` with encrypted manifest/chunks. The
+replay export is reused for artifact retrieval; it is never replaced.
+
+### Proposed endpoint `GET /admin/sentinel/incidents`
+
+Same super-admin authentication as the replay export. No plaintext evidence, key
+material or credentials appear in the response. Query parameters are validated
+fail-closed: unknown query keys, non-integer/out-of-range values and malformed
+values are rejected (never ignored, defaulted or coerced).
+
+| Parameter     | Type                                       | Semantics                                                                                              |
+| ------------- | ------------------------------------------ | ------------------------------------------------------------------------------------------------------ |
+| `limit`       | positive integer, server-enforced `1..100` | page size; the Sentinel adapter requests `1`                                                           |
+| `cursor`      | string \| absent                           | opaque continuation of the previous page; absent on the first request                                  |
+| `incident_id` | string \| absent                           | exact incident identity filter, in the frozen `incident_id` format given below; `readIncident` uses it |
+
+Success response `200`:
+
+| Field      | Type                 | Semantics                                                                           |
+| ---------- | -------------------- | ----------------------------------------------------------------------------------- |
+| `data`     | row array            | rows in schema below; empty is a real value only when the scan genuinely found none |
+| `cursor`   | string \| null       | next page cursor; `null` when pagination is exhausted                               |
+| `coverage` | `IncidentCoverageV1` | coverage of the scan producing this page; it also belongs to each mapped summary    |
+
+A missing/unreachable producer endpoint is a port error (`unavailable`), never
+an empty successful page — the adapter can never mistake an outage for "no
+unresolved incidents".
+
+### Row schema (exact snake case, unknown keys rejected)
+
+| Field                    | Type                         | Semantics                                                                                                                         |
+| ------------------------ | ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `incident_id`            | string                       | stable incident identity in the frozen provider-UUID format below                                                                 |
+| `fingerprint`            | 64 hex                       | stable SHA-256 group identity (dedupe) — never a ciphertext digest                                                                |
+| `severity`               | `P0` \| `P1` \| `P2` \| `P3` | trusted producer classification                                                                                                   |
+| `first_seen_at_ms`       | ms timestamp                 | first observation                                                                                                                 |
+| `last_seen_at_ms`        | ms timestamp                 | `>= first_seen_at_ms`                                                                                                             |
+| `count`                  | integer `>= 1`               | occurrence count                                                                                                                  |
+| `failing_revision`       | 40-hex Git SHA \| null       | exact failing target revision; `null` blocks later replay, never discovery                                                        |
+| `error_type`             | string                       | bounded non-empty label                                                                                                           |
+| `context`                | object                       | `{ message, location, sample }` — sanitized/bounded, no plaintext secrets (rows conform to the `IncidentSummaryV1` context rules) |
+| `provenance`             | object                       | `{ endpoint, captured_at_ms, captured_by }` — see below                                                                           |
+| `evidence_ref`           | object \| null               | `{ ref, digest }`; `digest` is the SHA-256 of the encrypted artifact or `null`                                                    |
+| `evidence_expires_at_ms` | ms timestamp \| null         | expiry of the referenced capture; `null` when no evidence is referenced                                                           |
+
+`evidence_ref.ref` is a restricted storage reference (opaque name — same
+structural rules as `EvidenceRefV1`; never a network URL, filesystem path or
+query string to raw evidence). `evidence_ref: null` is allowed and never
+fabricated: a row without evidence is an incident whose replay stage is blocked,
+not a suppressed discovery. `failing_revision: null` likewise blocks the replay
+stage only.
+
+**Incident id format (frozen).** `incident_id` is the gateway's existing
+incident identity: lowercase `provider-` followed by a lowercase version-4 UUID,
+exactly
+`^provider-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`.
+This is the `INCIDENT_ID` pattern already enforced by the target's
+`src/sentinel_incident_outbox.ts` at the recorded setup snapshot
+(`aafb7ee0598699bb7fb8a72ea133693ed64462da`), and the existing replay export
+rejects incident ids outside it. The proposed index rows and the `incident_id`
+filter reuse that same accepted format unchanged: an out-of-format id (for
+example an ad-hoc `sentinel-synth-0001` label) is invalid at the row/filter
+boundary — the adapter never coerces, renames or substitutes a fallback id, and
+`readIncident` rejects it fail-closed instead of returning an empty page.
+
+**Trusted adapter configuration.** The `IncidentSummaryV1.repository` identity
+and `provenance.source: "gateway"` are trusted adapter configuration/constants:
+they come from the adapter's own config, never from the response (the wire row
+carries only `endpoint`/`captured_at_ms`/`captured_by`; `source` and repository
+identity are not row fields). The wire `evidence_expires_at_ms` is consumed by
+the evidence stage (mapping into `IncidentEvidenceV1` artifact `expiresAt`); the
+summary record itself carries no expiry field.
+
+### `readIncident` procedure (read-only)
+
+1. Request the index with `incident_id=<id>` and `limit=1`, exhausting pages
+   until `cursor: null` and coverage complete; never assume a larger page is
+   supported.
+2. Fetch the referenced capture through the existing authentic replay export
+   (`incident_id` plus an explicit safe interval `after_ms >= 0`,
+   `before_ms >= after_ms`), exhausting `limit=1` pages.
+3. No hidden claim/ack/defer writes: the incident claim/acknowledge/defer POST
+   endpoints are never invoked by discovery or evidence reads.
+
+### Artifact identity and integrity
+
+- The replay **manifest fingerprint is an HMAC identity** over the capture —
+  never a ciphertext digest. Chunks are decoded in order (encrypted base64url),
+  `chunk_count`/`ciphertext_bytes` and the manifest identity are verified, and
+  the SHA-256 of the **actual concatenated ciphertext** is the
+  `EncryptedArtifactDigest`.
+- The deterministic restricted artifact ref names both the incident and the
+  capture identity (e.g. `artifact://<namespace>/<incident_id>/<capture-id>`),
+  so distinct captures never share a ref.
+- Transport reads are bounded: `readArtifact(ref, maxBytes)` returns the
+  canonical base64 ciphertext (`EncryptedArtifactV1.ciphertextBase64`), and
+  `null` only for a gone/expired artifact (`evidence_expired` blocker) — never
+  plaintext, never a fabricated digest.
+- The AES-GCM/gzip manifest needed for trusted decryption is preserved as
+  restricted associated metadata in the evidence store; no key material exists
+  in contract records or public state, and the encrypted-artifact digest is
+  never reused as a `FixtureDigest` (brand separation, §2).
+- `ReplayMetadataV1` stays `null` until a trusted sanitized regression fixture
+  exists; encrypted evidence bytes are never the fixture.
+
+### Retention
+
+The current 48-hour capture/outbox TTL is **not** claimed sufficient: weekly
+review waits outlive it, and `evidence_expired` is a typed blocker, never a
+reason to invent a fixture. Retention past 48 hours is secured by deterministic
+ingestion into trusted bounded restricted storage **before model admission** —
+never by asserting the current TTL already meets the contract. Live
+owner-approved retention/storage bounds and the target producer seam remain
+activation blockers (plan §10).
