@@ -73,6 +73,7 @@ import {
   buildAcceptanceResult,
   evaluateAcceptance,
   nextAlignedWindowStart,
+  slotMissed,
 } from "./acceptance.ts";
 import type { BuildReceiptResolverV1 } from "./resolver.ts";
 
@@ -797,12 +798,16 @@ export class ReleaseController {
       return this.blocked(record.id, "monitoring window has no start");
     }
 
-    // Managed identity observation every tick. An observable mismatch is an
-    // objective controlled-candidate failure; unobservability is an
-    // interrupted monitor (reset, never fabricate).
+    // Managed identity observation every tick. A healthy managed sample is
+    // body marker + managed headers + exact identity (port-level `healthy`);
+    // any missing piece is an interrupted monitor (reset, never fabricate) —
+    // an observable mismatch is handled below; degraded/unhealthy evidence
+    // never advances the window.
     const observation = await this.observeManaged();
     if (
-      observation.status === "error" || observation.sample.identity === null
+      observation.status === "error" ||
+      observation.sample.identity === null ||
+      observation.sample.status !== "healthy"
     ) {
       return this.restartMonitor(record, context);
     }
@@ -826,22 +831,28 @@ export class ReleaseController {
       );
     }
 
-    // Custom-domain probe: 200 with exact identity passes; 200 mismatch is a
-    // hard identity failure; Cloudflare-identified 403 warns only after the
-    // managed identity passed.
+    // Custom-domain probe after the managed identity passed. 200 with exact
+    // identity passes; 200 mismatch is a hard identity failure; a VERIFIED
+    // Cloudflare 403 challenge warns only; every other outcome (unverified
+    // 403, other non-200, unobservable gateway) blocks acceptance — custom
+    // delivery can never be accepted while the gateway cannot be verified.
     const warnings: string[] = [];
     const custom = await this.probeCustom(record.candidate.identity);
     if (custom?.status === "hard-fail") {
       return this.persistRollbackIntent(record, context, warnings);
     }
     if (custom?.status === "warned") warnings.push(...custom.warnings);
+    if (custom?.status === "blocked") {
+      return this.blocked(record.id, custom.detail);
+    }
 
     // Candidate window slots, strictly from persisted state. All due slots
-    // since the last persisted sample are collected in one run (bounded by
-    // the run cap); every slot keeps its exact persisted window. A backlog
-    // beyond the cap, or any slot whose telemetry is incomplete/unreadable,
-    // is an interrupted monitor: continuity restarts and missing samples are
-    // never reconstructed.
+    // since the last persisted sample are collected in one run; every slot
+    // keeps its exact persisted window. When the observation is late by more
+    // than one interval (an unobserved monitoring gap), continuity restarts:
+    // historical slots are never accepted as if sampled while the monitor was
+    // absent. A slot whose telemetry is incomplete/unreadable is likewise an
+    // interrupted monitor and is never reconstructed.
     const startedAt = record.monitoring.startedAt;
     const now = this.clock.now();
     const collected = record.monitoring.samples;
@@ -855,7 +866,15 @@ export class ReleaseController {
         warnings,
       });
     }
-    if (dueSlots > RELEASE_MAX_SLOTS_PER_RUN) {
+    if (
+      slotMissed(
+        startedAt,
+        RELEASE_SAMPLE_INTERVAL_MS,
+        collected,
+        now,
+        this.target.logsLagMs,
+      )
+    ) {
       return this.restartMonitor(record, context);
     }
 
@@ -905,6 +924,14 @@ export class ReleaseController {
         if (!baselineSample.ok || !completeSample(baselineSample.value)) break;
         baseline.push(baselineSample.value);
       }
+    }
+    if (baseline.length === 0 && samples.length >= 1) {
+      // Candidate telemetry was observed but no baseline evidence for the
+      // recorded prior exists: an acceptance document cannot be constructed
+      // (the frozen parser requires baseline evidence), so the missing
+      // baseline is a persisted explicit insufficient-evidence failure —
+      // never a thrown exception, never a fabricated baseline.
+      return this.failBaselineInsufficient(record, context, warnings);
     }
     // One durable write per run: the run's slots (and the completed baseline
     // evidence) are persisted together; a crashed run simply restarts its
@@ -1037,6 +1064,41 @@ export class ReleaseController {
       ...record,
       phase: "failed",
       acceptance: finalAcceptance,
+      receipts: {
+        ...record.receipts,
+        error: makeError(this.clock.now(), "acceptance_insufficient"),
+      },
+      updatedAt: this.clock.now(),
+    });
+    const write = await this.writeSnapshot(context, failed);
+    if (!write) {
+      return portOk({ status: "conflict", recordId: record.id, warnings: [] });
+    }
+    return portOk({
+      status: "advanced",
+      recordId: record.id,
+      phase: "failed",
+      warnings,
+    });
+  }
+
+  /**
+   * Baseline evidence is entirely absent while candidate telemetry was
+   * observed: the frozen acceptance contract requires baseline evidence, so
+   * the missing baseline is persisted as an explicit
+   * `acceptance_insufficient` failure (no rollback — there is no objective
+   * candidate failure). Also never throws: a missing baseline must not
+   * repeatedly crash the release controller.
+   */
+  private async failBaselineInsufficient(
+    record: ReleaseRecordV1,
+    context: LoadedContextV1,
+    warnings: string[],
+  ): Promise<PortResultV1<ReleaseCycleResultV1>> {
+    const failed = parseReleaseRecordV1({
+      ...record,
+      phase: "failed",
+      acceptance: null,
       receipts: {
         ...record.receipts,
         error: makeError(this.clock.now(), "acceptance_insufficient"),
@@ -1282,9 +1344,11 @@ export class ReleaseController {
 
   /**
    * Custom-domain probe after the managed identity passed. 200 with exact
-   * identity is clean; 200 with a different identity is a hard identity
-   * failure; a Cloudflare-identified 403 (or any other non-200 gateway
-   * response) is a warning only.
+   * identity is clean; a 200 without a fully healthy body/header validation,
+   * or with a different identity, is a hard identity failure; a VERIFIED
+   * Cloudflare 403 challenge (the target's identified warning exception) is a
+   * warning only; every other failure (unverified 403, other non-200,
+   * unobservable gateway) blocks acceptance.
    */
   private async probeCustom(
     expected: DeploymentIdentityV1,
@@ -1292,6 +1356,7 @@ export class ReleaseController {
     | { status: "ok" }
     | { status: "hard-fail" }
     | { status: "warned"; warnings: string[] }
+    | { status: "blocked"; detail: string }
     | null
   > {
     if (this.target.customBaseUrl === null) return null;
@@ -1314,28 +1379,31 @@ export class ReleaseController {
     });
     if (!result.ok) {
       return {
-        status: "warned",
-        warnings: ["custom gateway probe is unavailable"],
+        status: "blocked",
+        detail: "custom gateway probe is unavailable",
       };
     }
     const sample = result.value;
     if (sample.httpStatus === 200) {
       if (
-        sample.identity === null || !sameIdentity(sample.identity, expected)
+        sample.status !== "healthy" || sample.identity === null ||
+        !sameIdentity(sample.identity, expected)
       ) {
         return { status: "hard-fail" };
       }
       return { status: "ok" };
     }
-    if (sample.httpStatus === 403) {
+    if (sample.httpStatus === 403 && sample.headersMatch === true) {
+      // The target's identified exception: a verified Cloudflare Bot Fight
+      // Mode challenge on the gateway runner, never a deployment mismatch.
       return {
         status: "warned",
-        warnings: ["custom gateway returns Cloudflare-identified 403"],
+        warnings: ["custom gateway returns a verified Cloudflare-identified 403"],
       };
     }
     return {
-      status: "warned",
-      warnings: ["custom gateway returned a non-200 response"],
+      status: "blocked",
+      detail: "custom gateway identity cannot be verified",
     };
   }
 

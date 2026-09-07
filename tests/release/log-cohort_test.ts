@@ -70,15 +70,87 @@ Deno.test("cohort: terminal classification follows the configured rules only", (
     ],
   ] as const;
   const accumulator = new CohortAccumulatorV1();
+  // Every failing request also has its accepted event in the same cohort.
+  for (const requestId of ["r1", "r2", "r3", "r4"]) {
+    accumulator.add(
+      parseCohortMessage(
+        acceptedEvent({
+          requestId,
+          identity: DEP_1,
+          timestamp: 0,
+        }),
+        DEP_1,
+      ),
+      KINDS,
+    );
+  }
   for (const [message] of cases) {
     accumulator.add(parseCohortMessage(message, DEP_1), KINDS);
   }
   const counts = accumulator.counts();
-  assert.equal(counts.acceptedCount, 0);
+  assert.equal(counts.acceptedCount, 4);
   assert.equal(counts.fiveXxCount, 2); // r1 and r4 both 5xx
   assert.equal(counts.timeoutCount, 1);
   assert.equal(counts.streamFailureCount, 1);
   assert.equal(counts.upstreamWideCount, 1);
+  assert.equal(counts.unreadableCount, 0);
+});
+
+Deno.test("cohort: a terminal outside the accepted cohort contributes nothing", () => {
+  const accumulator = new CohortAccumulatorV1();
+  accumulator.add(
+    parseCohortMessage(
+      acceptedEvent({ requestId: "r1", identity: DEP_1, timestamp: 0 }),
+      DEP_1,
+    ),
+    KINDS,
+  );
+  // A terminal for a request whose accepted event belongs to another window
+  // (or is missing) is NOT part of this scan's denominator cohort.
+  accumulator.add(
+    parseCohortMessage(
+      terminalEvent({
+        requestId: "r9",
+        identity: DEP_1,
+        timestamp: 0,
+        status: 503,
+      }),
+      DEP_1,
+    ),
+    KINDS,
+  );
+  const counts = accumulator.counts();
+  assert.equal(counts.acceptedCount, 1);
+  assert.equal(counts.fiveXxCount, 0);
+  assert.equal(counts.timeoutCount, 0);
+  assert.equal(counts.streamFailureCount, 0);
+  assert.equal(counts.upstreamWideCount, 0);
+  assert.equal(counts.unreadableCount, 0);
+});
+
+Deno.test("cohort: a terminals-only scan emits consistent zero counts, never inconsistent metrics", () => {
+  // Review repro: a request accepted in the previous window terminates in
+  // this window. The denominator must not be smaller than any failure count;
+  // the only consistent outcome is the same cohort for both: nothing here.
+  const accumulator = new CohortAccumulatorV1();
+  accumulator.add(
+    parseCohortMessage(
+      terminalEvent({
+        requestId: "crossing",
+        identity: DEP_1,
+        timestamp: 0,
+        status: 502,
+      }),
+      DEP_1,
+    ),
+    KINDS,
+  );
+  const counts = accumulator.counts();
+  assert.equal(counts.acceptedCount, 0);
+  assert.equal(counts.fiveXxCount, 0);
+  assert.equal(counts.timeoutCount, 0);
+  assert.equal(counts.streamFailureCount, 0);
+  assert.equal(counts.upstreamWideCount, 0);
   assert.equal(counts.unreadableCount, 0);
 });
 

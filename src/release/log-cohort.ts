@@ -167,9 +167,17 @@ export interface CohortCountsV1 {
 /**
  * Aggregates a scan's events into sanitized counts. Accepted events are
  * deduplicated by request id (log re-delivery is not a second request);
- * terminals are deduplicated per request id per classification. A terminal
- * without a matching accepted event in the window still contributes its
- * failure classification (its accepted event may predate the window).
+ * terminals are deduplicated per request id per classification.
+ *
+ * The failure classifications are joined to THE SAME request cohort that
+ * provides the denominator: only a request whose accepted event was observed
+ * in this scan may contribute a failure classification. A terminal without a
+ * matching accepted event belongs to another window's cohort (its request
+ * was accepted earlier or accepted-event evidence is missing) and therefore
+ * contributes neither a failure nor the denominator — otherwise a request
+ * crossing a window boundary would produce failure counts outside the
+ * denominator (e.g. `requestCount: 0, fiveXxCount: 1`) and inconsistent
+ * metrics. A scan with only such terminals is complete with zero counts.
  *
  * Classification follows the owner-configured rules only:
  * - five_xx:     terminal HTTP status >= 500
@@ -215,12 +223,19 @@ export class CohortAccumulatorV1 {
   }
 
   counts(): CohortCountsV1 {
+    const inCohort = (ids: ReadonlySet<string>): number => {
+      let count = 0;
+      for (const id of ids) {
+        if (this.acceptedIds.has(id)) count++;
+      }
+      return count;
+    };
     return {
       acceptedCount: this.acceptedIds.size,
-      fiveXxCount: this.fiveXxIds.size,
-      timeoutCount: this.timeoutIds.size,
-      streamFailureCount: this.streamIds.size,
-      upstreamWideCount: this.upstreamIds.size,
+      fiveXxCount: inCohort(this.fiveXxIds),
+      timeoutCount: inCohort(this.timeoutIds),
+      streamFailureCount: inCohort(this.streamIds),
+      upstreamWideCount: inCohort(this.upstreamIds),
       unreadableCount: this.unreadableCount,
     };
   }

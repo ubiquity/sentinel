@@ -8,6 +8,7 @@ import type { DenoAuthProviderV1 } from "../../src/release/http.ts";
 import { DenoReleaseRESTClient } from "../../src/release/port.ts";
 import {
   asTransport,
+  CUSTOM_URL,
   DEP_0,
   DEP_1,
   DEP_X,
@@ -302,6 +303,50 @@ Deno.test("port: managed 200 with a wrong identity is a degraded sample with the
   assert.equal(sample.value.identity?.revisionId, DEP_X.revisionId);
 });
 
+Deno.test("port: a verified Cloudflare 403 challenge is identified in the sample", async () => {
+  const transport = new ScriptedTransport();
+  transport.health();
+  transport.customStatus = 403;
+  transport.customCloudflare = true;
+  const port = client(transport);
+  const sample = await port.sampleHealth({
+    baseUrl: CUSTOM_URL,
+    healthPath: "/health",
+    managedBodyMarker: '"status":"available"',
+    managedHeaders: [],
+    domain: "ai.ubq.fi",
+  });
+  assert.ok(sample.ok);
+  if (!sample.ok) return;
+  assert.equal(sample.value.status, "degraded");
+  assert.equal(sample.value.httpStatus, 403);
+  assert.equal(
+    sample.value.headersMatch,
+    true,
+    "the identified Cloudflare challenge must be reported",
+  );
+  assert.equal(sample.value.identity, null);
+});
+
+Deno.test("port: an unverified 403 is never reported as a Cloudflare challenge", async () => {
+  const transport = new ScriptedTransport();
+  transport.health();
+  transport.customStatus = 403;
+  transport.customCloudflare = false;
+  const port = client(transport);
+  const sample = await port.sampleHealth({
+    baseUrl: CUSTOM_URL,
+    healthPath: "/health",
+    managedBodyMarker: '"status":"available"',
+    managedHeaders: [],
+    domain: "ai.ubq.fi",
+  });
+  assert.ok(sample.ok);
+  if (!sample.ok) return;
+  assert.equal(sample.value.httpStatus, 403);
+  assert.equal(sample.value.headersMatch, false);
+});
+
 Deno.test("port: log sampling produces exact-window Cohort counts with complete coverage", async () => {
   const transport = new ScriptedTransport();
   logRoute(transport, {
@@ -365,6 +410,37 @@ Deno.test("port: unreadable log entries make coverage incomplete but preserve co
   if (!sample.ok) return;
   assert.equal(sample.value.requestCount, 50);
   assert.equal(sample.value.coverage.status, "incomplete");
+});
+
+Deno.test("port: terminals outside the window cohort never make metrics inconsistent", async () => {
+  const transport = new ScriptedTransport();
+  logRoute(transport, {
+    accept: 100,
+    fails: { fiveXx: 1 },
+    orphanTerminals: 3,
+  });
+  const clock = new TestClock(T0 + 35_001);
+  const port = client(transport, clock);
+  const sample = await port.sampleMetrics({
+    baseUrl: MANAGED_URL,
+    metricsPath: "/health",
+    identity: DEP_1,
+    windowStart: T0,
+    windowEnd: T0 + 30_000,
+    domain: "ai.ubq.fi",
+  });
+  assert.ok(sample.ok);
+  if (!sample.ok) return;
+  // The failing request `acc-0` belongs to the accepted cohort; the three
+  // orphan terminals (accepted event outside the window) are excluded from
+  // BOTH the denominator and the failure counts: counts stay consistent and
+  // the metrics parser accepts the sample (no failure > denominator).
+  assert.equal(sample.value.requestCount, 100);
+  assert.equal(sample.value.fiveXxCount, 1);
+  assert.equal(sample.value.timeoutCount, 0);
+  assert.equal(sample.value.streamFailureCount, 0);
+  assert.equal(sample.value.upstreamWideFault, false);
+  assert.deepEqual(sample.value.coverage, { status: "complete" });
 });
 
 Deno.test("port: auth failure of the REST read is a typed fault, not an empty result", async () => {
