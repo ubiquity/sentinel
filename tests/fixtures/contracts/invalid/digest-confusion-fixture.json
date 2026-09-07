@@ -1,0 +1,52 @@
+{
+  "version": "v1",
+  "kind": "replay_result",
+  "id": "replay-0001",
+  "taskId": "incident:deadbeef-c7b9-4e9f-9b0f-1a2b3c4d5e6f",
+  "repository": {
+    "owner": "ubiquity",
+    "name": "ai.ubq.fi",
+    "installationId": 12345
+  },
+  "original": {
+    "revision": "4a21c96d46e6f98c3c04125cafce34e255e710e3",
+    "outcome": "failed",
+    "exitCode": 1,
+    "output": {
+      "stdoutDigest": "abababab01020304abababab01020304abababab01020304abababab01020304",
+      "stderrDigest": null,
+      "truncated": false
+    },
+    "failure": {
+      "intended": true,
+      "reason": "missing completion terminator produces 500"
+    }
+  },
+  "candidate": {
+    "revision": "6dc35d06e757107b91eb58232bd15e5f671d79b4",
+    "outcome": "passed",
+    "exitCode": 0,
+    "output": {
+      "stdoutDigest": "cdcdcdcd05060708cdcdcdcd05060708cdcdcdcd05060708cdcdcdcd05060708",
+      "stderrDigest": null,
+      "truncated": false
+    },
+    "failure": null
+  },
+  "fixture": {
+    "ref": "fixture://x.json",
+    "digest": "aafb7ee0598699bb7fb8a72ea133693ed64462da",
+    "testIds": [
+      "t"
+    ]
+  },
+  "commands": {
+    "replay": "replay_capture",
+    "test": "test_ci"
+  },
+  "expected": {
+    "beforeReason": "missing completion terminator produces 500"
+  },
+  "limitations": [],
+  "createdAt": 1786002000000
+}

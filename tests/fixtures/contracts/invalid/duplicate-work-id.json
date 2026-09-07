@@ -1,0 +1,398 @@
+{
+  "version": "v1",
+  "kind": "repair_state_snapshot",
+  "stateHead": "5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c0d9e8f7a6b",
+  "sequence": 1,
+  "updatedAt": 1786006000000,
+  "incidents": [
+    {
+      "version": "v1",
+      "kind": "incident_summary",
+      "repository": {
+        "owner": "ubiquity",
+        "name": "ai.ubq.fi",
+        "installationId": 12345
+      },
+      "id": "inc-2026-09-07-0001",
+      "fingerprint": "deadbeef01020304deadbeef01020304deadbeef01020304deadbeef01020304",
+      "severity": "P1",
+      "firstSeenAt": 1785990000000,
+      "lastSeenAt": 1786000000000,
+      "count": 3,
+      "failingRevision": "aafb7ee0598699bb7fb8a72ea133693ed64462da",
+      "errorType": "GatewayError",
+      "context": {
+        "message": "integration refused upstream completion",
+        "location": "src/handler.ts:fetch",
+        "sample": [
+          "upstream terminated without completion",
+          "request aborted after 90s"
+        ]
+      },
+      "provenance": {
+        "source": "gateway",
+        "endpoint": "https://ai.ubq.fi",
+        "capturedAt": 1786000000000,
+        "capturedBy": "gateway"
+      },
+      "coverage": {
+        "status": "complete"
+      },
+      "evidenceRef": {
+        "ref": "artifact://inbox/inc-2026-09-07-0001.pgp",
+        "digest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+      }
+    }
+  ],
+  "evidence": [
+    {
+      "version": "v1",
+      "kind": "incident_evidence",
+      "repository": {
+        "owner": "ubiquity",
+        "name": "ai.ubq.fi",
+        "installationId": 12345
+      },
+      "id": "evidence-inc-2026-09-07-0001",
+      "incidentId": "inc-2026-09-07-0001",
+      "fingerprint": "deadbeef01020304deadbeef01020304deadbeef01020304deadbeef01020304",
+      "failingRevision": "aafb7ee0598699bb7fb8a72ea133693ed64462da",
+      "artifacts": [
+        {
+          "ref": "artifact://inbox/inc-2026-09-07-0001.pgp",
+          "digest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          "sizeBytes": 4096,
+          "expiresAt": 1787000000000,
+          "contentType": "application/octet-stream"
+        }
+      ],
+      "replay": {
+        "fixtureRef": "fixture://captures/inc-2026-09-07-0001/upstream.json",
+        "fixtureDigest": "f0e1d2c3b4a5968778695a4b3c2d1e0f00001111222233334444555566667777",
+        "upstreamCaptured": true,
+        "commandId": "replay_capture",
+        "reproducedAt": null
+      },
+      "provenance": {
+        "source": "gateway",
+        "endpoint": "https://ai.ubq.fi",
+        "capturedAt": 1786000000000,
+        "capturedBy": null
+      },
+      "coverage": {
+        "status": "incomplete",
+        "reason": "page limit exhausted before final cursor",
+        "nextCursor": "page-7"
+      }
+    }
+  ],
+  "work": [
+    {
+      "version": "v1",
+      "kind": "work",
+      "repository": {
+        "owner": "ubiquity",
+        "name": "ai.ubq.fi",
+        "installationId": 12345
+      },
+      "id": "incident:deadbeef-c7b9-4e9f-9b0f-1a2b3c4d5e6f",
+      "source": {
+        "kind": "incident",
+        "id": "inc-2026-09-07-0001",
+        "revision": "aafb7ee0598699bb7fb8a72ea133693ed64462da"
+      },
+      "related": {
+        "incidentId": "inc-2026-09-07-0001",
+        "issueNumber": null
+      },
+      "fingerprint": "deadbeef01020304deadbeef01020304deadbeef01020304deadbeef01020304",
+      "failingRevision": "aafb7ee0598699bb7fb8a72ea133693ed64462da",
+      "sourceSnapshotDigest": "cafebabe12345678cafebabe12345678cafebabe12345678cafebabe12345678",
+      "classification": {
+        "severity": "P1",
+        "priority": null
+      },
+      "controller": {
+        "sha": "1234567890abcdef1234567890abcdef12345678"
+      },
+      "target": {
+        "base": "aafb7ee0598699bb7fb8a72ea133693ed64462da",
+        "branch": "sentinel/inc-2026-09-07-0001",
+        "checkpoint": {
+          "branch": "sentinel/inc-2026-09-07-0001",
+          "sha": "1111111111111111111111111111111111111111"
+        },
+        "head": null,
+        "pr": null
+      },
+      "nextStep": "review",
+      "wait": {
+        "reason": "review_pending",
+        "since": 1786000000000,
+        "until": null
+      },
+      "blocker": null,
+      "counters": {
+        "attempts": 1,
+        "retries": 0,
+        "reviewRounds": 1
+      },
+      "evidence": [
+        {
+          "kind": "incident_evidence",
+          "ref": "artifact://inbox/inc-2026-09-07-0001.pgp",
+          "digest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        },
+        {
+          "kind": "fixture",
+          "ref": "fixture://captures/inc-2026-09-07-0001/upstream.json",
+          "digest": "f0e1d2c3b4a5968778695a4b3c2d1e0f00001111222233334444555566667777"
+        },
+        {
+          "kind": "replay_result",
+          "ref": "replay/rec-0001"
+        }
+      ],
+      "intent": null,
+      "firstSeenAt": 1785990000000,
+      "createdAt": 1785990000100,
+      "updatedAt": 1786002000000,
+      "urgency": {
+        "activeProduction": false,
+        "reproducible5xx": true,
+        "severeSecurityOrDataLoss": false
+      },
+      "dependencies": []
+    },
+    {
+      "version": "v1",
+      "kind": "work",
+      "repository": {
+        "owner": "ubiquity",
+        "name": "ai.ubq.fi",
+        "installationId": 12345
+      },
+      "id": "incident:deadbeef-c7b9-4e9f-9b0f-1a2b3c4d5e6f",
+      "source": {
+        "kind": "incident",
+        "id": "inc-2026-09-07-0001",
+        "revision": "aafb7ee0598699bb7fb8a72ea133693ed64462da"
+      },
+      "related": {
+        "incidentId": "inc-2026-09-07-0001",
+        "issueNumber": null
+      },
+      "fingerprint": "deadbeef01020304deadbeef01020304deadbeef01020304deadbeef01020304",
+      "failingRevision": "aafb7ee0598699bb7fb8a72ea133693ed64462da",
+      "sourceSnapshotDigest": "cafebabe12345678cafebabe12345678cafebabe12345678cafebabe12345678",
+      "classification": {
+        "severity": "P1",
+        "priority": null
+      },
+      "controller": {
+        "sha": "1234567890abcdef1234567890abcdef12345678"
+      },
+      "target": {
+        "base": "aafb7ee0598699bb7fb8a72ea133693ed64462da",
+        "branch": "sentinel/inc-2026-09-07-0001",
+        "checkpoint": {
+          "branch": "sentinel/inc-2026-09-07-0001",
+          "sha": "1111111111111111111111111111111111111111"
+        },
+        "head": null,
+        "pr": null
+      },
+      "nextStep": "review",
+      "wait": {
+        "reason": "review_pending",
+        "since": 1786000000000,
+        "until": null
+      },
+      "blocker": null,
+      "counters": {
+        "attempts": 1,
+        "retries": 0,
+        "reviewRounds": 1
+      },
+      "evidence": [
+        {
+          "kind": "incident_evidence",
+          "ref": "artifact://inbox/inc-2026-09-07-0001.pgp",
+          "digest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        },
+        {
+          "kind": "fixture",
+          "ref": "fixture://captures/inc-2026-09-07-0001/upstream.json",
+          "digest": "f0e1d2c3b4a5968778695a4b3c2d1e0f00001111222233334444555566667777"
+        },
+        {
+          "kind": "replay_result",
+          "ref": "replay/rec-0001"
+        }
+      ],
+      "intent": null,
+      "firstSeenAt": 1785990000000,
+      "createdAt": 1785990000100,
+      "updatedAt": 1786002000000,
+      "urgency": {
+        "activeProduction": false,
+        "reproducible5xx": true,
+        "severeSecurityOrDataLoss": false
+      },
+      "dependencies": []
+    }
+  ],
+  "reservations": [
+    {
+      "version": "v1",
+      "kind": "budget_reservation",
+      "repository": {
+        "owner": "ubiquity",
+        "name": "ai.ubq.fi",
+        "installationId": 12345
+      },
+      "id": "reservation-0001",
+      "taskId": "incident:deadbeef-c7b9-4e9f-9b0f-1a2b3c4d5e6f",
+      "attempt": 1,
+      "head": "6dc35d06e757107b91eb58232bd15e5f671d79b4",
+      "purpose": "implementation",
+      "createdAt": 1786000000000,
+      "outcome": "ambiguous",
+      "settledAt": 1786001000000,
+      "proofRef": null
+    }
+  ],
+  "reviews": [
+    {
+      "version": "v1",
+      "kind": "review_receipt",
+      "id": "receipt-0001",
+      "requestId": "review-request-0001",
+      "expectedReviewer": "chatgpt-codex-connector[bot]",
+      "observedReviewer": "chatgpt-codex-connector[bot]",
+      "repository": {
+        "owner": "ubiquity",
+        "name": "ai.ubq.fi",
+        "installationId": 12345
+      },
+      "pullRequest": {
+        "number": 42,
+        "head": "6dc35d06e757107b91eb58232bd15e5f671d79b4",
+        "base": "aafb7ee0598699bb7fb8a72ea133693ed64462da"
+      },
+      "outcome": "completed",
+      "resultId": "review-result-0001",
+      "summary": "One substantive P1 finding; the rest is acceptable.",
+      "findings": [
+        {
+          "id": "f-1",
+          "severity": "P1",
+          "path": "src/handler.ts",
+          "message": "Stream handling drops the SSE terminator on upstream EOF.",
+          "fingerprint": "feedface55667788feedface55667788feedface55667788feedface55667788",
+          "resolved": false,
+          "resolutionEvidence": null
+        },
+        {
+          "id": "f-2",
+          "severity": "P2",
+          "path": null,
+          "message": "Naming nit; no behavioral impact.",
+          "fingerprint": "f00dfeed00112233f00dfeed00112233f00dfeed00112233f00dfeed00112233",
+          "resolved": true,
+          "resolutionEvidence": {
+            "authorizingIdentity": "human-owner",
+            "reference": "dispute/2026-09-07-001"
+          }
+        }
+      ],
+      "unresolvedSeverities": [
+        "P1"
+      ],
+      "submittedAt": 1786000000000,
+      "completedAt": 1786003600000,
+      "observedAt": 1786003600000,
+      "findingsUncounted": 0
+    }
+  ],
+  "replays": [
+    {
+      "version": "v1",
+      "kind": "replay_result",
+      "id": "replay-0001",
+      "taskId": "incident:deadbeef-c7b9-4e9f-9b0f-1a2b3c4d5e6f",
+      "repository": {
+        "owner": "ubiquity",
+        "name": "ai.ubq.fi",
+        "installationId": 12345
+      },
+      "original": {
+        "revision": "4a21c96d46e6f98c3c04125cafce34e255e710e3",
+        "outcome": "failed",
+        "exitCode": 1,
+        "output": {
+          "stdoutDigest": "abababab01020304abababab01020304abababab01020304abababab01020304",
+          "stderrDigest": null,
+          "truncated": false
+        },
+        "failure": {
+          "intended": true,
+          "reason": "missing completion terminator produces 500"
+        }
+      },
+      "candidate": {
+        "revision": "6dc35d06e757107b91eb58232bd15e5f671d79b4",
+        "outcome": "passed",
+        "exitCode": 0,
+        "output": {
+          "stdoutDigest": "cdcdcdcd05060708cdcdcdcd05060708cdcdcdcd05060708cdcdcdcd05060708",
+          "stderrDigest": null,
+          "truncated": false
+        },
+        "failure": null
+      },
+      "fixture": {
+        "ref": "fixture://captures/inc-2026-09-07-0001/upstream.json",
+        "digest": "f0e1d2c3b4a5968778695a4b3c2d1e0f00001111222233334444555566667777",
+        "testIds": [
+          "gateway:stream-termination"
+        ]
+      },
+      "commands": {
+        "replay": "replay_capture",
+        "test": "test_ci"
+      },
+      "expected": {
+        "beforeReason": "missing completion terminator produces 500"
+      },
+      "limitations": [],
+      "createdAt": 1786002000000
+    }
+  ],
+  "releaseRequests": [
+    {
+      "version": "v1",
+      "kind": "release_request",
+      "id": "release-request-0001",
+      "target": {
+        "repository": {
+          "owner": "ubiquity",
+          "name": "ai.ubq.fi",
+          "installationId": 12345
+        },
+        "environment": "production"
+      },
+      "revision": "a1b2c3d4e5f60718293a4b5c6d7e8f901a2b3c4d",
+      "source": {
+        "pullRequest": 42,
+        "reviewRequestId": "review-request-0001",
+        "reviewReceiptId": "receipt-0001",
+        "head": "6dc35d06e757107b91eb58232bd15e5f671d79b4",
+        "base": "aafb7ee0598699bb7fb8a72ea133693ed64462da"
+      },
+      "status": "open",
+      "failureReason": null,
+      "createdAt": 1786004000000
+    }
+  ]
+}

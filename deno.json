@@ -1,0 +1,31 @@
+{
+  "name": "sentinel",
+  "version": "0.1.0",
+  "exports": "./src/contracts/mod.ts",
+  "tasks": {
+    "fmt": "deno fmt",
+    "lint": "deno lint",
+    "check": "deno check src/contracts/mod.ts",
+    "test": "deno test --allow-read=tests/fixtures/contracts tests/contracts/",
+    "test:local": "deno run --allow-env=PATH --allow-run=deno --allow-write test-local.ts"
+  },
+  "fmt": {
+    "include": [
+      "src/",
+      "tests/",
+      "test-local.ts",
+      "docs/contracts.md",
+      "deno.json"
+    ]
+  },
+  "lint": {
+    "include": [
+      "src/",
+      "tests/",
+      "test-local.ts"
+    ]
+  },
+  "compilerOptions": {
+    "strict": true
+  }
+}

@@ -1,0 +1,485 @@
+# Sentinel v1 shared contracts
+
+Foundation-owned record types, fail-closed runtime parsers, deterministic
+canonical serialization, distinct identity brands and typed operational ports.
+This document is the contract semantics reference for all consumers (m01-m06,
+state and budget implementations). The files in `src/contracts/` are frozen
+after review; consumers never invent their own status or digest variants.
+
+All records are JSON-safe values. There are no secret literal fields anywhere in
+these records; credential-bearing inputs are injected by the trusted host
+outside the record surface, and raw evidence payloads live only in restricted
+encrypted storage behind artifact refs. A schema alone never proves actual
+GitHub/Deno behavior — the authenticated transports in later modules are the
+only evidence of external behavior; these contracts define the shapes and the
+fail-closed rules they must satisfy.
+
+## 1. Design invariants
+
+Every parser in `src/contracts/` enforces all of the following; a violation is a
+typed `RecordParseError` (`code`, `path`, `message`) or, through
+`tryParse(parser, input)`, a `{ ok: false, issues }` result.
+
+- **Fail closed.** Unknown keys are rejected at every nesting level. Missing
+  keys are rejected. Nothing is ignored, defaulted or trimmed.
+- **Correct version.** Every record has `version: "v1"`; any other version is
+  rejected (`invalid_version`).
+- **Explicit kind.** Every record has a `kind` discriminant matching its parser
+  (e.g. `"work"` for `parseWorkRecordV1`), so records are distinguishable in
+  JSON state files.
+- **Full identity.** Git SHAs are exactly 40 lowercase hex characters; all
+  digests are exactly 64 lowercase hex characters (SHA-256).
+- **Finite nonnegative timestamps and counts.** Timestamps are nonnegative safe
+  integers (millisecond epoch); counts/ranges are nonnegative safe integers;
+  rates are finite numbers in [0,1].
+- **Bounded text.** Every string field has an explicit length cap; arrays have
+  explicit item caps (`MaxText`, `MaxItems` in `validation.ts`); sparse arrays
+  (holes) are rejected at parse time.
+- **Explicit enums.** Every enum is a closed literal union; case folding,
+  numbers and coercion are rejected.
+- **No coercion.** A number is accepted only where a number is expected, a
+  boolean only where a boolean is expected; numeric strings are rejected.
+- **Explicit nulls.** Nullable fields are declared `T | null` and must be
+  present (as `null`) or a value; `undefined` is never a valid JSON value and is
+  treated as a missing key by `expectExactKeys`.
+- **No input echo.** Parse error messages report `path`, `code`, `type` and
+  length only — never the invalid input value, which may be an arbitrary secret
+  (`expectSha256Hex`, `describeValue` and all `fail` messages follow this).
+- **Restricted refs only.** Every storage/credential reference field validates
+  against the restricted-ref shape (`^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,511}$`): no
+  URL query/fragment/userinfo, so a signed credential URL can never be persisted
+  into public Git state.
+
+## 2. Identity brands and digest separation
+
+`src/contracts/brands.ts` defines nominally-distinct brands:
+
+| Brand                     | Shape                    | Meaning                                                                |
+| ------------------------- | ------------------------ | ---------------------------------------------------------------------- |
+| `GitSha`                  | 40 hex                   | exact Git commit SHA-1                                                 |
+| `SourceSnapshotDigest`    | 64 hex                   | SHA-256 of a captured source tree snapshot                             |
+| `FixtureDigest`           | 64 hex                   | SHA-256 of sanitized fixture material (request, upstream, test output) |
+| `EncryptedArtifactDigest` | 64 hex                   | SHA-256 of an encrypted restricted artifact (raw evidence payload)     |
+| `IncidentFingerprint`     | 64 hex                   | stable incident dedupe identity                                        |
+| `FindingFingerprint`      | 64 hex                   | SHA-256 of the canonical form of one review finding                    |
+| `CommandId`               | `^[a-z][a-z0-9_]{0,63}$` | trusted credential-free configured command identity                    |
+| `WorkItemId`              | bounded id chars         | deterministic work item identity (task/branch/PR source)               |
+
+A 40-hex value can never be a digest and a 64-hex value can never be a Git SHA,
+so cross-brand confusion is rejected at parse time; the TypeScript brands
+additionally make the brands non-assignable in code. The four 64-hex brands
+share a shape but occupy differently-named fields in every record
+(`sourceSnapshotDigest`, `fixture.digest`, artifact `digest`, fingerprints), and
+`EvidenceRefV1` is a discriminated union whose digest brand is fixed by branch
+kind — an artifact digest can never be placed in a fixture slot.
+`canonicalStringifySha256` returns an unbranded hex string; callers apply the
+exact brand with the `as*Digest` helpers.
+
+`DeploymentIdentityV1 { gitSha, revisionId }` is the typed pair of the exact Git
+SHA and the platform's own revision id (e.g. the Deno deployment id) — two
+distinct values that are always kept together and never selected by time or list
+order. `gitSha` and `revisionId` are one identity, not alternatives.
+
+## 3. Canonical serialization
+
+`canonicalStringify(value)` (and `canonicalStringifySha256(value)`):
+
+- Object keys are sorted by UTF-16 code-unit order, recursively; array order is
+  preserved.
+- Values must be JSON-safe: null, boolean, finite number, string, array or plain
+  object. `undefined`, functions, symbols, bigint, `NaN`, `Infinity`, class
+  instances, sparse arrays and non-plain objects are rejected instead of
+  silently dropped (`CanonicalizationError`).
+- Cycles fail with `CanonicalizationError` (never a stack overflow); shared but
+  acyclic references serialize normally.
+- Own symbol keys, non-enumerable own keys and accessor (getter/setter)
+  properties are rejected: they would otherwise be silently dropped from the
+  hash or read with side effects. Arrays additionally reject own non-index
+  properties.
+- `-0` normalizes to `0`; strings use JSON escaping.
+
+Consequences for consumers: a record parsed from JSON and re-serialized
+canonically is byte-identical to the canonical form of the original JSON
+(verified by the fixture round-trip tests), and digests of canonical forms are
+stable across key orders.
+
+## 4. Records
+
+All records have `version: "v1"` and a `kind`; fields below are complete.
+
+### RepositoryConfigV1 (`kind: "repository_config"`)
+
+Per-repository configuration; the only credential surface is a restricted
+reference — no secret literal is allowed in any field.
+
+| Field                   | Type                                             | Semantics                                                                                                                                                                                                    |
+| ----------------------- | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `repository`            | `{ owner, name, installationId }`                | GitHub identity + App installation reference                                                                                                                                                                 |
+| `baseBranch`            | string                                           | primary source branch                                                                                                                                                                                        |
+| `adapter`               | `{ kind: "gateway", baseUrl }`                   | exact adapter kind — only `"gateway"` in v1                                                                                                                                                                  |
+| `commands.replay/.test` | `CommandId`                                      | trusted command IDs only; the config never carries shell argv (model-supplied commands are outside the contract)                                                                                             |
+| `commandRegistry`       | `CommandRegistryV1`                              | required concrete registry (file/injected config — never env/flag); references the same IDs and is checked to contain them                                                                                   |
+| `protectedPaths`        | string[]                                         | path prefixes that must never be modified                                                                                                                                                                    |
+| `build.projectId`       | string \| null                                   | Deno Deploy project id; null = not deployed                                                                                                                                                                  |
+| `build.acceptance`      | object \| null                                   | `healthPath`, `metricsPath`, `managedBodyMarker`, `managedHeaders` (non-secret identity markers), `domain`                                                                                                   |
+| `secretRef`             | string \| null                                   | restricted storage reference to host-injected credentials; must be a ref, never a literal URL/query/userinfo                                                                                                 |
+| `liveStartLimits`       | `{ perHour, perSevenDays }` \| null              | rolling model-start caps; **null = inference not enabled**; `perHour <= perSevenDays` enforced                                                                                                               |
+| `sessionBound`          | `{ maxDurationMs, maxOutputChars }` \| null      | declared supported session bounds                                                                                                                                                                            |
+| `retention`             | `{ evidenceMaxAgeMs, evidenceMaxBytes }` \| null | owner-approved evidence retention bound                                                                                                                                                                      |
+| `stabilityPolicy`       | object \| null                                   | declared metrics/denominators, `windowMs`/`sampleIntervalMs`, `minSamples`, `minRequests`, baseline window/samples, owner thresholds; empty threshold list rejected; `sampleIntervalMs <= windowMs` enforced |
+
+`CommandRegistryV1 { version, commands }` binds each `CommandId` to
+`CommandSpecV1 { executable, args, maxDurationMs, maxOutputBytes }`:
+`executable` is a name/path without whitespace or shell metacharacters, `args`
+is an exact argv array (never shell text) with control characters rejected, and
+runtime/output are bounded. No model-supplied text can enter the registry.
+
+`StabilityThresholdV1 { metric, maxRate, maxIncrease }` adds the
+owner-configured comparison threshold alongside the absolute maximum: acceptance
+fails when the observed rate exceeds `baselineRate + maxIncrease` or `maxRate`.
+A `null` `stabilityPolicy` disables live release entirely. The production
+gateway consumer requires a 30-minute window with 30-second samples before any
+acceptance is claimed (a checked module rule, not a config value).
+
+**Global budget policy.** `resolveGlobalLiveStartLimits(configs)` returns
+`{ status: "disabled" }`, `{ status: "enabled", limits }`, or
+`{ status: "conflict", repositories }`. Caps are one owner configuration across
+all repositories; conflicting per-repository limits refuse inference and
+per-repo independent caps are never used.
+
+### WorkRecordV1 (`kind: "work"`)
+
+Durable per-work-item progress record on `sentinel-state/repair`.
+
+| Field                             | Type                                                              | Semantics                                                                                                                            |
+| --------------------------------- | ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `repository`                      | `RepositoryIdentityV1`                                            | repository this work item belongs to; stable identity includes it for deterministic IDs                                              |
+| `id`                              | `WorkItemId`                                                      | deterministic identity (never regenerated)                                                                                           |
+| `source`                          | `{ kind, id, revision }`                                          | immutable source identity; `kind` is `"issue" \| "incident" \| "review_backlog"`, `revision` is the bounded captured source revision |
+| `related`                         | `{ incidentId, issueNumber }`                                     | cross references; issue tasks require `issueNumber`, incident tasks require `fingerprint`                                            |
+| `fingerprint`                     | `IncidentFingerprint \| null`                                     | incident dedupe identity                                                                                                             |
+| `failingRevision`                 | `GitSha \| null`                                                  | original failing revision; immutable, never rewritten to match a resumed run                                                         |
+| `sourceSnapshotDigest`            | `SourceSnapshotDigest \| null`                                    | captured source snapshot provenance                                                                                                  |
+| `classification`                  | `{ severity, priority }`                                          | priority null = missing (sorted last)                                                                                                |
+| `urgency`                         | `{ activeProduction, reproducible5xx, severeSecurityOrDataLoss }` | explicit selection urgency; no module-owned side map required                                                                        |
+| `dependencies`                    | `WorkItemId[]`                                                    | bounded exact ids of work items that must complete first                                                                             |
+| `controller.sha`                  | `GitSha`                                                          | Sentinel controller commit owning this record; immutable                                                                             |
+| `target`                          | `{ base, branch, checkpoint, head, pr }`                          | base must be revalidated before actions; `pr != null` requires `head`                                                                |
+| `nextStep`                        | `"work"\|"review"\|"delivery"\|"blocked"\|"done"`                 | the single lifecycle field                                                                                                           |
+| `wait`                            | `{ reason, since, until } \| null`                                | waiting reason on a next step — not a second lifecycle                                                                               |
+| `blocker`                         | `{ kind, message, since } \| null`                                | present iff `nextStep === "blocked"`                                                                                                 |
+| `counters`                        | `{ attempts, retries, reviewRounds }`                             | `retries <= attempts` enforced; **observation is not an attempt**                                                                    |
+| `evidence`                        | `EvidenceRefV1[]`                                                 | bounded refs, never payloads                                                                                                         |
+| `intent`                          | typed incomplete operation identity \| null                       | see below                                                                                                                            |
+| `firstSeenAt/createdAt/updatedAt` | timestamps                                                        | `createdAt <= updatedAt`; `firstSeenAt <= updatedAt`                                                                                 |
+
+Lifecycle rules enforced: `nextStep === "done"` forbids open `intent` and
+`wait`; `nextStep === "blocked"` requires `blocker`.
+
+`intent` carries the typed exact identity of an incomplete external operation
+(`IncompleteOperationV1`):
+`{ kind, key, startedAt, branch, expectedHead, observedBase, pr, requestId,
+resultId }`.
+There is no free-text detail and no model-supplied arbitrary JSON:
+`expectedHead` is the exact head expected/pushed, `observedBase` the base
+observed before starting, `branch` the deterministic branch, `pr`/`requestId`/
+`resultId` stay `null` until the object exists. Per-kind rules: push and
+`pull_request` require `expectedHead` plus `branch` (push forbids `pr` and
+external ids); `review_request` and `merge` require `pr` and `expectedHead`;
+`review_request` requires `branch`. The model-produced candidate checkpoint and
+original provenance stay immutable on resume.
+
+### IncidentSummaryV1 (`kind: "incident_summary"`) and IncidentEvidenceV1 (`kind: "incident_evidence"`)
+
+Summary records come from pending-unresolved discovery; evidence records
+describe restricted encrypted artifacts and replay metadata. Raw evidence
+payloads never appear in either; only bounded sanitized context plus artifact
+refs with digest/size/expiry.
+
+- `repository`: the repository the incident/evidence belongs to (identity, not
+  just endpoint URL).
+- `coverage`: `{ status: "complete" }` (pagination exhausted) or
+  `{ status: "incomplete", reason, nextCursor }`; complete records carry no
+  `nextCursor` (unknown key otherwise). A failed source read is a port error,
+  **never** an empty successful result.
+- `IncidentArtifactRefV1`: `{ ref, digest, sizeBytes, expiresAt, contentType }`;
+  `expiresAt >= capturedAt` enforced; `ref` is a restricted reference (no
+  URL/query/userinfo), so a signed credential URL never reaches Git state.
+- `ReplayMetadataV1`:
+  `{ fixtureRef, fixtureDigest, upstreamCaptured,
+  commandId, reproducedAt }`;
+  captured upstream requires a fixture digest and vice versa; `reproducedAt`
+  requires a fixture; `fixtureRef` is also a restricted reference.
+
+### ReviewReceiptV1 (`kind: "review_receipt"`)
+
+One normalized review observation; completion is never inferred from silence or
+reactions, and the receipt is derived by m01 from authenticated original
+evidence (never from unverified transport lists or agent-set flags).
+
+- Binds `expectedReviewer` and `observedReviewer` — the identity actually seen
+  (e.g. `chatgpt-codex-connector[bot]`; the `[bot]` suffix is accepted for
+  GitHub bot identities). A `"completed"` review requires the observed reviewer
+  to exactly match the expected reviewer; non-completed reviews carry
+  `observedReviewer: null`.
+- Also binds `pullRequest { number, head, base }` (exact head), `requestId`,
+  `resultId`, `submittedAt`, `completedAt`, `observedAt`.
+- `outcome`: `"completed" | "pending" | "unavailable"`. `"completed"` requires a
+  non-null `resultId` and `completedAt` with `completedAt >= submittedAt` and
+  `observedAt >= completedAt`. `"pending"`/`"unavailable"` forbid `completedAt`;
+  `"unavailable"` forbids `resultId`.
+- `findings` are full and untouched
+  (`{ id, severity, path, message, fingerprint, resolved,
+  resolutionEvidence }`);
+  `unresolvedSeverities` is validated to equal the distinct unresolved
+  severities derived from findings. `resolved: true` requires authorizing
+  `resolutionEvidence { authorizingIdentity, reference }` (trusted human dispute
+  or changed reviewed head); an agent-set flag alone never removes a P0/P1.
+  `findingsUncounted` records how many findings could not be retained (the
+  256-finding cap) — a receipt with `findingsUncounted > 0` and an empty
+  `unresolvedSeverities` is rejected, so truncation can never claim clean review
+  evidence.
+
+### BudgetReservationV1 (`kind: "budget_reservation"`)
+
+Durable model-start admission record; it is persisted before invocation and
+persistence failure prevents invocation.
+
+- Identity: `{ repository, id, taskId, attempt, head, purpose }` with `purpose`
+  in `"implementation" | "continuation" | "retry" | "review_request"`. `attempt`
+  is **one-based**: the first reservation for a task is `attempt: 1`.
+  Reservations are preserved across retries and restarts by the state/budget
+  implementation (deterministic ids; one shared policy across repositories).
+- `outcome`:
+  `"reserved" | "submitted" | "ambiguous" | "confirmed_not_submitted"`.
+  `"reserved"` is the interim state (`settledAt: null`). Terminal outcomes
+  require `settledAt >= createdAt`. `"submitted"` and `"ambiguous"` remain
+  **charged**; `"confirmed_not_submitted"` is the only uncharged terminal and
+  requires a non-null `proofRef` (and no other outcome may carry one).
+
+### ReplayResultV1 (`kind: "replay_result"`)
+
+One isolated before/after validation.
+
+- `original`/`candidate` each record exact `revision`, `outcome`
+  (`"passed" | "failed" | "unavailable"`), `exitCode`, output digests and
+  failure detail. `failed` requires `failure`; `unavailable` has no exit/output;
+  `failure.intended` records whether the before-failure matched the intended
+  reason.
+- `fixture { ref, digest, testIds }` uses `FixtureDigest` and a restricted
+  `ref`; `commands { replay,
+  test }` are `CommandId`s; `expected.beforeReason`
+  declares the intended failure.
+- Causal rule: unless `original.outcome === "failed"` with an intended failure
+  and `candidate.outcome === "passed"`, `limitations` must be non-empty —
+  non-causal results never claim proof (`original_not_reproduced`,
+  `candidate_not_verified`, `fixture_redacted`, `upstream_dependent`,
+  `output_truncated`).
+
+### ReleaseRequestV1 (`kind: "release_request"`)
+
+Written by the repair workflow; no model-chosen arbitrary revision is possible —
+`revision` is the exact accepted merged SHA with the PR/review reference
+(`source { pullRequest, reviewRequestId, reviewReceiptId, head,
+base }`) and
+`target { repository, environment }` with
+`environment: "production" | "isolated"` (the isolated environment is a
+separate, representable target from production).
+
+- `status`: `"open" | "fulfilled" | "failed" | "cancelled"`; `failed` and
+  `cancelled` require `failureReason`; `open`/`fulfilled` forbid it.
+
+### ReleaseRecordV1 (`kind: "release_record"`)
+
+Owned exclusively by the deterministic release workflow.
+
+- `repository` (release target identity, resolves the deploy config),
+  `environment` (same enum as the request), `requestId`, `requestRevision`
+  (recorded from the request; the only promotable Git revision),
+  `candidate { identity, buildTransactionId }` where
+  `identity: DeploymentIdentityV1` and the build transaction id is a separate
+  exact identity (candidate `gitSha` must equal the request revision),
+  `prior { identity, verifiedHealthyAt }` — the attested healthy exact prior
+  identity (must differ from the candidate).
+- `phase`:
+  `"requested" | "promoting" | "monitoring" | "accepted" | "failed" |
+  "rolled_back"`.
+  `"promoting"` requires a persisted
+  `intent { action:
+  "promote", key, persistedAt }`.
+- `observed { identity, domain, verified, at }` is the actually observed exact
+  deployment identity; verified observations require identity + timestamp.
+- `monitoring { startedAt, samples, continuous, lastSampleAt }` cannot fabricate
+  continuity: `samples > 0` requires `startedAt <= lastSampleAt`; `"accepted"`
+  requires `continuous`, `samples >= 1`, a passing and continuous `acceptance`
+  referencing exactly the candidate identity, and a verified observed identity
+  equal to the candidate.
+- `acceptance { identity, windowMs, sampleIntervalMs, continuous, baseline,
+  samples, thresholdResults, passed }`
+  persists the actual baseline and sample metrics evidence (`MetricsSampleV1`
+  arrays — never a bare boolean), and `thresholdResults` record
+  observed/`baselineRate` against `maxRate` and `maxIncrease`. Missing telemetry
+  is explicit `null` inside a sample, never a 0-rate picture.
+- `MetricsSampleV1 { sampledAt, domain, requestCount, fiveXxCount,
+  timeoutCount, streamFailureCount, upstreamWideFault }`:
+  counts are bounded by the denominator (`requestCount`), a null denominator
+  forces all counts and the flag null, and no raw request data is stored.
+- `receipts { promote, rollback, error }`: promote receipts record the status
+  code and the observed exact identity; `"rolled_back"` requires an ok rollback
+  receipt restoring exactly the recorded prior identity and a verified observed
+  identity equal to that prior; `"failed"` requires an error receipt.
+
+### RepairStateSnapshotV1 (`kind: "repair_state_snapshot"`)
+
+The single JSON document on `sentinel-state/repair`:
+`{ stateHead, sequence, updatedAt, incidents, evidence, work, reservations,
+reviews, replays, releaseRequests }`.
+Every nested record is fully validated by its own parser; corruption of any
+nested record fails the whole snapshot. `stateHead` is the **parent** state
+branch head this snapshot extends (`null` only on branch creation) — it is never
+claimed to be the snapshot's own content commit hash. Enabling strict
+expected-head CAS. Duplicate work/reservation/release (and incident/evidence/
+review/replay/request) ids are rejected instead of collapsing to last-wins maps.
+
+### ReleaseStateSnapshotV1 (`kind: "release_state_snapshot"`)
+
+The single JSON document on `sentinel-state/release`:
+`{ stateHead, sequence, updatedAt, releases }`. It contains **only** release
+records; the repair snapshot contains **only** work records, budget reservations
+and release requests. These sets never cross; duplicate release ids are
+rejected.
+
+## 5. Ports and result semantics
+
+`src/contracts/ports.ts` declares the operational interfaces. Every method
+returns a `PortResultV1<T>`; transport-level failure is
+`{ ok: false, error: { kind, detail } }` with `kind` in `unavailable`,
+`auth_failed`, `rate_limited`, `not_found`, `conflict`, `invalid`. Distinctions
+the callers rely on:
+
+- **Unavailable ≠ empty.** `listOpenIssues` failing is `ok: false`; an
+  authoritative empty list is `ok: true, value: []`. `readIncident` /
+  `readArtifact` use `null` for _gone/expired_ and `ok: false` for transport
+  failure, so `evidence_expired` block reasons stay distinct from outages.
+- **Ambiguous ≠ failed.** Writes return `outcome: "applied" | "ambiguous"` (pull
+  request creation, push, review request) — ambiguous means the effect may have
+  been applied and the caller must reconcile against exact authoritative state
+  before repeating. Merges are `merged | ambiguous |
+  blocked(reason)` where
+  `blocked` is a known non-merge state, not an error.
+- **GitHub recovery identity.** `GitHubPullRequestV1` carries the observed
+  `mergeSha` (exact merge commit) so an ambiguous merge can be reconciled;
+  `findPullRequestByHeadRef(headRef)` finds the Sentinel PR by its deterministic
+  head branch; `GitHubPort.pushHead` publishes the trusted commit — a model
+  candidate is a locally validated commit, never a model-owned push/publication.
+- **Review submission/observation.**
+  `requestReview({ prNumber, expectedHead, expectedBase, expectedReviewer,
+  operationKey })`
+  binds submission to exact identities;
+  `observeReview(
+  { operationKey, prNumber, head })` resolves by operation key
+  and PR/head even when the request response id was lost. `ReviewObservationV1`
+  includes `reviewer` — the actual reviewer identity observed — and m01 derives
+  `ReviewReceiptV1` from authenticated original evidence only.
+- **Exact-head CAS.** `GitHubPort.pushHead(ref, sha, expectedRef)`,
+  `PullRequestCreateV1.expectedBase`, `MergeRequestV1.expectedHead`; and
+  `StateStore.writeRepair/writeRelease(next, expectedHead)` compare expected
+  heads and return `conflict` with the current head instead of overwriting. A
+  `StateWriteResultV1` of `ambiguous` is a distinct network-outcome kind (may
+  have been applied) used for post-push reconciliation.
+- **State capabilities.** `StateReadView`, `RepairStateWriter` and
+  `ReleaseStateWriter` are separate interfaces; `StateStore` combines them for
+  tests, and consumers accept the narrow `Pick`-style capability types — a
+  release model never receives repair write capability or vice versa.
+  `StateReadResultV1` keeps the operational Git external ref (`ref`) separate
+  from the immutable `head`.
+- **Promotion.** `DenoReleasePort.promote` returns
+  `{ outcome: "promoted", statusCode: 204 } | { outcome: "rejected",
+  statusCode } | { outcome: "ambiguous", ... }`;
+  `DENO_PROMOTION_REQUIRED_STATUS` is 204.
+  `findBuiltCandidate(projectId,
+  revision, buildTransactionId)` takes the
+  exact build transaction id in addition to the merged SHA (two builds for one
+  SHA can never bind the wrong build receipt) and returns
+  `found | none | ambiguous` (multiple matching builds is ambiguous, never
+  "found"). Build/deployment/health/promotion identities are all
+  `DeploymentIdentityV1` — the Git SHA plus the exact Deno deployment id.
+  Health/metrics sampling returns explicit samples; missing telemetry is `null`
+  in the sample, never interpreted as zero.
+- **Implementation.** `ImplementationPort.runModel` takes a bounded pinned
+  request (`model: "gpt-5.6-luna"`, `reasoning: "max"`, `maxDurationMs`,
+  `maxOutputChars`, bounded evidence refs, secret-free base) and returns an
+  actual-observation receipt
+  (`observedModel/observedReasoning/durationMs/
+  outputChars`) — never a CLI
+  label alone — plus a locally validated candidate `head` (publication is the
+  trusted GitHub writer's job), `checkpointSha` and bounded `changedPaths`.
+- **Clock.** `Clock.now()` returns the current millisecond epoch; `SystemClock`
+  is the production implementation.
+
+## 6. Where records live
+
+| Record                                                                                                                      | Home                                                         |
+| --------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| RepositoryConfigV1 (+ CommandRegistryV1)                                                                                    | repository config file (Wave C), never in state              |
+| WorkRecordV1, BudgetReservationV1, ReleaseRequestV1, ReviewReceiptV1, ReplayResultV1, IncidentSummaryV1, IncidentEvidenceV1 | `sentinel-state/repair` snapshot                             |
+| ReleaseRecordV1                                                                                                             | `sentinel-state/release` snapshot                            |
+| Incident evidence payloads                                                                                                  | restricted encrypted artifact storage (refs only in records) |
+
+## 7. Fixtures and tests
+
+`tests/fixtures/contracts/valid/*.json` holds one sanitized representative
+fixture per record; `tests/fixtures/contracts/invalid/*.json` holds the
+fail-closed cases (unknown keys — top-level and nested, digest confusion in both
+directions, missing review completion, reviewer mismatch, unresolved
+without-authorization, secret-ref URL, free-form intent detail, duplicate
+snapshot ids, bad time, bad count, invalid lifecycle transitions, invalid
+coverage, invalid budget settlement, missing replay limitation, invalid config
+limits, coercion and enum violations). `tests/fixtures/contracts/canonical/`
+pins canonical determinism.
+
+`tests/contracts/` exercises the actual exported parsers (never duplicated
+validation logic): fixture round-trip reveals parse/serialize stability, every
+invalid fixture is rejected with the documented code and path, nested snapshot
+records are validated, sparse/cyclic/symbol/accessor canonicalization is
+rejected, error messages never echo values, metrics denominator rules hold, and
+the minimal fake-port test pins result-kind discrimination, state capability
+separation, ambiguous-vs-conflict outcomes, one-based attempts and global budget
+conflict refusal. Fakes record calls and return canned results — no product
+logic lives in test fakes.
+
+The test boundary is credential-free: `deno task test:local` runs
+`test-local.ts`, which executes every toolchain step in child processes with
+`clearEnv: true` inheriting only `PATH` and a temporary `HOME`/`DENO_DIR` (no
+workstation credentials, no user Deno config). All imports are local; only
+built-in `node:assert` is used — no remote test packages, no network.
+
+## 8. Proposed consumer entry points
+
+```ts
+// m01-github: normalize transport observations into frozen records.
+const receipt: ReviewReceiptV1 = parseReviewReceiptV1(observed);
+
+// m02-evidence: adapter returns normalized records.
+const summary: IncidentSummaryV1 = parseIncidentSummaryV1(pageItem);
+
+// m03-replay: build the durable result from port runs.
+const result: ReplayResultV1 = parseReplayResultV1(payload);
+
+// m04-repair: parse saved progress, then run model via ImplementationPort.
+const snapshot: RepairStateSnapshotV1 = parseRepairStateSnapshotV1(raw);
+
+// m05-release: parse durable release state and drive DenoReleasePort.
+const state: ReleaseStateSnapshotV1 = parseReleaseStateSnapshotV1(raw);
+
+// shared: config, registry and budget consumers.
+const config: RepositoryConfigV1 = parseRepositoryConfigV1(raw);
+const registry: CommandRegistryV1 = parseCommandRegistryV1(raw);
+const reservation: BudgetReservationV1 = parseBudgetReservationV1(raw);
+
+// canonical digests for fixture/review fingerprints (unbranded → brand via as*).
+const hex = await canonicalStringifySha256(finding);
+```
+
+Runtime entrypoints should use the throwing parsers (a bad record must stop the
+loop); state readers that fork on unknown content use `tryParse`.

@@ -1,0 +1,67 @@
+{
+  "version": "v1",
+  "kind": "release_record",
+  "repository": {
+    "owner": "ubiquity",
+    "name": "ai.ubq.fi",
+    "installationId": 12345
+  },
+  "environment": "production",
+  "id": "release-record-0001",
+  "requestId": "release-request-0001",
+  "requestRevision": "a1b2c3d4e5f60718293a4b5c6d7e8f901a2b3c4d",
+  "candidate": {
+    "identity": {
+      "gitSha": "a1b2c3d4e5f60718293a4b5c6d7e8f901a2b3c4d",
+      "revisionId": "dep-0001"
+    },
+    "buildTransactionId": "build-txn-0001"
+  },
+  "prior": {
+    "identity": {
+      "gitSha": "c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00",
+      "revisionId": "dep-0000"
+    },
+    "verifiedHealthyAt": 1786003000000
+  },
+  "phase": "monitoring",
+  "intent": {
+    "action": "promote",
+    "key": "promote/dep-0001",
+    "persistedAt": 1786005000000
+  },
+  "observed": {
+    "identity": {
+      "gitSha": "a1b2c3d4e5f60718293a4b5c6d7e8f901a2b3c4d",
+      "revisionId": "dep-0001"
+    },
+    "domain": "https://ai.ubq.fi",
+    "verified": true,
+    "at": 1786005100000
+  },
+  "monitoring": {
+    "startedAt": 1786005100000,
+    "samples": 5,
+    "continuous": true,
+    "lastSampleAt": 1786005400000
+  },
+  "acceptance": null,
+  "receipts": {
+    "promote": {
+      "action": "promote",
+      "ok": true,
+      "statusCode": 204,
+      "observedIdentity": {
+        "gitSha": "a1b2c3d4e5f60718293a4b5c6d7e8f901a2b3c4d",
+        "revisionId": "dep-0001"
+      },
+      "observedDomain": "https://ai.ubq.fi",
+      "at": 1786005000000,
+      "detail": null
+    },
+    "rollback": null,
+    "error": null
+  },
+  "createdAt": 1786005000000,
+  "updatedAt": 1786005400000
+}

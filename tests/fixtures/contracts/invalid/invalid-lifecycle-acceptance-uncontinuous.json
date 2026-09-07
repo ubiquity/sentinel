@@ -1,0 +1,144 @@
+{
+  "version": "v1",
+  "kind": "release_record",
+  "repository": {
+    "owner": "ubiquity",
+    "name": "ai.ubq.fi",
+    "installationId": 12345
+  },
+  "environment": "production",
+  "id": "release-record-0001",
+  "requestId": "release-request-0001",
+  "requestRevision": "a1b2c3d4e5f60718293a4b5c6d7e8f901a2b3c4d",
+  "candidate": {
+    "identity": {
+      "gitSha": "a1b2c3d4e5f60718293a4b5c6d7e8f901a2b3c4d",
+      "revisionId": "dep-0001"
+    },
+    "buildTransactionId": "build-txn-0001"
+  },
+  "prior": {
+    "identity": {
+      "gitSha": "c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00",
+      "revisionId": "dep-0000"
+    },
+    "verifiedHealthyAt": 1786003000000
+  },
+  "phase": "accepted",
+  "intent": {
+    "action": "promote",
+    "key": "promote/dep-0001",
+    "persistedAt": 1786005000000
+  },
+  "observed": {
+    "identity": {
+      "gitSha": "a1b2c3d4e5f60718293a4b5c6d7e8f901a2b3c4d",
+      "revisionId": "dep-0001"
+    },
+    "domain": "https://ai.ubq.fi",
+    "verified": true,
+    "at": 1786005100000
+  },
+  "monitoring": {
+    "startedAt": 1786005100000,
+    "samples": 5,
+    "continuous": false,
+    "lastSampleAt": 1786005400000
+  },
+  "acceptance": {
+    "identity": {
+      "gitSha": "a1b2c3d4e5f60718293a4b5c6d7e8f901a2b3c4d",
+      "revisionId": "dep-0001"
+    },
+    "windowMs": 1800000,
+    "sampleIntervalMs": 30000,
+    "continuous": false,
+    "baseline": [
+      {
+        "sampledAt": 1785999100000,
+        "domain": "https://ai.ubq.fi",
+        "requestCount": 1000,
+        "fiveXxCount": 10,
+        "timeoutCount": 5,
+        "streamFailureCount": 2,
+        "upstreamWideFault": false
+      }
+    ],
+    "samples": [
+      {
+        "sampledAt": 1786005100000,
+        "domain": "https://ai.ubq.fi",
+        "requestCount": 100,
+        "fiveXxCount": 1,
+        "timeoutCount": 0,
+        "streamFailureCount": 0,
+        "upstreamWideFault": false
+      },
+      {
+        "sampledAt": 1786005130000,
+        "domain": "https://ai.ubq.fi",
+        "requestCount": 100,
+        "fiveXxCount": 1,
+        "timeoutCount": 0,
+        "streamFailureCount": 0,
+        "upstreamWideFault": false
+      },
+      {
+        "sampledAt": 1786005160000,
+        "domain": "https://ai.ubq.fi",
+        "requestCount": 100,
+        "fiveXxCount": 1,
+        "timeoutCount": 0,
+        "streamFailureCount": 0,
+        "upstreamWideFault": false
+      },
+      {
+        "sampledAt": 1786005190000,
+        "domain": "https://ai.ubq.fi",
+        "requestCount": 100,
+        "fiveXxCount": 1,
+        "timeoutCount": 0,
+        "streamFailureCount": 0,
+        "upstreamWideFault": false
+      },
+      {
+        "sampledAt": 1786005220000,
+        "domain": "https://ai.ubq.fi",
+        "requestCount": 100,
+        "fiveXxCount": 1,
+        "timeoutCount": 0,
+        "streamFailureCount": 0,
+        "upstreamWideFault": false
+      }
+    ],
+    "thresholdResults": [
+      {
+        "metric": "five_xx_rate",
+        "observedRate": 0.01,
+        "baselineRate": 0.01,
+        "maxRate": 0.02,
+        "maxIncrease": 0.01,
+        "passed": true
+      }
+    ],
+    "passed": true
+  },
+  "receipts": {
+    "promote": {
+      "action": "promote",
+      "ok": true,
+      "statusCode": 204,
+      "observedIdentity": {
+        "gitSha": "a1b2c3d4e5f60718293a4b5c6d7e8f901a2b3c4d",
+        "revisionId": "dep-0001"
+      },
+      "observedDomain": "https://ai.ubq.fi",
+      "at": 1786005000000,
+      "detail": null
+    },
+    "rollback": null,
+    "error": null
+  },
+  "createdAt": 1786005000000,
+  "updatedAt": 1786005400000
+}
