@@ -156,3 +156,16 @@ Remote identity/visibility, credential access, live rolling budgets, retention/s
 - Exact validated foundation F: c63d3b90b69fb1b4710fe31f3689bcf1d4a99552. Canonical clean at freeze. Worker bases are immutable F, not the later ledger-only canonical tip.
 - Created recorded lanes from exact F: m01-github/master-plan-m01-github-a86bd3790da, m02-evidence/master-plan-m02-evidence-afb9652dea8, m03-replay/master-plan-m03-replay-ac17fc34d9a, each on matching codex/ branch under root .codex-worktrees. Ownership exactly MASTER-PLAN scopes; no shared/root edits authorized.
 - Immutable assignments /tmp/sentinel-gfa795549e5/m01-github-assignment-v2.txt, m02-evidence-assignment-v2.txt, m03-replay-assignment-v2.txt incorporate updated control/subagent rules. At most one optional DSH-native read-only child per module, no write child lanes. Total three implementation writers; single production runtime writer unchanged.
+
+## Wave B launch receipts (2026-09-07 03:38 UTC)
+
+| Module | PID | Persistent exec | Persisted DSH session |
+| --- | --- | --- | --- |
+| m01-github | 66048 | 31472 | 5357cd37-241f-493d-8b6f-8d7e768de075 |
+| m02-evidence | 66063 | 68562 | 34cfdcf2-6a0e-4369-8a63-b091267b52ce |
+| m03-replay | 66078 | 31557 | 8879480f-fefa-4119-bdcd-b995017627f6 |
+
+- Each required actual provider/model/max header, exact recorded cwd and NODE_ENV=production verified. Existing inference credential present; deployment credentials absent. Each lane was clean at exact F immediately before launch. Canonical is integration-only while writers run.
+- Streams /tmp/sentinel-gfa795549e5/{m01-github,m02-evidence,m03-replay}.stream.jsonl; stderr adjacent. Resume these handles; no restarts to adopt rules. First edits expected within 10 minutes, focused acceptance about 30 minutes. One final checkpoint per module. Native child sessions must be tracked and actual model/max verified before acceptance; none observed at launch.
+- Read-only m04 interface audit: frozen ImplementationPort lacks pre-call provider identity/observation. Chosen in-scope recovery is fail-closed: durable reservation + implementation intent, uncertain start stays charged/ambiguous and blocked for authoritative disposition, never auto-resubmitted; unrelated tasks continue. No shared interface extension needed. m04 draft records this limitation rather than claiming automatic provider recovery.
+- Wave B first-edit checkpoint (03:48 UTC): all three writers have verified edit/write events within their owned source scopes, with no launch error or observed provider throttling. No native child session observed yet. Canonical source unchanged; primary draft review notes are separate immutable evidence under /tmp/sentinel-gfa795549e5/wave-b-primary-draft-review.txt for final-byte checks. Keep current assignment inputs frozen.
