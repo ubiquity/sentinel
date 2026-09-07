@@ -3,7 +3,7 @@
 //
 // Every scenario runs against a real disposable bare repository (the real
 // GitStateStore) and a stateful scripted transport that models the documented
-// Deno REST contract: revisions list, exact revision resources, timelines,
+// Deno REST contract: revisions list, exact revision resources, pagination,
 // promote (204 + effect), managed/custom health identity headers, and the
 // logs endpoint with exact revision/window filtering.
 //

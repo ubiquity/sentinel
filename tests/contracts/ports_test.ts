@@ -499,9 +499,15 @@ Deno.test("portOk/portError helpers produce the documented shapes", () => {
 });
 
 // Compile-time shape guard: a minimal DenoReleasePort fake type-checks with
-// exact deployment identities and the SHA+buildTransactionId lookup.
+// exact deployment identities and the SHA+buildTransactionId+revisionId
+// lookup (the exact revision id comes from the trusted receipt resolver).
 const _releaseFake: DenoReleasePort = {
-  findBuiltCandidate() {
+  findBuiltCandidate(
+    _projectId: string,
+    _revision: string,
+    _buildTransactionId: string,
+    _revisionId: string,
+  ) {
     return resolved(portOk({ status: "none" }));
   },
   readCurrentDeployment() {

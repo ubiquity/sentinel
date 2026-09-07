@@ -509,13 +509,18 @@ export interface MetricsSampleConfigV1 {
 
 export interface DenoReleasePort {
   /**
-   * Exact lookup by merged Git SHA AND build transaction id: two builds for
-   * the same SHA must never bind the wrong accepted build receipt.
+   * Exact lookup by merged Git SHA, build transaction id AND the exact Deno
+   * revision id from the authenticated build-receipt resolver. The revision id
+   * is the required selector: two builds for the same SHA must never bind the
+   * wrong accepted build receipt, and the platform never carries the Git SHA
+   * or transaction id as a label. The transaction id is provenance supplied by
+   * the trusted receipt resolver, never inferred from platform data.
    */
   findBuiltCandidate(
     projectId: string,
     revision: GitSha,
     buildTransactionId: string,
+    revisionId: string,
   ): Promise<PortResultV1<BuildLookupV1>>;
   readCurrentDeployment(
     projectId: string,

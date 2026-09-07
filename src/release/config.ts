@@ -1,7 +1,6 @@
 /**
  * m05-owned release configuration: the exact target identity, health
- * verification shape, build-label binding keys, log classification rule and
- * bounded transport limits.
+ * verification shape, log classification rule and bounded transport limits.
  *
  * This configuration is constructed by the trusted host (Wave C) from
  * RepositoryConfigV1.build.* plus the m05-specific seams. There is no
@@ -44,6 +43,19 @@ export const DENO_LOGS_PAGE_LIMIT = 1000;
 /** Documented maximum page size of the revisions list API. */
 export const DENO_REVISIONS_PAGE_LIMIT = 100;
 /**
+ * Finite cap on revision-list page traversals for one exact membership proof.
+ * A pending continuation after this many pages is incomplete traversal, never
+ * success; this is a deterministic local implementation bound, not a new
+ * environment/CLI surface.
+ */
+export const DENO_REVISION_TRAVERSAL_MAX_PAGES = 128;
+/**
+ * Finite cap on one pagination cursor extracted from a rel=next Link header.
+ * A larger or empty cursor is rejected before it is used; this is a
+ * deterministic local implementation bound, not a new environment/CLI surface.
+ */
+export const DENO_REVISION_CURSOR_MAX_CHARS = 2048;
+/**
  * Finite cap on pagination steps for one window sample. A pending cursor after
  * this many pages is incomplete coverage, never success.
  */
@@ -68,7 +80,15 @@ export interface ReleaseTargetConfigV1 {
   projectId: string;
   /** Deno REST base URL (e.g. https://api.deno.com). */
   apiBaseUrl: string;
-  /** Managed host base URL that serves the deployed application. */
+  /**
+   * Trusted managed host base URL that serves the deployed application. It
+   * must be a root HTTPS URL with a hostname ending in `.deno.net` — the
+   * actual two-label shape is `<project>.<organization>.deno.net` (e.g.
+   * `ai-ubq-fi.ubiquity-dao.deno.net`): the immutable health URL for an exact
+   * revision is derived by replacing the FIRST hostname label with
+   * `label-<revisionId>` (Deno's immutable hostname form). A generic host has
+   * no trusted immutable form and is rejected.
+   */
   managedBaseUrl: string;
   /** Custom domain base URL to probe; null when no custom domain exists. */
   customBaseUrl: string | null;
@@ -83,18 +103,6 @@ export interface ReleaseTargetConfigV1 {
    * exact proof of a promotion — never a timestamp or latest list item.
    */
   identityHeaders: { gitSha: string; revisionId: string };
-  /**
-   * Revision label key carrying the built Git SHA (exact platform identity
-   * field; the label key is set by the trusted build pipeline, never invented
-   * here).
-   */
-  gitShaLabelKey: string;
-  /**
-   * Revision label key carrying the m06/WaveC build-receipt transaction id.
-   * The key is set by the trusted build pipeline; the resolver is the
-   * authoritative binding and this label is the platform-side verification.
-   */
-  buildTransactionLabelKey: string;
   /**
    * Owner-declared `failure_kind` values classified as timeouts (target
    * telemetry rule; no universal guessing).
@@ -114,8 +122,58 @@ export interface ReleaseTargetConfigV1 {
   logsLagMs: number;
 }
 
-const LABEL_KEY_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const URL_RE = /^https?:\/\/[^ /]+(?::\d+)?(?:\/[^ ]*)?$/;
+/** One DNS hostname label (RFC-952-style, case-insensitive). */
+const DNS_LABEL_RE = "[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?";
+/**
+ * Trusted Deno managed hostname: one or more DNS labels before the fixed
+ * `.deno.net` root. The actual production target uses the two-label shape
+ * (`ai-ubq-fi.ubiquity-dao.deno.net`); any trailing foreign suffix is
+ * rejected by the anchored `.deno.net` end.
+ */
+export const DENO_MANAGED_HOST_RE = new RegExp(
+  `^(?:${DNS_LABEL_RE}\\.)+deno\\.net$`,
+);
+
+/**
+ * Parses one configured base URL and requires a complete root HTTPS URL:
+ * scheme https, no credentials, only the default (or no) port, an empty or
+ * "/" pathname (the normal optional trailing slash), and no query or
+ * fragment. A base with any other component cannot be safely appended to —
+ * an immutable URL is derived from it — and is rejected before use.
+ */
+function parseRootHttpsUrl(value: string, path: string, label: string): URL {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    fail(path, "invalid_pattern", `expected ${label} URL`);
+  }
+  if (url.protocol !== "https:") {
+    fail(path, "invalid_pattern", `expected https ${label} URL`);
+  }
+  if (url.username !== "" || url.password !== "") {
+    fail(path, "invalid_pattern", `expected ${label} URL without credentials`);
+  }
+  if (url.port !== "") {
+    fail(
+      path,
+      "invalid_pattern",
+      `expected ${label} URL without a nondefault port`,
+    );
+  }
+  if (url.pathname !== "" && url.pathname !== "/") {
+    fail(path, "invalid_pattern", `expected root ${label} URL without a path`);
+  }
+  if (url.search !== "" || url.hash !== "") {
+    fail(
+      path,
+      "invalid_pattern",
+      `expected ${label} URL without query or fragment`,
+    );
+  }
+  return url;
+}
 
 /** Validates and normalizes one release target configuration. */
 export function validateReleaseTargetConfig(
@@ -135,6 +193,13 @@ export function validateReleaseTargetConfig(
     "expected http(s) API base URL",
     MaxText.url,
   );
+  if (!apiBaseUrl.startsWith("https://")) {
+    fail(
+      "$.apiBaseUrl",
+      "invalid_pattern",
+      "expected an https API base URL",
+    );
+  }
   const managedBaseUrl = expectPattern(
     obj.managedBaseUrl,
     "$.managedBaseUrl",
@@ -143,6 +208,20 @@ export function validateReleaseTargetConfig(
     "expected http(s) managed base URL",
     MaxText.url,
   );
+  {
+    const managed = parseRootHttpsUrl(
+      managedBaseUrl,
+      "$.managedBaseUrl",
+      "managed base",
+    );
+    if (!DENO_MANAGED_HOST_RE.test(managed.hostname)) {
+      fail(
+        "$.managedBaseUrl",
+        "invalid_pattern",
+        "expected an https managed host ending in .deno.net",
+      );
+    }
+  }
   const customBaseUrl = obj.customBaseUrl === null ? null : expectPattern(
     obj.customBaseUrl,
     "$.customBaseUrl",
@@ -168,30 +247,6 @@ export function validateReleaseTargetConfig(
       64,
     ),
   };
-
-  const gitShaLabelKey = expectPattern(
-    obj.gitShaLabelKey,
-    "$.gitShaLabelKey",
-    LABEL_KEY_RE,
-    "invalid_pattern",
-    "expected a non-empty revision label key",
-    64,
-  );
-  const buildTransactionLabelKey = expectPattern(
-    obj.buildTransactionLabelKey,
-    "$.buildTransactionLabelKey",
-    LABEL_KEY_RE,
-    "invalid_pattern",
-    "expected a non-empty revision label key",
-    64,
-  );
-  if (gitShaLabelKey === buildTransactionLabelKey) {
-    fail(
-      "$.buildTransactionLabelKey",
-      "invalid_lifecycle",
-      "build transaction label key cannot equal the git SHA label key",
-    );
-  }
 
   const timeoutFailureKinds = expectLabelSet(
     obj.timeoutFailureKinds,
@@ -220,8 +275,6 @@ export function validateReleaseTargetConfig(
     customBaseUrl,
     acceptance,
     identityHeaders,
-    gitShaLabelKey,
-    buildTransactionLabelKey,
     timeoutFailureKinds,
     upstreamWideFailureKinds,
     logsLagMs,

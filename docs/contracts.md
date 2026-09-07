@@ -481,17 +481,31 @@ the callers rely on:
   statusCode } | { outcome: "ambiguous", ... }`;
   `DENO_PROMOTION_REQUIRED_STATUS` is 204.
   `findBuiltCandidate(projectId,
-  revision, buildTransactionId)` takes the
-  exact build transaction id in addition to the merged SHA (two builds for one
-  SHA can never bind the wrong build receipt) and returns
-  `found | none | ambiguous` (multiple matching builds is ambiguous, never
-  "found"). Build/deployment/health/promotion identities are all
-  `DeploymentIdentityV1` — the Git SHA plus the exact Deno deployment id.
-  Health/metrics sampling returns explicit samples; missing telemetry is `null`
-  in the sample, never interpreted as zero. `MetricsSampleConfigV1` carries the
-  exact `identity` plus an explicit `windowStart`/`windowEnd`
-  (`windowStart < windowEnd`) so a sample is never a clock-derived guess, and
-  every returned `MetricsSampleV1` binds that identity, window and its coverage.
+  revision, buildTransactionId, revisionId)`
+  takes the exact build transaction id AND the exact Deno revision id from the
+  trusted receipt resolver; the revision id is the unique platform selector (two
+  builds for one SHA can never bind the wrong receipt) and the transaction id is
+  receipt provenance only — the platform producer writes no custom
+  Git/transaction labels and the port requires none. Exact membership is proven
+  by bounded page traversal of `/v2/apps/{project}/revisions?status=succeeded`
+  (page size 100; up to 128 pages, cursor ≤ 2048 chars; deterministic
+  implementation bounds, not environment/CLI surfaces), continuing only through
+  one validated `rel=next` Link header whose cursor is replayed on the
+  configured API origin with the original status/limit filters (the Link URL
+  itself is never fetched), plus the direct `GET /v2/revisions/{revisionId}`
+  resource and the immutable managed hostname (`<first-label>-<revisionId>` on
+  the configured `https://*.deno.net` managed base URL) healthy body/headers. It
+  returns `found | none | ambiguous`; a future page bound without a usable
+  continuation, a malformed/foreign Link, a repeated cursor or exact id, a
+  failed/absent/duplicate id and any wrong immutable identity fail closed —
+  never "found", never a time/list-order substitution.
+  Build/deployment/health/promotion identities are all `DeploymentIdentityV1` —
+  the Git SHA plus the exact Deno deployment id. Health/metrics sampling returns
+  explicit samples; missing telemetry is `null` in the sample, never interpreted
+  as zero. `MetricsSampleConfigV1` carries the exact `identity` plus an explicit
+  `windowStart`/`windowEnd` (`windowStart < windowEnd`) so a sample is never a
+  clock-derived guess, and every returned `MetricsSampleV1` binds that identity,
+  window and its coverage.
 - **Implementation.** `ImplementationPort.runModel` takes a bounded pinned
   request (`model: "gpt-5.6-luna"`, `reasoning: "max"`, `maxDurationMs`,
   `maxOutputChars`, bounded evidence refs, secret-free base) and returns an

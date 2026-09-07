@@ -58,6 +58,8 @@ export interface DenoRestRequestV1 {
 export interface DenoRestResponseV1 {
   status: number;
   body: Uint8Array;
+  /** Response headers in insertion order (name, value). */
+  headers: [string, string][];
 }
 
 const DENO_TIMEOUT_DETAIL = "deno request exceeded the time bound";
@@ -133,7 +135,15 @@ export async function denoRestCall(
       deadline,
     );
     if (!bodyResult.ok) return bodyResult;
-    return portOk({ status: response.status, body: bodyResult.value });
+    const responseHeaders: [string, string][] = [];
+    response.headers.forEach((value, name) =>
+      responseHeaders.push([name, value])
+    );
+    return portOk({
+      status: response.status,
+      body: bodyResult.value,
+      headers: responseHeaders,
+    });
   } finally {
     deadline.close();
   }
