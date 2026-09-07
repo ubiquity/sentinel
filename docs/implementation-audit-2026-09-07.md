@@ -1,6 +1,6 @@
 # Sentinel implementation divergence audit
 
-Audit date: 2026-09-07. Initial source baseline: `5ed87855c4bd911b2bd395e2ce7a9c09e7c326de`. Latest accepted local source: `a3eb26e494a31cb1c754971466db14b06ec05df1` at 22:41 UTC, canonical branch `codex/master-plan-gfa795549e5`. This is an implementation audit, not a replacement plan or production acceptance receipt. `docs/build-status.md` remains the single progress ledger.
+Audit date: 2026-09-07. Initial source baseline: `5ed87855c4bd911b2bd395e2ce7a9c09e7c326de`. Latest accepted local source: `c2fa5ce` at 22:53 UTC, canonical branch `codex/master-plan-gfa795549e5`. This is an implementation audit, not a replacement plan or production acceptance receipt. `docs/build-status.md` remains the single progress ledger. Dated follow-ups below preserve the investigation history; later acceptance entries supersede earlier defect status.
 
 ## Governing documents
 
@@ -50,7 +50,7 @@ Publication identity, hosted credentials, live budgets/retention/stability setti
 
 ## Next acceptance surface
 
-Correct incident pagination and complete target evidence capture, then assemble the real gateway adapter, retained-capture preparation, trusted safe fixture source, isolated replay runtime, GitHub/model/review transports and release receipt resolver. Exercise the complete lifecycle through those adapters with scripted external transports and real temporary Git state. Only then freeze the candidate for the authorized integrated review and subsequent live gates. Do not add more placeholder host capabilities and call that composition complete.
+Complete target durable incident discovery and capture-reference binding, then upstream capture and safe fixture preparation. Assemble the real gateway adapter, retained-capture preparation, trusted safe fixture source, isolated replay runtime, GitHub/model/review transports and release receipt resolver. Exercise the complete lifecycle through those adapters with scripted external transports and real temporary Git state. Only then freeze the candidate for the authorized integrated review and subsequent live gates. Do not add more placeholder host capabilities and call that composition complete.
 
 ## Follow-up inspection at 21:56 UTC
 
@@ -65,3 +65,9 @@ Direct execution of both scheduled entrypoint modules still throws for missing t
 Commit `a3eb26e` passed 101 fresh primary release/entrypoint/contract tests, all independent actual-host/page-two/auth-origin/contradictory-health probes, repository formatting/lint and configured type checks. Before/after source hashes matched. This closes the release defects recorded above, including the draft hostname validator error. Exact rollback and interrupted-monitor cases pass through the scripted Deno transport and real temporary Git state; an actual isolated Deno rollback drill and production delivery are still not proved.
 
 The actual adapter-to-repair-entrypoint pagination probe remains failing: only page one is requested. The next producer integration must also bind stable incident IDs to capture references at capture completion. Today, incident-filtered export references depend on the retired coalescer; restoring unfiltered capture/export did not close that gap. No coalescer, dispatch or scheduler should be restored to provide that binding.
+
+## Pagination correction accepted locally at 22:53 UTC
+
+Commit `c2fa5ce` separates successful page coverage from pagination exhaustion and bounds the actual intake consumer to 128 pages with repeated-cursor detection. Fresh primary validation passed 84 focused tests with zero failures. The independent real gateway adapter → repair entrypoint → temporary Git probe passed: both incidents were persisted and the P0 incident on page two was selected before the P2 on page one, with no model or replay invocation. The earlier pagination failure is closed locally.
+
+Both direct scheduled entrypoints still throw for absent host wiring, rechecked at this checkpoint. The target's capture completion still needs an atomic binding from a durable incident ID to its encrypted capture reference; the existing unfiltered export test cannot prove that binding. These are current integration gaps. The pagination correction has no deployment, new Codex review or production-delivery receipt.
