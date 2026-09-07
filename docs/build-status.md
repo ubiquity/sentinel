@@ -254,3 +254,10 @@ Remote identity/visibility, credential access, live rolling budgets, retention/s
 
 - Created isolated integration lane `/Users/nv/repos/ubiquity/sentinel/.codex-worktrees/master-plan-wave-c-20260907` on `codex/master-plan-wave-c-20260907` from canonical tip `2a3fcc4`. Assignment `/tmp/sentinel-gfa795549e5/wave-c-assignment-v1.txt` owns only entrypoints, root task registration, workflow/config wiring, and integration tests/docs; no module or frozen-contract edits.
 - DSH integration writer is active as wrapper/child PIDs 32371/32386 with stream `/tmp/sentinel-gfa795549e5/wave-c-integration-v1.stream.jsonl`. Required `NODE_ENV=production` and existing inference credential were supplied; no deployment or target credentials/calls are authorized.
+
+## Wave C integration checkpoint (2026-09-07 07:34 UTC)
+
+- Wave C writer completed in its recorded isolated lane and settled all descendants. Worker tip `bd41b227f11380e955de7a8dae4bbf62da51c67d` was committed by the primary and ancestry-preservingly merged into canonical as `85bdbc2441104d6337bc8230f979300110f15b81`.
+- Production entrypoints, release/repair workflow wiring, root task registration, configuration example and six integration tests are now present. The release build receipt remains unavailable unless a trusted resolver is injected; no target ownership transfer or activation occurred.
+- Primary independent evidence on the worker tip: `deno task test:integration` passed 6/6; credential-free `deno task test:local` passed 389/389; `deno fmt --check`, `deno lint` and `deno task check` passed. No external calls or GitHub writes were made.
+- Temporary test repositories and scratch directories were settled and removed by the worker; the worker lane is clean. This is integrated local acceptance evidence only. Codex review, publication, deployment, live target proof and exact rollback proof remain pending.
