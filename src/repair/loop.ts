@@ -112,6 +112,51 @@ function isCausalReplayResult(
     result.candidate.outcome === "passed";
 }
 
+/**
+ * Exact repository identity match: owner, name AND GitHub App installation id
+ * are one identity — a different installation is a different repository scope,
+ * never a compatible evidence source.
+ */
+function sameRepositoryIdentity(
+  a: RepositoryIdentityV1,
+  b: RepositoryIdentityV1,
+): boolean {
+  return a.owner === b.owner && a.name === b.name &&
+    a.installationId === b.installationId;
+}
+
+/**
+ * Deterministic evidence-to-task identity match: the evidence record belongs
+ * to the exact incident id AND the exact repository identity. The evidence
+ * record id is an immutable record identity (`evidence:<incidentId>` from the
+ * gateway producer) and is never a lookup key; the incidentId field is.
+ */
+function evidenceMatches(
+  evidence: IncidentEvidenceV1,
+  incidentId: string,
+  repository: RepositoryIdentityV1,
+): boolean {
+  return evidence.incidentId === incidentId &&
+    sameRepositoryIdentity(evidence.repository, repository);
+}
+
+/**
+ * The persisted evidence record matching one work task, or undefined when
+ * none exists. Every consumer resolves evidence by incidentId + repository
+ * identity (never by evidence record id), so a foreign record can never be
+ * mistaken for this task's evidence.
+ */
+function evidenceForRecord(
+  snapshot: RepairStateSnapshotV1,
+  record: WorkRecordV1,
+): IncidentEvidenceV1 | undefined {
+  const incidentId = record.related.incidentId;
+  if (incidentId === null) return undefined;
+  return snapshot.evidence.find(
+    (item) => evidenceMatches(item, incidentId, record.repository),
+  );
+}
+
 export interface RepairCycleDepsV1 {
   clock: Clock;
   /** Repair read view plus the one trusted repair writer; never release write. */
@@ -837,7 +882,7 @@ async function ensureEvidence(
       evidence: null,
     };
   }
-  const existing = snapshot.evidence.find((item) => item.id === incidentId);
+  const existing = evidenceForRecord(snapshot, record);
   if (existing !== undefined) {
     const now = deps.clock.now();
     const hasDurableReplay = snapshot.replays.some(
@@ -883,6 +928,38 @@ async function ensureEvidence(
   }
   const evidence = read.value;
   const now = deps.clock.now();
+  // A freshly returned record is validated against the exact requested
+  // identity before it is persisted OR used: the same incident id must belong
+  // to the same repository (owner/name/installationId). A foreign record fails
+  // closed with a typed blocker and is never merged into this task.
+  if (!evidenceMatches(evidence, incidentId, record.repository)) {
+    return {
+      record: markBlocked(
+        record,
+        "other",
+        "incident evidence belongs to a different incident or repository",
+        now,
+      ),
+      evidence: null,
+    };
+  }
+  // A global evidence id collision with an already-persisted record for a
+  // different incident/repository is never overwritten, silently reused or
+  // rewritten as a no-progress transition: fail closed with a typed blocker.
+  // (The same-identity lookup above guarantees a colliding record here is
+  // always foreign.)
+  const colliding = snapshot.evidence.find((item) => item.id === evidence.id);
+  if (colliding !== undefined) {
+    return {
+      record: markBlocked(
+        record,
+        "other",
+        "evidence id collides with an existing record for a different incident or repository",
+        now,
+      ),
+      evidence: null,
+    };
+  }
   if (evidence.artifacts.some((artifact) => artifact.expiresAt <= now)) {
     return {
       record: markBlocked(
@@ -972,9 +1049,7 @@ async function ensureBeforeReplay(
     }
     return null;
   }
-  const evidence = snapshot.evidence.find(
-    (item) => item.id === record.related.incidentId,
-  );
+  const evidence = evidenceForRecord(snapshot, record);
   if (evidence === undefined || evidence === null || evidence.replay === null) {
     return markBlocked(
       record,
@@ -1121,9 +1196,7 @@ async function candidateValidated(
   if (record.source.kind !== "incident") return { kind: "ready" };
   const head = record.target.head;
   if (head === null) return { kind: "retry" };
-  const evidence = context.snapshot.evidence.find(
-    (item) => item.id === record.related.incidentId,
-  );
+  const evidence = evidenceForRecord(context.snapshot, record);
   if (evidence === undefined || evidence === null || evidence.replay === null) {
     return {
       kind: "blocked",
