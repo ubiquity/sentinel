@@ -95,6 +95,18 @@ const MAX_OUTPUT_LIMIT_BYTES = 4096;
 const MODEL_ID = "gpt-5.6-luna" as const;
 const REASONING = "max" as const;
 
+function isCausalReplayResult(
+  result: ReplayResultV1,
+  record: WorkRecordV1,
+): boolean {
+  return result.taskId === record.id &&
+    result.original.revision === record.failingRevision &&
+    result.limitations.length === 0 &&
+    result.original.outcome === "failed" &&
+    result.original.failure?.intended === true &&
+    result.candidate.outcome === "passed";
+}
+
 export interface RepairCycleDepsV1 {
   clock: Clock;
   /** Repair read view plus the one trusted repair writer; never release write. */
@@ -712,9 +724,7 @@ async function ensureEvidence(
   if (existing !== undefined) {
     const now = deps.clock.now();
     const hasDurableReplay = snapshot.replays.some(
-      (result) =>
-        result.taskId === record.id &&
-        result.original.revision === record.failingRevision,
+      (result) => isCausalReplayResult(result, record),
     );
     if (
       !hasDurableReplay &&
@@ -815,9 +825,7 @@ async function ensureBeforeReplay(
   // the before-run evidence again, so a later candidate can be validated
   // without paying the reproduction another time.
   const already = snapshot.replays.find(
-    (result) =>
-      result.taskId === record.id &&
-      result.original.revision === record.failingRevision,
+    (result) => isCausalReplayResult(result, record),
   );
   if (already !== undefined) {
     carry.beforeRun = {
