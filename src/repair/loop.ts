@@ -34,7 +34,10 @@ import { parseReleaseRequestV1 } from "../contracts/release.ts";
 import type { ReleaseRequestV1 } from "../contracts/release.ts";
 import { parseReplayResultV1 } from "../contracts/replay-result.ts";
 import type { ReplayResultV1 } from "../contracts/replay-result.ts";
-import { parseReviewReceiptV1 } from "../contracts/review-receipt.ts";
+import {
+  deriveUnresolvedSeverities,
+  parseReviewReceiptV1,
+} from "../contracts/review-receipt.ts";
 import type { ReviewReceiptV1 } from "../contracts/review-receipt.ts";
 import { parseRepairStateSnapshotV1 } from "../contracts/state-snapshots.ts";
 import type { RepairStateSnapshotV1 } from "../contracts/state-snapshots.ts";
@@ -1799,7 +1802,11 @@ async function requestReviewFor(
       advanceToReview(
         countReviewRound(clearIntent(withIntent, now), now),
         { pr: prNumber, head },
-        { reason: "review_pending", since: now, until: now + REVIEW_POLL_MS },
+        {
+          reason: "review_pending",
+          since: submitted.value.requestedAt,
+          until: Math.max(now, submitted.value.requestedAt) + REVIEW_POLL_MS,
+        },
         now,
       ),
     ),
@@ -1890,7 +1897,16 @@ async function reconcilePublishIntent(
       ...clearIntent(record, now),
       target: { ...record.target },
     };
-    return persistWork(deps, context, cleared);
+    const persisted = await persistWork(deps, context, cleared);
+    if (persisted.kind !== "progress") return persisted;
+    // The push may have succeeded immediately before the process stopped. The
+    // exact ref observation above is the publication proof; continue the same
+    // publication sequence now so a bounded run does not leave a pushed branch
+    // without its PR (or its next review request).
+    if (cleared.target.pr !== null) {
+      return requestReviewFor(deps, context, cleared, cleared.target.pr);
+    }
+    return createPullRequestFor(deps, context, cleared, config);
   }
   if (intent.kind === "pull_request") {
     if (intent.branch === null) {
@@ -2001,24 +2017,30 @@ async function observeReview(
     head,
   });
   if (!observed.ok) {
+    const since = reviewWaitSince(record, now);
     return persistWork(
       deps,
       context,
       setWait(
         record,
-        { reason: "unavailable", since: now, until: now + REVIEW_POLL_MS },
+        { reason: "unavailable", since, until: now + REVIEW_POLL_MS },
         now,
       ),
     );
   }
   const value = observed.value;
   if (value.status === "pending" || value.status === "unavailable") {
+    const since = reviewWaitSince(record, now);
     return persistWork(
       deps,
       context,
       setWait(
         record,
-        { reason: "review_pending", since: now, until: now + REVIEW_POLL_MS },
+        {
+          reason: "review_pending",
+          since,
+          until: Math.max(now, since) + REVIEW_POLL_MS,
+        },
         now,
       ),
     );
@@ -2036,12 +2058,13 @@ async function applyObservedReview(
   if (value.observedHead !== record.target.head) {
     // A review of a different head never advances this task; one pending
     // request per head remains pending and no receipt is synthesized.
+    const since = reviewWaitSince(record, now);
     return persistWork(
       deps,
       context,
       setWait(
         record,
-        { reason: "review_pending", since: now, until: now + REVIEW_POLL_MS },
+        { reason: "review_pending", since, until: now + REVIEW_POLL_MS },
         now,
       ),
     );
@@ -2071,20 +2094,22 @@ async function applyObservedReview(
       summary: value.summary,
       findings: value.findings,
       findingsUncounted: 0,
-      unresolvedSeverities: value.findings
-        .filter((finding) => !finding.resolved)
-        .map((finding) => finding.severity),
-      submittedAt: record.updatedAt,
+      // Derive the distinct, canonical severity set before parsing. A review
+      // may report several findings at one severity; passing duplicates makes
+      // the strict receipt parser reject an otherwise valid result.
+      unresolvedSeverities: deriveUnresolvedSeverities(value.findings),
+      submittedAt: reviewWaitSince(record, now),
       completedAt: value.completedAt,
       observedAt: value.receivedAt,
     });
   } catch {
+    const since = reviewWaitSince(record, now);
     return persistWork(
       deps,
       context,
       setWait(
         record,
-        { reason: "review_pending", since: now, until: now + REVIEW_POLL_MS },
+        { reason: "review_pending", since, until: now + REVIEW_POLL_MS },
         now,
       ),
     );
@@ -2607,12 +2632,37 @@ function touchesProtected(
   protectedPaths: readonly string[],
   path: string,
 ): boolean {
+  const candidate = normalizePathPrefix(path);
   return protectedPaths.some(
-    (protectedPath) =>
-      path === protectedPath ||
-      path.startsWith(`${protectedPath}/`) ||
-      protectedPath.startsWith(`${path}/`),
+    (protectedPath) => {
+      const prefix = normalizePathPrefix(protectedPath);
+      if (prefix.length === 0) return true;
+      return candidate === prefix ||
+        candidate.startsWith(`${prefix}/`) ||
+        prefix.startsWith(`${candidate}/`);
+    },
   );
+}
+
+/** Normalize trusted repository-relative path prefixes before boundary checks. */
+function normalizePathPrefix(value: string): string {
+  return value
+    .replaceAll("\\", "/")
+    .replace(/^\.\//, "")
+    .replace(/\/{2,}/g, "/")
+    .replace(/\/+$/, "");
+}
+
+/** Preserve the exact request timestamp across durable review waits. */
+function reviewWaitSince(record: WorkRecordV1, fallback: number): number {
+  if (
+    record.wait?.reason === "review_pending" ||
+    record.wait?.reason === "unavailable"
+  ) return record.wait.since;
+  if (record.intent?.kind === "review_request") {
+    return record.intent.startedAt;
+  }
+  return Math.min(record.updatedAt, fallback);
 }
 
 function mergeEvidence(

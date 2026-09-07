@@ -175,6 +175,7 @@ export interface FakeGithubOptionsV1 {
   branchRefSha?: GitSha | null;
   review?: Partial<ReviewObservationV1> | null;
   reviewUnavailable?: boolean;
+  reviewRequestedAt?: number;
   pushOutcome?: "applied" | "ambiguous";
   pushFailNext?: boolean;
   createOutcome?: "applied" | "ambiguous";
@@ -367,7 +368,7 @@ export class FakeGithub implements GitHubPort {
     return Promise.resolve(portOk({
       outcome: "applied",
       requestId: "review-req-1",
-      requestedAt: T0,
+      requestedAt: this.options.reviewRequestedAt ?? T0,
     }));
   }
 
