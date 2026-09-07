@@ -11,3 +11,5 @@
 /sentinel-state-test-*/
 # Harness failure-path disposable cwd
 /sentinel-harness-failure-*/
+# Wave C integration suite disposable repositories and scratch dirs
+/sentinel-integration-test-*/

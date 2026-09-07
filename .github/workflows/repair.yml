@@ -1,0 +1,37 @@
+# Sentinel repair polling workflow (Wave C wiring).
+#
+# Schedule: 7, 22, 37, 52 minutes past the hour (plan §4 / runtime tree).
+# Concurrency: one fixed non-cancelling group — concurrent repair runs are
+# never started, and a running job is never cancelled by a new schedule tick.
+#
+# Activation boundary: this runner is inert until the trusted host wiring for
+# src/main.ts exists. The entrypoint receives every capability (state store,
+# GitHub/Incident/Replay/Implementation ports, RollingStartBudget) from the
+# host; without that wiring `deno task repair:run` fails closed and no model,
+# GitHub, Deno or target action can occur. No credential, secret or
+# environment surface is defined here; the owner supplies those only at
+# authorized activation.
+name: sentinel-repair
+
+on:
+  schedule:
+    - cron: "7,22,37,52 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sentinel-repair
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - name: Repair polling run
+        run: deno task repair:run
