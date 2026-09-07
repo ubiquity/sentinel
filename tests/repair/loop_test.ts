@@ -321,7 +321,9 @@ Deno.test(
 
       // Run 2 (after the review poll): completed review -> delivery -> merge
       // -> release request -> waiting for acceptance.
-      rig.clock.advance(15 * 60_000 + 1);
+      // A durable replay result lets the task resume after retained artifact
+      // expiry; the saved fixture and before-failure proof are reused.
+      rig.clock.advance(100_000_000 + 1);
       rig.github.completeReview([], rig.clock.now());
       const third = await rig.run();
       assert.equal(third.status, "idle", JSON.stringify(third));

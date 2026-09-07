@@ -711,7 +711,15 @@ async function ensureEvidence(
   const existing = snapshot.evidence.find((item) => item.id === incidentId);
   if (existing !== undefined) {
     const now = deps.clock.now();
-    if (existing.artifacts.some((artifact) => artifact.expiresAt <= now)) {
+    const hasDurableReplay = snapshot.replays.some(
+      (result) =>
+        result.taskId === record.id &&
+        result.original.revision === record.failingRevision,
+    );
+    if (
+      !hasDurableReplay &&
+      existing.artifacts.some((artifact) => artifact.expiresAt <= now)
+    ) {
       return {
         record: markBlocked(
           record,
