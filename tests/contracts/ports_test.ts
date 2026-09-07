@@ -32,10 +32,49 @@ import type {
   ReleaseStateSnapshotV1,
   RepairStateSnapshotV1,
 } from "../../src/contracts/state-snapshots.ts";
+import { parseReviewReceiptV1 } from "../../src/contracts/review-receipt.ts";
+import type { ReviewReceiptV1 } from "../../src/contracts/review-receipt.ts";
 import type { WorkRecordV1 } from "../../src/contracts/work-record.ts";
 import { parseWorkRecordV1 } from "../../src/contracts/work-record.ts";
 
 const SHA: GitSha = "aafb7ee0598699bb7fb8a72ea133693ed64462da" as GitSha;
+const REVIEWER = "chatgpt-codex-connector[bot]";
+
+/** Minimal valid completed review receipt, parsed by the frozen parser. */
+function completedReview(
+  overrides: Record<string, unknown> = {},
+): ReviewReceiptV1 {
+  return parseReviewReceiptV1({
+    version: "v1",
+    kind: "review_receipt",
+    id: "review-1",
+    requestId: "req-1",
+    expectedReviewer: REVIEWER,
+    observedReviewer: REVIEWER,
+    repository: { owner: "ubiquity", name: "ai.ubq.fi", installationId: 1 },
+    pullRequest: { number: 1, head: SHA, base: SHA },
+    outcome: "completed",
+    resultId: "result-1",
+    summary: null,
+    findings: [],
+    findingsUncounted: 0,
+    unresolvedSeverities: [],
+    submittedAt: 1786000000000,
+    completedAt: 1786000001000,
+    observedAt: 1786000002000,
+    ...overrides,
+  });
+}
+
+/** The exact new merge request shape the GitHub fake now requires. */
+function mergeRequest(): Parameters<GitHubPort["mergePullRequest"]>[0] {
+  return {
+    pullRequestNumber: 1,
+    expectedHead: SHA,
+    expectedBase: SHA,
+    review: completedReview(),
+  };
+}
 
 /** Test helpers: mark strings with the exact contract brands. */
 function digest(hex: string): FixtureDigest {
@@ -411,6 +450,16 @@ Deno.test("GitHub merge result kinds are discriminated values, not booleans", ()
     reason: "checks_pending",
     head: SHA,
   };
+  const baseMismatch: MergeOutcomeV1 = {
+    outcome: "blocked",
+    reason: "base_mismatch",
+    head: SHA,
+  };
+  const reviewRequired: MergeOutcomeV1 = {
+    outcome: "blocked",
+    reason: "review_required",
+    head: SHA,
+  };
   const ambiguous: MergeOutcomeV1 = {
     outcome: "ambiguous",
     head: null,
@@ -421,6 +470,12 @@ Deno.test("GitHub merge result kinds are discriminated values, not booleans", ()
   assert.equal(ambiguous.outcome, "ambiguous");
   if (blocked.outcome === "blocked") {
     assert.equal(blocked.reason, "checks_pending");
+  }
+  if (baseMismatch.outcome === "blocked") {
+    assert.equal(baseMismatch.reason, "base_mismatch");
+  }
+  if (reviewRequired.outcome === "blocked") {
+    assert.equal(reviewRequired.reason, "review_required");
   }
 });
 
@@ -561,10 +616,7 @@ Deno.test("fake ports are callable and return documented kinds", async () => {
   assert.deepEqual(await _githubFake.listOpenIssues(), portOk([]));
   const check = await _githubFake.readChecks(SHA);
   assert.ok(check.ok && check.value.checks.length === 0); // empty checks is a real value
-  const merge = await _githubFake.mergePullRequest({
-    pullRequestNumber: 1,
-    expectedHead: SHA,
-  });
+  const merge = await _githubFake.mergePullRequest(mergeRequest());
   assert.ok(merge.ok && merge.value.outcome === "blocked");
   const dep = await _releaseFake.readCurrentDeployment("p");
   assert.ok(dep.ok && dep.value.status === "unknown");

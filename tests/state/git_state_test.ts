@@ -1184,10 +1184,6 @@ Deno.test("state: incident evidence keeps identity, appends artifacts and fills 
           extra,
         ],
       }),
-      // Duplicate artifact refs are invalid.
-      incidentEvidence("ev:1", {
-        artifacts: [evidence.artifacts[0], extra, extra],
-      }),
       // Provenance cannot be rewritten.
       {
         ...appended,
@@ -1208,25 +1204,10 @@ Deno.test("state: incident evidence keeps identity, appends artifacts and fills 
       if (!result.ok) assert.equal(result.error.kind, "invalid");
     }
 
-    // Duplicate artifact refs on a brand-new evidence record are invalid too.
-    const duplicateNew = await store.writeRepair(
-      repairSnapshot({
-        stateHead: head2,
-        sequence: 3,
-        updatedAt: T0 + 3000,
-        evidence: [
-          appended,
-          incidentEvidence("ev:new", {
-            artifacts: [extra, extra],
-          }),
-        ],
-      }),
-      head2,
-    );
-    assert.ok(!duplicateNew.ok);
-    if (!duplicateNew.ok) {
-      assert.equal(duplicateNew.error.kind, "invalid");
-    }
+    // Duplicate artifact refs (on an existing or a brand-new record) are
+    // rejected by the frozen parser itself on every path — direct parse,
+    // initial snapshot write and raw remote read are covered separately by
+    // the parser guard tests; the store is not the only defense.
 
     // Replay metadata may go null -> valid, and fixtureDigest/reproducedAt
     // fill exactly once but never replace a non-null identity.
@@ -1973,6 +1954,82 @@ Deno.test("state: raw state trees require canonical bytes and regular blob modes
       const restored = await store.readRepair();
       assert.ok(restored.ok);
     }
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+/**
+ * An evidence record with a duplicate artifact ref can no longer be produced
+ * by the frozen parser (the guard lives in parseIncidentEvidenceV1 now), so
+ * this raw object is assembled by hand for the store-level rejection cases;
+ * it is canonical JSON with exactly one semantic defect.
+ */
+function duplicateRefEvidenceText(id: string): string {
+  const valid = incidentEvidence(id);
+  return `${
+    canonicalStringify({
+      ...valid,
+      artifacts: [
+        valid.artifacts[0],
+        {
+          ...valid.artifacts[0],
+          digest: "f".repeat(64),
+          sizeBytes: valid.artifacts[0].sizeBytes + 1,
+        },
+      ],
+    })
+  }\n`;
+}
+
+Deno.test("state: duplicate artifact refs are rejected on the initial snapshot write", async () => {
+  const ctx = await makeCtx("dup-artifact-initial");
+  try {
+    const store = storeAt(ctx, "a", "repair");
+    // The guard must run on branch creation too, not only on transitions.
+    const rawEvidence = JSON.parse(duplicateRefEvidenceText("ev:duplicate"));
+    const result = await store.writeRepair(
+      repairSnapshot({ evidence: [rawEvidence] }),
+      null,
+    );
+    assert.ok(!result.ok);
+    if (!result.ok) assert.equal(result.error.kind, "invalid");
+    // Nothing was applied: the ref stays absent.
+    const read = await store.readRepair();
+    assert.ok(read.ok);
+    if (read.ok) assert.equal(read.value.status, "absent");
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+Deno.test("state: canonical raw remote records with duplicate artifact refs are rejected on read", async () => {
+  const ctx = await makeCtx("dup-artifact-raw");
+  try {
+    const store = storeAt(ctx, "a", "repair");
+    // Establish a valid first commit so the raw tree has a real parent.
+    const head1 = appliedHead(
+      await store.writeRepair(
+        repairSnapshot({ evidence: [incidentEvidence("ev:1")] }),
+        null,
+      ),
+    );
+
+    // Push canonical bytes (exactly one semantic defect: a duplicate ref) as a
+    // raw remote tree the store must validate; the read must fail closed,
+    // never return the record. pushRawTree fetches the parent into the raw
+    // work repo before building the child commit.
+    const duplicateId = "ev:duplicate";
+    await pushRawTree(ctx, head1, REPAIR_STATE_REF, {
+      "manifest.json": rawManifestText(2, T0 + 2000, head1),
+      [`evidence/${await sha256Hex(duplicateId)}.json`]:
+        duplicateRefEvidenceText(
+          duplicateId,
+        ),
+    }, ctx.env);
+    const read = await store.readRepair();
+    assert.ok(!read.ok);
+    if (!read.ok) assert.equal(read.error.kind, "invalid");
   } finally {
     await ctx.cleanup();
   }

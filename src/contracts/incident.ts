@@ -295,6 +295,11 @@ export function parseIncidentEvidenceV1(input: unknown): IncidentEvidenceV1 {
   const provenance = parseProvenance(obj.provenance, "$.provenance");
   const coverage = parseIncidentCoverage(obj.coverage, "$.coverage");
 
+  // Artifact refs are exact storage pointers, never multiply-claimable: a
+  // duplicate ref inside one evidence record is invalid on every path —
+  // initial snapshot creation, existing-state transitions and raw remote
+  // reads — never only a transition-time guard.
+  const seenArtifactRefs = new Set<string>();
   for (const [index, artifact] of artifacts.entries()) {
     if (artifact.expiresAt < provenance.capturedAt) {
       fail(
@@ -303,6 +308,14 @@ export function parseIncidentEvidenceV1(input: unknown): IncidentEvidenceV1 {
         "artifact cannot expire before capture",
       );
     }
+    if (seenArtifactRefs.has(artifact.ref)) {
+      fail(
+        `$.artifacts[${index}].ref`,
+        "invalid_lifecycle",
+        "duplicate artifact ref",
+      );
+    }
+    seenArtifactRefs.add(artifact.ref);
   }
 
   return {

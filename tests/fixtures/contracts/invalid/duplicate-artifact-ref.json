@@ -1,0 +1,39 @@
+{
+  "version": "v1",
+  "kind": "incident_evidence",
+  "repository": {
+    "owner": "ubiquity",
+    "name": "ai.ubq.fi",
+    "installationId": 12345
+  },
+  "id": "evidence-inc-2026-09-07-0001",
+  "incidentId": "inc-2026-09-07-0001",
+  "fingerprint": "deadbeef01020304deadbeef01020304deadbeef01020304deadbeef01020304",
+  "failingRevision": "aafb7ee0598699bb7fb8a72ea133693ed64462da",
+  "artifacts": [
+    {
+      "ref": "artifact://inbox/inc-2026-09-07-0001.pgp",
+      "digest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "sizeBytes": 4096,
+      "expiresAt": 1787000000000,
+      "contentType": "application/octet-stream"
+    },
+    {
+      "ref": "artifact://inbox/inc-2026-09-07-0001.pgp",
+      "digest": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+      "sizeBytes": 128,
+      "expiresAt": 1787000000000,
+      "contentType": "text/plain"
+    }
+  ],
+  "replay": null,
+  "provenance": {
+    "source": "gateway",
+    "endpoint": "https://ai.ubq.fi",
+    "capturedAt": 1786000000000,
+    "capturedBy": null
+  },
+  "coverage": {
+    "status": "complete"
+  }
+}

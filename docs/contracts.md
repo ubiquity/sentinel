@@ -213,6 +213,10 @@ refs with digest/size/expiry.
 - `IncidentArtifactRefV1`: `{ ref, digest, sizeBytes, expiresAt, contentType }`;
   `expiresAt >= capturedAt` enforced; `ref` is a restricted reference (no
   URL/query/userinfo), so a signed credential URL never reaches Git state.
+  Duplicate artifact refs inside one evidence record are rejected at parse time
+  on every path — direct parse, initial snapshot creation, existing-state
+  transitions and raw remote reads (refs are exact storage pointers, never
+  multiply-claimable).
 - `ReplayMetadataV1`:
   `{ fixtureRef, fixtureDigest, upstreamCaptured,
   commandId, reproducedAt }`;
@@ -247,6 +251,11 @@ evidence (never from unverified transport lists or agent-set flags).
   256-finding cap) — a receipt with `findingsUncounted > 0` and an empty
   `unresolvedSeverities` is rejected, so truncation can never claim clean review
   evidence.
+- A completed receipt is the required evidence input to an exact-head merge
+  request (see §5, merge authorization), and the merge parser additionally
+  requires zero uncounted findings and no unresolved P0/P1. The receipt is
+  identity/cleanliness evidence only — never current CI, protection or
+  authenticity evidence, and never by itself authorization.
 
 ### BudgetReservationV1 (`kind: "budget_reservation"`)
 
@@ -414,12 +423,50 @@ the callers rely on:
   and PR/head even when the request response id was lost. `ReviewObservationV1`
   includes `reviewer` — the actual reviewer identity observed — and m01 derives
   `ReviewReceiptV1` from authenticated original evidence only.
-- **Exact-head CAS.** `GitHubPort.pushHead(ref, sha, expectedRef)`,
-  `PullRequestCreateV1.expectedBase`, `MergeRequestV1.expectedHead`; and
-  `StateStore.writeRepair/writeRelease(next, expectedHead)` compare expected
-  heads and return `conflict` with the current head instead of overwriting. A
-  `StateWriteResultV1` of `ambiguous` is a distinct network-outcome kind (may
-  have been applied) used for post-push reconciliation.
+- **Merge authorization (`MergeRequestV1`).** The exact-head merge input is
+  `{ pullRequestNumber, expectedHead, expectedBase, review }` —
+  trusted-controller-only, and `parseMergeRequestV1(input, policy)` is its
+  strict runtime validator (exported via `contracts/mod.ts`). It rejects every
+  missing/unknown field; the embedded review must be a completed
+  `ReviewReceiptV1` (pending/unavailable/malformed are never authorization)
+  binding the exact same PR number, head and base, with
+  `findingsUncounted ===
+  0` and no unresolved P0/P1 (unresolved P2/P3 do not
+  block). Repository and reviewer identity are additionally checked against the
+  caller-supplied trusted adapter `policy { repository, expectedReviewer }`,
+  both strictly validated, so a request can never name another repository or
+  select a trusted reviewer. Parsing never grants authority: the receipt is
+  identity/cleanliness evidence only, not current CI, protection or authenticity
+  evidence — m01 re-observes the authoritative review by exact identifiers,
+  verifies trusted resolution authorization, requires effective strict
+  server-enforced up-to-date protections with no applicable token bypass, and
+  requires candidate ancestry containing `expectedBase` before an expected-head
+  merge.
+- **Exact-head CAS vs. REST preconditions.**
+  `GitHubPort.pushHead(ref, sha,
+  expectedRef)` and
+  `StateStore.writeRepair/writeRelease(next, expectedHead)` are true
+  expected-head compare-and-swap: a mismatch returns `conflict` with the current
+  head instead of overwriting. `PullRequestCreateV1.expectedBase` is **not** an
+  API atomic base CAS — it is the base head precondition the trusted caller
+  observed, re-observed both before and after publication; a PR created after an
+  ambiguous response remains reconcilable and can never merge without exact
+  current validation. The final merge compares
+  `MergeRequestV1.expectedHead`/`expectedBase` against the current exact
+  identities (`head_mismatch`/`base_mismatch`), and GitHub REST offers no atomic
+  base CAS: effective strict protection rules (branch up-to-date enforcement)
+  are what make a moved base block the merge server-side, so a moved base makes
+  the candidate outdated and requires current integrated validation plus a fresh
+  reviewed head. A `StateWriteResultV1` of `ambiguous` is a distinct
+  network-outcome kind (may have been applied) used for post-push
+  reconciliation.
+- **Merge blocked reasons.** `MergeOutcomeV1` blocked reasons are
+  `conflict | checks_pending | checks_failed | protection_required |
+  head_mismatch | base_mismatch | review_required`
+  — `base_mismatch` covers a moved/mismatched base (candidate no longer descends
+  from the exact validated base) and `review_required` covers a
+  missing/non-completed/outdated review or ineffective strict protection; none
+  of them is an error and none is ever mergeable from the same request.
 - **State capabilities.** `StateReadView`, `RepairStateWriter` and
   `ReleaseStateWriter` are separate interfaces; `StateStore` combines them for
   tests, and consumers accept the narrow `Pick`-style capability types — a
@@ -535,27 +582,154 @@ and writes only its own:
   Snapshot sequence increases by exactly one and `updatedAt` never moves
   backward.
 
-## 7. Fixtures and tests
+## 7. Budget controller API (`src/budget/mod.ts`)
+
+`RollingStartBudget` is the one production model-start admission controller. It
+receives an injected `Clock`, the repair state capability
+(`StateReadView & RepairStateWriter` — `createRepairStateStore` produces it) and
+the trusted complete repository configuration set; it contains no inference
+transport, no storage alternative and no generalized policy layer. Every
+operation rereads the authoritative repair state; callers never hold a snapshot
+between operations.
+
+### reserveModelStart(request)
+
+`request` is only the reserved identity fields
+`{ repository, taskId, head, attempt, purpose }` — a caller can never supply the
+reservation id, `createdAt` or settled state. The controller reads the clock
+itself, derives the id as the SHA-256 of the canonical JSON of
+repository/taskId/head/attempt/purpose, and applies one durable
+`BudgetReservationV1` (outcome `reserved`) to the repair branch before any start
+is granted.
+
+Result variants (exactly one; only `admitted` grants a start):
+
+| Variant       | Meaning                                                                                                                                                                 |
+| ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `admitted`    | one new reservation was applied; carries the durable reservation plus the newly applied state head                                                                      |
+| `duplicate`   | an existing reservation with the same derived id **and the exact same logical identity** exists (including a refunded one): reconciliation needed, never a second start |
+| `deferred`    | `reason: "cap_limit"` with the exact `retryAt`, or `reason: "clock_regression"` with the time at which the clock catches up                                             |
+| `disabled`    | policy missing/mismatched/unowned; `detail` explains which                                                                                                              |
+| `conflict`    | expected-head CAS lost; caller rereads rather than retrying                                                                                                             |
+| `ambiguous`   | the write may have applied (including a rejected write promise, `currentHead: null`); reread reconciles (never a start from this response)                              |
+| `unavailable` | read/write failure, a rejected read promise, malformed/out-of-range state or exhausted sequence; never grants                                                           |
+| `invalid`     | bad identity fields, non-positive attempt, or an identity collision (same id under a different identity, or the same identity under a different id)                     |
+
+Rules:
+
+- **One global budget.** All repositories charge the same rolling caps.
+  Admission policy is the complete supplied config set: the requested repository
+  must be in the set, every config must carry non-null `liveStartLimits` and
+  `sessionBound`, caps must be positive safe integers and identical across the
+  whole set. Missing, null or mismatched policies return `disabled`; no
+  default/fallback caps, no per-repo independent budget. Workflow single-writer
+  serialization and one deployed config are caller responsibilities — the
+  controller invents no distributed policy negotiation.
+- **Charging.** Millisecond rolling intervals `(now - duration, now]`; every
+  `reserved`/`submitted`/`ambiguous` reservation charges at its `createdAt`;
+  only `confirmed_not_submitted` with a validated restricted `proofRef` is
+  refunded. Windows never reset on midnight or process restart. The earliest
+  `retryAt` under both caps sorts charged timestamps (each window's cap-th most
+  recent charge must fall out), so several excess entries are handled exactly,
+  not by assuming one. Timestamp/window and snapshot-sequence arithmetic stays
+  inside the safe-integer range: any overflow or invalid arithmetic input is a
+  typed failure (`unavailable`) and nothing is written, never an unsafe
+  `retryAt` or `NaN`.
+- **Identity deduplication.** Exact logical identity
+  (repository/taskId/head/attempt/purpose) is compared **before** any duplicate
+  classification: the same derived id plus the same logical identity returns
+  `duplicate` with the existing state — never a second start permission,
+  including refunded reservations. A derived id that belongs to a different
+  logical identity (or the same identity under a different id) is an `invalid`
+  collision; a genuinely new retry uses its own incremented attempt.
+- **Clock regression.** If `now` is behind the durable snapshot `updatedAt` or
+  any reservation `createdAt`/`settledAt` (including refunded entries),
+  admission is blocked so future state is never lost.
+- **Fail closed at the write.** A read error, a rejected read promise (sanitized
+  `unavailable`, never an escaped transport exception), malformed state, CAS
+  conflict, ambiguous write or persistence failure never grants permission, and
+  a reservation write is never retried automatically: after
+  `conflict`/`ambiguous` (including a rejected write promise, whose effect may
+  have happened) the caller rereads, finds the durable reservation and
+  reconciles (`duplicate`).
+
+### settleModelStart(request)
+
+`{ id, outcome, proofRef }` with `outcome` in `submitted`/`ambiguous`/
+`confirmed_not_submitted` and a restricted `proofRef` required iff
+`confirmed_not_submitted`. The controller reads the clock and state itself,
+preserves `createdAt`, and applies:
+
+- `reserved` → any settlement outcome; the settlement time is the trusted now.
+- `ambiguous` → `submitted` (stays charged) or `confirmed_not_submitted` (proof
+  required); settlement time only moves forward (clock regression blocks).
+- Equal already-settled outcome: `idempotent` — no rewrite, no timestamp move,
+  no new state commit. Changed settled proof or a contradictory terminal outcome
+  (e.g. `submitted` → `confirmed_not_submitted`, or a revert towards `reserved`)
+  is `invalid`.
+- `submitted`/`confirmed_not_submitted` are immutable terminals; submitted
+  remains charged.
+
+The state machine is guarded from both sides: the controller never constructs an
+illegal transition, and the repair state store's transition validation rejects
+one anyway. There is no model fallback, retry loop or budget bypass for
+reviews/continuations — all local starts, including review requests, go through
+the same global repair snapshot.
+
+### Exported arithmetic helpers
+
+`earliestRetryAt(reservations, now, limits)` and `isCharged(reservation)` are
+the pure rolling-window helpers. `earliestRetryAt` validates every input with
+the frozen reservation parser, plus a nonnegative safe-integer `now`, positive
+safe-integer caps and `perHour <= perSevenDays`; invalid input or timestamp
+overflow throws one fixed sanitized `RangeError` that never echoes a value. The
+controller catches it at its boundary, returns `unavailable` and writes nothing
+— an unsafe `retryAt` or `NaN` is never produced. Windows are
+`(now - duration, now]`, refunded reservations never charge, and the retry time
+is the max of each window's cap-th most recent charge plus the window length (a
+several-excess-correct sort, never a single-excess guess).
+
+## 8. Fixtures and tests
 
 `tests/fixtures/contracts/valid/*.json` holds one sanitized representative
 fixture per record; `tests/fixtures/contracts/invalid/*.json` holds the
 fail-closed cases (unknown keys — top-level and nested, digest confusion in both
 directions, missing review completion, reviewer mismatch, unresolved
 without-authorization, secret-ref URL, free-form intent detail, duplicate
-snapshot ids, bad time, bad count, invalid lifecycle transitions, invalid
-coverage, invalid budget settlement, missing replay limitation, invalid config
-limits, coercion and enum violations). `tests/fixtures/contracts/canonical/`
-pins canonical determinism.
+artifact ref, duplicate snapshot ids, bad time, bad count, invalid lifecycle
+transitions, invalid coverage, invalid budget settlement, missing replay
+limitation, invalid config limits, coercion and enum violations).
+`tests/fixtures/contracts/canonical/` pins canonical determinism.
 
 `tests/contracts/` exercises the actual exported parsers (never duplicated
 validation logic): fixture round-trip reveals parse/serialize stability, every
 invalid fixture is rejected with the documented code and path, nested snapshot
 records are validated, sparse/cyclic/symbol/accessor canonicalization is
-rejected, error messages never echo values, metrics denominator rules hold, and
-the minimal fake-port test pins result-kind discrimination, state capability
-separation, ambiguous-vs-conflict outcomes, one-based attempts and global budget
-conflict refusal. Fakes record calls and return canned results — no product
-logic lives in test fakes.
+rejected, error messages never echo values, metrics denominator rules hold, the
+merge-authorization parser is covered by positive and negative cases (pending/
+unavailable/malformed/mismatched reviews, repository and reviewer policy
+binding, uncounted findings, unresolved P0/P1), and the minimal fake-port test
+pins result-kind discrimination, state capability separation,
+ambiguous-vs-conflict outcomes, one-based attempts and global budget conflict
+refusal. Fakes record calls and return canned results — no product logic lives
+in test fakes.
+
+`tests/budget/` covers the budget controller: pure rolling-window arithmetic
+(strict `(now - duration, now]` boundaries, overlapping caps, several excess
+entries under lowered caps, proof-only refunds, exact safe-integer bound,
+sanitized `RangeError` on invalid/overflowing inputs), deterministic controller
+semantics on the in-memory capability (exact-identity duplicate/collision
+classification, malformed request and settlement boundaries, clock regression,
+disabled policies, settlement idempotence and immutable timestamps, rejected
+read/write promises, retry/sequence overflow, never admitting on
+read/CAS/ambiguity/persistence failure), and real `GitStateStore` cases against
+disposable local bare remotes (global cap across repositories with a restarted
+store, simultaneous identical and distinct admissions granting exactly one
+start, successful push with a lost response, throwing transports, invalid
+identity inputs at the real state boundary, and unrelated state preservation).
+The duplicate-artifact ref guard is additionally pinned by the direct parser
+fixture, an initial-snapshot write rejection and a canned remote-tree read
+rejection in `tests/state/`.
 
 The test boundary is credential-free: `deno task test:local` runs
 `test-local.ts`, which executes every toolchain step in child processes with
@@ -563,11 +737,19 @@ The test boundary is credential-free: `deno task test:local` runs
 workstation credentials, no user Deno config). All imports are local; only
 built-in `node:assert` is used — no remote test packages, no network.
 
-## 8. Proposed consumer entry points
+## 9. Proposed consumer entry points
 
 ```ts
 // m01-github: normalize transport observations into frozen records.
 const receipt: ReviewReceiptV1 = parseReviewReceiptV1(observed);
+
+// m01-github: authorize an exact-head merge against trusted adapter policy
+// (repository + expected reviewer come from adapter configuration, never from
+// the request or the caller-selected tokens).
+const merge: MergeRequestV1 = parseMergeRequestV1(raw, {
+  repository,
+  expectedReviewer,
+});
 
 // m02-evidence: adapter returns normalized records.
 const summary: IncidentSummaryV1 = parseIncidentSummaryV1(pageItem);

@@ -14,7 +14,11 @@ import type {
 } from "./brands.ts";
 import type { IncidentEvidenceV1, IncidentSummaryV1 } from "./incident.ts";
 import type { ReplayLimitationV1 } from "./replay-result.ts";
-import type { ReviewFindingV1, ReviewStatusV1 } from "./review-receipt.ts";
+import type {
+  ReviewFindingV1,
+  ReviewReceiptV1,
+  ReviewStatusV1,
+} from "./review-receipt.ts";
 import type {
   ReleaseStateSnapshotV1,
   RepairStateSnapshotV1,
@@ -143,7 +147,15 @@ export interface PullRequestCreateV1 {
   headRef: string;
   baseRef: string;
   body: string;
-  /** Expected base head; a CAS that fails instead of racing a moved base. */
+  /**
+   * Base head the trusted caller observed as the integration precondition.
+   * GitHub REST has no atomic base CAS: this is not an in-API guarantee
+   * against base movement — the precondition is re-observed both before and
+   * after publication, and the final merge rechecks the current base/head
+   * against effective strict protections. A created PR after an ambiguous
+   * response stays reconcilable and can never merge without exact current
+   * validation.
+   */
   expectedBase: GitSha;
   /** Expected head of the new branch; null means the branch must not exist. */
   expectedHeadRef: GitSha | null;
@@ -207,14 +219,38 @@ export type MergeOutcomeV1 =
       | "checks_pending"
       | "checks_failed"
       | "protection_required"
-      | "head_mismatch";
+      | "head_mismatch"
+      | "base_mismatch"
+      | "review_required";
     head: GitSha | null;
   };
 
+/**
+ * Exact-identity merge authorization, trusted-controller-only. The request
+ * carries the PR number, the exact head, the exact integrated validated base
+ * and a completed ReviewReceiptV1 binding the same PR/head/base.
+ *
+ * REST has no atomic base CAS: `expectedBase` is a precondition the adapter
+ * re-validates immediately before an expected-head merge, not an API
+ * guarantee. Effective strict server-enforced protections (requiring up-to-
+ * date branches with no applicable token bypass) plus candidate ancestry
+ * containing `expectedBase` are required; a moved base then makes the
+ * candidate outdated and the server blocks the merge (base_mismatch) until
+ * the exact current base is integrated and validated again. The review
+ * receipt is identity/cleanliness evidence only — it is never current CI,
+ * protection or authenticity evidence, so the adapter must re-observe the
+ * authoritative review by exact identifiers and verify trusted resolution
+ * authorization and repository/reviewer binding against its configuration
+ * before merging; a caller-supplied receipt never grants authority.
+ */
 export interface MergeRequestV1 {
   pullRequestNumber: number;
   /** Exact head required; a mismatch must fail closed, never merge stale work. */
   expectedHead: GitSha;
+  /** Exact integrated validated base the candidate must contain as ancestor. */
+  expectedBase: GitSha;
+  /** Completed review receipt; no unresolved P0/P1, zero uncounted findings. */
+  review: ReviewReceiptV1;
 }
 
 export type IssueCloseOutcomeV1 = "closed" | "already_closed";

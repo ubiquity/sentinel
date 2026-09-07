@@ -206,6 +206,12 @@ const INVALID: {
     path: "$.artifacts[0].ref",
   },
   {
+    file: "duplicate-artifact-ref.json",
+    parser: parseIncidentEvidenceV1,
+    code: "invalid_lifecycle",
+    path: "$.artifacts[1].ref",
+  },
+  {
     file: "release-window-inverted.json",
     parser: parseReleaseRecordV1,
     code: "invalid_lifecycle",

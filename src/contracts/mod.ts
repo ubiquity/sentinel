@@ -23,5 +23,7 @@ export * from "./budget-reservation.ts";
 export * from "./replay-result.ts";
 export * from "./release.ts";
 export * from "./state-snapshots.ts";
+// Merge authorization parser (type with the ports below).
+export * from "./merge-request.ts";
 // Ports.
 export * from "./ports.ts";

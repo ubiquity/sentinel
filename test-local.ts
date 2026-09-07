@@ -42,7 +42,12 @@ const steps: { name: string; args: string[] }[] = [
   { name: "lint", args: ["lint"] },
   {
     name: "check",
-    args: ["check", "src/contracts/mod.ts", "src/state/mod.ts"],
+    args: [
+      "check",
+      "src/contracts/mod.ts",
+      "src/state/mod.ts",
+      "src/budget/mod.ts",
+    ],
   },
   {
     name: "test",
@@ -55,6 +60,7 @@ const steps: { name: string; args: string[] }[] = [
       "--allow-env=PATH",
       "tests/contracts/",
       "tests/state/",
+      "tests/budget/",
     ],
   },
 ];
