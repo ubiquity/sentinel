@@ -1,6 +1,6 @@
 # Sentinel implementation divergence audit
 
-Audit date: 2026-09-07. Source candidate: `5ed87855c4bd911b2bd395e2ce7a9c09e7c326de`, canonical branch `codex/master-plan-gfa795549e5`. This is an implementation audit, not a replacement plan or acceptance receipt. `docs/build-status.md` remains the single progress ledger.
+Audit date: 2026-09-07. Initial source baseline: `5ed87855c4bd911b2bd395e2ce7a9c09e7c326de`. Latest accepted local source: `a3eb26e494a31cb1c754971466db14b06ec05df1` at 22:41 UTC, canonical branch `codex/master-plan-gfa795549e5`. This is an implementation audit, not a replacement plan or production acceptance receipt. `docs/build-status.md` remains the single progress ledger.
 
 ## Governing documents
 
@@ -44,13 +44,13 @@ At target base `9331946ef10d3b7259b5ca4933598dd380c1d794`, ai.ubq.fi `AGENTS.md`
 
 Local target commits `5df8cbd0` and `93cac701` restore the authenticated encrypted export and automatic request-capture path. Thirteen focused tests pass, including actual handler capture/export and unauthorized rejection; an independent cross-repository probe proves compatibility with standalone retained decryption. CI now invokes the focused real-KV task. These commits remain local on the recorded m06 lane, not reviewed, merged or deployed. Upstream recording, unresolved discovery, retention and build receipts remain incomplete.
 
-Further release divergence was verified during integration: the official Deno CLI cannot supply the custom revision labels required by the current release port, and a synthetic probe shows `sampleHealth` accepts contradictory JSON body and header identities. Both need correction before exact-build acceptance. The build-status ledger records the source evidence and failing probe.
+Release divergence was verified during integration: the official Deno CLI cannot supply the custom revision labels required by the former release port, and a synthetic probe showed `sampleHealth` accepting contradictory JSON body and header identities. Local source commit `a3eb26e` corrects both, adds bounded real Link pagination and supports the actual two-label Deno hostname. The exact transaction still needs the authenticated build-receipt resolver; that production integration remains incomplete.
 
 Publication identity, hosted credentials, live budgets/retention/stability settings, promotion ownership transfer and a fresh acceptance-review cycle are also unresolved. These are distinct from local implementation and must be recorded explicitly before activation.
 
 ## Next acceptance surface
 
-Complete target evidence capture and the exact-release-identity correction, then assemble the real gateway adapter, retained-capture preparation, trusted safe fixture source, isolated replay runtime, GitHub/model/review transports and release receipt resolver. Exercise the complete lifecycle through those adapters with scripted external transports and real temporary Git state. Only then freeze the candidate for the authorized integrated review and subsequent live gates. Do not add more placeholder host capabilities and call that composition complete.
+Correct incident pagination and complete target evidence capture, then assemble the real gateway adapter, retained-capture preparation, trusted safe fixture source, isolated replay runtime, GitHub/model/review transports and release receipt resolver. Exercise the complete lifecycle through those adapters with scripted external transports and real temporary Git state. Only then freeze the candidate for the authorized integrated review and subsequent live gates. Do not add more placeholder host capabilities and call that composition complete.
 
 ## Follow-up inspection at 21:56 UTC
 
@@ -59,3 +59,9 @@ The canonical release correction is still being written and is not an accepted c
 A separate confirmed producer/consumer contradiction blocks normal incident pagination: `parseGatewayIndexPageV1` rejects a complete page with a continuation cursor, while the repair loop stops on incomplete coverage before following its cursor. Page completeness and normal continuation must be independent. The prepared correction preserves genuine missing-source coverage and requires a real adapter-to-entrypoint test with the highest-priority incident on a later page. This correction is not implemented yet.
 
 Direct execution of both scheduled entrypoint modules still throws for missing trusted host wiring, confirmed again in this inspection. The 465-test receipt above remains evidence for its recorded older source candidate, not for the changing release draft.
+
+## Release correction accepted locally at 22:41 UTC
+
+Commit `a3eb26e` passed 101 fresh primary release/entrypoint/contract tests, all independent actual-host/page-two/auth-origin/contradictory-health probes, repository formatting/lint and configured type checks. Before/after source hashes matched. This closes the release defects recorded above, including the draft hostname validator error. Exact rollback and interrupted-monitor cases pass through the scripted Deno transport and real temporary Git state; an actual isolated Deno rollback drill and production delivery are still not proved.
+
+The actual adapter-to-repair-entrypoint pagination probe remains failing: only page one is requested. The next producer integration must also bind stable incident IDs to capture references at capture completion. Today, incident-filtered export references depend on the retired coalescer; restoring unfiltered capture/export did not close that gap. No coalescer, dispatch or scheduler should be restored to provide that binding.
