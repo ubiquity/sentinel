@@ -233,3 +233,7 @@ Remote identity/visibility, credential access, live rolling budgets, retention/s
 ## m04 bounded probe intervention (2026-09-07 06:11 UTC)
 
 - The continuation's review-loss probe (`reviewlost3`) failed with a contract timestamp fixture error and remained in `nextStep=review`; the corrected reruns (`reviewlost4` and `reviewlost5`) each exceeded the declared 45-second bound without terminal output. Primary stopped only the affected test children under task-owned authority and verified they settled; the DSH worker and lane edits remain preserved and active. m04 is unaccepted and must return a direct, unfiltered passing lifecycle checkpoint before integration.
+
+## m01 transport correction launch (2026-09-07 06:13 UTC)
+
+- After the prior m01 gate writer and descendants settled, a new bounded m01 transport/push correction was launched in the recorded existing lane with immutable assignment copy `/tmp/sentinel-gfa795549e5/m01-transport-push-correction-v3.txt`. Active wrapper/DSH PIDs are 80040/80059; stream and stderr are under the same goal directory. Required inference credential and `NODE_ENV=production` were supplied; no deployment credential or external target access was used. Scope remains `src/github/**` and `tests/github/**`; primary will independently validate and integrate.
