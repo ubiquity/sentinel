@@ -237,3 +237,9 @@ Remote identity/visibility, credential access, live rolling budgets, retention/s
 ## m01 transport correction launch (2026-09-07 06:13 UTC)
 
 - After the prior m01 gate writer and descendants settled, a new bounded m01 transport/push correction was launched in the recorded existing lane with immutable assignment copy `/tmp/sentinel-gfa795549e5/m01-transport-push-correction-v3.txt`. Active wrapper/DSH PIDs are 80040/80059; stream and stderr are under the same goal directory. Required inference credential and `NODE_ENV=production` were supplied; no deployment credential or external target access was used. Scope remains `src/github/**` and `tests/github/**`; primary will independently validate and integrate.
+
+## m04 repair checkpoint and integration (2026-09-07 06:36 UTC)
+
+- The m04 DSH process was stopped after its focused suite completed and then became a stale job wait; task-owned descendants were settled and `/tmp/sentinel-gfa795549e5/m04-stop-v2.json` records the disposition. Its lane source/tests were preserved; orphaned `sentinel-repair-test-*` directories remain untouched.
+- Primary independent checks passed 15 repair/selection tests, zero failed, in 3m13s; owned fmt/lint/type and diff checks passed. Evidence: `/tmp/sentinel-gfa795549e5/m04-primary-tests-v2.txt`, `m04-primary-fmt.txt`, `m04-primary-lint.txt`, and `m04-primary-check.txt`.
+- m04 tip `e0815c3` was committed in its worker lane and ancestry-preservingly merged into canonical. This is module-level acceptance only; Wave C wiring and the separate transport/backlog boundaries remain outstanding.
