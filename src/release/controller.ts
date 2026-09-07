@@ -1398,7 +1398,9 @@ export class ReleaseController {
       // Mode challenge on the gateway runner, never a deployment mismatch.
       return {
         status: "warned",
-        warnings: ["custom gateway returns a verified Cloudflare-identified 403"],
+        warnings: [
+          "custom gateway returns a verified Cloudflare-identified 403",
+        ],
       };
     }
     return {

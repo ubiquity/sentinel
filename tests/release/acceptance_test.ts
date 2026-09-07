@@ -19,7 +19,10 @@ import assert from "node:assert/strict";
 import type { PortResultV1 } from "../../src/contracts/ports.ts";
 import type { ReleaseRecordV1 } from "../../src/contracts/release.ts";
 import { parseReleaseRecordV1 } from "../../src/contracts/release.ts";
-import type { DeploymentIdentityV1, MetricsSampleV1 } from "../../src/contracts/shared.ts";
+import type {
+  DeploymentIdentityV1,
+  MetricsSampleV1,
+} from "../../src/contracts/shared.ts";
 import type { StabilityPolicyV1 } from "../../src/contracts/repository-config.ts";
 import type { ReleaseStateSnapshotV1 } from "../../src/contracts/state-snapshots.ts";
 import {
@@ -34,9 +37,7 @@ import {
   evaluateAcceptance,
   nextAlignedWindowStart,
 } from "../../src/release/acceptance.ts";
-import {
-  RELEASE_SAMPLE_INTERVAL_MS,
-} from "../../src/release/config.ts";
+import { RELEASE_SAMPLE_INTERVAL_MS } from "../../src/release/config.ts";
 import {
   asTransport,
   DEP_0,
@@ -44,8 +45,8 @@ import {
   DEP_X,
   type GitCtxV1,
   installREST,
-  LOGS_RE,
   logRoute,
+  LOGS_RE,
   makeGitCtx,
   MANAGED_URL,
   PROMOTE_RE,

@@ -275,8 +275,7 @@ export class ScriptedTransport {
       },
       body: this.managedBodyMissing
         ? `{"status":"maintenance","release":{"git_sha":"${identity.gitSha}","deployment_id":"${identity.revisionId}"}}`
-        :
-          `{"status":"available","release":{"git_sha":"${identity.gitSha}","deployment_id":"${identity.revisionId}"}}`,
+        : `{"status":"available","release":{"git_sha":"${identity.gitSha}","deployment_id":"${identity.revisionId}"}}`,
     };
   }
 
