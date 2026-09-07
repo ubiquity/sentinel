@@ -1,0 +1,184 @@
+/**
+ * m04-repair model-port tests: the runtime ImplementationPort requests the
+ * bounded isolated-checkout WRITE capability (workspace-write sandbox over
+ * the secret-free checkout cwd, never read-only, never full access), still
+ * refuses approvals, and produces a completed receipt with the resolved
+ * candidate through an injected verifier/resolver. The session is a recording
+ * fake; no subprocess, no network, no model call exists in this suite.
+ */
+import assert from "node:assert/strict";
+
+import { asWorkItemId } from "../../src/contracts/brands.ts";
+import type { CodexSessionV1 } from "../../src/repair/codex-transport.ts";
+import type { CodexServerNotificationV1 } from "../../src/repair/codex-transport.ts";
+import { CodexImplementationPort } from "../../src/repair/model-port.ts";
+import type { ActualSessionEvidenceV1 } from "../../src/repair/model-port.ts";
+import { REPO, SHA1, SHA3 } from "../state/helpers.ts";
+
+const CHECKOUT = "/tmp/sentinel-model-checkout";
+
+/** Recording fake CodexSessionV1; emits one terminal turn/completed event. */
+class FakeCodexSession implements CodexSessionV1 {
+  readonly sent: { method: string; params: unknown }[] = [];
+  closeCalls = 0;
+  private notifications:
+    | ((event: CodexServerNotificationV1) => void)
+    | null = null;
+  private turnStarted = false;
+
+  send(method: string, params: unknown): Promise<unknown> {
+    this.sent.push({ method, params });
+    switch (method) {
+      case "initialize":
+        return Promise.resolve({ userAgent: "codex-app-server/0.153.4" });
+      case "thread/start":
+        return Promise.resolve({
+          thread: { id: "thread-1" },
+          model: "gpt-5.6-luna",
+          reasoningEffort: "max",
+          modelProvider: "sentinel-host",
+        });
+      case "turn/start":
+        this.turnStarted = true;
+        return Promise.resolve({ turn: { id: "turn-1" } });
+      case "turn/interrupt":
+        return Promise.resolve({});
+      default:
+        return Promise.resolve({});
+    }
+  }
+
+  notify(method: string, params?: unknown): void {
+    this.sent.push({ method, params: params ?? {} });
+  }
+
+  onNotification(handler: (event: CodexServerNotificationV1) => void): void {
+    this.notifications = handler;
+    if (this.turnStarted) {
+      // The real app-server emits the terminal event only after the listener
+      // is registered inside awaitSettlement; the fake mirrors that order.
+      queueMicrotask(() => {
+        this.notifications?.({
+          method: "turn/completed",
+          params: {
+            threadId: "thread-1",
+            turn: { id: "turn-1", status: "completed", durationMs: 5 },
+          },
+        });
+      });
+    }
+  }
+
+  onServerRequest(): void {}
+
+  close(): Promise<void> {
+    this.closeCalls++;
+    return Promise.resolve();
+  }
+}
+
+Deno.test("model-port: thread starts with bounded isolated-checkout write capability", async () => {
+  const session = new FakeCodexSession();
+  const verified: ActualSessionEvidenceV1[] = [];
+  const port = new CodexImplementationPort({
+    openSession: () => Promise.resolve(session),
+    checkoutDir: CHECKOUT,
+    checkout: {
+      resolve: () =>
+        Promise.resolve({
+          head: SHA3,
+          checkpointSha: null,
+          changedPaths: ["src/app.ts"],
+        }),
+    },
+    receiptVerifier: (evidence) => {
+      verified.push(evidence);
+      if (
+        evidence.threadModel === "gpt-5.6-luna" &&
+        evidence.terminal.status === "completed"
+      ) {
+        return { observedModel: "gpt-5.6-luna", observedReasoning: "max" };
+      }
+      return null;
+    },
+  });
+
+  const result = await port.runModel({
+    taskId: asWorkItemId("issue-1"),
+    repository: { ...REPO },
+    base: SHA1,
+    issue: { number: 1, title: "title", body: "body" },
+    evidence: [],
+    model: "gpt-5.6-luna",
+    reasoning: "max",
+    maxDurationMs: 5_000,
+    maxOutputChars: 10_000,
+  });
+  assert.ok(result.ok, JSON.stringify(result));
+  if (!result.ok) return;
+  assert.equal(result.value.outcome, "completed");
+  assert.equal(result.value.candidate?.head, SHA3);
+  assert.deepEqual(
+    result.value.candidate?.changedPaths,
+    ["src/app.ts"],
+    "candidate comes from the isolated checkout resolver",
+  );
+
+  const threadStart = session.sent.find(
+    (frame) => frame.method === "thread/start",
+  );
+  assert.ok(threadStart, "thread/start was sent");
+  const params = threadStart?.params as Record<string, unknown>;
+  // Bounded isolated-checkout write capability: the narrowest write-capable
+  // sandbox, scoped to the checkout cwd — not read-only (a commit would be
+  // impossible) and never full access.
+  assert.equal(params.sandbox, "workspace-write");
+  assert.equal(params.cwd, CHECKOUT, "write scope is the isolated checkout");
+  assert.equal(params.approvalPolicy, "never");
+  assert.equal(params.ephemeral, true);
+  assert.equal(params.model, "gpt-5.6-luna");
+  assert.equal(
+    session.sent.some((frame) =>
+      frame.method === "turn/start" &&
+      (frame.params as Record<string, unknown>).effort === "max"
+    ),
+    true,
+    "max reasoning is requested on the turn",
+  );
+  assert.equal(session.closeCalls, 1, "the session is always closed");
+  assert.ok(
+    verified.length === 1,
+    "the trusted-host verifier observed the session evidence",
+  );
+});
+
+Deno.test("model-port: a missing trusted receipt fails closed and still closes the session", async () => {
+  const session = new FakeCodexSession();
+  const port = new CodexImplementationPort({
+    openSession: () => Promise.resolve(session),
+    checkoutDir: CHECKOUT,
+    checkout: {
+      resolve: () =>
+        Promise.resolve({ head: SHA3, checkpointSha: null, changedPaths: [] }),
+    },
+    receiptVerifier: () => null, // default boundary: activation unresolved
+  });
+  const result = await port.runModel({
+    taskId: asWorkItemId("issue-2"),
+    repository: { ...REPO },
+    base: SHA1,
+    issue: null,
+    evidence: [],
+    model: "gpt-5.6-luna",
+    reasoning: "max",
+    maxDurationMs: 5_000,
+    maxOutputChars: 10_000,
+  });
+  assert.ok(!result.ok);
+  if (!result.ok) assert.equal(result.error.kind, "unavailable");
+  assert.equal(
+    session.closeCalls,
+    1,
+    "fail-closed run still settles the session",
+  );
+});

@@ -200,7 +200,9 @@ export async function runRepairCycle(
       return { status: "state_error", detail: "selected record missing" };
     }
 
-    if (!(await declaredOperationFits(deps, record, options.deadline))) {
+    if (
+      !(await declaredOperationFits(deps, context, record, options.deadline))
+    ) {
       return {
         status: "margin",
         detail: `next operation for ${record.id} cannot fit`,
@@ -456,12 +458,17 @@ async function pollIncidents(
 
 function declaredOperationFits(
   deps: RepairCycleDepsV1,
+  context: LoopContextV1,
   record: WorkRecordV1,
   deadline: number,
 ): boolean {
   const config = configFor(deps, record.repository);
   if (config === null) return false;
-  if (record.nextStep === "work" && record.target.head === null) {
+  if (
+    record.nextStep === "work" &&
+    (record.target.head === null ||
+      headRejectedByReview(context.snapshot, record))
+  ) {
     const bound = config.sessionBound;
     if (bound === null) return true;
     if (
@@ -576,7 +583,10 @@ async function executeWorkStep(
     return persistWork(deps, context, reproduced);
   }
 
-  if (record.target.head === null) {
+  if (
+    record.target.head === null ||
+    headRejectedByReview(context.snapshot, record)
+  ) {
     return executeImplementationStep(deps, context, record, config);
   }
 
@@ -700,15 +710,36 @@ async function ensureBeforeReplay(
   carry: CarryV1,
 ): Promise<WorkRecordV1 | null> {
   if (record.source.kind !== "incident") return null;
-  // Once a durable causal ReplayResultV1 exists for the exact candidate,
-  // reproduction is proven and never rerun; before that, local deterministic
-  // replay of the identical request is safe and rerunnable on resume.
+  // Once a durable causal ReplayResultV1 exists for this exact task and
+  // original revision, the intended before-failure is proven and never rerun —
+  // including a correction round, whose candidate head is new while the
+  // original revision and fixture are unchanged. The durable result supplies
+  // the before-run evidence again, so a later candidate can be validated
+  // without paying the reproduction another time.
   const already = snapshot.replays.find(
     (result) =>
       result.taskId === record.id &&
-      result.candidate.revision === record.target.head,
+      result.original.revision === record.failingRevision,
   );
-  if (already !== undefined) return null;
+  if (already !== undefined) {
+    carry.beforeRun = {
+      outcome: already.original.outcome,
+      exitCode: already.original.exitCode,
+      output: already.original.output,
+      failure: already.original.failure === null ? null : {
+        intended: already.original.failure.intended,
+        reason: already.original.failure.reason,
+      },
+      limitations: [],
+      startedAt: 0,
+      endedAt: 0,
+    };
+    carry.fixtureRef = already.fixture.ref;
+    carry.fixtureDigest = already.fixture.digest;
+    carry.replayCommandId = already.commands.replay;
+    carry.beforeReason = already.expected.beforeReason;
+    return null;
+  }
   const evidence = snapshot.evidence.find(
     (item) => item.id === record.related.incidentId,
   );
@@ -793,6 +824,31 @@ function summaryErrorType(
     (incident) => incident.fingerprint === fingerprint,
   );
   return summary?.errorType || "unreported original failure";
+}
+
+/**
+ * A completed review receipt with unresolved P0/P1 findings bound to the
+ * record's CURRENT reviewed head means that head is rejected: the work step
+ * must run a fresh bounded implementation and validate the NEW candidate
+ * through the replay path before any publication. The rejected candidate is
+ * never re-published and never re-reviewed (the frozen contract keeps a
+ * head alongside a published PR, so the rejection is read from durable
+ * evidence, not from a cleared field).
+ */
+function headRejectedByReview(
+  snapshot: RepairStateSnapshotV1,
+  record: WorkRecordV1,
+): boolean {
+  const head = record.target.head;
+  const pr = record.target.pr;
+  if (head === null || pr === null) return false;
+  const receipt = snapshot.reviews.find(
+    (review) =>
+      review.pullRequest.number === pr &&
+      review.pullRequest.head === head &&
+      review.outcome === "completed",
+  );
+  return receipt !== undefined && receipt.unresolvedSeverities.length > 0;
 }
 
 /** Candidate validation before publication (incident tasks only). */
@@ -1319,11 +1375,15 @@ async function executePublishStep(
     return reconcilePublishIntent(deps, context, record, config);
   }
 
+  // The unfinished-PR cap applies only to FRESH publications. A correction of
+  // an existing PR does not open another unfinished PR — it updates the branch
+  // this task already owns — so it must never be blocked by the cap (matching
+  // the selection rule, which caps only records with target.pr === null).
   const openPrs =
     context.snapshot.work.filter((work) =>
       work.target.pr !== null && work.nextStep !== "done"
     ).length;
-  if (openPrs >= MAX_UNFINISHED_PRS) {
+  if (record.target.pr === null && openPrs >= MAX_UNFINISHED_PRS) {
     return persistWork(
       deps,
       context,
@@ -1958,10 +2018,15 @@ function executeDeliveryStep(
     }
   }
 
+  // Look up the durable release request by its SOURCE identity (exact PR and
+  // reviewed head); the request's `revision` is the merged revision, which is
+  // never the candidate head, so it cannot be the lookup key. Retaining the
+  // merged revision inside the matched request keeps one exact request per
+  // PR/head and never replays a merge or fabricates a duplicate request.
   const existingRequest = context.snapshot.releaseRequests.find(
     (request) =>
       request.source.pullRequest === record.target.pr &&
-      request.revision === record.target.head,
+      request.source.head === record.target.head,
   );
   if (existingRequest !== undefined) {
     return observeReleaseAcceptance(deps, context, record, existingRequest);
@@ -2141,6 +2206,21 @@ async function reconcileMergeIntent(
     );
   }
   if (pull.state === "merged" && pull.mergeSha !== null) {
+    if (pull.head !== record.target.head) {
+      // Reconcile only the head this task reviewed: an observed merged head
+      // different from the saved reviewed head is an identity contradiction
+      // and must never produce a release request for the wrong revision.
+      return persistWork(
+        deps,
+        context,
+        markBlocked(
+          record,
+          "other",
+          "observed merged head identity mismatch",
+          deps.clock.now(),
+        ),
+      );
+    }
     return handleMergeOutcome(deps, context, record, {
       outcome: "merged",
       head: pull.head,

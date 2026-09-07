@@ -234,3 +234,45 @@ Deno.test("selection: WIP cap skips fresh publications at three unfinished PRs",
   assert.deepEqual(ranked.ordered, []);
   assert.equal(ranked.skipped[fresh.id], "wip");
 });
+
+Deno.test("selection: an existing-PR correction is never WIP-skipped", () => {
+  const correction = work("issue-1", {
+    source: { kind: "issue", id: "1", revision: SHA2 },
+    classification: { severity: "P2", priority: 9 },
+    nextStep: "work",
+    target: {
+      base: SHA1,
+      branch: "b",
+      checkpoint: null,
+      head: SHA2 as GitSha,
+      pr: 7,
+    },
+  });
+  const prs = Array.from(
+    { length: MAX_UNFINISHED_PRS },
+    (_, index) =>
+      work(`issue-${index + 10}`, {
+        source: { kind: "issue", id: `${index + 10}`, revision: SHA2 },
+        nextStep: "review",
+        wait: { reason: "review_pending", since: T0, until: NOW + 100000 },
+        target: {
+          base: SHA1,
+          branch: "b",
+          checkpoint: null,
+          head: SHA2 as GitSha,
+          pr: index + 20,
+        },
+      }),
+  );
+  const ranked = rankEligibleWork(
+    snapshot([correction, ...prs]),
+    repairConfigs(),
+    NOW,
+  );
+  assert.deepEqual(
+    ranked.ordered,
+    [correction.id],
+    "the correction of an already-owned PR remains eligible at the cap",
+  );
+  assert.equal(ranked.skipped[correction.id], undefined);
+});
