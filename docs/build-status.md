@@ -273,3 +273,9 @@ Remote identity/visibility, credential access, live rolling budgets, retention/s
 - m04 correction tip `acfd3ddc8fdecb2f89db323cff485dae6adb3f67` and m05 correction tip `3327897f2a2c7ce8b755fc97e79da71ca14cf34e` were independently tested and merged with ancestry preserved into canonical `0d997f12ee29760161f97c609ecb35aa578a384e`.
 - m04 repair tests passed 25/25, including bounded app-server writes/termination, fresh correction implementation, exact merge/release identity, and existing-PR cap handling. m05 release tests passed 57/57, including monitoring gaps, healthy managed responses, baseline insufficiency, verified Cloudflare handling and request-cohort accounting.
 - Correction worker lanes remain dirty only with pre-existing or task-created disposable test directories; source changes are committed and accepted tips are canonical ancestors. No target writes, publication, deployment or live model calls occurred.
+
+## Integrated Codex review rerun (2026-09-07 08:56 UTC)
+
+- The second exact-head review was run against canonical HEAD `2c219e613d1cf81ad034fffbe0ca4e9adff60b3d` with `codex review --base development`. The review harness reached 409 passing tests, then failed one environment-sensitive `DenoGitExecutor: bounded output and hanging descendants settle` check because its disposable child PID file was absent; the review exited without a verdict.
+- Per policy, a failed or verdict-less review is unavailable and does not clear the acceptance gate. The failed check was independently rerun once on the exact canonical head and passed 1/1. This does not replace a completed current-head Codex review; no P1 finding was accepted or dismissed from this run.
+- The updated orchestration rules were adopted at this safe boundary. Active review and worker ownership were preserved; no DSH control adapter, publication, deployment, target mutation or live model call was introduced.
