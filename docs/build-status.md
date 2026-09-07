@@ -243,3 +243,9 @@ Remote identity/visibility, credential access, live rolling budgets, retention/s
 - The m04 DSH process was stopped after its focused suite completed and then became a stale job wait; task-owned descendants were settled and `/tmp/sentinel-gfa795549e5/m04-stop-v2.json` records the disposition. Its lane source/tests were preserved; orphaned `sentinel-repair-test-*` directories remain untouched.
 - Primary independent checks passed 15 repair/selection tests, zero failed, in 3m13s; owned fmt/lint/type and diff checks passed. Evidence: `/tmp/sentinel-gfa795549e5/m04-primary-tests-v2.txt`, `m04-primary-fmt.txt`, `m04-primary-lint.txt`, and `m04-primary-check.txt`.
 - m04 tip `e0815c3` was committed in its worker lane and ancestry-preservingly merged into canonical. This is module-level acceptance only; Wave C wiring and the separate transport/backlog boundaries remain outstanding.
+
+## m01 transport checkpoint and integration (2026-09-07 06:38 UTC)
+
+- m01 transport correction completed naturally with terminal READY handback. Primary independently passed fmt/lint/check plus 86 GitHub tests, zero failed, in 11s; evidence `/tmp/sentinel-gfa795549e5/m01-primary-tests-v3.txt` and paired check reports.
+- m01 tip `95f2db1` was committed in its isolated lane and ancestry-preservingly merged into canonical. Exact-ref race rejection, descendant process-group settlement, bounded transport/output, and sanitized failures are now module-integrated. The stale v1 probe remains obsolete because it omits `expectedRef`; the corrected v3 probe and real bare-remote tests are the authoritative evidence.
+- Wave B modules m01-m05 are integrated locally. No Codex review, GitHub publication, deployment, target mutation, or live delivery proof has occurred. Wave C production entrypoint wiring and integrated lifecycle acceptance are next.
