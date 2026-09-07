@@ -51,3 +51,11 @@ Publication identity, hosted credentials, live budgets/retention/stability setti
 ## Next acceptance surface
 
 Complete target evidence capture and the exact-release-identity correction, then assemble the real gateway adapter, retained-capture preparation, trusted safe fixture source, isolated replay runtime, GitHub/model/review transports and release receipt resolver. Exercise the complete lifecycle through those adapters with scripted external transports and real temporary Git state. Only then freeze the candidate for the authorized integrated review and subsequent live gates. Do not add more placeholder host capabilities and call that composition complete.
+
+## Follow-up inspection at 21:56 UTC
+
+The canonical release correction is still being written and is not an accepted candidate. Independent validation of its draft rejects the actual managed target hostname `https://ai-ubq-fi.ubiquity-dao.deno.net`: the draft hostname regex accepts only one label before `.deno.net`. The real target shape must pass configuration validation as well as the REST-client probes before acceptance. The immutable URL helper also needs consistent handling of credentials, ports and non-root URL components. The recorded probe is `release-managed-host-primary-probe-v1.ts` under `/tmp/sentinel-gfa795549e5/`.
+
+A separate confirmed producer/consumer contradiction blocks normal incident pagination: `parseGatewayIndexPageV1` rejects a complete page with a continuation cursor, while the repair loop stops on incomplete coverage before following its cursor. Page completeness and normal continuation must be independent. The prepared correction preserves genuine missing-source coverage and requires a real adapter-to-entrypoint test with the highest-priority incident on a later page. This correction is not implemented yet.
+
+Direct execution of both scheduled entrypoint modules still throws for missing trusted host wiring, confirmed again in this inspection. The 465-test receipt above remains evidence for its recorded older source candidate, not for the changing release draft.
