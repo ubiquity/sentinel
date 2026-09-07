@@ -41,6 +41,7 @@ import type {
   StateReadView,
 } from "./contracts/ports.ts";
 import {
+  REPAIR_RUN_CEILING_MS,
   type RepairCycleOutcomeV1,
   type ReplayFixtureIdentitySourceV1,
   runRepairCycle,
@@ -68,7 +69,13 @@ export interface RepairEntrypointDepsV1 {
 }
 
 export interface RepairEntrypointOptionsV1 {
-  /** Absolute run deadline; declared operations must fit the remaining margin. */
+  /**
+   * Absolute run deadline; declared operations must fit the remaining margin.
+   * The caller-supplied deadline is bound by the fixed 120-minute run ceiling
+   * (the stricter of the two wins), so an unbounded caller value can never
+   * extend a run past the plan's ceiling; the loop also enforces the
+   * 90-minute no-new-model-work cutoff internally.
+   */
   deadline: number;
   /** Bounded persisted transitions per run. */
   stepLimit?: number;
@@ -99,6 +106,18 @@ export function runRepairEntrypoint(
         `across ${agreement.repositories.join(", ")}`,
     );
   }
+  // Bound the caller-supplied deadline by the fixed run ceiling before the
+  // loop's run-relative bounds are applied; the cycle re-clamps with its own
+  // start time for direct consumers. A NaN caller deadline is not a bound (its
+  // comparisons are all false) and must never bypass the fixed ceiling, so it
+  // is normalized to unbounded and the ceiling governs.
+  const callerDeadline = Number.isNaN(options.deadline)
+    ? Number.POSITIVE_INFINITY
+    : options.deadline;
+  const deadline = Math.min(
+    callerDeadline,
+    deps.clock.now() + REPAIR_RUN_CEILING_MS,
+  );
   return runRepairCycle(
     {
       clock: deps.clock,
@@ -112,7 +131,7 @@ export function runRepairEntrypoint(
       model: deps.model,
       budget: deps.budget,
     },
-    { deadline: options.deadline, stepLimit: options.stepLimit },
+    { deadline, stepLimit: options.stepLimit },
   );
 }
 

@@ -90,6 +90,11 @@ const CHECK_POLL_MS = 5 * 60_000;
 const RELEASE_POLL_MS = 5 * 60_000;
 const OPERATION_MARGIN_MS = 5 * 60_000;
 const DEFAULT_STEP_LIMIT = 32;
+
+/** Fixed repair job ceiling (plan §4): 120 minutes. */
+export const REPAIR_RUN_CEILING_MS = 120 * 60_000;
+/** No NEW model work may start after 90 minutes of one run (plan §4). */
+export const REPAIR_MODEL_CUTOFF_MS = 90 * 60_000;
 const MAX_IMPLEMENTATION_ATTEMPTS = 3;
 const MAX_OUTPUT_LIMIT_BYTES = 4096;
 const MODEL_ID = "gpt-5.6-luna" as const;
@@ -159,35 +164,90 @@ export type RepairCycleOutcomeV1 =
 interface LoopContextV1 {
   snapshot: RepairStateSnapshotV1;
   head: GitSha | null;
+  /** Run-relative bounds for every start decision in this run. */
+  bounds: RunBoundsV1;
+}
+
+/** Effective run bounds: caller deadline clamped by the fixed ceiling. */
+interface RunBoundsV1 {
+  /** Total deadline: min(caller deadline, run start + 120 minutes). */
+  runDeadline: number;
+  /** No NEW model work may start at/after this point of the run. */
+  modelCutoff: number;
 }
 
 type StepResultV1 =
   | { kind: "progress" }
   | { kind: "idle" }
   | { kind: "margin"; detail: string }
-  | { kind: "state_error"; detail: string };
+  | { kind: "state_error"; detail: string }
+  | { kind: "deferred"; detail: string };
 
 /** One run of the bounded repair loop. */
 export async function runRepairCycle(
   deps: RepairCycleDepsV1,
   options: RepairCycleOptionsV1,
 ): Promise<RepairCycleOutcomeV1> {
+  // Run-relative time bounds: the caller-supplied deadline is clamped to the
+  // fixed run ceiling (the stricter of the two always wins), and no NEW model
+  // work (implementation start or review request) may start after the 90-minute
+  // cutoff. A NaN caller deadline is not a bound at all (every comparison
+  // against NaN is false, so it must never bypass the fixed ceiling): it is
+  // treated as unbounded and the ceiling governs. The real clock is the wall
+  // clock; fakes advance it inside port calls so a step that crosses the
+  // cutoff mid-flight still fails closed.
+  const startedAt = deps.clock.now();
+  const callerDeadline = Number.isNaN(options.deadline)
+    ? Number.POSITIVE_INFINITY
+    : options.deadline;
+  const runDeadline = Math.min(
+    callerDeadline,
+    startedAt + REPAIR_RUN_CEILING_MS,
+  );
+  const modelCutoff = startedAt + REPAIR_MODEL_CUTOFF_MS;
+  const bounds: RunBoundsV1 = { runDeadline, modelCutoff };
   const stepLimit = options.stepLimit ?? DEFAULT_STEP_LIMIT;
   let steps = 0;
   let sourceError: string | null = null;
   let didWork = false;
+  // Records whose declared next operation cannot start under the current run
+  // bounds are deferred so that lower-ranked deterministic work still runs;
+  // the run ends in the existing typed "margin" outcome when nothing remains.
+  const deferred = new Set<string>();
 
   for (;;) {
-    let loaded = await loadSnapshot(deps);
+    if (deps.clock.now() >= runDeadline) {
+      return { status: "margin", detail: "repair run deadline reached" };
+    }
+    let loaded = await loadSnapshot(deps, bounds);
     if (loaded === null) {
+      // The state read is awaited wall-clock time: if it crossed the total
+      // deadline, even the one-time seed write must not start then (a later
+      // run inside its own window seeds).
+      if (deps.clock.now() >= runDeadline) {
+        return {
+          status: "margin",
+          detail: "repair run deadline reached during state read",
+        };
+      }
       // Branch creation: exactly one seeded snapshot (sequence 1), written
       // with expectedHead null; never a force overwrite of existing state.
-      loaded = await seedSnapshot(deps);
+      loaded = await seedSnapshot(deps, bounds);
       if (loaded === null) {
         return { status: "state_error", detail: "repair state unavailable" };
       }
     }
-    const context: LoopContextV1 = loaded;
+    const context: LoopContextV1 = { ...loaded, bounds };
+
+    // The initial state read is awaited wall-clock time and may have crossed
+    // the total deadline (fakes advance the clock inside port calls): no
+    // intake read may start at/after it.
+    if (deps.clock.now() >= runDeadline) {
+      return {
+        status: "margin",
+        detail: "repair run deadline reached during state read",
+      };
+    }
 
     if (steps === 0) {
       const intake = await pollIntake(deps, context);
@@ -223,23 +283,39 @@ export async function runRepairCycle(
       };
     }
 
-    const record = context.snapshot.work.find(
-      (work) => work.id === rank.ordered[0],
-    );
-    if (record === undefined) {
-      return { status: "state_error", detail: "selected record missing" };
+    let selected: WorkRecordV1 | null = null;
+    let cannotFit: string | null = null;
+    for (const id of rank.ordered) {
+      if (deferred.has(id)) continue;
+      const record = context.snapshot.work.find(
+        (work) => work.id === id,
+      );
+      if (record === undefined) {
+        return { status: "state_error", detail: "selected record missing" };
+      }
+      if (
+        declaredOperationFits(deps, context, record)
+      ) {
+        selected = record;
+        break;
+      }
+      // This record cannot start under the current bounds; keep looking for
+      // eligible deterministic work before giving up (never block it).
+      deferred.add(id);
+      cannotFit = `next operation for ${id} cannot fit`;
     }
-
-    if (
-      !(await declaredOperationFits(deps, context, record, options.deadline))
-    ) {
+    if (selected === null) {
       return {
         status: "margin",
-        detail: `next operation for ${record.id} cannot fit`,
+        detail: cannotFit ?? "no operation fits the remaining run margin",
       };
     }
 
-    const result = await executeStep(deps, context, record);
+    const result = await executeStep(deps, context, selected);
+    if (result.kind === "deferred") {
+      deferred.add(selected.id);
+      continue;
+    }
     if (result.kind === "state_error") {
       return { status: "state_error", detail: result.detail };
     }
@@ -268,15 +344,17 @@ export async function runRepairCycle(
 
 async function loadSnapshot(
   deps: RepairCycleDepsV1,
+  bounds: RunBoundsV1,
 ): Promise<LoopContextV1 | null> {
   const read = await deps.state.readRepair();
   if (!read.ok || read.value.status === "absent") return null;
-  return { snapshot: read.value.snapshot, head: read.value.head };
+  return { snapshot: read.value.snapshot, head: read.value.head, bounds };
 }
 
 /** Seed the repair branch once with sequence 1 when no snapshot exists. */
 async function seedSnapshot(
   deps: RepairCycleDepsV1,
+  bounds: RunBoundsV1,
 ): Promise<LoopContextV1 | null> {
   const now = deps.clock.now();
   const seed = parseRepairStateSnapshotV1({
@@ -295,7 +373,7 @@ async function seedSnapshot(
   });
   const written = await deps.state.writeRepair(seed, null);
   if (!written.ok || written.value.status !== "applied") return null;
-  return { snapshot: seed, head: written.value.head };
+  return { snapshot: seed, head: written.value.head, bounds };
 }
 
 async function persistTransition(
@@ -391,6 +469,13 @@ async function pollIntake(
   >();
 
   for (;;) {
+    // No new intake read may start at/after the total run deadline: every
+    // page read is awaited wall-clock time, so the bounds are rechecked
+    // between pages. A stop preserves whatever was already collected; the
+    // next run resumes the same scan.
+    if (deps.clock.now() >= context.bounds.runDeadline) {
+      break;
+    }
     const page = await deps.incidents.listUnresolvedIncidents(
       cursor,
       INCIDENT_PAGE_LIMIT,
@@ -431,6 +516,11 @@ async function pollIntake(
         continue;
       }
       // New incident: a trusted base must be observed before a record is owned.
+      // The page read is awaited wall-clock time: no new source read (base
+      // ref) may start after the total deadline.
+      if (deps.clock.now() >= context.bounds.runDeadline) {
+        break;
+      }
       const base = await readBase(deps, summary.repository);
       if (base === null) {
         error = `base unavailable for ${summary.repository.name}`;
@@ -460,7 +550,12 @@ async function pollIntake(
   const issueRepository = deps.configs.length === 1
     ? deps.configs[0].repository
     : null;
-  if (issueRepository !== null) {
+  if (
+    issueRepository !== null &&
+    deps.clock.now() < context.bounds.runDeadline
+  ) {
+    // No new issue intake read starts at/after the total deadline (the
+    // incident reads above are awaited wall-clock time).
     const issues = await deps.github.listOpenIssues();
     if (!issues.ok) {
       error = `issue source unavailable: ${issues.error.kind}`;
@@ -486,6 +581,9 @@ async function pollIntake(
           `${issueRepository.owner}/${issueRepository.name}`;
         let base = baseByRepository.get(repositoryKey);
         if (base === undefined) {
+          // The issue read above is awaited wall-clock time: stop before a
+          // new base-ref read after the total deadline.
+          if (deps.clock.now() >= context.bounds.runDeadline) break;
           base = await readBase(deps, issueRepository);
           baseByRepository.set(repositoryKey, base);
         }
@@ -539,27 +637,46 @@ async function pollIntake(
 }
 
 // ---------------------------------------------------------------------------
-// Scheduling: declared operations must fit the remaining margin.
+// Scheduling: declared operations must fit the run bounds.
 // ---------------------------------------------------------------------------
 
+/**
+ * A record whose immediate next action starts NEW model work (implementation
+ * or a correction session). Review/publish phases keep their deterministic
+ * parts but their review request is gated at the request site (they have no
+ * declared session duration of their own).
+ */
+function isModelStartAction(
+  snapshot: RepairStateSnapshotV1,
+  record: WorkRecordV1,
+): boolean {
+  return record.nextStep === "work" &&
+    (record.target.head === null ||
+      headRejectedByReview(snapshot, record));
+}
+
+/**
+ * Whether the declared operation of `record` may start now: the clock must be
+ * before the bounded run deadline, and a model start additionally requires the
+ * full declared session plus the reserved margin AND a clock before the
+ * no-new-model-work cutoff. Deterministic operations stay available within
+ * the reserved margin up to the total deadline.
+ */
 function declaredOperationFits(
   deps: RepairCycleDepsV1,
   context: LoopContextV1,
   record: WorkRecordV1,
-  deadline: number,
 ): boolean {
+  const bounds = context.bounds;
+  const now = deps.clock.now();
+  if (now >= bounds.runDeadline) return false;
   const config = configFor(deps, record.repository);
   if (config === null) return false;
-  if (
-    record.nextStep === "work" &&
-    (record.target.head === null ||
-      headRejectedByReview(context.snapshot, record))
-  ) {
+  if (isModelStartAction(context.snapshot, record)) {
+    if (now >= bounds.modelCutoff) return false;
     const bound = config.sessionBound;
     if (bound === null) return true;
-    if (
-      deps.clock.now() + bound.maxDurationMs + OPERATION_MARGIN_MS > deadline
-    ) {
+    if (now + bound.maxDurationMs + OPERATION_MARGIN_MS > bounds.runDeadline) {
       return false;
     }
   }
@@ -1199,6 +1316,18 @@ async function executeImplementationStep(
   record: WorkRecordV1,
   config: RepositoryConfigV1,
 ): Promise<StepResultV1> {
+  // No NEW model work after the 90-minute cutoff (or at/after the total run
+  // deadline): the start is rejected before any reservation is made (nothing
+  // is charged), and the record stays exactly as it was so a later run inside
+  // the cutoff starts it. The step is deferred, not terminal, so lower-ranked
+  // deterministic work still runs.
+  const bounds = context.bounds;
+  if (deps.clock.now() >= bounds.modelCutoff) {
+    return {
+      kind: "deferred",
+      detail: "implementation start is past the model cutoff",
+    };
+  }
   const now = deps.clock.now();
   if (record.counters.attempts >= MAX_IMPLEMENTATION_ATTEMPTS) {
     return persistWork(
@@ -1277,7 +1406,7 @@ async function executeImplementationStep(
   const durable = reservation;
 
   // The reservation write moved the state head; reload before persisting intent.
-  const fresh = await loadSnapshot(deps);
+  const fresh = await loadSnapshot(deps, context.bounds);
   if (fresh === null) {
     return { kind: "state_error", detail: "repair state unavailable" };
   }
@@ -1314,7 +1443,51 @@ async function executeImplementationStep(
       "issue state unavailable before model run",
       deps.clock.now(),
     );
-    return persistAfterSettlement(deps, replaceWorkMutation(blocked));
+    return persistAfterSettlement(
+      deps,
+      context.bounds,
+      replaceWorkMutation(blocked),
+    );
+  }
+
+  // Late-admission recheck: the durable admission and intent/issue preparation
+  // are awaited wall-clock work, so the cutoff (or the declared-maximum-plus-
+  // margin fit) may have been crossed AFTER the entry gate. A start that is
+  // provably never submitted is refunded with confirmed_not_submitted (never
+  // charged as ambiguous or submitted), its unsent intent is cleared, and the
+  // already-counted attempt gives the next run a fresh reservation identity so
+  // it resumes without a duplicate start.
+  const readyAt = deps.clock.now();
+  if (
+    readyAt >= bounds.modelCutoff ||
+    readyAt + bound.maxDurationMs + OPERATION_MARGIN_MS > bounds.runDeadline
+  ) {
+    const refunded = await deps.budget.settleModelStart({
+      id: durable.reservation.id,
+      outcome: "confirmed_not_submitted",
+      proofRef: runBoundsProofRef(durable.reservation.id),
+    });
+    if (refunded.status !== "settled" && refunded.status !== "idempotent") {
+      return {
+        kind: "state_error",
+        detail: "late admission settlement failed",
+      };
+    }
+    const afterRefund = await loadSnapshot(deps, context.bounds);
+    if (afterRefund === null) {
+      return { kind: "state_error", detail: "repair state unavailable" };
+    }
+    const cleared = clearIntent(withIntent, deps.clock.now());
+    const persisted = await persistTransition(
+      deps,
+      afterRefund,
+      replaceWorkMutation(cleared),
+    );
+    if (persisted.kind !== "progress") return persisted;
+    return {
+      kind: "deferred",
+      detail: "implementation start crossed the run bounds after admission",
+    };
   }
 
   const receipt = await deps.model.runModel({
@@ -1337,7 +1510,11 @@ async function executeImplementationStep(
       "model run ended without a trusted receipt",
       deps.clock.now(),
     );
-    return persistAfterSettlement(deps, replaceWorkMutation(blocked));
+    return persistAfterSettlement(
+      deps,
+      context.bounds,
+      replaceWorkMutation(blocked),
+    );
   }
   return handleModelReceipt(
     deps,
@@ -1405,7 +1582,7 @@ async function handleModelReceipt(
   }
   // The settlement write advanced the state; the exact new head must be
   // observed before the candidate transition is persisted (never a stale CAS).
-  const afterSettlement = await loadSnapshot(deps);
+  const afterSettlement = await loadSnapshot(deps, context.bounds);
   if (afterSettlement === null) {
     return { kind: "state_error", detail: "repair state unavailable" };
   }
@@ -1465,9 +1642,10 @@ async function settleAndBlock(
  */
 async function persistAfterSettlement(
   deps: RepairCycleDepsV1,
+  bounds: RunBoundsV1,
   mutate: (draft: RepairStateSnapshotV1) => void,
 ): Promise<StepResultV1> {
-  const fresh = await loadSnapshot(deps);
+  const fresh = await loadSnapshot(deps, bounds);
   if (fresh === null) {
     return { kind: "state_error", detail: "repair state unavailable" };
   }
@@ -1577,6 +1755,16 @@ async function executePublishStep(
   const persisted = await persistWork(deps, context, withIntent);
   if (persisted.kind !== "progress") return persisted;
 
+  // The push intent write is awaited wall-clock time: the total deadline is
+  // rechecked before the first publication mutation (no push may start at or
+  // after it). The durable push intent lets a later run re-push exactly once.
+  if (deps.clock.now() >= context.bounds.runDeadline) {
+    return {
+      kind: "margin",
+      detail: "publication crossed the total run deadline before push",
+    };
+  }
+
   const push = await deps.github.pushHead(
     `refs/heads/${branch}`,
     head,
@@ -1595,6 +1783,16 @@ async function executePublishStep(
   }
   if (push.value === "ambiguous") {
     return { kind: "progress" }; // reconciled next run by exact ref read
+  }
+  // The push is a real remote mutation: it may have crossed the total
+  // deadline. The finished push must not be repeated or lost, so the durable
+  // push intent stays and the run stops; the next run reconciles the exact
+  // ref and creates/reuses the PR once.
+  if (deps.clock.now() >= context.bounds.runDeadline) {
+    return {
+      kind: "margin",
+      detail: "publication crossed the total run deadline after push",
+    };
   }
   const pushedRecord = { ...record, updatedAt: now };
   if (record.target.pr !== null) {
@@ -1627,6 +1825,16 @@ async function createPullRequestFor(
   const withIntent = setIntent(record, intent, now);
   const persisted = await persistWork(deps, context, withIntent);
   if (persisted.kind !== "progress") return persisted;
+
+  // The PR intent write is awaited wall-clock time: before the PR creation
+  // mutation the total deadline is rechecked. The durable pull_request intent
+  // makes the next run reconcile the exact head ref and create the PR once.
+  if (deps.clock.now() >= context.bounds.runDeadline) {
+    return {
+      kind: "margin",
+      detail: "PR creation crossed the total run deadline",
+    };
+  }
 
   const title = record.source.kind === "incident"
     ? `Sentinel repair: ${record.source.id}`
@@ -1686,6 +1894,21 @@ async function requestReviewFor(
   prNumber: number,
 ): Promise<StepResultV1> {
   const now = deps.clock.now();
+  // A review request is NEW model work (it consumes the shared model-start
+  // budget and starts a reviewer session): at/after the 90-minute cutoff OR
+  // the total run deadline (a tighter caller deadline already governs it) it
+  // is rejected BEFORE any reservation, and the record stays unchanged so the
+  // next run inside the bounds performs it. Deferral never blocks lower-ranked
+  // deterministic work (the run continues and ends in the typed margin).
+  if (
+    now >= context.bounds.modelCutoff ||
+    now >= context.bounds.runDeadline
+  ) {
+    return {
+      kind: "deferred",
+      detail: "review request is past the run bounds",
+    };
+  }
   const head = record.target.head!;
   const operationKey = reviewOperationKey(prNumber, head);
 
@@ -1761,7 +1984,7 @@ async function requestReviewFor(
   const reservationId = reservation.reservation.id;
 
   // The admission write moved the state head; reload before persisting intent.
-  const fresh = await loadSnapshot(deps);
+  const fresh = await loadSnapshot(deps, context.bounds);
   if (fresh === null) {
     return { kind: "state_error", detail: "repair state unavailable" };
   }
@@ -1791,6 +2014,41 @@ async function requestReviewFor(
   );
   if (persisted.kind !== "progress") return persisted;
 
+  // Late-admission recheck: the durable admission and intent write are awaited
+  // wall-clock work, so the 90-minute cutoff OR the total run deadline (a
+  // tighter caller deadline already governs it) may have been crossed AFTER
+  // the entry gate. A review start that is provably never submitted is
+  // refunded with confirmed_not_submitted, its unsent intent is cleared, and
+  // the round counter it already prepared gives the next run a fresh
+  // reservation identity so it resumes without a duplicate start.
+  if (
+    deps.clock.now() >= context.bounds.modelCutoff ||
+    deps.clock.now() >= context.bounds.runDeadline
+  ) {
+    const refunded = await settleReviewCharge(
+      deps,
+      context,
+      reservationId,
+      "confirmed_not_submitted",
+      runBoundsProofRef(reservationId),
+    );
+    if (refunded.kind !== "progress") return refunded;
+    const cleared = countReviewRound(
+      clearIntent(withIntent, deps.clock.now()),
+      deps.clock.now(),
+    );
+    const persistedClear = await persistAfterSettlement(
+      deps,
+      context.bounds,
+      replaceWorkMutation(cleared),
+    );
+    if (persistedClear.kind !== "progress") return persistedClear;
+    return {
+      kind: "deferred",
+      detail: "review request crossed the run bounds after admission",
+    };
+  }
+
   // Invocation happens strictly after the durable intent exists.
   const submitted = await deps.github.requestReview({
     prNumber,
@@ -1805,6 +2063,7 @@ async function requestReviewFor(
     // the exact remote review state instead of resubmitting.
     const settled = await settleReviewCharge(
       deps,
+      context,
       reservationId,
       "ambiguous",
     );
@@ -1814,6 +2073,7 @@ async function requestReviewFor(
   if (submitted.value.outcome === "ambiguous") {
     const settled = await settleReviewCharge(
       deps,
+      context,
       reservationId,
       "ambiguous",
     );
@@ -1822,12 +2082,14 @@ async function requestReviewFor(
   }
   const settled = await settleReviewCharge(
     deps,
+    context,
     reservationId,
     "submitted",
   );
   if (settled.kind !== "progress") return settled;
   return persistAfterSettlement(
     deps,
+    context.bounds,
     replaceWorkMutation(
       advanceToReview(
         countReviewRound(clearIntent(withIntent, now), now),
@@ -1846,18 +2108,22 @@ async function requestReviewFor(
 /**
  * Durable settlement of one review admission. "ambiguous" preserves the
  * charge for a lost/uncertain response; "submitted" records the confirmed
- * invocation. An already-charged terminal outcome is idempotent in effect and
- * never adds a second charge; a contradictory terminal outcome stops safely.
+ * invocation; "confirmed_not_submitted" refunds a start that is provably
+ * never submitted and requires the restricted run-bound proof ref. An
+ * already-charged terminal outcome is idempotent in effect and never adds a
+ * second charge; a contradictory terminal outcome stops safely.
  */
 async function settleReviewCharge(
   deps: RepairCycleDepsV1,
+  context: LoopContextV1,
   reservationId: string,
-  outcome: "submitted" | "ambiguous",
+  outcome: "submitted" | "ambiguous" | "confirmed_not_submitted",
+  proofRef: string | null = null,
 ): Promise<StepResultV1> {
   const settled = await deps.budget.settleModelStart({
     id: reservationId,
     outcome,
-    proofRef: null,
+    proofRef,
   });
   if (settled.status === "settled" || settled.status === "idempotent") {
     return { kind: "progress" };
@@ -1866,7 +2132,7 @@ async function settleReviewCharge(
     // A contradictory terminal outcome: reconcile the exact reservation
     // before deciding. An already charged (submitted/ambiguous) reservation
     // preserves the charge; anything else fails closed.
-    const read = await loadSnapshot(deps);
+    const read = await loadSnapshot(deps, context.bounds);
     if (read === null) {
       return { kind: "state_error", detail: "repair state unavailable" };
     }
@@ -1923,6 +2189,16 @@ async function reconcilePublishIntent(
         ),
       );
     }
+    // The ref read is awaited wall-clock time: if it crossed the total
+    // deadline, the push is proven applied and the push intent must stay
+    // durable so the next run continues the same publication (PR creation or
+    // review request) without repeating the push.
+    if (deps.clock.now() >= context.bounds.runDeadline) {
+      return {
+        kind: "margin",
+        detail: "publication continuation crossed the total run deadline",
+      };
+    }
     const cleared = {
       ...clearIntent(record, now),
       target: { ...record.target },
@@ -1976,6 +2252,15 @@ async function reconcilePublishIntent(
         ),
       );
     }
+    // The remote PR read is awaited wall-clock time: no PR creation mutation
+    // may start at/after the total deadline. The pull_request intent stays
+    // durable, so the next run creates the PR exactly once.
+    if (deps.clock.now() >= context.bounds.runDeadline) {
+      return {
+        kind: "margin",
+        detail: "PR reconciliation crossed the total run deadline",
+      };
+    }
     return createPullRequestFor(
       deps,
       context,
@@ -1995,12 +2280,13 @@ async function reconcilePublishIntent(
     if (intent.requestId !== null) {
       const settled = await settleReviewCharge(
         deps,
+        context,
         intent.requestId,
         "ambiguous",
       );
       if (settled.kind !== "progress") return settled;
     }
-    const afterSettlement = await loadSnapshot(deps);
+    const afterSettlement = await loadSnapshot(deps, context.bounds);
     if (afterSettlement === null) {
       return { kind: "state_error", detail: "repair state unavailable" };
     }
@@ -2259,6 +2545,16 @@ async function executeMerge(
   const persisted = await persistWork(deps, context, withIntent);
   if (persisted.kind !== "progress") return persisted;
 
+  // The merge intent write is awaited wall-clock time: no merge mutation may
+  // start at/after the total deadline. The merge intent stays durable, so the
+  // next run re-reads the exact PR gate and merges exactly once.
+  if (deps.clock.now() >= context.bounds.runDeadline) {
+    return {
+      kind: "margin",
+      detail: "merge crossed the total run deadline",
+    };
+  }
+
   const merged = await deps.github.mergePullRequest(mergeRequest);
   if (!merged.ok) {
     return persistWork(
@@ -2410,6 +2706,15 @@ async function reconcileMergeIntent(
       ),
     );
   }
+  // The merge-gate read is awaited wall-clock time: it may have crossed the
+  // total deadline, and the merge mutation must not start then. The merge
+  // intent stays durable; the next run re-reads the gate and merges once.
+  if (deps.clock.now() >= context.bounds.runDeadline) {
+    return {
+      kind: "margin",
+      detail: "merge gate crossed the total run deadline",
+    };
+  }
   return executeMerge(deps, context, record);
 }
 
@@ -2543,6 +2848,15 @@ async function retryClosure(
     );
   }
   const now = deps.clock.now();
+  // The issue_closure intent is durable: the closure mutation never starts
+  // at/after the total deadline (the release read may have crossed it), so
+  // the next run retries the exact closure once.
+  if (now >= context.bounds.runDeadline) {
+    return {
+      kind: "margin",
+      detail: "issue closure crossed the total run deadline",
+    };
+  }
   const closed = await deps.github.closeIssue(issueNumber);
   if (!closed.ok) {
     // Closure-only retry: the issue_closure intent remains and only the
@@ -2681,6 +2995,14 @@ function normalizePathPrefix(value: string): string {
     .replace(/^\.\//, "")
     .replace(/\/{2,}/g, "/")
     .replace(/\/+$/, "");
+}
+
+/**
+ * Restricted trusted proof ref for an admission whose start was provably
+ * never submitted because the run bounds were crossed during preparation.
+ */
+function runBoundsProofRef(reservationId: string): string {
+  return `artifact://sentinel/run-bounds/${reservationId}`;
 }
 
 /** Preserve the exact request timestamp across durable review waits. */

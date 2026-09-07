@@ -28,6 +28,10 @@ concurrency:
 jobs:
   repair:
     runs-on: ubuntu-latest
+    # Plan §4 fixed job ceiling: 120 minutes. The loop enforces the same
+    # run-relative ceiling plus the 90-minute no-new-model-work cutoff; this
+    # is the host-side hard stop below GitHub's six-hour hosted-job maximum.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
       - uses: denoland/setup-deno@v2
