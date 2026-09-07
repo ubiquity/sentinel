@@ -12,6 +12,8 @@ The plan's opening status and planned-lane labels describe its planning snapshot
 
 ## Finding
 
+Current correction (23:37 UTC): actual gateway discovery is blocked by a producer/consumer provenance mismatch. The 23:28 index acceptance proves wire parsing and capture binding, not successful consumption by `GatewayIncidentAdapter`. See the final checkpoint below.
+
 The code follows the proposed polling architecture at module level, but the complete production path is not assembled. The main divergence is between tested component behavior and the required autonomous delivery outcome. Both scheduled commands still reach direct entrypoints that throw for missing host wiring. Passing the local harness cannot establish a working standalone deployment.
 
 ## Requirement and evidence matrix
@@ -79,3 +81,19 @@ Target m06 commit `f771c2a9022ea4bdc4b2eb9dfd578c737da6437d` adds a passive, sup
 Primary independently ran 25 focused tests and three cross-repository probes with zero failures. The probes use the actual authenticated handler, standalone strict index parser, incident-filtered encrypted export and actual decryption; they verify the original request bytes, the frozen 1..100 query range, and historical revision/timestamp binding across a new capture followed by an older duplicate. Source/test/toolchain hashes stayed unchanged through acceptance and the commit hooks. A native read-only DSH child checked the binding while the sole parent corrected the source; both completed and all jobs settled.
 
 This closes the earlier missing index/reference producer gap locally. These target commits are not yet reviewed, published, merged or deployed. They still capture request bytes and observations only. Real upstream byte capture before provider normalization, trusted permanent fixture generation, complete runtime wiring, final review and live delivery/rollback proof remain incomplete.
+
+## Actual adapter divergence confirmed at 23:37 UTC
+
+Rechecked Sentinel HEAD `00710af4cf869f4a78a07f3d417de5431597e010` and clean target m06 HEAD `f771c2a9022ea4bdc4b2eb9dfd578c737da6437d`. A credential-free, network-disabled synthetic probe exercised the actual target request handler, authenticated index route and actual standalone `GatewayIncidentAdapter.listUnresolvedIncidents(null, 1)`.
+
+The producer emitted provenance endpoint `/v1/responses`. Strict wire parsing succeeded, but the actual adapter returned `{"ok":false,"error":{"kind":"invalid","detail":"gateway index row failed record validation"}}`. Target `normalizeSentinelIncidentEndpoint` permits recognized relative paths or `other`; standalone `parseProvenance` requires an absolute HTTP(S) URL. `gatewayRowToSummary` passes the value through unchanged. Thus normal newly captured incidents cannot enter repair selection through the actual adapter.
+
+This narrows the 23:28 acceptance claim: wire parsing and capture binding passed, but actual adapter consumption does not. Reproducer: `/tmp/sentinel-gfa795549e5/m06-index-actual-adapter-audit-v1.ts`, derived from the existing synthetic handler probe without changing that original. Exit 0 means the probe reproduced the expected rejection; it is not a passing integration result. Previous ciphertext/export assertions also passed. No production requests, model calls or source changes occurred. This bounded probe was run directly and has no registered evidence-archive receipt.
+
+Immediate next work: reconcile trusted endpoint provenance between producer and domain contract, then require actual handler → actual adapter success as the acceptance check. Preserve safe endpoint classification and exclude untrusted host/query data. Upstream capture remains the next larger missing capability after this defect. The full suite was not rerun for this documentation-only audit; earlier test counts retain their recorded candidate scope.
+
+## Follow-up: artifact reference mismatch at 23:49 UTC
+
+The DSH URL-projection draft passes 26 target tests, but independent actual adapter acceptance still rejects its records. A second incompatible wire field is now identified: target index refs are `capture:<id>`, while the domain restricted-ref parser allows `artifact`, `fixture` and `secret` schemes. The actual retained store uses `artifact://sentinel/<incidentId>/<captureId>`. The original wire-parser-only test missed both constraints.
+
+The candidate is not accepted. A bounded target correction now maps validated internal capture refs to the exact retained artifact namespace at the wire projection only, preserving storage identities and digests. Primary acceptance has been extended through actual adapter listing, actual evidence read, actual retained store and standalone decryption, with temporary storage and synthetic data. No model/network/deployment call is part of that check.

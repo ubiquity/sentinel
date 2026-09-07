@@ -1029,3 +1029,126 @@ ingestion into trusted bounded restricted storage **before model admission** —
 never by asserting the current TTL already meets the contract. Live
 owner-approved retention/storage bounds and the target producer seam remain
 activation blockers (plan §10).
+
+## 12. Private upstream capture cutover (implementation contract, 2026-09-07)
+
+Primary architecture decision, 2026-09-07. Governs the next coordinated
+producer/consumer implementation on the existing Sentinel canonical lane and
+target m06 lane. Not a completion receipt. No worker owns this file. This
+replaces tentative upstream notes for format decisions.
+
+## Transport and metadata
+
+Keep outer manifest version 1, gzip/binary framing, existing ciphertext
+chunking, AES/HKDF salt and AAD unchanged. Hard-cut over private plaintext
+metadata from version 1 to version 2 in producer and consumer together. Existing
+request-only v1 plaintext is unsupported by the new decryptors, never upstream
+proof. Do not add legacy fallback. Keep existing 256 KiB metadata and 32 MiB
+request bounds; preserve exact request bytes. New required metadata key
+`upstream` has this exact shape:
+
+- version: 1
+- attempts: array, at most 8, in actual dispatch order
+- attempts_truncated: boolean
+- bytes_truncated: boolean
+- chunks_truncated: boolean
+
+Each attempt has exactly provider, status, content_type, chunks_base64,
+terminal. Provider is a trusted literal enum
+chatgpt_codex/surplus/metered/cerebras. status is null until headers, otherwise
+integer 100..599. content_type is null before headers, otherwise
+text/event-stream, application/json or other; normalize MIME before semicolon
+without retaining arbitrary text. chunks_base64 is an ordered array of canonical
+padded standard-base64 strings. terminal is pending, fetch_error, eof,
+read_error or cancelled. Before-header attempts have no chunks; fetch_error
+requires null status/content_type. Header-bearing read_error/cancelled/eof
+require a status. A pending attempt can have no headers or partially consumed
+body. No free-form error, URLs, request IDs, headers, account IDs, timestamps or
+durations.
+
+Aggregate bounds: 131072 decoded bytes, 256 chunks, 8 attempts. Once a
+respective bound prevents capture, set its truncation flag permanently. Store a
+copied prefix of the current chunk only if bytes remain; the flag discloses
+omitted tail. Do not split a chunk for convenience. Omit empty chunks. No
+unbounded omitted counter. Snapshot clones only these finite bytes. Encode
+base64 only for snapshot serialization; internal retained buffers are zeroable
+Uint8Arrays. Validate canonical base64, exact keys, aggregate byte/chunk bounds
+and cross-field consistency on both producer and consumer. Crypto-authenticated
+JSON is still untrusted input to strict parsing. Existing metadata cap may
+reject a capture; never silently drop upstream to make it fit.
+
+`upstreamCaptured` in the domain replay contract remains unavailable until
+trusted sanitization creates a verified fixture digest. A raw transcript is
+private evidence, not a safe fixture. No attempts, any truncation, fetch_error,
+read_error, cancelled or pending must never be labeled complete raw response
+coverage. EOF with all bounds intact proves the complete observed response body
+only. A parsed terminal followed by consumer cancellation is a consumed prefix,
+not network EOF. Later replay may reproduce an explicit recorded interruption
+but must not call it complete raw bytes.
+
+## Fingerprint cutover
+
+Use existing HMAC key derivation purpose unchanged. Fingerprint input frame
+namespace becomes `uos-sentinel-replay-v2:fingerprint`; retain existing method,
+endpoint, sorted compatibility-header text, request body and failure-signature
+frames in that order, then append one frame of canonical upstream JSON.
+Canonical JSON recursively sorts object keys lexicographically, preserves array
+order, and uses JSON.stringify primitive/string encoding, no whitespace.
+Strictly validate before canonicalizing. No capture/request IDs or timestamps in
+trace, so equivalent evidence can dedupe. Different partial/complete traces
+cannot suppress one another. Keep case-group identity exactly v1 request-only
+HMAC for stable grouping. Existing v1 dedupe cannot collide with v2 fingerprint
+namespace. Decryptors recompute the same v2 HMAC and verify old case-group HMAC,
+exact capture timestamp and failure signature.
+
+## Passive request-owned recorder and provider boundaries
+
+One internal request-owned recorder, carried through existing UsageContext and
+provider options. No global fetch interception, clone/tee, new product
+configuration, extra upstream request or paid call. Record dispatch only
+immediately before actual fetch after admission/abort checks; quota denial is
+not an attempt. Provider hooks receive only a fixed provider literal, response
+and fixed terminal disposition, never authenticated request
+objects/headers/URL/account data.
+
+Codex: start in fetchPreparedCodexResponses.fetchAttempt actual onDispatch
+callback; wrap fetchCodexResponseWithAuth result before response WeakMap
+account/affinity/health registration. Each intermediate retry is its own
+attempt; record no-header error only after dispatch. Surplus: wrap before
+normalizeSurplusResponsesStream. Metered and Cerebras: wrap their raw fetch
+result. Pass recorder through all existing openai.ts call sites. Preserve
+dispatch accounting, retry waterfall, callbacks and original error behavior.
+
+Wrap response body with highWaterMark:0. Read only when the existing consumer
+reads. Retain a copy of each consumed original chunk; enqueue that same original
+chunk. Forward cancellation to original reader, preserve original thrown error
+object, status/statusText/headers and observable response metadata used by
+callers. Do not read ahead or drain for capture. A bodyless response records EOF
+with zero bytes. Recorder operations are best effort; capture failure cannot
+replace a gateway response. No metadata registration may remain attached only to
+the pre-wrapper response when consumers get the wrapper.
+
+Seal/snapshot at the existing application-terminal capture handoff, not at
+initial response-header return. Snapshot before awaits/cleanup, so HMAC and
+plaintext use the same immutable trace. If application terminal precedes
+upstream completion, snapshot marks pending coverage, no added waiting.
+Carefully handle handler backgroundReplayInput copies: shallow copying a shared
+live recorder then zeroing original must not erase the snapshot. Use one
+explicit existing-path snapshot helper if needed to copy body and trace
+together. Successful requests also dispose retained bytes; after sealing no
+future read retains additional capture bytes, though the real stream still
+forwards normally. Zero temporary and discarded buffers through existing cleanup
+paths. Do not start a free-running recorder task.
+
+## Acceptance
+
+Focused actual-provider offline transports must cover raw Surplus
+pre-normalization bytes; Codex intermediate retries and preserved WeakMap
+telemetry; metered/Cerebras paths; admission denial; no headers; read error;
+cancellation; zero eager reads; each bound and fixed metadata allowlist. Then
+actual handler failure -> authenticated index -> actual standalone adapter ->
+incident-filtered encrypted export -> retained store -> standalone decrypt must
+recover exact request and raw upstream bytes with truthful coverage. Producer
+golden fixture must be regenerated using actual target functions with public
+synthetic data. Existing independent tamper/HMAC/bounds tests must be updated to
+v2, not bypassed. No model/network/GitHub/deploy calls in local tests.
