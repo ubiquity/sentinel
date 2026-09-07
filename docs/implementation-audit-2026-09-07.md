@@ -38,14 +38,16 @@ The code follows the proposed polling architecture at module level, but the comp
 
 Focused independent checks passed for these changes. The integrated `test:local` run on the exact source candidate passed 465 tests with zero failures in 8 minutes 21 seconds; formatting, lint and types passed, and before/after source hashes matched. The build-status ledger records the receipt. This proves the existing harness, not the missing real-adapter composition or live delivery.
 
-## Owner decision that blocks target implementation
+## Target policy decision resolved; integration is in progress
 
-Current ai.ubq.fi `AGENTS.md`, Sentinel Retirement, says: “Do not restore Sentinel workflows, schedules, incident delivery, request capture, or deployment credentials in this repository.” This conflicts with m06's required capture/export integration. Current inspected target revision is `9331946ef10d3b7259b5ca4933598dd380c1d794`.
+At target base `9331946ef10d3b7259b5ca4933598dd380c1d794`, ai.ubq.fi `AGENTS.md` prohibited restoring request capture and incident delivery. The owner explicitly approved the narrow m06 exception at 21:07 UTC: authenticated failure capture/export, bounded upstream replay data, and exact-build receipts, while keeping scheduling and agents standalone and live activation separate. The target lane now records that exception in its instructions.
 
-The concrete pending exception is authenticated failure capture/export, bounded upstream replay data, and exact-build receipts in ai.ubq.fi, while keeping Sentinel scheduling and agents in the standalone repository. Live activation remains separate. No target edit or credential transfer has been made. If capture must remain retired, the owner must choose a different authoritative evidence source or revise the captured-request outcome; the implementation must not silently weaken that outcome.
+Local target commits `5df8cbd0` and `93cac701` restore the authenticated encrypted export and automatic request-capture path. Thirteen focused tests pass, including actual handler capture/export and unauthorized rejection; an independent cross-repository probe proves compatibility with standalone retained decryption. CI now invokes the focused real-KV task. These commits remain local on the recorded m06 lane, not reviewed, merged or deployed. Upstream recording, unresolved discovery, retention and build receipts remain incomplete.
+
+Further release divergence was verified during integration: the official Deno CLI cannot supply the custom revision labels required by the current release port, and a synthetic probe shows `sampleHealth` accepts contradictory JSON body and header identities. Both need correction before exact-build acceptance. The build-status ledger records the source evidence and failing probe.
 
 Publication identity, hosted credentials, live budgets/retention/stability settings, promotion ownership transfer and a fresh acceptance-review cycle are also unresolved. These are distinct from local implementation and must be recorded explicitly before activation.
 
 ## Next acceptance surface
 
-After the target evidence decision, assemble the real gateway adapter, retained-capture preparation, trusted safe fixture source, isolated replay runtime, GitHub/model/review transports and release receipt resolver. Exercise the complete lifecycle through those adapters with scripted external transports and real temporary Git state. Only then freeze the candidate for the authorized integrated review and subsequent live gates. Do not add more placeholder host capabilities and call that composition complete.
+Complete target evidence capture and the exact-release-identity correction, then assemble the real gateway adapter, retained-capture preparation, trusted safe fixture source, isolated replay runtime, GitHub/model/review transports and release receipt resolver. Exercise the complete lifecycle through those adapters with scripted external transports and real temporary Git state. Only then freeze the candidate for the authorized integrated review and subsequent live gates. Do not add more placeholder host capabilities and call that composition complete.
