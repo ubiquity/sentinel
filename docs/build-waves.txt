@@ -1,0 +1,39 @@
+SENTINEL BUILD ORDER
+
+PRIMARY ORCHESTRATOR
+|
++-- WAVE A: FOUNDATION [one writer, canonical lane]
+|   +-- Freeze shared contracts and fixtures
+|   +-- Implement state and model-budget records
+|   +-- Establish hermetic test harness
+|   `-- Commit validated foundation F
+|
++-- WAVE B: MODULES [isolated lanes; up to three writers initially]
+|   +-- m01-github   : GitHub access, PRs and review evidence
+|   +-- m02-evidence : gateway incidents and restricted artifacts
+|   +-- m03-replay   : isolated reproduction and regression tests
+|   +-- m04-repair   : polling, selection and bounded agent work
+|   +-- m05-release  : deterministic Deno promotion and rollback
+|   `-- m06-gateway  : existing app capture/retention/build seams
+|       `-- Separate repository; reconcile its writer first
+|
++-- WAVE C: INTEGRATION [one writer, canonical lane]
+|   +-- Integrate accepted commits with ancestry preserved
+|   +-- Connect actual entrypoints, workflows and adapters
+|   +-- Prove complete local lifecycle and crash recovery
+|   `-- Freeze integrated acceptance candidate
+|
++-- CODEX REVIEW [first review here, not per module]
+|   +-- Review exact integrated candidate
+|   +-- Batch substantive corrections if required
+|   `-- Revalidate and review changed candidate as needed
+|
+`-- ACTIVATION AND LIVE ACCEPTANCE
+    +-- Set owner budget, retention and stability policy
+    +-- Reconcile target and release ownership
+    +-- Prove isolated Deno release / exact rollback
+    +-- Enable authorized live work
+    `-- Prove two new deliveries and continued selection
+
+Parallel development does not enable parallel production coding agents.
+All exact lane identities, scopes and gates are in ../MASTER-PLAN.md.

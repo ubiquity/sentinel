@@ -1,0 +1,136 @@
+SENTINEL — COMPLETE LIFECYCLE
+Runtime design snapshot: 2026-09-06; copied into the new master plan.
+Parallel build modules are defined separately in ../MASTER-PLAN.md.
+
+Read downward for order. Repair and release are separate scheduled runs.
+Both poll saved state; neither needs webhooks. Optional future modules
+are marked [LATER]. This describes the proposed system, not deployed code.
+
+SENTINEL
+|
++-- BOOTSTRAP [LATER]
+|   +-- Read active Sentinel version
+|   +-- Verify configuration and state compatibility
+|   +-- Launch swappable main runtime
+|   +-- Invalid activation: retain compatible version
+|   `-- Keep authority and safety policy outside agent write scope
+|
++-- REPAIR RUN [cron; one writer; model budget applies]
+|   |
+|   +-- 1. LOAD AND RECOVER
+|   |   +-- Load target repositories, adapters and limits
+|   |   +-- Read saved progress and checkpoints
+|   |   `-- Reconcile incomplete remote operations
+|   |       +-- Existing branch / PR: reuse it
+|   |       +-- Review requested: retrieve status
+|   |       `-- Release accepted: finish issue closure
+|   |
+|   +-- 2. POLL [deterministic; no inference]
+|   |   +-- App adapter: unresolved incident groups
+|   |   +-- GitHub: PRs, reviews and CI
+|   |   `-- GitHub: issues and prerequisites
+|   |
+|   +-- 3. SELECT NEXT ELIGIBLE ACTION
+|   |   +-- Finish existing delivery bookkeeping
+|   |   +-- Active production incidents
+|   |   +-- P0/P1 review corrections
+|   |   +-- Other 5xx incidents and PR repairs
+|   |   `-- Issues: highest priority, then oldest first
+|   |       `-- Skip blocked, owned or waiting work
+|   |
+|   +-- 4. CHECK MODEL BUDGET
+|   |   +-- Check rolling-hour and seven-day limits
+|   |   +-- Available: save reservation before invocation
+|   |   `-- Exhausted: defer inference
+|   |       `-- Deterministic work may continue
+|   |
+|   +-- 5. PREPARE TARGET
+|   |   +-- Clone exact application revision
+|   |   +-- Create or resume isolated repair branch
+|   |   `-- Retrieve incident evidence
+|   |       +-- Original request and error context [PRIVATE]
+|   |       `-- Sanitized request / upstream fixture
+|   |
+|   +-- 6. REPRODUCE AND REPAIR [bounded agent]
+|   |   +-- Prove fixture fails on original revision
+|   |   +-- Modify application within allowed scope
+|   |   +-- Replay against modified server
+|   |   +-- Add permanent regression test to target CI
+|   |   `-- Run normal target validation
+|   |       +-- Pass: publish
+|   |       `-- Fail: bounded correction or explicit blocker
+|   |
+|   +-- 7. PUBLISH AND REQUEST REVIEW
+|   |   +-- Push candidate; create or update same PR
+|   |   +-- Reserve budget; request current-head review
+|   |   `-- Save WAITING_REVIEW
+|   |       `-- Move to another task; do not wait idle
+|   |
+|   +-- 8. PROCESS REVIEW [on a subsequent poll]
+|   |   +-- Pending / unavailable: keep waiting
+|   |   +-- Stale head: obtain a valid new review
+|   |   +-- P0/P1: correct, validate, request fresh review
+|   |   |   `-- Exhausted correction budget: block, never merge
+|   |   `-- Accepted current head
+|   |       +-- Verify CI, current base and protections
+|   |       +-- Verify no conflicting release
+|   |       `-- Merge exact head; save release request
+|   |
+|   `-- 9. CONTINUE OR EXIT
+|       +-- Eligible work and time: return to polling
+|       `-- Otherwise: next cron resumes saved state
+|
++-- DENO RELEASE RUN [separate cron; no inference]
+|   |
+|   +-- 1. Read requests and unfinished release records
+|   +-- 2. Identify exact merged SHA and built revision
+|   +-- 3. Replay / probe candidate before promotion
+|   +-- 4. Save healthy previous revision [ROLLBACK TARGET]
+|   +-- 5. Promote exact candidate through Deno API
+|   |   `-- Verify stable route SHA and revision identity
+|   +-- 6. Monitor objective production acceptance
+|   |   +-- Pass: save acceptance receipt
+|   |   |   `-- Repair loop observes receipt, then closes issue
+|   |   +-- Candidate-caused failure
+|   |   |   `-- Restore exact previous revision, then verify
+|   |   `-- Interrupted / insufficient evidence
+|   |       `-- Preserve state; resume without claiming success
+|   `-- 7. Continue configured stability checks
+|       `-- Never roll back an unrelated newer release
+|
++-- DURABLE STORAGE
+|   +-- Target Git repository
+|   |   `-- Source, branches, PRs, fixtures, regression tests
+|   +-- Application artifact storage [RESTRICTED]
+|   |   `-- Original requests, upstream context, error logs
+|   +-- Sentinel repair-state branch [REPAIR WRITER ONLY]
+|   |   `-- Progress, budgets, checkpoints, release requests
+|   `-- Sentinel release-state branch [RELEASE WRITER ONLY]
+|       `-- Revision identities, measurements, release receipts
+|
+`-- SELF-IMPROVEMENT [LATER]
+    +-- Capture Sentinel defect and reproducer
+    +-- Propose fix in Sentinel's own repository
+    +-- Run tests and obtain review acceptance
+    +-- Maintainer activates new main runtime
+    `-- Future: bootstrap-controlled activation and recovery
+        `-- Agent cannot rewrite its own authority or guard
+
+
+IMPORTANT BOUNDARIES
+
+- Review acceptance requires a verified completed review of the current
+  head with no unresolved P0/P1 findings; silence is not acceptance.
+- Hourly/seven-day start limits are local Sentinel limits, not exact
+  measurements of subscription tokens or remaining provider allowance.
+- Target CI builds the application. The release controller exclusively
+  owns stable promotion and rollback; competing writers must be removed.
+- For the gateway, retain exact revision/health verification and the
+  existing 30-minute acceptance window with 30-second sampling.
+- Save checkpoints during work. A terminated runner must not erase an
+  already published candidate or cause duplicate PR/review submission.
+- GitHub schedules and runners can be delayed or unavailable. They do
+  not provide a guaranteed immediate incident or rollback response.
+
+Authoritative build plan: ../MASTER-PLAN.md
+Detailed rationale: design-rationale.md
