@@ -261,3 +261,9 @@ Remote identity/visibility, credential access, live rolling budgets, retention/s
 - Production entrypoints, release/repair workflow wiring, root task registration, configuration example and six integration tests are now present. The release build receipt remains unavailable unless a trusted resolver is injected; no target ownership transfer or activation occurred.
 - Primary independent evidence on the worker tip: `deno task test:integration` passed 6/6; credential-free `deno task test:local` passed 389/389; `deno fmt --check`, `deno lint` and `deno task check` passed. No external calls or GitHub writes were made.
 - Temporary test repositories and scratch directories were settled and removed by the worker; the worker lane is clean. This is integrated local acceptance evidence only. Codex review, publication, deployment, live target proof and exact rollback proof remain pending.
+
+## Integrated Codex review (2026-09-07 07:49 UTC)
+
+- Local review command: `codex review --base development`, exact canonical worktree `/Users/nv/repos/ubiquity/sentinel/.codex-worktrees/master-plan-gfa795549e5`, reviewed HEAD `af09b80997bd9ff8ad4ef61317709ea359e85bce`, exit 0.
+- Review produced seven substantiated P1 findings and four P2 findings spanning merge/release identity checks, correction execution, model transport shutdown/write serialization, acceptance continuity and health evidence, baseline handling, PR-cap logic and log cohort accounting. The reviewer supplied independent credential-free reproductions; no finding was auto-dismissed.
+- Delivery is blocked at the review gate until P1 findings are corrected and the exact integrated candidate is revalidated. No correction writer, GitHub publication, deployment, target mutation or live model call has been started from this checkpoint.
