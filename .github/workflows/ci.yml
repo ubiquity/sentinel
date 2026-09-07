@@ -1,0 +1,31 @@
+# Sentinel deterministic CI gate (Wave C wiring).
+#
+# Runs the canonical credential-free harness: formatting, lint, type/build
+# check across every module plus the entrypoints, then the complete local
+# suite (contracts, state, budget, modules and Wave C integration) in
+# credential-free child environments. This is the deterministic branch gate
+# required before any aggregate Sentinel PR review/merge; it never calls
+# external services.
+name: sentinel-ci
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+      - development
+      - "codex/**"
+
+permissions:
+  contents: read
+
+jobs:
+  test-local:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - name: Credential-free local harness
+        run: deno task test:local

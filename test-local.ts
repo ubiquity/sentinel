@@ -11,10 +11,14 @@
  * Run with: deno task test:local
  *
  * Required harness permissions: --allow-env=PATH (read PATH for children),
- * --allow-run=deno,git (spawn deno/git), --allow-write (temporary HOME).
+ * --allow-run (spawn deno/git/sh; the replay module's node child-process
+ * layer also signals owned process groups), --allow-write (temporary HOME).
  * The state tests spawn their own disposable git children with clearEnv, so
- * the git permission is required here even though the toolchain steps are
- * Deno-only.
+ * run access is required here even though the toolchain steps are Deno-only.
+ * The replay module's DenoReplayRuntime uses the node child process
+ * compatibility layer, which inspects the host `NODE_V8_COVERAGE` entry for
+ * its complete credential-free child environment; the test step therefore
+ * grants PATH plus NODE_V8_COVERAGE inside the harness children.
  *
  * Exit discipline: the harness must wait for removal of the task-created
  * temp home on BOTH success and failure before exiting. `Deno.exit` from
@@ -47,6 +51,13 @@ const steps: { name: string; args: string[] }[] = [
       "src/contracts/mod.ts",
       "src/state/mod.ts",
       "src/budget/mod.ts",
+      "src/github/mod.ts",
+      "src/adapters/gateway/mod.ts",
+      "src/replay/mod.ts",
+      "src/repair/mod.ts",
+      "src/release/mod.ts",
+      "src/main.ts",
+      "src/release-main.ts",
     ],
   },
   {
@@ -54,13 +65,18 @@ const steps: { name: string; args: string[] }[] = [
     args: [
       "test",
       "--allow-read=.",
-      "--allow-run=deno",
-      "--allow-run=git",
+      "--allow-run",
       "--allow-write",
-      "--allow-env=PATH",
+      "--allow-env=PATH,NODE_V8_COVERAGE",
       "tests/contracts/",
       "tests/state/",
       "tests/budget/",
+      "tests/github/",
+      "tests/adapters/gateway/",
+      "tests/replay/",
+      "tests/repair/",
+      "tests/release/",
+      "tests/integration/",
     ],
   },
 ];

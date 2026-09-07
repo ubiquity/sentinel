@@ -742,6 +742,18 @@ The duplicate-artifact ref guard is additionally pinned by the direct parser
 fixture, an initial-snapshot write rejection and a canned remote-tree read
 rejection in `tests/state/`.
 
+`tests/integration/` (Wave C) drives the actual production entrypoints
+(`src/main.ts`, `src/release-main.ts`) with fake external transports and
+disposable real local Git repositories: the complete repair lifecycle (discovery
+→ retained evidence → intended before-failure → model candidate → after-pass
+regression → PR → review wait → exact merge → release request), the release
+controller through `src/release-main.ts` with the real `DenoReleaseRESTClient`
+(receipt binding, 204 promotion plus post-effect identity proof, the 30-minute
+window, acceptance, terminal repair completion), the receipt-unavailable default
+(no injected resolver → waiting, never a promotion), and gateway
+discovery/retention with fail-closed `evidence_expired` — plus compile-time
+capability-fence checks pinning the capability separation of §10.
+
 The test boundary is credential-free: `deno task test:local` runs
 `test-local.ts`, which executes every toolchain step in child processes with
 `clearEnv: true` inheriting only `PATH` and a temporary `HOME`/`DENO_DIR` (no
@@ -788,20 +800,41 @@ loop); state readers that fork on unknown content use `tryParse`.
 
 ## 10. Runtime entrypoint ownership (Wave C)
 
-Wave A registers the boundary only: no production entrypoint file is created by
-the foundation, and **no fake `src/main.ts` / `src/release-main.ts` stub may
-exist**. The real entrypoints are Wave C-owned:
+The real entrypoints are Wave C-owned and implemented in `src/main.ts` (repair
+polling workflow) and `src/release-main.ts` (deterministic release workflow); no
+fake stub exists. Both export one capability-injected boundary function — the
+trusted host constructs every port/provider from its own secret-bearing wiring,
+and the repository never builds a transport, reads an environment variable or
+parses a CLI flag:
 
 | Entrypoint                               | Owner                                        | Capabilities received                                                                                                                                                                                      | Never receives                                                                                    |
 | ---------------------------------------- | -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
 | `src/main.ts` — repair polling workflow  | Wave C primary                               | `StateReadView & RepairStateWriter` (repair snapshot only), the complete trusted repository config set, `Clock`, `GitHubPort`, `IncidentAdapter`, `ReplayPort`, `ImplementationPort`, `RollingStartBudget` | `ReleaseStateWriter` / `ReleaseStateSnapshotV1`, `DenoReleasePort`, release records               |
 | `src/release-main.ts` — release workflow | Wave C primary (exclusive release ownership) | `StateReadView & ReleaseStateWriter` (release snapshot only), deploy identity configuration, `DenoReleasePort`, `Clock`                                                                                    | repair write capability, work records, budget reservations, `ImplementationPort`, model admission |
 
+`runRepairEntrypoint(deps, options)` re-validates every supplied
+`RepositoryConfigV1` with the frozen parser and resolves the global live-start
+agreement via `resolveGlobalLiveStartLimits`: a `conflict` across the repository
+set is a host wiring fault that fails closed before the loop starts.
+`runReleaseEntrypoint(deps)` re-validates the m05 `ReleaseTargetConfigV1` and,
+when no `BuildReceiptResolverV1` is injected, constructs the
+`UnavailableBuildReceiptResolver` — the release controller then waits/blocks and
+can never promote a build it cannot bind. Executing either module directly
+(`deno task repair:run` / `release:run`) fails closed with a static fault: no
+capability wiring is shipped, so no live activation is possible until the owner
+supplies the trusted host wiring.
+
 The two workflows poll independently; the read-only `StateReadView` is the only
 shared surface, and a release consumer never receives repair write capability
 (or vice versa), matching the port capabilities in §5. The repair writer never
 promotes and never mutates release-state records; the release writer never edits
 application code or repair-budget records.
+
+`docs/config.example.json` is the minimal disabled-by-default repository
+configuration template (`liveStartLimits: null`, `sessionBound: null`,
+`stabilityPolicy: null`, `build.projectId: null`): the trusted host maintains
+the real config set and never commits secret literals (the contract carries
+restricted `secretRef`s only).
 
 **Model admission.** Only a durable `RollingStartBudget.reserveModelStart(...)`
 result of `{ status: "admitted" }` — one new `BudgetReservationV1` applied to
