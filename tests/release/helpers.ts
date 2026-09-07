@@ -637,6 +637,19 @@ export function logRoute(
       for (let i = 0; i < (fails.upstream ?? 0); i++) {
         pushFail(502, "upstream_error", null, null);
       }
+      // Every accepted request has a terminal outcome in the gateway log. The
+      // release acceptance contract treats an accepted-only row as incomplete
+      // evidence, so emit successful terminals for the remaining requests.
+      for (let i = failIndex; i < options.accept; i++) {
+        logs.push(
+          terminalEvent({
+            requestId: `${revisionId}-acc-${i}`,
+            timestamp: start + i,
+            identity,
+            status: 200,
+          }),
+        );
+      }
       for (let i = 0; i < (options.orphanTerminals ?? 0); i++) {
         const requestId = `${revisionId}-outside-${i}`;
         logs.push(

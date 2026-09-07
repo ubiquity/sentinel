@@ -291,3 +291,9 @@ Remote identity/visibility, credential access, live rolling budgets, retention/s
 - Canonical correction `058620d` passed the combined repair, release and integration acceptance: 89 tests passed, with format, lint and type checks green. The updated orchestration rules remain adopted; no external target or model mutation occurred.
 - The third verdict-bearing review of HEAD `058620d` found one remaining P1: accepted requests without terminal events are counted as complete, allowing stalled deployments to pass acceptance. Four P2 findings remain (early model notification buffering, null failure counters, per-invocation baseline bounds, and nonblocking review correction routing).
 - The three-round acceptance review bound is exhausted with a substantive P1 unresolved. Delivery is blocked under MASTER-PLAN.md; no publication, deployment, target ownership transfer, live model call or rollback claim is permitted. The accepted correction and all worker artifacts remain preserved for a future owner-authorized cycle.
+
+## Telemetry completeness correction (2026-09-07 10:19 UTC)
+
+- Corrected `CohortAccumulatorV1` to mark both accepted-only and terminal-only request IDs as unresolved outcomes. Deterministic release fixtures now emit successful terminal events for successful accepted requests, and a regression covers accepted-without-terminal evidence.
+- Focused release checks passed 13/13; release plus integration checks passed 64/64; the full credential-free local suite passed 412/412. Format, lint and type checks passed.
+- This correction has not received a new Codex review because the three-round review bound is already exhausted. The prior P1 is locally corrected, but reviewed delivery, publication, deployment, live acceptance and rollback remain unproven and blocked by the review-budget policy.

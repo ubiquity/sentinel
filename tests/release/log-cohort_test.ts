@@ -127,7 +127,7 @@ Deno.test("cohort: a terminal outside the accepted cohort contributes nothing", 
   assert.equal(counts.streamFailureCount, 0);
   assert.equal(counts.upstreamWideCount, 0);
   assert.equal(counts.unreadableCount, 0);
-  assert.equal(counts.unresolvedOutcomeCount, 1);
+  assert.equal(counts.unresolvedOutcomeCount, 2);
 });
 
 Deno.test("cohort: a terminals-only scan emits consistent zero counts, never inconsistent metrics", () => {
@@ -178,6 +178,20 @@ Deno.test("cohort: duplicates are deduplicated per request id", () => {
   assert.equal(counts.acceptedCount, 1);
   assert.equal(counts.fiveXxCount, 1);
   assert.equal(counts.unresolvedOutcomeCount, 0);
+});
+
+Deno.test("cohort: accepted requests without terminals are unresolved", () => {
+  const accumulator = new CohortAccumulatorV1();
+  accumulator.add(
+    parseCohortMessage(
+      acceptedEvent({ requestId: "pending", identity: DEP_1, timestamp: 0 }),
+      DEP_1,
+    ),
+    KINDS,
+  );
+  const counts = accumulator.counts();
+  assert.equal(counts.acceptedCount, 1);
+  assert.equal(counts.unresolvedOutcomeCount, 1);
 });
 
 Deno.test("cohort: wrong identity or malformed evidence is unreadable, never counted", () => {

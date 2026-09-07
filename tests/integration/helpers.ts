@@ -338,6 +338,16 @@ export function integrationLogRoute(
       for (let i = 0; i < (fails.upstream ?? 0); i++) {
         pushFail(502, "upstream_error", null, null);
       }
+      for (let i = failIndex; i < options.accept; i++) {
+        logs.push(
+          terminalEvent({
+            requestId: `${revisionId}-acc-${i}`,
+            timestamp: start + i,
+            identity,
+            status: 200,
+          }),
+        );
+      }
       return {
         kind: "response",
         status: 200,

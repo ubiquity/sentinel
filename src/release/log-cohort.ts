@@ -247,6 +247,7 @@ export class CohortAccumulatorV1 {
       upstreamWideCount: inCohort(this.upstreamIds),
       unreadableCount: this.unreadableCount,
       unresolvedOutcomeCount:
+        [...this.acceptedIds].filter((id) => !this.terminalIds.has(id)).length +
         [...this.terminalIds].filter((id) => !this.acceptedIds.has(id)).length,
     };
   }
