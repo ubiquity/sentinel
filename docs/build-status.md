@@ -297,3 +297,10 @@ Remote identity/visibility, credential access, live rolling budgets, retention/s
 - Corrected `CohortAccumulatorV1` to mark both accepted-only and terminal-only request IDs as unresolved outcomes. Deterministic release fixtures now emit successful terminal events for successful accepted requests, and a regression covers accepted-without-terminal evidence.
 - Focused release checks passed 13/13; release plus integration checks passed 64/64; the full credential-free local suite passed 412/412. Format, lint and type checks passed.
 - This correction has not received a new Codex review because the three-round review bound is already exhausted. The prior P1 is locally corrected, but reviewed delivery, publication, deployment, live acceptance and rollback remain unproven and blocked by the review-budget policy.
+
+## Resumed backlog (2026-09-07 14:29 UTC)
+
+- Local implementation remains accepted at `fbc82c0`; the accepted-without-terminal telemetry defect is corrected and covered by deterministic tests.
+- Backlog item B01: obtain an owner-authorized fresh Codex acceptance cycle for the exact current head, with no unresolved P0/P1 findings. The previous cycle is exhausted and cannot be silently reused.
+- Backlog item B02: resolve publication identity and authority, then create the aggregate Sentinel delivery path only after B01 passes. No repository, PR, deployment, or target mutation is authorized by the current local state.
+- Backlog item B03: after publication and target handover, perform the captured-request live repair, exact Deno promotion/acceptance, six-hour observation, and exact rollback proof required by MASTER-PLAN.md. Local fixtures and rollback tests remain evidence only.
