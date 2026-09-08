@@ -175,6 +175,7 @@ export interface FakeGithubOptionsV1 {
   branchRefSha?: GitSha | null;
   review?: Partial<ReviewObservationV1> | null;
   reviewUnavailable?: boolean;
+  reviewRequestedAt?: number;
   pushOutcome?: "applied" | "ambiguous";
   pushFailNext?: boolean;
   createOutcome?: "applied" | "ambiguous";
@@ -367,7 +368,7 @@ export class FakeGithub implements GitHubPort {
     return Promise.resolve(portOk({
       outcome: "applied",
       requestId: "review-req-1",
-      requestedAt: T0,
+      requestedAt: this.options.reviewRequestedAt ?? T0,
     }));
   }
 
@@ -700,4 +701,57 @@ export function assertRecordValid(record: WorkRecordV1): void {
   assert.ok(record.id.length > 0);
   assert.ok(record.repository.owner === REPO.owner);
   assert.ok(record.controller.sha.length === 40);
+}
+
+/**
+ * Run-bound test device: advances the fake clock exactly once when the
+ * before-run replay executes (the step directly before an implementation
+ * start). A consumed before-run is replayed once more when the candidate is
+ * validated, so the device arms itself; the after-run (candidate revision) is
+ * left untouched and the rest of a lifecycle step is exercised at the advanced
+ * time without a second jump.
+ */
+export class AdvancingFakeReplay extends FakeReplay {
+  private advanced = false;
+  constructor(
+    private readonly clock: FakeClock,
+    private readonly advanceMs: number,
+    options: FakeReplayOptionsV1 = {},
+  ) {
+    super(options);
+  }
+
+  override runReplay(
+    request: ReplayRunRequestV1,
+  ): Promise<PortResultV1<IsolatedReplayResultV1>> {
+    if (!this.advanced && request.revision === SHA2) {
+      this.clock.advance(this.advanceMs);
+      this.advanced = true;
+    }
+    return super.runReplay(request);
+  }
+}
+
+/**
+ * Run-bound test device: advances the fake clock when a candidate branch push
+ * succeeds (the deterministic publication step directly before a review
+ * request), so a review start can be observed past the model cutoff.
+ */
+export class AdvancingFakeGithub extends FakeGithub {
+  constructor(
+    private readonly clock: FakeClock,
+    private readonly advanceMs: number,
+    options: FakeGithubOptionsV1 = {},
+  ) {
+    super(options);
+  }
+
+  override pushHead(
+    ref: string,
+    sha: GitSha,
+    expectedRef: GitSha | null,
+  ): Promise<PortResultV1<"applied" | "ambiguous">> {
+    this.clock.advance(this.advanceMs);
+    return super.pushHead(ref, sha, expectedRef);
+  }
 }

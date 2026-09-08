@@ -14,12 +14,14 @@ import {
   createReleaseStateStore,
   createRepairStateStore,
 } from "../../src/state/mod.ts";
+import { asWorkItemId } from "../../src/contracts/brands.ts";
 import type { GitSha } from "../../src/contracts/brands.ts";
 import { parseReviewReceiptV1 } from "../../src/contracts/review-receipt.ts";
 import type { ReviewReceiptV1 } from "../../src/contracts/review-receipt.ts";
 import type { RepairStateSnapshotV1 } from "../../src/contracts/state-snapshots.ts";
 import type { ReleaseStateSnapshotV1 } from "../../src/contracts/state-snapshots.ts";
 import type { WorkRecordV1 } from "../../src/contracts/work-record.ts";
+import { candidateBranch, pushIntentKey } from "../../src/repair/keys.ts";
 import { runRepairCycle } from "../../src/repair/loop.ts";
 import {
   DEP_0,
@@ -319,7 +321,9 @@ Deno.test(
 
       // Run 2 (after the review poll): completed review -> delivery -> merge
       // -> release request -> waiting for acceptance.
-      rig.clock.advance(15 * 60_000 + 1);
+      // A durable replay result lets the task resume after retained artifact
+      // expiry; the saved fixture and before-failure proof are reused.
+      rig.clock.advance(100_000_000 + 1);
       rig.github.completeReview([], rig.clock.now());
       const third = await rig.run();
       assert.equal(third.status, "idle", JSON.stringify(third));
@@ -503,6 +507,144 @@ Deno.test("ambiguous push and review request reconcile without duplicate starts"
     assert.equal(state.work[0].nextStep, "review");
     assert.equal(state.work[0].wait?.reason, "review_pending");
     assert.equal(rig.model.requests.length, 1);
+  } finally {
+    await rig.ctx.cleanup();
+  }
+});
+
+Deno.test("successful push reconciliation continues publication", async () => {
+  const rig = await makeRig("pushcontinue", {
+    summaries: false,
+    github: { branchRefSha: SHA3 },
+  });
+  try {
+    const id = asWorkItemId("issue-1");
+    const branch = candidateBranch(id);
+    const work = workRecord("issue-1", {
+      source: { kind: "issue", id: "1", revision: SHA1 },
+      related: { incidentId: null, issueNumber: 1 },
+      target: { base: SHA1, branch, checkpoint: null, head: SHA3, pr: 7 },
+      nextStep: "work",
+      intent: {
+        kind: "push",
+        key: pushIntentKey(SHA3),
+        startedAt: T0,
+        branch,
+        expectedHead: SHA3,
+        observedBase: SHA1,
+        pr: null,
+        requestId: null,
+        resultId: null,
+      },
+      updatedAt: T0,
+    });
+    const seeded = await rig.store.writeRepair(seededSnapshot([work]), null);
+    assert.ok(seeded.ok && seeded.value.status === "applied");
+
+    const outcome = await rig.run();
+    assert.equal(outcome.status, "idle", JSON.stringify(outcome));
+    const state = await rig.snapshot();
+    assert.equal(state.work[0].nextStep, "review");
+    assert.equal(state.work[0].wait?.reason, "review_pending");
+    assert.equal(state.work[0].intent, null);
+    assert.equal(
+      rig.github.pushes.length,
+      0,
+      "an already successful push is never repeated",
+    );
+    assert.equal(
+      rig.github.calls.filter((call) => call === "createPr").length,
+      0,
+      "an existing PR is not published again",
+    );
+    assert.equal(
+      rig.github.calls.filter((call) => call === "requestReview").length,
+      1,
+      "publication continues with exactly one review request",
+    );
+  } finally {
+    await rig.ctx.cleanup();
+  }
+});
+
+Deno.test(
+  "protected directory prefixes are normalized before candidate path checks",
+  async () => {
+    const rig = await makeRig("protectedprefix", {
+      configOverrides: { protectedPaths: ["./src/handler/"] },
+      model: { changedPaths: ["src/handler/file.ts"] },
+    });
+    try {
+      const outcome = await rig.run();
+      assert.equal(outcome.status, "idle", JSON.stringify(outcome));
+      const state = await rig.snapshot();
+      assert.equal(state.work[0].nextStep, "blocked");
+      assert.equal(state.work[0].blocker?.kind, "other");
+      assert.equal(rig.github.pushes.length, 0);
+    } finally {
+      await rig.ctx.cleanup();
+    }
+  },
+);
+
+Deno.test("review receipt preserves the actual submission timestamp", async () => {
+  const submittedAt = T0 - 60_000;
+  const rig = await makeRig("reviewtimestamp", {
+    github: { reviewRequestedAt: submittedAt },
+  });
+  try {
+    const first = await rig.run();
+    assert.equal(first.status, "idle", JSON.stringify(first));
+    let state = await rig.snapshot();
+    assert.equal(state.work[0].wait?.since, submittedAt);
+
+    rig.clock.advance(15 * 60_000 + 1);
+    rig.github.completeReview([], rig.clock.now());
+    const second = await rig.run();
+    assert.equal(second.status, "idle", JSON.stringify(second));
+    state = await rig.snapshot();
+    assert.equal(state.reviews.length, 1);
+    assert.equal(state.reviews[0].submittedAt, submittedAt);
+  } finally {
+    await rig.ctx.cleanup();
+  }
+});
+
+Deno.test("duplicate unresolved review severities are normalized before parsing", async () => {
+  const rig = await makeRig("reviewseverity", {
+    model: { heads: [SHA3, SHA4] },
+  });
+  try {
+    const first = await rig.run();
+    assert.equal(first.status, "idle", JSON.stringify(first));
+    rig.clock.advance(15 * 60_000 + 1);
+    rig.github.completeReview([
+      {
+        id: "finding-p1-a",
+        severity: "P1",
+        path: "src/app.ts",
+        message: "first required fix",
+        fingerprint: "b".repeat(64),
+        resolved: false,
+        resolutionEvidence: null,
+      },
+      {
+        id: "finding-p1-b",
+        severity: "P1",
+        path: "src/app.ts",
+        message: "second required fix",
+        fingerprint: "c".repeat(64),
+        resolved: false,
+        resolutionEvidence: null,
+      },
+    ], rig.clock.now());
+    const second = await rig.run();
+    assert.equal(second.status, "idle", JSON.stringify(second));
+    const state = await rig.snapshot();
+    assert.equal(state.reviews.length, 1);
+    assert.deepEqual(state.reviews[0].unresolvedSeverities, ["P1"]);
+    assert.equal(state.work[0].nextStep, "review");
+    assert.equal(state.work[0].target.head, SHA4);
   } finally {
     await rig.ctx.cleanup();
   }
@@ -1065,6 +1207,52 @@ function seededSnapshot(
     ...extra,
   };
 }
+
+Deno.test("retained expired incident evidence blocks before replay", async () => {
+  const rig = await makeRig("expired-retained", { summaries: false });
+  try {
+    const retained = evidenceFixture();
+    const expiredEvidence = {
+      ...retained,
+      artifacts: retained.artifacts.map((artifact) => ({
+        ...artifact,
+        expiresAt: T0,
+      })),
+    };
+    const taskId = asWorkItemId("expired-retained");
+    const seed = seededSnapshot([
+      workRecord("expired-retained", {
+        source: { kind: "incident", id: "inc-a", revision: SHA2 },
+        related: { incidentId: "inc-a", issueNumber: null },
+        fingerprint: FINGERPRINT,
+        failingRevision: SHA2,
+        target: {
+          base: SHA1,
+          branch: candidateBranch(taskId),
+          checkpoint: null,
+          head: null,
+          pr: null,
+        },
+      }),
+    ], {
+      incidents: [summaryFixture()],
+      evidence: [expiredEvidence],
+    });
+    const written = await rig.store.writeRepair(seed, null);
+    assert.ok(written.ok && written.value.status === "applied");
+
+    const outcome = await rig.run();
+    assert.equal(outcome.status, "idle", JSON.stringify(outcome));
+    const state = await rig.snapshot();
+    assert.equal(state.work[0].nextStep, "blocked");
+    assert.equal(state.work[0].blocker?.kind, "evidence_expired");
+    assert.equal(state.work[0].blocker?.message, "incident artifact expired");
+    assert.equal(rig.replay.requests.length, 0);
+    assert.equal(rig.model.requests.length, 0);
+  } finally {
+    await rig.ctx.cleanup();
+  }
+});
 
 /** Issue task in the delivery phase with the given reviewed head and PR. */
 function deliveryRecord(

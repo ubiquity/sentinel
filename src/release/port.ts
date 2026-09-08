@@ -3,24 +3,27 @@
  * managed/custom domain health endpoints.
  *
  * Endpoints and resource identity fields (no invented API):
- * - GET  /v2/apps/{app}/revisions?status=succeeded&limit=N   → RevisionListItem[]
- *   (id, status, labels, created_at)
+ * - GET  /v2/apps/{app}/revisions?status=succeeded&limit=N[&cursor=...]
+ *   → RevisionListItem[] (id, status, labels, created_at); pagination
+ *   continuation is the rel=next Link response header, whose cursor is
+ *   extracted and replayed on the configured API origin
  * - GET  /v2/revisions/{revision}                            → Revision
- * - GET  /v2/revisions/{revision}/timelines                  → Timeline[]
- *   ({slug, partition, domains:[{domain}]})
  * - POST /v2/revisions/{revision}/promote                    → 204 No Content
  * - GET  /v2/apps/{app}/logs?start&end&revision_id&limit&cursor
  *   → { logs:[{timestamp,level,message,revision_id}], next_cursor }
  *
  * Identity is always the pair {gitSha, revisionId}; a revision id alone, a
- * timestamp or the latest list item is never a substitute. The revision list
- * response is a bare array with a documented cursor/limit but no documented
- * envelope, so a full page is inconclusive and the lookup fails closed
- * instead of guessing.
+ * timestamp or the latest list item is never a substitute. The candidate
+ * lookup takes the EXACT revision id from the authenticated build-receipt
+ * resolver and proves its membership in the configured app by bounded page
+ * traversal (never time/list-order selection) plus the exact revision
+ * resource. Two same-SHA builds never bind the wrong receipt: the revision id
+ * is the unique platform selector and the build transaction id remains
+ * resolver-provided provenance that this module never infers or labels.
  *
- * The client is constructed with trusted config (project id, label keys,
- * identity header names, log classification, bounds) plus injected transports,
- * auth and clock; no environment variable or CLI surface exists.
+ * The client is constructed with trusted config (project id, identity header
+ * names, log classification, bounds) plus injected transports, auth and
+ * clock; no environment variable or CLI surface exists.
  */
 
 import type { Clock } from "../contracts/ports.ts";
@@ -42,9 +45,12 @@ import type { DeploymentIdentityV1 } from "../contracts/shared.ts";
 import type { GitSha } from "../contracts/brands.ts";
 import {
   DENO_LOGS_PAGE_LIMIT,
+  DENO_MANAGED_HOST_RE,
   DENO_MAX_LOG_PAGE_BYTES,
   DENO_MAX_LOG_PAGES,
   DENO_MAX_RESPONSE_BYTES,
+  DENO_REVISION_CURSOR_MAX_CHARS,
+  DENO_REVISION_TRAVERSAL_MAX_PAGES,
   DENO_REVISIONS_PAGE_LIMIT,
 } from "./config.ts";
 import type { ReleaseTargetConfigV1 } from "./config.ts";
@@ -57,6 +63,20 @@ import { CohortAccumulatorV1, parseCohortMessage } from "./log-cohort.ts";
 
 /** Finite deadline for one unauthenticated health probe, in ms. */
 const DENO_HEALTH_TIMEOUT_MS = 5_000;
+
+/** Validated exact Git SHA (40 lower-hex) accepted as the receipt revision. */
+const GIT_SHA_RE = /^[0-9a-f]{40}$/;
+/**
+ * Validated exact Deno revision id charset for the immutable hostname form:
+ * the id is used as a single hostname label, so dots (subdomain boundaries)
+ * are never accepted. Bounded by the local implementation constant.
+ */
+const DENO_REVISION_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+/** Aggregate entry bound across one page traversal (page size x pages). */
+const DENO_REVISION_TRAVERSAL_MAX_ENTRIES = DENO_REVISIONS_PAGE_LIMIT *
+  DENO_REVISION_TRAVERSAL_MAX_PAGES;
+/** Official console origin whose Link header form is the only accepted one. */
+const DENO_CONSOLE_ORIGIN = "https://console.deno.com";
 
 export interface DenoReleasePortOptions {
   /** Injected native-fetch-compatible transport (production: `fetch`). */
@@ -96,57 +116,91 @@ export class DenoReleaseRESTClient implements DenoReleasePort {
   }
 
   // -------------------------------------------------------------------------
-  // Candidate build lookup: exact SHA+transaction, no list-order selection.
+  // Candidate build lookup: exact receipt revision, no list-order selection.
   // -------------------------------------------------------------------------
 
   async findBuiltCandidate(
     projectId: string,
     revision: GitSha,
     buildTransactionId: string,
+    revisionId: string,
   ): Promise<PortResultV1<BuildLookupV1>> {
-    const page = await this.listSucceededRevisions(projectId);
-    if (!page.ok) return page;
-    const items = page.value;
-
-    const shaMatches: RevisionListItemV1[] = [];
-    const matches: RevisionListItemV1[] = [];
-    for (const item of items) {
-      const shaLabel = stringLabel(item.labels, this.config.gitShaLabelKey);
-      const txnLabel = stringLabel(
-        item.labels,
-        this.config.buildTransactionLabelKey,
+    if (projectId !== this.config.projectId) {
+      return portError(
+        "invalid",
+        "candidate project does not match the configured target",
       );
-      if (shaLabel === revision) {
-        shaMatches.push(item);
-        if (txnLabel === buildTransactionId) matches.push(item);
-      }
     }
+    if (!GIT_SHA_RE.test(revision)) {
+      return portError("invalid", "candidate revision is not a valid Git SHA");
+    }
+    if (!DENO_REVISION_ID_RE.test(revisionId)) {
+      return portError(
+        "invalid",
+        "candidate revision id cannot form an immutable hostname",
+      );
+    }
+    const items = await this.listSucceededRevisions(projectId);
+    if (!items.ok) return items;
+
+    // The receipt selects the EXACT revision id. A different build for the
+    // same SHA is irrelevant; a duplicate exact id is never "found"; the
+    // transaction id is receipt provenance only (not a platform label).
+    const matches = items.value.filter((item) => item.id === revisionId);
     if (matches.length > 1) {
-      // Several builds claim the exact same SHA AND transaction: the binding
-      // is ambiguous, never "found".
       return portOk({ status: "ambiguous" as const });
     }
     if (matches.length === 0) {
-      if (shaMatches.length > 0) {
-        // A build for this exact SHA exists, but none carries the recorded
-        // transaction: the receipt cannot be bound to a unique build.
-        return portOk({ status: "ambiguous" as const });
-      }
+      // The exact receipt revision is not a succeeded build of the configured
+      // app: not built (or not visible) yet. Never an order/time substitution.
       return portOk({ status: "none" as const });
     }
-
     const item = matches[0];
     const resource = await this.readRevision(item.id);
     if (!resource.ok) return resource;
     if (
-      resource.value.id !== item.id || resource.value.status !== "succeeded" ||
-      stringLabel(resource.value.labels, this.config.gitShaLabelKey) !==
-        revision ||
-      stringLabel(
-          resource.value.labels,
-          this.config.buildTransactionLabelKey,
-        ) !== buildTransactionId
+      resource.value.id !== item.id ||
+      resource.value.status !== "succeeded"
     ) {
+      return portOk({ status: "ambiguous" as const });
+    }
+
+    // The immutable deployment host is derived from the trusted managed base
+    // URL (never from any platform-supplied URL) and must serve the exact
+    // receipt identity in both body and headers with an available status.
+    const immutableBase = immutableManagedBaseUrl(
+      this.config.managedBaseUrl,
+      revisionId,
+    );
+    if (immutableBase === null) {
+      return portError(
+        "invalid",
+        "managed host cannot form an immutable health URL",
+      );
+    }
+    const health = await this.sampleHealth({
+      baseUrl: immutableBase,
+      healthPath: this.config.acceptance.healthPath,
+      managedBodyMarker: this.config.acceptance.managedBodyMarker,
+      managedHeaders: [
+        ...this.config.acceptance.managedHeaders,
+        { name: this.config.identityHeaders.gitSha, value: revision },
+        {
+          name: this.config.identityHeaders.revisionId,
+          value: revisionId,
+        },
+      ],
+      domain: null,
+    });
+    if (
+      !health.ok ||
+      health.value.httpStatus !== 200 ||
+      health.value.status !== "healthy" ||
+      health.value.identity === null ||
+      health.value.identity.gitSha !== revision ||
+      health.value.identity.revisionId !== revisionId
+    ) {
+      // Missing/failed/wrong immutable identity must never yield "found".
       return portOk({ status: "ambiguous" as const });
     }
     return portOk({
@@ -162,40 +216,32 @@ export class DenoReleaseRESTClient implements DenoReleasePort {
   }
 
   // -------------------------------------------------------------------------
-  // Current deployment: exact enumeration without time/list-order guessing.
+  // Current deployment: strict managed health identity, then exact app
+  // membership/resource verification, then a stable recheck. No timeline
+  // enumeration and no label/order/time inference of the pinned revision.
   // -------------------------------------------------------------------------
 
   async readCurrentDeployment(
     projectId: string,
   ): Promise<PortResultV1<DenoDeploymentV1>> {
+    if (projectId !== this.config.projectId) {
+      return portError(
+        "invalid",
+        "deployment project does not match the configured target",
+      );
+    }
     const domain = this.config.acceptance.domain ??
       new URL(this.config.managedBaseUrl).host;
-    const page = await this.listSucceededRevisions(projectId);
-    if (!page.ok) return page;
-
-    const bound: RevisionListItemV1[] = [];
-    for (const item of page.value) {
-      const timelines = await this.readTimelines(item.id);
-      if (!timelines.ok) return timelines;
-      if (
-        timelines.value.some((timeline) => timeline.domains.includes(domain))
-      ) {
-        bound.push(item);
-      }
-    }
-    if (bound.length === 0) {
-      return portOk({
-        projectId,
-        identity: null,
-        domain,
-        status: "not_deployed",
-        updatedAt: null,
-      });
-    }
-    if (bound.length > 1) {
-      // Several succeeded revisions claim the hostname and the API does not
-      // expose the production pin: the current identity is not determinable.
-      // This is never resolved by latest-list-item or timestamp choice.
+    const healthConfig = this.managedHealthConfig(null);
+    const observed = await this.sampleHealth(healthConfig);
+    if (
+      !observed.ok ||
+      observed.value.httpStatus !== 200 ||
+      observed.value.status !== "healthy" ||
+      observed.value.identity === null
+    ) {
+      // Unknown or unavailable health is never claimed healthy or as a
+      // positive not-deployed result; no identity is inferred from it.
       return portOk({
         projectId,
         identity: null,
@@ -204,9 +250,50 @@ export class DenoReleaseRESTClient implements DenoReleasePort {
         updatedAt: null,
       });
     }
-    const item = bound[0];
-    const gitSha = stringLabel(item.labels, this.config.gitShaLabelKey);
-    if (gitSha === null) {
+    const identity = observed.value.identity;
+
+    const items = await this.listSucceededRevisions(projectId);
+    if (!items.ok) return items;
+    const matches = items.value.filter(
+      (item) => item.id === identity.revisionId,
+    );
+    if (matches.length !== 1) {
+      // Absent or duplicated exact membership: the platform cannot
+      // corroborate the observed deployment. Never select by position/order.
+      return portOk({
+        projectId,
+        identity: null,
+        domain,
+        status: "unknown",
+        updatedAt: null,
+      });
+    }
+    const item = matches[0];
+    const resource = await this.readRevision(item.id);
+    if (!resource.ok) return resource;
+    if (
+      resource.value.id !== item.id ||
+      resource.value.status !== "succeeded"
+    ) {
+      return portOk({
+        projectId,
+        identity: null,
+        domain,
+        status: "unknown",
+        updatedAt: null,
+      });
+    }
+
+    // Stable recheck: the identity must be unchanged across the verification
+    // steps, otherwise the deployment moved and no live claim is made.
+    const recheck = await this.sampleHealth(healthConfig);
+    if (
+      !recheck.ok ||
+      recheck.value.httpStatus !== 200 ||
+      recheck.value.status !== "healthy" ||
+      recheck.value.identity === null ||
+      !sameIdentity(recheck.value.identity, identity)
+    ) {
       return portOk({
         projectId,
         identity: null,
@@ -217,7 +304,7 @@ export class DenoReleaseRESTClient implements DenoReleasePort {
     }
     return portOk({
       projectId,
-      identity: { gitSha: gitSha as GitSha, revisionId: item.id },
+      identity,
       domain,
       status: "live",
       updatedAt: item.createdAt,
@@ -280,7 +367,7 @@ export class DenoReleaseRESTClient implements DenoReleasePort {
   }
 
   // -------------------------------------------------------------------------
-  // Health sampling: managed body/headers plus exact deployment identity.
+  // Health sampling: parsed available JSON body + exact body/header identity.
   // -------------------------------------------------------------------------
 
   async sampleHealth(
@@ -331,15 +418,21 @@ export class DenoReleaseRESTClient implements DenoReleasePort {
     const headersMatch = config.managedHeaders.every((entry) =>
       headerEquals(headers, entry.name, entry.value)
     );
-    const identity = this.identityFromHeaders(headers);
-    const healthy = bodyMarkerPresent && headersMatch && identity !== null;
+    // The verified identity requires BOTH the validated identity headers and
+    // the parsed body `release.git_sha`/`release.deployment_id` to present
+    // the same exact identity with an available status. Any missing,
+    // malformed or contradictory body/header identity is degraded with no
+    // verified identity; it is never healthy and never an inference.
+    const verifiedIdentity = this.verifiedBodyIdentity(bodyText, headers);
+    const healthy = bodyMarkerPresent && headersMatch &&
+      verifiedIdentity !== null;
     return portOk({
       at: this.clock.now(),
       status: healthy ? "healthy" : "degraded",
       httpStatus: status,
       bodyMarkerPresent,
       headersMatch,
-      identity,
+      identity: healthy ? verifiedIdentity : null,
       domain: config.domain,
     });
   }
@@ -477,6 +570,17 @@ export class DenoReleaseRESTClient implements DenoReleasePort {
     };
   }
 
+  /** Managed stable health config derived from the trusted target config. */
+  private managedHealthConfig(domain: string | null): HealthSampleConfigV1 {
+    return {
+      baseUrl: this.config.managedBaseUrl,
+      healthPath: this.config.acceptance.healthPath,
+      managedBodyMarker: this.config.acceptance.managedBodyMarker,
+      managedHeaders: [...this.config.acceptance.managedHeaders],
+      domain,
+    };
+  }
+
   private identityFromHeaders(headers: Headers): DeploymentIdentityV1 | null {
     const gitSha = headers.get(this.config.identityHeaders.gitSha) ?? null;
     const revisionId = headers.get(this.config.identityHeaders.revisionId) ??
@@ -485,6 +589,61 @@ export class DenoReleaseRESTClient implements DenoReleasePort {
     if (!/^[0-9a-f]{40}$/.test(gitSha)) return null;
     if (revisionId.length === 0 || revisionId.length > 256) return null;
     return { gitSha: gitSha as GitSha, revisionId };
+  }
+
+  /**
+   * Verified identity of one 200 health response: the parsed JSON body must
+   * report `status: "available"` and `release.git_sha`/`release.deployment_id`
+   * equal to the validated identity headers. Missing, malformed or
+   * contradictory body/header identity yields null — never an inference.
+   */
+  private verifiedBodyIdentity(
+    bodyText: string,
+    headers: Headers,
+  ): DeploymentIdentityV1 | null {
+    const headerIdentity = this.identityFromHeaders(headers);
+    if (headerIdentity === null) return null;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(bodyText);
+    } catch {
+      return null;
+    }
+    if (
+      typeof parsed !== "object" || parsed === null || Array.isArray(parsed)
+    ) {
+      return null;
+    }
+    const obj = parsed as Record<string, unknown>;
+    if (obj.status !== "available") return null;
+    const release = obj.release;
+    if (
+      typeof release !== "object" || release === null || Array.isArray(release)
+    ) {
+      return null;
+    }
+    const releaseObj = release as Record<string, unknown>;
+    const gitSha = releaseObj.git_sha;
+    const revisionId = releaseObj.deployment_id;
+    if (
+      typeof gitSha !== "string" || typeof revisionId !== "string" ||
+      !GIT_SHA_RE.test(gitSha) ||
+      revisionId.length === 0 ||
+      revisionId.length > 256
+    ) {
+      return null;
+    }
+    const bodyIdentity: DeploymentIdentityV1 = {
+      gitSha: gitSha as GitSha,
+      revisionId,
+    };
+    if (
+      bodyIdentity.gitSha !== headerIdentity.gitSha ||
+      bodyIdentity.revisionId !== headerIdentity.revisionId
+    ) {
+      return null;
+    }
+    return bodyIdentity;
   }
 
   private async unauthenticatedGet(
@@ -581,10 +740,73 @@ export class DenoReleaseRESTClient implements DenoReleasePort {
   private async listSucceededRevisions(
     projectId: string,
   ): Promise<PortResultV1<RevisionListItemV1[]>> {
+    const items: RevisionListItemV1[] = [];
+    const seenIds = new Set<string>();
+    const seenCursors = new Set<string>();
+    let cursor: string | null = null;
+    let pages = 0;
+    for (;;) {
+      pages++;
+      if (pages > DENO_REVISION_TRAVERSAL_MAX_PAGES) {
+        return portError(
+          "invalid",
+          "revision listing exceeded the page bound",
+        );
+      }
+      const page = await this.readRevisionPage(projectId, cursor);
+      if (!page.ok) return page;
+      for (const item of page.value.items) {
+        if (seenIds.has(item.id)) {
+          // A repeated exact id across pages makes the listing inconsistent:
+          // no single entry can be bound.
+          return portError(
+            "invalid",
+            "revision listing contains a duplicate exact id",
+          );
+        }
+        seenIds.add(item.id);
+        items.push(item);
+        if (items.length > DENO_REVISION_TRAVERSAL_MAX_ENTRIES) {
+          return portError(
+            "invalid",
+            "revision listing exceeded the entry bound",
+          );
+        }
+      }
+      if (page.value.nextCursor === null) {
+        if (page.value.items.length >= DENO_REVISIONS_PAGE_LIMIT) {
+          // A full page with no usable continuation is inconclusive: the
+          // exact membership proof is incomplete and fails closed.
+          return portError(
+            "invalid",
+            "revision listing is inconclusive at the page bound",
+          );
+        }
+        // A normal final shorter page without a continuation is exhausted.
+        return portOk(items);
+      }
+      if (seenCursors.has(page.value.nextCursor)) {
+        return portError(
+          "invalid",
+          "revision listing repeated a pagination cursor",
+        );
+      }
+      seenCursors.add(page.value.nextCursor);
+      cursor = page.value.nextCursor;
+    }
+  }
+
+  private async readRevisionPage(
+    projectId: string,
+    cursor: string | null,
+  ): Promise<
+    PortResultV1<{ items: RevisionListItemV1[]; nextCursor: string | null }>
+  > {
     const params = new URLSearchParams({
       status: "succeeded",
       limit: String(DENO_REVISIONS_PAGE_LIMIT),
     });
+    if (cursor !== null) params.set("cursor", cursor);
     const call = await denoRestCall(
       {
         baseUrl: this.config.apiBaseUrl,
@@ -609,15 +831,6 @@ export class DenoReleaseRESTClient implements DenoReleasePort {
     if (!Array.isArray(parsed)) {
       return portError("invalid", "revision listing has an unexpected shape");
     }
-    if (parsed.length >= DENO_REVISIONS_PAGE_LIMIT) {
-      // The documented response envelope is a bare array with no cursor
-      // field, so a full page cannot be proven complete. Fail closed instead
-      // of guessing that a match does or does not exist beyond it.
-      return portError(
-        "invalid",
-        "revision listing is inconclusive at the page bound",
-      );
-    }
     const items: RevisionListItemV1[] = [];
     for (const raw of parsed) {
       const item = parseRevisionListItem(raw);
@@ -626,7 +839,17 @@ export class DenoReleaseRESTClient implements DenoReleasePort {
       }
       items.push(item);
     }
-    return portOk(items);
+    const headers = new Headers();
+    for (const [name, value] of call.value.headers) {
+      headers.set(name, value);
+    }
+    const parsedLink = parseNextLinkCursor(
+      headers.get("link") ?? null,
+      projectId,
+      this.config.apiBaseUrl,
+    );
+    if (!parsedLink.ok) return parsedLink;
+    return portOk({ items, nextCursor: parsedLink.value });
   }
 
   private async readRevision(
@@ -657,68 +880,6 @@ export class DenoReleaseRESTClient implements DenoReleasePort {
       return portError("invalid", "revision resource has a malformed shape");
     }
     return portOk(item);
-  }
-
-  private async readTimelines(
-    revisionId: string,
-  ): Promise<PortResultV1<{ domains: string[] }[]>> {
-    const call = await denoRestCall(
-      {
-        baseUrl: this.config.apiBaseUrl,
-        path: `/v2/revisions/${encodeURIComponent(revisionId)}/timelines`,
-        method: "GET",
-        responseByteCap: DENO_MAX_RESPONSE_BYTES,
-      },
-      this.transport,
-      this.auth,
-    );
-    if (!call.ok) return call;
-    if (call.value.status !== 200) {
-      return portError("unavailable", "revision timelines are unavailable");
-    }
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(new TextDecoder().decode(call.value.body));
-    } catch {
-      return portError("invalid", "revision timelines are not valid JSON");
-    }
-    if (!Array.isArray(parsed)) {
-      return portError(
-        "invalid",
-        "revision timelines have an unexpected shape",
-      );
-    }
-    const timelines: { domains: string[] }[] = [];
-    for (const raw of parsed) {
-      if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
-        return portError("invalid", "revision timeline has a malformed entry");
-      }
-      const domains = (raw as Record<string, unknown>).domains;
-      if (!Array.isArray(domains)) {
-        return portError("invalid", "revision timeline is missing domains");
-      }
-      const hostnames: string[] = [];
-      for (const entry of domains) {
-        if (
-          typeof entry !== "object" || entry === null || Array.isArray(entry)
-        ) {
-          return portError(
-            "invalid",
-            "revision timeline has a malformed domain",
-          );
-        }
-        const domainValue = (entry as Record<string, unknown>).domain;
-        if (typeof domainValue !== "string" || domainValue.length === 0) {
-          return portError(
-            "invalid",
-            "revision timeline has a malformed domain",
-          );
-        }
-        hostnames.push(domainValue);
-      }
-      timelines.push({ domains: hostnames });
-    }
-    return portOk(timelines);
   }
 
   private async readLogPage(
@@ -792,11 +953,14 @@ export class DenoReleaseRESTClient implements DenoReleasePort {
       }
       entries.push({ message });
     }
-    const nextCursor = obj.next_cursor === null || obj.next_cursor === undefined
-      ? null
-      : typeof obj.next_cursor === "string" && obj.next_cursor.length > 0
-      ? obj.next_cursor
-      : null;
+    const rawNextCursor = obj.next_cursor;
+    if (rawNextCursor === null) {
+      return portOk({ entries, unreadableEntries, nextCursor: null });
+    }
+    if (typeof rawNextCursor !== "string" || rawNextCursor.length === 0) {
+      return portError("invalid", "log response has a malformed next cursor");
+    }
+    const nextCursor = rawNextCursor;
     return portOk({ entries, unreadableEntries, nextCursor });
   }
 }
@@ -864,15 +1028,6 @@ function parseLabels(input: unknown): Record<string, string | string[]> | null {
   return labels;
 }
 
-function stringLabel(
-  labels: Record<string, string | string[]>,
-  key: string,
-): string | null {
-  const value = labels[key];
-  if (typeof value === "string" && value.length > 0) return value;
-  return null;
-}
-
 function headerEquals(
   headers: Headers,
   name: string,
@@ -895,6 +1050,180 @@ function isVerifiedCloudflareChallenge(headers: Headers): boolean {
   const ray = headers.get("cf-ray")?.trim() ?? "";
   return server === "cloudflare" && mitigation === "challenge" &&
     ray.length > 0;
+}
+
+function sameIdentity(
+  a: DeploymentIdentityV1,
+  b: DeploymentIdentityV1,
+): boolean {
+  return a.gitSha === b.gitSha && a.revisionId === b.revisionId;
+}
+
+/**
+ * Derives the immutable health base URL for one exact revision from the
+ * trusted configured managed base URL. Only the config-validated root HTTPS
+ * shape is accepted (https, no credentials, default port, no path/query/
+ * fragment, hostname ending in `.deno.net` — the actual two-label target is
+ * `<project>.<organization>.deno.net`), and the FIRST hostname label is
+ * replaced with `label-<revisionId>` while every other label stays (Deno's
+ * immutable hostname form). The first label need not equal the configured
+ * project id; no platform-supplied URL is ever consumed.
+ */
+function immutableManagedBaseUrl(
+  managedBaseUrl: string,
+  revisionId: string,
+): string | null {
+  if (!DENO_REVISION_ID_RE.test(revisionId)) return null;
+  let url: URL;
+  try {
+    url = new URL(managedBaseUrl);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "https:") return null;
+  if (url.username !== "" || url.password !== "") return null;
+  if (url.port !== "") return null;
+  if (url.pathname !== "" && url.pathname !== "/") return null;
+  if (url.search !== "" || url.hash !== "") return null;
+  const hostname = url.hostname;
+  if (!DENO_MANAGED_HOST_RE.test(hostname)) return null;
+  const dotIndex = hostname.indexOf(".");
+  if (dotIndex <= 0) return null;
+  const firstLabel = hostname.slice(0, dotIndex);
+  const immutableHost = `${firstLabel}-${revisionId}${
+    hostname.slice(firstLabel.length)
+  }`;
+  return `${url.protocol}//${immutableHost}`;
+}
+
+const LINK_VALUE_RE = /^<([^>]*)>([\s\S]*)$/;
+const LINK_REL_RE = /^rel\s*=\s*(?:"([^"]*)"|([^\s;]+))$/i;
+
+/**
+ * Parses the rel=next Link header of one revision page. Returns the single
+ * validated continuation cursor or null when the page has no rel=next link.
+ * Multiple/conflicting next links, malformed link-values and any next link
+ * that is not for the configured project on the configured API origin or the
+ * official Deno console origin are rejected. The returned cursor is replayed
+ * on the configured API origin by the caller; the Link URL is never fetched.
+ */
+function parseNextLinkCursor(
+  linkHeader: string | null,
+  projectId: string,
+  apiBaseUrl: string,
+): PortResultV1<string | null> {
+  if (linkHeader === null) return portOk(null);
+  const linkValues = linkHeader.split(",");
+  let nextUrl: string | null = null;
+  let malformed = false;
+  for (const part of linkValues) {
+    const value = part.trim();
+    if (value.length === 0) {
+      malformed = true;
+      continue;
+    }
+    const parsed = parseLinkValue(value);
+    if (parsed === null) {
+      malformed = true;
+      continue;
+    }
+    if (!parsed.isNext) continue;
+    if (nextUrl !== null) {
+      return portError(
+        "invalid",
+        "revision listing has multiple or conflicting next links",
+      );
+    }
+    nextUrl = parsed.url;
+  }
+  if (malformed) {
+    return portError("invalid", "revision listing has a malformed Link header");
+  }
+  if (nextUrl === null) return portOk(null);
+  return parseNextLinkUrl(nextUrl, projectId, apiBaseUrl);
+}
+
+function parseLinkValue(raw: string): { url: string; isNext: boolean } | null {
+  const match = LINK_VALUE_RE.exec(raw);
+  if (match === null) return null;
+  const params = match[2];
+  let isNext = false;
+  if (params.length > 0) {
+    for (const param of params.split(";")) {
+      const trimmed = param.trim();
+      if (trimmed.length === 0) continue;
+      const relMatch = LINK_REL_RE.exec(trimmed);
+      if (relMatch === null) continue;
+      const rel = (relMatch[1] ?? relMatch[2] ?? "").toLowerCase();
+      if (rel.split(/\s+/).includes("next")) isNext = true;
+    }
+  }
+  return { url: match[1], isNext };
+}
+
+function parseNextLinkUrl(
+  rawUrl: string,
+  projectId: string,
+  apiBaseUrl: string,
+): PortResultV1<string> {
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    return portError("invalid", "revision next link is not a valid URL");
+  }
+  if (url.username !== "" || url.password !== "") {
+    return portError("invalid", "revision next link carries credentials");
+  }
+  if (url.hash !== "") {
+    return portError("invalid", "revision next link carries a fragment");
+  }
+  const accepted = (url.origin === new URL(apiBaseUrl).origin &&
+    url.pathname === `/v2/apps/${projectId}/revisions`) ||
+    (url.origin === DENO_CONSOLE_ORIGIN &&
+      url.pathname === `/api/v2/apps/${projectId}/revisions`);
+  if (!accepted) {
+    return portError(
+      "invalid",
+      "revision next link is not for the configured project",
+    );
+  }
+  const seen = new Set<string>();
+  for (const key of url.searchParams.keys()) {
+    if (seen.has(key)) {
+      return portError(
+        "invalid",
+        "revision next link repeats a query parameter",
+      );
+    }
+    seen.add(key);
+    if (key === "cursor") continue;
+    if (key === "status" && url.searchParams.get("status") === "succeeded") {
+      continue;
+    }
+    if (
+      key === "limit" &&
+      url.searchParams.get("limit") === String(DENO_REVISIONS_PAGE_LIMIT)
+    ) {
+      continue;
+    }
+    return portError(
+      "invalid",
+      "revision next link changes the listing semantics",
+    );
+  }
+  const cursors = url.searchParams.getAll("cursor");
+  if (cursors.length !== 1) {
+    return portError(
+      "invalid",
+      "revision next link has an absent or duplicate cursor",
+    );
+  }
+  const cursor = cursors[0];
+  if (cursor.length === 0 || cursor.length > DENO_REVISION_CURSOR_MAX_CHARS) {
+    return portError("invalid", "revision next link has an invalid cursor");
+  }
+  return portOk(cursor);
 }
 
 function toRfc3339(ms: number): string {

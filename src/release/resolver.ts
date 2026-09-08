@@ -6,7 +6,11 @@
  * This is the ONLY accepted candidate source. Never is a revision selected by
  * list order, timestamp, or any model-provided identity. When the exact
  * receipt is absent or ambiguous the release controller waits/blocks without
- * promotion.
+ * promotion. The exact receipt `identity.revisionId` is passed through to the
+ * release port as the required fourth `findBuiltCandidate` argument; the
+ * platform revision id is the selector and no custom revision label is
+ * required — transaction provenance stays a resolver duty and is never
+ * inferred from platform data.
  *
  * The target build-receipt integration (GitHub CI receipt published per
  * request, m06/WaveC) is a later seam; until it is wired, the production

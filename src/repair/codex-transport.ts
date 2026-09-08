@@ -93,7 +93,9 @@ export interface CodexSessionV1 {
   send(method: string, params: unknown): Promise<unknown>;
   /** Send one notification (no response expected; e.g. `initialized`). */
   notify(method: string, params?: unknown): void;
-  /** Register the single notification consumer. */
+  /** Register the single notification consumer. Notifications arriving
+   * before registration are retained in a bounded ordered backlog and
+   * delivered exactly once at registration, in wire order. */
   onNotification(handler: (event: CodexServerNotificationV1) => void): void;
   /** Register the single server-request consumer (unsolicited requests). */
   onServerRequest(handler: (request: CodexServerRequestV1) => void): void;
@@ -120,6 +122,13 @@ export class CodexSubprocessSession implements CodexSessionV1 {
   private notificationHandler:
     | ((event: CodexServerNotificationV1) => void)
     | null = null;
+  /**
+   * Ordered backlog for inbound notifications that arrive before the consumer
+   * registers. The existing inbound notification byte bound (observableBytes
+   * vs maxNotificationBytes) is applied to every notification before it is
+   * queued, so this backlog is finite by the same bound as live delivery.
+   */
+  private readonly pendingNotifications: CodexServerNotificationV1[] = [];
   private serverRequestHandler:
     | ((request: CodexServerRequestV1) => void)
     | null = null;
@@ -131,6 +140,13 @@ export class CodexSubprocessSession implements CodexSessionV1 {
   private observableBytes = 0;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private closed = false;
+  /**
+   * First fatal stream/session error; sticky until close. Once set, no
+   * further frame is queued or delivered, new sends reject with it and
+   * consumer registration fails explicitly: no valid-looking completion can
+   * escape a transport that already failed closed.
+   */
+  private fatalError: CodexProtocolError | null = null;
   private closePromise: Promise<void> | null = null;
   /** Strictly serialized stdin writes; one frame at a time, never interleaved. */
   private writeChain: Promise<void> = Promise.resolve();
@@ -198,6 +214,9 @@ export class CodexSubprocessSession implements CodexSessionV1 {
 
   send(method: string, params: unknown): Promise<unknown> {
     const id = nextRequestId();
+    if (this.fatalError !== null) {
+      return Promise.reject(this.fatalError);
+    }
     if (this.closed) {
       return Promise.reject(
         new CodexProtocolError(
@@ -213,15 +232,24 @@ export class CodexSubprocessSession implements CodexSessionV1 {
   }
 
   notify(method: string, params?: unknown): void {
-    if (this.closed) return;
+    if (this.fatalError !== null || this.closed) return;
     this.write({ jsonrpc: "2.0", method, params: params ?? {} });
   }
 
   onNotification(handler: (event: CodexServerNotificationV1) => void): void {
+    if (this.fatalError !== null) throw this.fatalError;
     this.notificationHandler = handler;
+    // Drain pre-registration notifications now, exactly once and in wire
+    // order (the backlog is bounded by the notification byte bound above),
+    // so a terminal event racing the turn/start response is never dropped.
+    if (this.pendingNotifications.length > 0) {
+      const backlog = this.pendingNotifications.splice(0);
+      for (const event of backlog) handler(event);
+    }
   }
 
   onServerRequest(handler: (request: CodexServerRequestV1) => void): void {
+    if (this.fatalError !== null) throw this.fatalError;
     this.serverRequestHandler = handler;
   }
 
@@ -335,7 +363,9 @@ export class CodexSubprocessSession implements CodexSessionV1 {
                 "codex line bound exceeded",
               ),
             );
-            continue;
+            // A fatal bound failure ends the pump: the rest of the buffer
+            // must not be re-queued or delivered.
+            return;
           }
           const outcome = this.handleLine(line);
           if (outcome !== null) {
@@ -380,6 +410,9 @@ export class CodexSubprocessSession implements CodexSessionV1 {
 
   /** Returns a protocol error instead of throwing across async pumps. */
   private handleLine(line: string): CodexProtocolError | null {
+    // After a fatal failure no further frame may be queued or delivered; the
+    // pump reports the sticky error and stops processing the buffer.
+    if (this.fatalError !== null) return this.fatalError;
     let frame: unknown;
     try {
       frame = JSON.parse(line);
@@ -404,7 +437,17 @@ export class CodexSubprocessSession implements CodexSessionV1 {
           "codex notification byte bound exceeded",
         );
       }
-      this.notificationHandler?.({ method, params: record.params });
+      const notification: CodexServerNotificationV1 = {
+        method,
+        params: record.params,
+      };
+      if (this.notificationHandler !== null) {
+        this.notificationHandler(notification);
+      } else {
+        // No consumer yet: retain once, in wire order, until registration
+        // drains the backlog (bounded by the byte bound applied above).
+        this.pendingNotifications.push(notification);
+      }
       return null;
     }
     if (typeof record.method === "string" && "id" in record) {
@@ -453,7 +496,20 @@ export class CodexSubprocessSession implements CodexSessionV1 {
   }
 
   private fail(error: Error): void {
-    this.rejectAll(error);
+    // First failure wins and sticks: later frames, sends and registrations
+    // all observe the same canonical error and never re-enter delivery.
+    if (this.fatalError === null) {
+      this.fatalError = error instanceof CodexProtocolError
+        ? error
+        : new CodexProtocolError(
+          "server_error",
+          "codex session failed: " + error.message.slice(0, 200),
+        );
+    }
+    // Discard the bounded pre-registration backlog: a terminal retained
+    // before the failure must never be delivered after the stream failed.
+    this.pendingNotifications.length = 0;
+    this.rejectAll(this.fatalError);
     const child = this.child;
     if (child !== null) {
       signalGroup(child, "SIGTERM");
@@ -461,12 +517,11 @@ export class CodexSubprocessSession implements CodexSessionV1 {
   }
 
   private rejectAll(error: Error): void {
-    const canonical = error instanceof CodexProtocolError
-      ? error
-      : new CodexProtocolError(
+    const canonical = this.fatalError ??
+      (error instanceof CodexProtocolError ? error : new CodexProtocolError(
         "server_error",
         "codex session failed: " + error.message.slice(0, 200),
-      );
+      ));
     for (const entry of this.pending.values()) {
       entry.reject(canonical);
     }

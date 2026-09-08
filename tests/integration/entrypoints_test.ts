@@ -398,19 +398,19 @@ Deno.test(
         budget,
       }, {
         deadline: loopClock.now() + 600_000,
-        stepLimit: 4,
+        // Bounded: intake, branch assignment, evidence retention and the
+        // missing-fixture blocker need 4 progress transitions; 6 leaves the
+        // margin to reach the idle ranking inside the 4-8 window.
+        stepLimit: 6,
       });
-      // KNOWN CROSS-MODULE BOUNDARY (Wave C finding, not fixed here): the
-      // gateway adapter names evidence records `evidence:<incidentId>`
-      // (src/adapters/gateway/incident-adapter.ts), while the repair loop
-      // resolves evidence by `item.id === incidentId`
-      // (src/repair/loop.ts ensureEvidence/ensureBeforeReplay). The m04
-      // fixtures masked this by using identical id and incidentId values.
-      // A bounded m04-lane correction (lookup by `item.incidentId`) is
-      // required before this loop converges with the real producer; the
-      // assertions below pin the observable boundary instead of pretending
-      // convergence.
-      assert.equal(result.status, "step_limit", JSON.stringify(result));
+      // Wave C identity correction: the repair loop resolves evidence by
+      // incidentId + exact repository identity (never by the evidence id
+      // `evidence:<incidentId>`), so the real gateway evidence is found and
+      // the loop converges to the truthful blocker — the producer emits
+      // replay:null, so no fixture exists and no captured-request repair is
+      // fabricated. (tests/integration/evidence-identity_test.ts proves the
+      // no-refetch/no-repeat-persistence/collision cases in depth.)
+      assert.equal(result.status, "idle", JSON.stringify(result));
       const read = await store.readRepair();
       assert.ok(read.ok && read.value.status === "found", JSON.stringify(read));
       const snapshot = read.value.snapshot;
@@ -420,10 +420,11 @@ Deno.test(
       const work = snapshot.work[0]!;
       assert.ok(work);
       assert.equal(work.related.incidentId, INCIDENT_A);
-      // The work record is still in the work step: the loop cannot converge
-      // past the evidence stage with the real producer identity (the defect
-      // above), so no model start, no fixture and no fakery happened.
-      assert.equal(work.nextStep, "work");
+      // The record is blocked on the missing replay fixture; no model start,
+      // no fixture and no fakery happened.
+      assert.equal(work.nextStep, "blocked");
+      assert.equal(work.blocker?.kind, "missing_evidence");
+      assert.equal(work.blocker?.message, "incident has no replay fixture");
       assert.equal(model.requests.length, 0);
       assert.equal(snapshot.replays.length, 0);
       // The evidence WAS fetched and retained with exact artifact identity;

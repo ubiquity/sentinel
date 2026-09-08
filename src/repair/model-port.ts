@@ -14,11 +14,13 @@
  *
  * The port never invents CLI flags/stdin controls or unsupported protocol
  * methods: thread and turn parameters come from the frozen installed schema
- * (`thread/start`, `turn/start`, `turn/interrupt`, `turn/completed`), terminal
- * settlement is awaited, and every owned timer and stream is cleared. The
- * thread sandbox is the narrowest write-capable mode (`workspace-write` over
- * the isolated checkout cwd): the session can produce its commit inside the
- * checkout but holds no read access outside it and no approval authority.
+ * (`thread/start`, `turn/start`, `turn/interrupt`, `turn/completed`), command
+ * and edit items arrive as `item/started` / `item/completed` with an item
+ * `type` of `commandExecution` or `fileChange`, terminal settlement is
+ * awaited, and every owned timer and stream is cleared. The thread sandbox is
+ * the narrowest write-capable mode (`workspace-write` over the isolated
+ * checkout cwd): the session can produce its commit inside the checkout but
+ * holds no read access outside it and no approval authority.
  */
 
 import type { GitSha } from "../contracts/brands.ts";
@@ -30,7 +32,12 @@ import type {
   PortResultV1,
 } from "../contracts/ports.ts";
 import { portError, portOk } from "../contracts/ports.ts";
+import { checkoutContentCheckpoint } from "./checkout-content.ts";
 import { CodexProtocolError, type CodexSessionV1 } from "./codex-transport.ts";
+import {
+  FailedCommandLoopGuard,
+  type FailedCommandObservation,
+} from "./failed-command-loop.ts";
 
 /** Max model task prompt characters (private finite bound). */
 const MAX_PROMPT_CHARS = 32_000;
@@ -38,6 +45,26 @@ const MAX_PROMPT_CHARS = 32_000;
 const MAX_ISSUE_BODY_CHARS = 8_000;
 /** Expected checkpoint ref on the model checkout, if the model recorded one. */
 const CHECKPOINT_REF = "refs/sentinel/checkpoint";
+
+/** Sanitized loop-stop marker recorded through the receipt error path. */
+export const LOOP_STOP_MARKER = "failed_command_loop" as const;
+
+/** Fixed corrective steer text: trusted fixed prose plus a sanitized digest. */
+const STEER_TEXT =
+  "The last commands produced the same verified failure. Inspect the saved " +
+  "failure evidence and change your approach; repeating the failing command " +
+  "will be stopped.";
+
+// Private finite bounds for the observation pipeline (no new config surface).
+const MAX_ITEM_ID_CHARS = 256;
+const MAX_COMMAND_CHARS = 4096;
+const MAX_CWD_CHARS = 4096;
+const MAX_OUTPUT_CHARS = 64 * 1024; // 64Ki characters; larger output is inconclusive
+const MAX_PENDING_OBSERVATIONS = 16;
+const MAX_UNIQUE_ITEM_IDS = 1024;
+const MAX_ACTIVE_COMMAND_IDS = 16;
+/** Settle deadline from ANY interrupt: grace from the request, never the old ceiling. */
+const SETTLE_GRACE_MS_EXTRA = 1;
 
 export interface ActualSessionEvidenceV1 {
   /** Values the app-server itself acknowledged (configured thread metadata). */
@@ -65,6 +92,10 @@ export type ReceiptVerifierV1 = (
 
 /** The default verifier never certifies; nothing is ever synthesized. */
 export const unavailableReceiptVerifier: ReceiptVerifierV1 = () => null;
+
+/** Exact existing typed `unavailable` detail for the unverified-receipt boundary. */
+const UNAVAILABLE_RECEIPT_DETAIL =
+  "model receipt unavailable: actual provider model/effort could not be verified at this boundary";
 
 /** Local credential-free checkout identity resolution (no remote, no creds). */
 export interface CheckoutResolverV1 {
@@ -103,6 +134,7 @@ export class LocalCheckoutResolver implements CheckoutResolverV1 {
     if (ancestor === null || ancestor.trim() !== "") return null;
     const files = await this.git([
       "diff",
+      "--no-renames",
       "--name-only",
       `${this.baseSha}..${headSha}`,
     ]);
@@ -171,6 +203,14 @@ export class CodexImplementationPort implements ImplementationPort {
   async runModel(
     request: ModelRunRequestV1,
   ): Promise<PortResultV1<ModelRunReceiptV1>> {
+    if (this.verifier === unavailableReceiptVerifier) {
+      // The default (or explicitly supplied unavailable) verifier never
+      // certifies actual provider model/effort: fail closed with the existing
+      // typed `unavailable` before any session opens or model work begins.
+      // Only a configured verifier can earn the session; a configured
+      // verifier is never invoked without real session evidence.
+      return portError("unavailable", UNAVAILABLE_RECEIPT_DETAIL);
+    }
     let session: CodexSessionV1 | null = null;
     const invocationId = `codex-${request.taskId}-${Date.now()}`;
     try {
@@ -191,7 +231,9 @@ export class CodexImplementationPort implements ImplementationPort {
         turn.turnId,
         request.maxOutputChars,
       );
-      return this.finishReceipt(request, invocationId, thread, awaited);
+      // Explicit await so the receipt is fully built before the session close
+      // in finally: runModel never resolves before close() has settled.
+      return await this.finishReceipt(request, invocationId, thread, awaited);
     } catch (error) {
       const failure = unavailableFor(error);
       return portError(failure.kind, failure.detail);
@@ -300,51 +342,454 @@ export class CodexImplementationPort implements ImplementationPort {
     let rerouted: { from: string; to: string } | null = null;
     let terminal: AwaitedSettlementV1["terminal"] = null;
     let resolver: ((value: AwaitedSettlementV1) => void) | null = null;
-    let interrupted = false;
     const terminalPromise = new Promise<AwaitedSettlementV1>((resolve) => {
       resolver = resolve;
     });
-    const interrupt = () => {
-      if (interrupted) return;
-      interrupted = true;
-      void session.send("turn/interrupt", { threadId, turnId }).catch(() => {
-        // The interrupt request itself failed; the wait continues to the
-        // settlement deadline and then fails closed without a terminal state.
+    const resolveSettlement = (value: AwaitedSettlementV1) => {
+      resolver?.(value);
+    };
+
+    // --- loop-guard observability state. Every field below is initialized
+    // BEFORE the notification listener is registered: the terminal listener
+    // may fire synchronously from the pre-registration backlog, so a
+    // half-built handler must never be reachable.
+    let loopStopped = false;
+    let interruptRequested = false;
+    let generation = 0;
+    let steerSent = false;
+    let steerAcked = false;
+    let guardDisabled = false;
+    // Bounded EXACT active command ids: only unique started ids are added and
+    // a completion deletes only that exact id, so a completion can never
+    // consume an unrelated command's active state (see collectStarted /
+    // collectCompleted).
+    const activeCommandIds = new Set<string>();
+    const seenItemIds = new Set<string>();
+    const guard = new FailedCommandLoopGuard(threadId, turnId);
+    const jobs: CapturedObservationV1[] = [];
+    let draining: Promise<void> | null = null;
+    let stopped = false;
+    // Private cancellation for a pending steer/settlement wait: resolved by
+    // settleNow so a terminal (or any other stop) resolves the pending steer
+    // race immediately instead of leaving its default-grace timer (or a hung
+    // steer send) alive past settlement.
+    let cancelSettlement: (() => void) | null = null;
+    const cancelled = new Promise<void>((resolve) => {
+      cancelSettlement = resolve;
+    });
+
+    const settleNow = () => {
+      if (stopped) return;
+      stopped = true;
+      jobs.length = 0;
+      clearTimeout(durationTimer);
+      clearTimeout(settleTimer);
+      // Cancel the pending steer FIRST: a drain in-flight inside `sendSteer`
+      // must not wait (or depend) on the default-grace steer timer once the
+      // terminal stop has happened; the race loses to this resolution and the
+      // sendSteer continuation observes `stopped` and returns without sending.
+      cancelSettlement?.();
+      const value: AwaitedSettlementV1 = {
+        terminal,
+        outputChars,
+        rerouted,
+        loopStopped,
+      };
+      if (draining === null) {
+        resolveSettlement(value);
+        return;
+      }
+      // Await the bounded drain after canceling the steer: queued jobs were
+      // dropped above, the in-flight job observes `stopped` and performs no
+      // side effects, and the checkpoint work is privately bounded, so the
+      // wait is finite and no separate cleanup timer can outlive settlement.
+      // A rejection never escapes as a dangling rejecting finally chain.
+      void draining.catch(() => {}).finally(() => {
+        resolveSettlement(value);
       });
     };
-    const onEvent = (method: string, params: unknown) => {
-      if (method === "turn/completed") {
-        const record = params as Record<string, unknown>;
-        const turn = record?.turn as Record<string, unknown> | null;
-        if (record?.threadId !== threadId || turn === null) return;
-        const status = turn.status;
-        if (
-          status !== "completed" && status !== "interrupted" &&
-          status !== "failed"
-        ) {
-          // A non-terminal status in the terminal event is malformed evidence.
+
+    /**
+     * Request a turn interrupt and start the settlement grace NOW: every
+     * interrupt path (duration ceiling, output-bound crossing, own loop stop)
+     * uses the same immediate grace, so a stopped run never waits for the old
+     * duration ceiling. Once the wait is settled, no callback sends anything.
+     */
+    const requestInterrupt = () => {
+      if (stopped || interruptRequested) return;
+      interruptRequested = true;
+      clearTimeout(settleTimer);
+      settleTimer = setTimeout(() => {
+        if (terminal === null) {
           terminal = {
             status: "failed",
-            error: "malformed terminal turn status",
+            error: "timeout without terminal settlement",
             durationMs: null,
           };
-          resolver?.({ terminal, outputChars, rerouted });
+        }
+        settleNow();
+      }, this.graceMs + SETTLE_GRACE_MS_EXTRA);
+      try {
+        session.send("turn/interrupt", { threadId, turnId }).catch(() => {
+          // The interrupt request itself failed; the wait continues to the
+          // grace deadline and then fails closed without a terminal state.
+        });
+      } catch {
+        // A synchronously-throwing session must never escape the receiver.
+      }
+    };
+
+    /**
+     * Early loop stop: the repair loop guard owns the stop, so settlement
+     * grace starts NOW (never at the old duration ceiling) and the exact
+     * terminal is awaited from this point.
+     */
+    const earlyLoopInterrupt = () => {
+      if (loopStopped || stopped) return;
+      loopStopped = true;
+      requestInterrupt();
+    };
+
+    const failClosed = (detail: string) => {
+      if (stopped) return;
+      terminal = {
+        status: "failed",
+        error: detail,
+        durationMs: null,
+      };
+      settleNow();
+    };
+
+    const collectStarted = (params: unknown) => {
+      const record = params as Record<string, unknown> | null;
+      if (record?.threadId !== threadId || record?.turnId !== turnId) return;
+      const item = record?.item as Record<string, unknown> | null;
+      if (item?.type === "fileChange") {
+        // Any edit is state progress: the repeated-failure sequence resets
+        // even when the committed HEAD did not change (the model is changing
+        // files), and pending observations no longer attest their state.
+        generation++;
+        guard.resetProgress();
+        return;
+      }
+      if (item?.type !== "commandExecution") return;
+      if (
+        typeof item.id !== "string" || item.id.length === 0 ||
+        item.id.length > MAX_ITEM_ID_CHARS
+      ) {
+        // An unidentifiable start makes active-command bookkeeping
+        // untrustworthy: disable the early guard conservatively and reset the
+        // sequence; the start is still progress for pending observations.
+        guardDisabled = true;
+        generation++;
+        guard.resetProgress();
+        return;
+      }
+      if (activeCommandIds.has(item.id) || seenItemIds.has(item.id)) {
+        // Duplicate start: no state change. An id that already completed
+        // (seenItemIds) must never re-enter active bookkeeping as a ghost
+        // active command, or pending failure evidence would be invalidated.
+        return;
+      }
+      if (activeCommandIds.size >= MAX_ACTIVE_COMMAND_IDS) {
+        // The active-id bound is exceeded: conservatively disable the guard.
+        guardDisabled = true;
+        generation++;
+        guard.resetProgress();
+        return;
+      }
+      activeCommandIds.add(item.id);
+      // The start is a progress generation: any observation still pending
+      // when this start was received is invalid (see observeWork below).
+      generation++;
+    };
+
+    const captureCompleted = (
+      item: Record<string, unknown>,
+      itemId: string,
+      receivedOthersActive: boolean,
+    ): CapturedObservationV1 => {
+      const rawCommand = typeof item.command === "string" ? item.command : null;
+      const rawCwd = typeof item.cwd === "string" ? item.cwd : null;
+      const rawOutput = typeof item.aggregatedOutput === "string"
+        ? item.aggregatedOutput
+        : null;
+      return {
+        receivedGeneration: generation,
+        receivedSteerAcked: steerAcked,
+        receivedOthersActive,
+        itemId,
+        command: rawCommand !== null && rawCommand.length <= MAX_COMMAND_CHARS
+          ? rawCommand
+          : null,
+        cwd: rawCwd !== null && rawCwd.length <= MAX_CWD_CHARS ? rawCwd : null,
+        status: typeof item.status === "string" ? item.status : null,
+        output: rawOutput !== null && rawOutput.length <= MAX_OUTPUT_CHARS
+          ? rawOutput
+          : null,
+        exitCode: typeof item.exitCode === "number" ? item.exitCode : null,
+      };
+    };
+
+    const collectCompleted = (params: unknown) => {
+      const record = params as Record<string, unknown> | null;
+      // Normalize exact completed items for this thread/turn only; events for
+      // other threads/turns are stale and ignored (never a sequence break).
+      if (record?.threadId !== threadId || record?.turnId !== turnId) return;
+      const item = record?.item as Record<string, unknown> | null;
+      if (item?.type === "fileChange") {
+        generation++;
+        guard.resetProgress();
+        return;
+      }
+      if (item?.type !== "commandExecution") return;
+      let itemId: string | null = null;
+      if (
+        typeof item.id === "string" && item.id.length > 0 &&
+        item.id.length <= MAX_ITEM_ID_CHARS
+      ) {
+        itemId = item.id;
+      }
+      if (itemId === null) {
+        // A completion without an exact bounded id cannot be attributed or
+        // deduplicated: it never becomes an observation (no empty-string item
+        // id through the helper) — reset the sequence directly and discard it.
+        guard.resetProgress();
+        return;
+      }
+      // Dedup before any async work or active-state change; a duplicate
+      // stream delivery of an already-observed item is ignored (same evidence,
+      // never re-counted).
+      if (seenItemIds.has(itemId)) return;
+      if (seenItemIds.size >= MAX_UNIQUE_ITEM_IDS) {
+        guardDisabled = true;
+        guard.resetProgress();
+        return;
+      }
+      seenItemIds.add(itemId);
+      // Delete only this exact id from the active set (never decrement a
+      // count for an unrelated completion); what remains are the OTHER
+      // commands still active at receipt, captured before any async work.
+      activeCommandIds.delete(itemId);
+      const job = captureCompleted(item, itemId, activeCommandIds.size > 0);
+      enqueue(job);
+    };
+
+    const enqueue = (job: CapturedObservationV1) => {
+      if (stopped) return;
+      if (jobs.length >= MAX_PENDING_OBSERVATIONS) {
+        // Bounded queue overflow: the guard is disabled (stale evidence), the
+        // accumulated sequence is conservatively reset, and the overflow item
+        // is dropped.
+        guardDisabled = true;
+        guard.resetProgress();
+        return;
+      }
+      jobs.push(job);
+      if (draining === null) {
+        draining = drain().catch(() => {}).finally(() => {
+          draining = null;
+        });
+      }
+    };
+
+    const drain = async () => {
+      while (!stopped) {
+        const job = jobs.shift();
+        if (job === undefined) break;
+        await handleWork(job);
+      }
+    };
+
+    const handleWork = async (job: CapturedObservationV1) => {
+      if (stopped || guardDisabled || interruptRequested) return;
+      await observeWork(job);
+    };
+
+    const observeWork = async (job: CapturedObservationV1) => {
+      // Receipt-time capture: an observation that was received while another
+      // command was active, before the steer acknowledgement, or that somehow
+      // aged in the bounded queue is uncertain — never counted, conservatively
+      // reset instead of turning it into post-ack or concurrent evidence.
+      if (
+        job.receivedOthersActive ||
+        job.receivedGeneration !== generation ||
+        job.receivedSteerAcked !== steerAcked
+      ) {
+        guard.resetProgress();
+        return;
+      }
+      const normalized = await normalizeObservation(
+        job,
+        this.options.checkoutDir,
+      );
+      if (stopped || interruptRequested || guardDisabled) return;
+      // A new command start or edit during the pending checkpoint/hash work
+      // invalidates this observation (its checkpoint no longer attests the
+      // state the failure ran in) and resets the repeated sequence; a
+      // serial start after this observation fully settles is preserved.
+      if (
+        job.receivedOthersActive ||
+        activeCommandIds.size > 0 ||
+        job.receivedGeneration !== generation ||
+        job.receivedSteerAcked !== steerAcked
+      ) {
+        guard.resetProgress();
+        return;
+      }
+      const observation = normalized.inconclusive
+        ? inconclusiveObservation(threadId, turnId, job)
+        : {
+          threadId,
+          turnId,
+          itemId: job.itemId,
+          command: normalized.command!,
+          cwd: normalized.cwd!,
+          exitCode: normalized.exitCode!,
+          outputDigest: normalized.outputDigest!,
+          checkpoint: normalized.checkpoint!,
+          conclusiveFailure: true,
+        };
+      const result = await guard.observe(observation);
+      if (stopped || interruptRequested || guardDisabled) return;
+      // Recheck generation/active/ack state AFTER the observe await as well:
+      // a stale result must never fire a steer/interrupt.
+      if (
+        job.receivedOthersActive ||
+        activeCommandIds.size > 0 ||
+        job.receivedGeneration !== generation ||
+        job.receivedSteerAcked !== steerAcked
+      ) {
+        guard.resetProgress();
+        return;
+      }
+      if (result.kind === "steer") {
+        await sendSteer(result.evidenceDigest);
+      } else if (result.kind === "interrupt") {
+        earlyLoopInterrupt();
+      }
+    };
+
+    const sendSteer = async (evidenceDigest: string) => {
+      if (steerSent) return;
+      steerSent = true;
+      // Private bounded wait for the acknowledgement: one bounded race inside
+      // the existing duration/grace bounds. No replacement turn, session or
+      // admission authority; awaiting this can never become unbounded.
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      const bound = new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error("steer acknowledgement timeout")),
+          this.graceMs + SETTLE_GRACE_MS_EXTRA,
+        );
+      });
+      try {
+        const response = await Promise.race([
+          session.send("turn/steer", {
+            threadId,
+            expectedTurnId: turnId,
+            input: [{
+              type: "text",
+              text: `${STEER_TEXT}\n[Sanitized evidence: ${evidenceDigest}]`,
+              text_elements: [],
+            }],
+          }),
+          bound,
+          // A terminal (or any other stop) resolves this race immediately:
+          // the default-grace steer timer is cleared in finally and no late
+          // response processing can create a request after settlement.
+          cancelled,
+        ]);
+        // Late resolution after a stop/interrupt must not mark anything.
+        if (stopped || loopStopped) return;
+        const record = response as Record<string, unknown> | null;
+        // Acknowledged only by an exact returned turn id for THIS same turn;
+        // malformed/rejected/unsupported/unavailable -> interrupt, and the
+        // single steer is never retried. The ack state flips at this exact
+        // boundary, so pre-ack jobs (captured with their false flag) are
+        // discarded/reset by the recheck instead of counting as post-ack.
+        if (typeof record?.turnId !== "string" || record.turnId !== turnId) {
+          earlyLoopInterrupt();
           return;
         }
-        const turnError = (turn.error ?? null) as
-          | Record<string, unknown>
-          | null;
-        const error = typeof turnError?.message === "string"
-          ? turnError.message.slice(0, 300)
-          : null;
-        terminal = {
-          status,
-          error,
-          durationMs: typeof turn.durationMs === "number"
-            ? turn.durationMs
-            : null,
-        };
-        resolver?.({ terminal, outputChars, rerouted });
+        steerAcked = true;
+        guard.markSteered();
+      } catch {
+        if (stopped || loopStopped) return;
+        earlyLoopInterrupt();
+      } finally {
+        if (timer !== null) clearTimeout(timer);
+      }
+    };
+
+    const handleTerminal = (params: unknown) => {
+      const record = params as Record<string, unknown> | null;
+      // Exact current thread AND turn id are required for a successful or
+      // interrupted settlement: a missing/nonobject turn (or missing thread
+      // identity) fails closed, a wrong/stale identity is ignored.
+      if (
+        typeof record !== "object" || record === null ||
+        typeof record.threadId !== "string"
+      ) {
+        failClosed("malformed terminal thread id");
+        return;
+      }
+      if (record.threadId !== threadId) return;
+      const turn = record.turn;
+      if (typeof turn !== "object" || turn === null) {
+        failClosed("malformed terminal turn");
+        return;
+      }
+      const turnRecord = turn as Record<string, unknown>;
+      if (typeof turnRecord.id !== "string") {
+        failClosed("malformed terminal turn id");
+        return;
+      }
+      if (turnRecord.id !== turnId) return;
+      const status = turnRecord.status;
+      if (
+        status !== "completed" && status !== "interrupted" &&
+        status !== "failed"
+      ) {
+        failClosed("malformed terminal turn status");
+        return;
+      }
+      const turnError = (turnRecord.error ?? null) as
+        | Record<string, unknown>
+        | null;
+      const error = typeof turnError?.message === "string"
+        ? turnError.message.slice(0, 300)
+        : null;
+      terminal = {
+        status,
+        error,
+        durationMs: typeof turnRecord.durationMs === "number"
+          ? turnRecord.durationMs
+          : null,
+      };
+      settleNow();
+    };
+
+    const onEvent = (method: string, params: unknown) => {
+      if (stopped) return;
+      // Bounded output accounting FIRST: every nonterminal event contributes
+      // to the total (malformed, over-bound and unknown events included) and
+      // crossing the bound interrupts the turn — no event bypasses the total
+      // through an event-specific early return.
+      outputChars += JSON.stringify(params ?? {}).length;
+      if (method !== "turn/completed" && outputChars > maxOutputChars) {
+        requestInterrupt();
+      }
+      if (method === "item/started") {
+        collectStarted(params);
+        return;
+      }
+      if (method === "item/completed") {
+        collectCompleted(params);
+        return;
+      }
+      if (method === "turn/completed") {
+        handleTerminal(params);
         return;
       }
       if (method === "model/rerouted") {
@@ -357,24 +802,28 @@ export class CodexImplementationPort implements ImplementationPort {
         }
         return;
       }
-      // Bounded output accounting: the sum of all notification payloads is
-      // capped; crossing the bound interrupts the turn (never silent drift).
-      outputChars += JSON.stringify(params ?? {}).length;
-      if (outputChars > maxOutputChars) interrupt();
+      // Unknown methods were counted above; nothing else is inferred.
     };
-    session.onNotification((event) => onEvent(event.method, event.params));
 
-    const durationTimer = setTimeout(interrupt, request.maxDurationMs);
-    const settleTimer = setTimeout(() => {
+    // Timers are armed before the listener registers so a synchronous
+    // terminal at registration still observes fully initialized state. Every
+    // interrupt path re-arms the settlement grace immediately
+    // (see requestInterrupt), so the initial arm is only the fully initialized
+    // placeholder never observed by a live interrupt.
+    const durationTimer = setTimeout(requestInterrupt, request.maxDurationMs);
+    let settleTimer: ReturnType<typeof setTimeout>;
+    settleTimer = setTimeout(() => {
       if (terminal === null) {
         terminal = {
           status: "failed",
           error: "timeout without terminal settlement",
           durationMs: null,
         };
-        resolver?.({ terminal, outputChars, rerouted });
       }
-    }, request.maxDurationMs + this.graceMs + 1);
+      settleNow();
+    }, request.maxDurationMs + this.graceMs + SETTLE_GRACE_MS_EXTRA);
+
+    session.onNotification((event) => onEvent(event.method, event.params));
 
     const settled = await terminalPromise;
     clearTimeout(durationTimer);
@@ -397,7 +846,8 @@ export class CodexImplementationPort implements ImplementationPort {
       this.options.checkoutDir,
       request.base,
     );
-    const resolved = settled.terminal?.status === "completed"
+    const resolved = settled.terminal?.status === "completed" &&
+        !settled.loopStopped
       ? await checkout.resolve()
       : null;
     const candidate: CandidateOutcomeV1 | null = resolved === null ? null : {
@@ -420,10 +870,7 @@ export class CodexImplementationPort implements ImplementationPort {
     };
     const verified = this.verifier(evidence);
     if (verified === null) {
-      return portError(
-        "unavailable",
-        "model receipt unavailable: actual provider model/effort could not be verified at this boundary",
-      );
+      return portError("unavailable", UNAVAILABLE_RECEIPT_DETAIL);
     }
     if (
       verified.observedModel !== request.model ||
@@ -433,6 +880,25 @@ export class CodexImplementationPort implements ImplementationPort {
         "unavailable",
         "model receipt mismatch: observed model/effort differ from requested Luna/max",
       );
+    }
+    if (settled.loopStopped) {
+      // Own early loop stop: the model/session did not fail as an application
+      // defect and no candidate may be produced — even if a completed terminal
+      // races the interrupt. The receipt carries only the sanitized marker.
+      return portOk({
+        invocationId,
+        outcome: settled.terminal?.status === "failed"
+          ? "failed"
+          : "interrupted",
+        actual: {
+          observedModel: verified.observedModel,
+          observedReasoning: verified.observedReasoning,
+          durationMs: settled.terminal?.durationMs ?? 0,
+          outputChars: settled.outputChars,
+        },
+        candidate: null,
+        error: LOOP_STOP_MARKER,
+      });
     }
     if (settled.terminal?.status !== "completed") {
       return portOk({
@@ -473,6 +939,240 @@ interface AwaitedSettlementV1 {
   } | null;
   outputChars: number;
   rerouted: { from: string; to: string } | null;
+  /** Own failed-command loop stop: early interrupt already decided. */
+  loopStopped: boolean;
+}
+
+/** Bounded capture of one completed command item, taken at receipt time. */
+interface CapturedObservationV1 {
+  /** Progress generation at receipt (starts and edits advance it). */
+  receivedGeneration: number;
+  /** Steering-ack state at receipt; async work must not relabel pre-ack items. */
+  receivedSteerAcked: boolean;
+  /** Other commands were still active at receipt; the item is never counted. */
+  receivedOthersActive: boolean;
+  /** Exact bounded item id; unidentifiable completions are discarded at receipt. */
+  itemId: string;
+  command: string | null;
+  cwd: string | null;
+  status: string | null;
+  output: string | null;
+  exitCode: number | null;
+}
+
+interface NormalizedObservationV1 {
+  inconclusive: boolean;
+  command: string | null;
+  cwd: string | null;
+  exitCode: number | null;
+  outputDigest: string | null;
+  checkpoint: string | null;
+}
+
+type CommandClassV1 =
+  | "deno_check"
+  | "deno_lint"
+  | "deno_test"
+  | "rg_grep"
+  | "unknown";
+
+/** Deno diagnostic line: `error: ...` or `error (rule): ...` / `error[rule]: ...`. */
+const DIAGNOSTIC_LINE = /^\s*error(?:\s*\([^)\n]*\)|\[[^\]\n]*\])?\s*:/m;
+
+/** A literal single-quoted `/bin/bash -lc` or `/bin/zsh -lc` command wrapper. */
+const LITERAL_WRAPPER = /^\/bin\/(?:bash|zsh) -lc '([^']*)'$/;
+
+/** One simple-command token: a literal word or a balanced double-quoted word. */
+const LITERAL_TOKEN_SRC = "[A-Za-z0-9_.,@%+=:/\\-]+";
+const QUOTED_TOKEN_SRC = '"[^"\\r\\n\\\\$`]+"';
+
+/**
+ * Conservative full-string simple-command syntax applied to BOTH bare commands
+ * and literal wrapped commands: only literal (or balanced double-quoted) words
+ * with no substitutions, operators, pipeline/compound syntax, escape
+ * sequences or unbalanced quoting can classify as a deno check/lint command.
+ */
+const SIMPLE_COMMAND = new RegExp(
+  `^(?:${LITERAL_TOKEN_SRC}|${QUOTED_TOKEN_SRC})` +
+    `(?: +(?:${LITERAL_TOKEN_SRC}|${QUOTED_TOKEN_SRC}))*$`,
+);
+
+function classifyCommand(rawCommand: string): CommandClassV1 {
+  const wrapper = LITERAL_WRAPPER.exec(rawCommand);
+  const inner = wrapper !== null ? wrapper[1] : rawCommand;
+  if (!SIMPLE_COMMAND.test(inner)) return "unknown";
+  const tokens = tokenizeCommand(inner);
+  if (tokens.length === 0) return "unknown";
+  if (tokens[0] === "deno") {
+    switch (tokens[1]) {
+      case "check":
+        return "deno_check";
+      case "lint":
+        return "deno_lint";
+      case "test":
+        return "deno_test";
+      default:
+        return "unknown";
+    }
+  }
+  if (tokens[0] === "rg" || tokens[0] === "grep") {
+    return "rg_grep";
+  }
+  return "unknown";
+}
+
+/** Simple token split that keeps double-quoted arguments as one token. */
+function tokenizeCommand(command: string): string[] {
+  const tokens: string[] = [];
+  let current = "";
+  let quoted = false;
+  for (const ch of command.trim()) {
+    if (ch === '"') {
+      quoted = !quoted;
+      current += ch;
+    } else if (ch === " " && !quoted) {
+      if (current.length > 0) {
+        tokens.push(current);
+        current = "";
+      }
+    } else {
+      current += ch;
+    }
+  }
+  if (current.length > 0) tokens.push(current);
+  return tokens;
+}
+
+function hasRealDiagnostics(output: string): boolean {
+  return DIAGNOSTIC_LINE.test(output);
+}
+
+async function sha256Hex(text: string): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(text),
+  );
+  return Array.from(
+    new Uint8Array(digest),
+    (byte) => byte.toString(16).padStart(2, "0"),
+  ).join("");
+}
+
+/**
+ * Normalize one completed command observation for the EXACT thread/turn.
+ * Returns an inconclusive record when any metadata is missing, over-bound,
+ * untrusted (symlink/outside/absent cwd), unknown-command or otherwise not a
+ * certified repeated failure; such evidence breaks the repeated sequence and
+ * is never counted. Only potentially conclusive failure commands are hashed
+ * against a trusted checkout-content checkpoint (never a truncated output).
+ */
+async function normalizeObservation(
+  job: CapturedObservationV1,
+  checkoutDir: string,
+): Promise<NormalizedObservationV1> {
+  const inconclusive = (): NormalizedObservationV1 => ({
+    inconclusive: true,
+    command: null,
+    cwd: null,
+    exitCode: null,
+    outputDigest: null,
+    checkpoint: null,
+  });
+  if (
+    job.command === null || job.cwd === null || job.status === null ||
+    job.output === null || job.exitCode === null ||
+    !Number.isInteger(job.exitCode)
+  ) {
+    return inconclusive();
+  }
+  // Declined and non-terminal statuses are not completed failures.
+  if (job.status !== "completed" && job.status !== "failed") {
+    return inconclusive();
+  }
+  const classification = classifyCommand(job.command);
+  if (
+    classification !== "deno_check" && classification !== "deno_lint"
+  ) {
+    // Unknown commands, successful reads, rg/grep no-match and deno
+    // test/replay (expected baseline phases unknown) are inconclusive.
+    return inconclusive();
+  }
+  if (job.exitCode === 0) return inconclusive();
+  if (!hasRealDiagnostics(job.output)) return inconclusive();
+
+  const cwd = await normalizedCheckoutCwd(job.cwd, checkoutDir);
+  if (cwd === null) return inconclusive();
+  // Hash the FULL bounded output only; a larger or missing output stays
+  // inconclusive and is never hashed truncated.
+  const outputDigest = await sha256Hex(job.output);
+  const checkpoint = await checkoutContentCheckpoint(checkoutDir);
+  if (checkpoint === null) return inconclusive();
+  return {
+    inconclusive: false,
+    command: job.command,
+    cwd,
+    exitCode: job.exitCode,
+    outputDigest,
+    checkpoint,
+  };
+}
+
+/**
+ * Resolve cwd to inside the real checkout. The raw absolute normalized path
+ * must equal its own real path (a symlink alias is rejected, never accepted
+ * as an uncertain path identity), and that real path must stay inside the
+ * checkout root normalized to its real path; outside/alias/absent is null.
+ */
+async function normalizedCheckoutCwd(
+  cwd: string,
+  checkoutDir: string,
+): Promise<string | null> {
+  try {
+    const raw = normalizeAbsolutePath(cwd);
+    if (raw === null) return null;
+    const real = await Deno.realPath(raw);
+    const root = await Deno.realPath(checkoutDir);
+    if (real !== root && !real.startsWith(`${root}/`)) return null;
+    if (raw !== real) return null;
+    return real === root ? "." : real.slice(root.length + 1);
+  } catch {
+    return null;
+  }
+}
+
+/** Collapse `.`/`..` of an absolute path without resolving symlinks. */
+function normalizeAbsolutePath(path: string): string | null {
+  if (!path.startsWith("/")) return null;
+  const parts: string[] = [];
+  for (const part of path.split("/")) {
+    if (part === "" || part === ".") continue;
+    if (part === "..") {
+      if (parts.length === 0) return null;
+      parts.pop();
+    } else {
+      parts.push(part);
+    }
+  }
+  return `/${parts.join("/")}`;
+}
+
+/** Inconclusive guard observation: breaks the sequence, never counts. */
+function inconclusiveObservation(
+  threadId: string,
+  turnId: string,
+  job: CapturedObservationV1,
+): FailedCommandObservation {
+  return {
+    threadId,
+    turnId,
+    itemId: job.itemId ?? "",
+    command: job.command ?? "",
+    cwd: "",
+    exitCode: 0,
+    outputDigest: "",
+    checkpoint: "",
+    conclusiveFailure: false,
+  };
 }
 
 function requireRecord(

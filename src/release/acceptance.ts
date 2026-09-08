@@ -93,6 +93,9 @@ export function evaluateAcceptance(
   samples: MetricsSampleV1[],
 ): AcceptanceEvaluationV1 {
   const insufficientReasons: string[] = [];
+  const thresholdMetrics = [
+    ...new Set(policy.thresholds.map((threshold) => threshold.metric)),
+  ];
   for (
     const [name, list] of [
       ["baseline", baseline],
@@ -112,6 +115,13 @@ export function evaluateAcceptance(
           `${name}[${index}] has missing telemetry`,
         );
         continue;
+      }
+      for (const metric of thresholdMetrics) {
+        if (failureCountForMetric(sample, metric) === null) {
+          insufficientReasons.push(
+            `${name}[${index}] has a missing ${metric} counter`,
+          );
+        }
       }
       if (sample.requestCount < policy.minRequests) {
         insufficientReasons.push(
@@ -186,15 +196,26 @@ function aggregateRate(
       continue;
     }
     denominator += sample.requestCount;
-    const count = metric === "five_xx_rate"
-      ? sample.fiveXxCount
-      : metric === "timeout_rate"
-      ? sample.timeoutCount
-      : sample.streamFailureCount;
-    failures += count ?? 0;
+    const count = failureCountForMetric(sample, metric);
+    if (count === null) {
+      missing = true;
+      continue;
+    }
+    failures += count;
   }
   if (missing || denominator === 0) return null;
   return failures / denominator;
+}
+
+function failureCountForMetric(
+  sample: MetricsSampleV1,
+  metric: "five_xx_rate" | "timeout_rate" | "stream_failure_rate",
+): number | null {
+  return metric === "five_xx_rate"
+    ? sample.fiveXxCount
+    : metric === "timeout_rate"
+    ? sample.timeoutCount
+    : sample.streamFailureCount;
 }
 
 function expectedBaselineSamples(policy: StabilityPolicyV1): number {

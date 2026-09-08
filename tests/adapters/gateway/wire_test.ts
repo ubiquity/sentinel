@@ -145,16 +145,17 @@ Deno.test("wire: index page rejects unknown keys, bad cursors and incomplete cov
     () => parseGatewayIndexPageV1({ ...page, cursor: "x".repeat(2_049) }),
     GatewayWireError,
   );
-  assert.throws(
-    () =>
-      parseGatewayIndexPageV1({
-        ...page,
-        coverage: { status: "complete" },
-        cursor: "p2",
-      }),
-    GatewayWireError,
-    "complete coverage with a non-null cursor is contradictory",
-  );
+  // Complete coverage with a non-null cursor is normal pagination: the page's
+  // source contribution was fully covered while another page remains — the
+  // producer reports complete for every successful page read, never
+  // incomplete merely because more pages exist.
+  const continued = parseGatewayIndexPageV1({
+    ...page,
+    coverage: { status: "complete" },
+    cursor: "p2",
+  });
+  assert.equal(continued.coverage.status, "complete");
+  assert.equal(continued.cursor, "p2");
   // Incomplete coverage with a non-null cursor is representable: the scan was
   // truncated while pagination continues.
   const incomplete = parseGatewayIndexPageV1({

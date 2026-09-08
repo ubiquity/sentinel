@@ -3,7 +3,7 @@
 //
 // Every scenario runs against a real disposable bare repository (the real
 // GitStateStore) and a stateful scripted transport that models the documented
-// Deno REST contract: revisions list, exact revision resources, timelines,
+// Deno REST contract: revisions list, exact revision resources, pagination,
 // promote (204 + effect), managed/custom health identity headers, and the
 // logs endpoint with exact revision/window filtering.
 //
@@ -410,6 +410,70 @@ Deno.test("checkpoint: minimum request coverage failure is insufficient, not a r
     await scene.cleanup();
   }
 });
+
+Deno.test(
+  "checkpoint: known requests with null failure counters are insufficient, not zero",
+  async () => {
+    const scene = await makeScenario({
+      logs: { accept: 100, fails: { fiveXx: 1 } },
+    });
+    try {
+      await promoteToMonitoring(scene);
+      await seedMonitorWindow(scene, 59);
+
+      // Keep the denominator known while removing the configured five_xx
+      // counter from every persisted candidate sample. The old evaluator
+      // converted these nulls to zero and could accept the window.
+      const store = storeAt(scene.ctx, "null-counter", "release");
+      const read = await store.readRelease();
+      assert.ok(read.ok, "release state must be readable");
+      if (!read.ok || read.value.status !== "found") {
+        throw new Error("release state unavailable");
+      }
+      const record = read.value.snapshot.releases[0];
+      if (record === undefined || record.acceptance === null) {
+        throw new Error("seeded acceptance evidence unavailable");
+      }
+      const mutated = parseReleaseRecordV1({
+        ...record,
+        acceptance: {
+          ...record.acceptance,
+          samples: record.acceptance.samples.map((sample) => ({
+            ...sample,
+            fiveXxCount: null,
+          })),
+        },
+        updatedAt: scene.clock.now(),
+      });
+      const snapshot: ReleaseStateSnapshotV1 = {
+        ...read.value.snapshot,
+        stateHead: read.value.head,
+        sequence: read.value.snapshot.sequence + 1,
+        updatedAt: scene.clock.now(),
+        releases: read.value.snapshot.releases.map((entry) =>
+          entry.id === mutated.id ? mutated : entry
+        ),
+      };
+      const written = await store.writeRelease(snapshot, read.value.head);
+      assert.ok(written.ok, "null-counter fixture must be applied");
+
+      assertCycle(await scene.controller.run(), "advanced");
+      const records = await scene.records();
+      assert.equal(records[0].phase, "failed");
+      assert.equal(records[0].receipts.error?.kind, "acceptance_insufficient");
+      assert.equal(records[0].receipts.rollback, null);
+      assert.equal(records[0].acceptance?.passed, false);
+      const fiveXx = records[0].acceptance?.thresholdResults.find((result) =>
+        result.metric === "five_xx_rate"
+      );
+      assert.ok(fiveXx);
+      assert.equal(fiveXx.observedRate, null);
+      assert.equal(scene.transport.callCount("POST", PROMOTE_RE), 1);
+    } finally {
+      await scene.cleanup();
+    }
+  },
+);
 
 Deno.test("checkpoint: threshold breach is objective failure and rolls back exactly", async () => {
   const policy = stabilityPolicy({

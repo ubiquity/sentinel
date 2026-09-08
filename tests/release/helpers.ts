@@ -47,7 +47,14 @@ export const DEP_X: DeploymentIdentityV1 = {
   revisionId: "dep-0009",
 };
 
-export const MANAGED_URL = "https://managed.example";
+/**
+ * Public synthetic Deno managed host used by every fixture: the actual
+ * two-label shape `<project>.<organization>.deno.net`, so the trusted
+ * immutable hostname form (`<first-label>-<revisionId>` plus the rest of the
+ * configured hostname) is exercised exactly as production derives it. No
+ * generic-host fallback exists in the port.
+ */
+export const MANAGED_URL = "https://ai-ubq-fi.ubiquity-dao.deno.net";
 export const CUSTOM_URL = "https://ai.ubq.fi";
 export const API_URL = "https://api.deno.com";
 export const PROJECT_ID = "project-ubq";
@@ -57,6 +64,16 @@ export const HEALTH_HEADERS = {
 export const BODY_MARKER = '"status":"available"';
 export const GIT_SHA_HEADER = "x-uos-git-sha";
 export const REVISION_HEADER = "x-uos-deployment-id";
+
+/** Immutable managed base URL for one exact revision (test-side mirror). */
+export function immutableUrl(revisionId: string): string {
+  const managed = new URL(MANAGED_URL);
+  const hostname = managed.hostname;
+  const firstLabel = hostname.slice(0, hostname.indexOf("."));
+  return `https://${firstLabel}-${revisionId}${
+    hostname.slice(firstLabel.length)
+  }`;
+}
 
 export function targetConfig(
   overrides: Partial<ReleaseTargetConfigV1> = {},
@@ -77,8 +94,6 @@ export function targetConfig(
       gitSha: GIT_SHA_HEADER,
       revisionId: REVISION_HEADER,
     },
-    gitShaLabelKey: "git.sha",
-    buildTransactionLabelKey: "sentinel.build_transaction_id",
     timeoutFailureKinds: ["upstream_timeout"],
     upstreamWideFailureKinds: ["upstream_error", "empty_upstream_completion"],
     logsLagMs: 5_000,
@@ -144,6 +159,7 @@ export class TestClock implements Clock {
 
 export interface RouteCallV1 {
   method: string;
+  host: string;
   pathname: string;
   search: string;
   authorization: string | null;
@@ -187,6 +203,37 @@ export class ScriptedTransport {
   customReject: boolean = false;
   /** Managed health 200 with valid identity headers but a missing body marker. */
   managedBodyMissing: boolean = false;
+  /**
+   * Per-call managed STABLE health identities: when non-empty each probe
+   * serves the next entry (the last one repeats), so a moving deployment can
+   * be scripted deterministically.
+   */
+  managedIdentitySequence: DeploymentIdentityV1[] = [];
+  private managedSequenceCursor = 0;
+  /**
+   * Exact identity served by the immutable managed host for one revision id.
+   * Lookup order: this map first, then the revisions installed by
+   * `installREST` (which are registered there).
+   */
+  immutableIdentities: Map<string, DeploymentIdentityV1> = new Map();
+  /**
+   * Per-request override for one immutable health probe. Receives the looked
+   * up identity (null when unknown) and returns a raw response or null to use
+   * the default identity body/headers. Enables body/header discrepancy and
+   * wrong-identity scripting.
+   */
+  immutableHealth:
+    | ((identity: DeploymentIdentityV1 | null) => RouteResponseV1 | null)
+    | null = null;
+  /**
+   * Per-request override for one managed STABLE health probe. Receives the
+   * identity that would be served and returns a raw response or null to use
+   * the default body/headers. Enables body/header discrepancy and malformed
+   * identity scripting on the stable host.
+   */
+  managedHealth:
+    | ((identity: DeploymentIdentityV1) => RouteResponseV1 | null)
+    | null = null;
   identityOverride: DeploymentIdentityV1 | null = null;
   customIdentityOverride: DeploymentIdentityV1 | null = null;
   /** When true, the logs endpoint rejects (transport failure). */
@@ -233,7 +280,55 @@ export class ScriptedTransport {
       new RegExp(
         `^${escapeRegExp(managedBase.href.slice(0, -1))}${escapeRegExp(path)}$`,
       ),
-      () => this.identityHealthResponse(200),
+      () => {
+        const sequence = this.managedIdentitySequence.length > 0
+          ? this.managedIdentitySequence[
+            Math.min(
+              this.managedSequenceCursor,
+              this.managedIdentitySequence.length - 1,
+            )
+          ]
+          : null;
+        this.managedSequenceCursor++;
+        const effective = sequence ?? this.identity();
+        const override = this.managedHealth?.(effective);
+        if (override !== null && override !== undefined) return override;
+        return this.identityHealthResponse(200, effective);
+      },
+    );
+    // Immutable managed hostname for one exact revision:
+    // <first-label>-<revisionId> + the REST of the configured managed hostname
+    // (the actual two-label shape keeps the `<organization>.deno.net` suffix).
+    // The looked-up identity is the immutableIdentities map entry or the
+    // installed revision. The suffix is derived from the configured trusted
+    // host, never hardcoded to a single-label form.
+    const managedHostName = managedBase.hostname;
+    const firstLabel = managedHostName.slice(
+      0,
+      managedHostName.indexOf("."),
+    );
+    const managedSuffix = managedHostName.slice(firstLabel.length);
+    this.any(
+      "GET",
+      new RegExp(
+        `^https://${escapeRegExp(firstLabel)}-[A-Za-z0-9_-]+${
+          escapeRegExp(managedSuffix)
+        }${escapeRegExp(path)}$`,
+      ),
+      (url) => {
+        const hostname = url.hostname;
+        const revisionId = hostname.slice(
+          firstLabel.length + 1,
+          hostname.length - managedSuffix.length,
+        );
+        const identity = this.immutableIdentities.get(revisionId) ??
+          this.revisions.find((entry) => entry.revisionId === revisionId) ??
+          null;
+        const override = this.immutableHealth?.(identity);
+        if (override !== null && override !== undefined) return override;
+        if (identity === null) return { kind: "reject" };
+        return this.identityHealthResponse(200, identity);
+      },
     );
     return this;
   }
@@ -324,6 +419,7 @@ export class ScriptedTransport {
     const headers = new Headers(init?.headers ?? {});
     this.calls.push({
       method,
+      host: url.host,
       pathname: url.pathname,
       search: url.search,
       authorization: headers.get("authorization"),
@@ -347,14 +443,15 @@ export class ScriptedTransport {
 export const REVISIONS_PATH = `/v2/apps/${PROJECT_ID}/revisions`;
 export const PROMOTE_RE = /^\/v2\/revisions\/([^/]+)\/promote$/;
 export const REVISION_RE = /^\/v2\/revisions\/([^/]+)$/;
-export const TIMELINES_RE = /^\/v2\/revisions\/([^/]+)\/timelines$/;
 export const LOGS_RE = /^\/v2\/apps\/[^/]+\/logs$/;
 
 /**
  * Registers a self-consistent Deno REST contract for `deployments`:
- * revisions list (exact SHA+transaction labels), revision resource, and
- * timelines binding the custom domain. The promote route is registered
- * separately through `promoteRoute` so tests can swap its behavior.
+ * revisions list (one page, exact ids, no git/transaction labels — the
+ * receipt revision id is the membership selector), and per-revision exact
+ * resource routes. The promote route is registered separately through
+ * `promoteRoute` so tests can swap its behavior. Callers that exercise the
+ * immutable health probe register `transport.health()` too.
  */
 export function installREST(
   transport: ScriptedTransport,
@@ -375,12 +472,7 @@ export function installREST(
           deployments.map((identity) => ({
             id: identity.revisionId,
             status: "succeeded",
-            labels: {
-              [transport.config.gitShaLabelKey]: identity.gitSha,
-              [transport.config.buildTransactionLabelKey]:
-                `txn-${identity.revisionId}`,
-              extra: ["legacy-value"],
-            },
+            labels: { "custom.branch": "main" },
             created_at: "2026-09-07T00:00:00.000Z",
           })),
         ),
@@ -397,25 +489,8 @@ export function installREST(
         body: JSON.stringify({
           id: identity.revisionId,
           status: "succeeded",
-          labels: {
-            [transport.config.gitShaLabelKey]: identity.gitSha,
-            [transport.config.buildTransactionLabelKey]:
-              `txn-${identity.revisionId}`,
-          },
+          labels: { "custom.branch": "main" },
         }),
-      }),
-    });
-    transport.route({
-      method: "GET",
-      pathname: `/v2/revisions/${identity.revisionId}/timelines`,
-      respond: () => ({
-        kind: "response",
-        status: 200,
-        body: JSON.stringify([{
-          slug: "production",
-          partition: {},
-          domains: [{ domain: "ai.ubq.fi" }],
-        }]),
       }),
     });
   }

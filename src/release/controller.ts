@@ -105,7 +105,7 @@ export interface ReleaseControllerOptions {
   repository: RepositoryIdentityV1;
   /** The exact target environment (production/isolated). */
   environment: ReleaseTargetEnvironmentV1;
-  /** m05 trusted configuration (labels, identity headers, bounds). */
+  /** m05 trusted configuration (identity headers, bounds). */
   target: ReleaseTargetConfigV1;
   /** Enabled owner stability policy (validated at construction). */
   policy: StabilityPolicyV1;
@@ -296,6 +296,7 @@ export class ReleaseController {
       this.target.projectId,
       request.revision,
       receipt.buildTransactionId,
+      receipt.identity.revisionId,
     );
     if (!candidate.ok) {
       return portOk({

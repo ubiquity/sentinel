@@ -119,6 +119,37 @@ Deno.test("release policy: sparse traffic and missing telemetry are insufficient
   assert.equal(missing.passed, false);
 });
 
+Deno.test(
+  "release policy: null configured failure counters are insufficient, never zero",
+  () => {
+    const policy = stabilityPolicy({
+      thresholds: [
+        { metric: "five_xx_rate", maxRate: 0, maxIncrease: 0 },
+      ],
+    });
+    const samples = windowSamples(DEP_1, 1).map((sample) => ({
+      ...sample,
+      fiveXxCount: null,
+    }));
+    const evaluation = evaluateAcceptance(
+      policy,
+      windowSamples(DEP_0, 0),
+      samples,
+    );
+    assert.equal(evaluation.objectiveFailure, false);
+    assert.equal(evaluation.passed, false);
+    assert.ok(
+      evaluation.insufficientReasons.some((reason) =>
+        reason.includes("samples[0] has a missing five_xx_rate counter")
+      ),
+    );
+    const fiveXx = evaluation.thresholds[0];
+    assert.equal(fiveXx?.observedRate, null);
+    assert.equal(fiveXx?.baselineRate, 0);
+    assert.equal(fiveXx?.passed, false);
+  },
+);
+
 Deno.test("release policy: upstream-wide faults cannot become stable", () => {
   const policy = stabilityPolicy();
   const samples = windowSamples(DEP_1, 0).map((sample, index) =>

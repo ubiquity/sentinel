@@ -385,14 +385,12 @@ export function parseGatewayIndexPageV1(
     }
   }
   const coverage = parseIncidentCoverage(page.coverage, "coverage");
-  if (coverage.status === "complete" && cursor !== null) {
-    // A complete scan cannot continue to another page: contradictory producer
-    // data, not a clean completion.
-    throw new GatewayWireError(
-      "wire_invalid_coverage",
-      "complete coverage with a non-null cursor is contradictory",
-    );
-  }
+  // Coverage describes the correctness of THIS page's source contribution (a
+  // successful, complete read of its scan slice); `cursor` describes normal
+  // pagination continuation. They are independent axes: a fully covered page
+  // with another page available carries `coverage.complete` AND a non-null
+  // cursor. A producer never reports incomplete merely because more pages
+  // exist; `incomplete` means a genuine source gap and stays fail-closed.
   const rows: GatewayIndexRowV1[] = [];
   for (const item of data) rows.push(parseGatewayIndexRowV1(item));
   return { rows, cursor, coverage };
