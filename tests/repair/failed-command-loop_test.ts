@@ -8,8 +8,8 @@ import assert from "node:assert/strict";
 
 import {
   FailedCommandLoopGuard,
-  type FailedCommandObservation,
   type FailedCommandLoopResult,
+  type FailedCommandObservation,
 } from "../../src/repair/failed-command-loop.ts";
 
 const THREAD_ID = "thread-1";
@@ -90,10 +90,12 @@ Deno.test("failed-command-loop: duplicate item IDs never count and never reset",
   expectContinue(await observe(guard, { itemId: "dup" }));
   // Re-observations of the same item, even with reset-looking metadata.
   expectContinue(await observe(guard, { itemId: "dup", exitCode: 0 }));
-  expectContinue(await observe(guard, {
-    itemId: "dup",
-    conclusiveFailure: false,
-  }));
+  expectContinue(
+    await observe(guard, {
+      itemId: "dup",
+      conclusiveFailure: false,
+    }),
+  );
   expectContinue(await observe(guard, { itemId: "dup", outputDigest: hex(9) }));
   // Three more unique identical failures still reach the steer threshold.
   expectContinue(await observe(guard, { itemId: "item-2" }));
@@ -103,10 +105,12 @@ Deno.test("failed-command-loop: duplicate item IDs never count and never reset",
 
 Deno.test("failed-command-loop: foreign thread and stale turn observations are ignored", async () => {
   const guard = new FailedCommandLoopGuard(THREAD_ID, TURN_ID);
-  expectContinue(await observe(guard, {
-    itemId: "foreign",
-    threadId: "other-thread",
-  }));
+  expectContinue(
+    await observe(guard, {
+      itemId: "foreign",
+      threadId: "other-thread",
+    }),
+  );
   expectContinue(await observe(guard, { itemId: "stale", turnId: "turn-0" }));
   // Only the four real failures count.
   expectContinue(await observe(guard, { itemId: "item-1" }));
@@ -128,11 +132,13 @@ Deno.test("failed-command-loop: success, inconclusive and zero-exit unique obser
   const inconclusive = new FailedCommandLoopGuard(THREAD_ID, TURN_ID);
   expectContinue(await observe(inconclusive, { itemId: "item-1" }));
   expectContinue(await observe(inconclusive, { itemId: "item-2" }));
-  expectContinue(await observe(inconclusive, {
-    itemId: "item-3",
-    conclusiveFailure: false,
-    exitCode: 2,
-  }));
+  expectContinue(
+    await observe(inconclusive, {
+      itemId: "item-3",
+      conclusiveFailure: false,
+      exitCode: 2,
+    }),
+  );
   expectContinue(await observe(inconclusive, { itemId: "item-4" }));
   expectContinue(await observe(inconclusive, { itemId: "item-5" }));
   expectContinue(await observe(inconclusive, { itemId: "item-6" }));
@@ -177,14 +183,18 @@ Deno.test("failed-command-loop: missing or malformed digest/checkpoint resets", 
   const malformed = new FailedCommandLoopGuard(THREAD_ID, TURN_ID);
   expectContinue(await observe(malformed, { itemId: "item-1" }));
   expectContinue(await observe(malformed, { itemId: "item-2" }));
-  expectContinue(await observe(malformed, {
-    itemId: "item-3",
-    outputDigest: "not-sha256",
-  }));
-  expectContinue(await observe(malformed, {
-    itemId: "item-4",
-    outputDigest: "",
-  }));
+  expectContinue(
+    await observe(malformed, {
+      itemId: "item-3",
+      outputDigest: "not-sha256",
+    }),
+  );
+  expectContinue(
+    await observe(malformed, {
+      itemId: "item-4",
+      outputDigest: "",
+    }),
+  );
   // Each malformed unique observation resets, so four consecutive failures
   // are needed after the last reset before the steer threshold.
   expectContinue(await observe(malformed, { itemId: "item-5" }));
@@ -214,15 +224,21 @@ Deno.test("failed-command-loop: progress during pending steering requires four p
   expectContinue(await observe(changed, { itemId: "item-3" }));
   expectSteer(await observe(changed, { itemId: "item-4" }));
   // Progress while steering: a different cwd starts a new tuple.
-  expectContinue(await observe(changed, { itemId: "item-5", cwd: "/repo/src" }));
-  expectContinue(await observe(changed, { itemId: "item-6", cwd: "/repo/src" }));
+  expectContinue(
+    await observe(changed, { itemId: "item-5", cwd: "/repo/src" }),
+  );
+  expectContinue(
+    await observe(changed, { itemId: "item-6", cwd: "/repo/src" }),
+  );
   changed.markSteered();
   // Broken old sequence: six unchanged pairs after the ack, no second steer.
   for (let index = 7; index <= 11; index++) {
-    expectContinue(await observe(changed, {
-      itemId: `item-${index}`,
-      cwd: "/repo/src",
-    }));
+    expectContinue(
+      await observe(changed, {
+        itemId: `item-${index}`,
+        cwd: "/repo/src",
+      }),
+    );
   }
   const interrupt = await observe(changed, {
     itemId: "item-12",
@@ -241,30 +257,38 @@ Deno.test("failed-command-loop: progress during pending steering requires four p
   expectContinue(await observe(reset, { itemId: "item-1" }));
   reset.markSteered();
   for (let index = 5; index <= 9; index++) {
-    expectContinue(await observe(reset, {
-      itemId: `item-${index}`,
-      cwd: "/repo/src",
-    }));
+    expectContinue(
+      await observe(reset, {
+        itemId: `item-${index}`,
+        cwd: "/repo/src",
+      }),
+    );
   }
-  expectInterrupt(await observe(reset, {
-    itemId: "item-10",
-    cwd: "/repo/src",
-  }));
+  expectInterrupt(
+    await observe(reset, {
+      itemId: "item-10",
+      cwd: "/repo/src",
+    }),
+  );
 });
 
 Deno.test("failed-command-loop: item ID window disables the guard at the cap without evicting", async () => {
   const guard = new FailedCommandLoopGuard(THREAD_ID, TURN_ID);
   for (let index = 1; index <= 1024; index++) {
-    expectContinue(await observe(guard, {
-      itemId: `item-${index}`,
-      command: `cmd-${index}`,
-    }));
+    expectContinue(
+      await observe(guard, {
+        itemId: `item-${index}`,
+        command: `cmd-${index}`,
+      }),
+    );
   }
   // The 1025th unique item cannot be added: the guard is permanently off.
-  expectContinue(await observe(guard, {
-    itemId: "item-1025",
-    command: "cmd-1025",
-  }));
+  expectContinue(
+    await observe(guard, {
+      itemId: "item-1025",
+      command: "cmd-1025",
+    }),
+  );
   // Even four identical failures must never steer afterwards.
   expectContinue(await observe(guard, { itemId: "after-1" }));
   expectContinue(await observe(guard, { itemId: "after-2" }));
@@ -297,10 +321,12 @@ Deno.test("failed-command-loop: one steer per instance and never total lifetime 
   expectContinue(await observe(broken, { itemId: "item-7", cwd: "/repo/src" }));
   expectContinue(await observe(broken, { itemId: "item-8", cwd: "/repo/src" }));
   expectContinue(await observe(broken, { itemId: "item-9", cwd: "/repo/src" }));
-  expectInterrupt(await observe(broken, {
-    itemId: "item-10",
-    cwd: "/repo/src",
-  }));
+  expectInterrupt(
+    await observe(broken, {
+      itemId: "item-10",
+      cwd: "/repo/src",
+    }),
+  );
 });
 
 Deno.test("failed-command-loop: markSteered before a steer is a no-op", async () => {
@@ -339,20 +365,27 @@ Deno.test("failed-command-loop: evidenceDigest is the deterministic sha256 of th
   for (let index = 1; index <= 3; index++) {
     expectContinue(await observe(second, { itemId: `item-${index}` }));
   }
-  assert.equal(expectSteer(await observe(second, { itemId: "item-4" })), expected);
+  assert.equal(
+    expectSteer(await observe(second, { itemId: "item-4" })),
+    expected,
+  );
 
   // A different canonical tuple yields a different digest.
   const other = new FailedCommandLoopGuard(THREAD_ID, TURN_ID);
   const otherCommand = "deno test other.ts";
   for (let index = 1; index <= 3; index++) {
-    expectContinue(await observe(other, {
-      itemId: `item-${index}`,
-      command: otherCommand,
-    }));
+    expectContinue(
+      await observe(other, {
+        itemId: `item-${index}`,
+        command: otherCommand,
+      }),
+    );
   }
-  const otherDigest = expectSteer(await observe(other, {
-    itemId: "item-4",
-    command: otherCommand,
-  }));
+  const otherDigest = expectSteer(
+    await observe(other, {
+      itemId: "item-4",
+      command: otherCommand,
+    }),
+  );
   assert.notEqual(otherDigest, expected);
 });

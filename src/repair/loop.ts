@@ -115,6 +115,7 @@ function isCausalReplayResult(
   record: WorkRecordV1,
 ): boolean {
   return result.taskId === record.id &&
+    sameRepositoryIdentity(result.repository, record.repository) &&
     result.original.revision === record.failingRevision &&
     result.limitations.length === 0 &&
     result.original.outcome === "failed" &&
@@ -1224,58 +1225,107 @@ async function ensureBeforeReplay(
   carry: CarryV1,
 ): Promise<WorkRecordV1 | null> {
   if (record.source.kind !== "incident") return null;
-  // Once a durable causal ReplayResultV1 exists for this exact task and
-  // original revision, the intended before-failure is proven and never rerun —
-  // including a correction round, whose candidate head is new while the
-  // original revision and fixture are unchanged. The durable result supplies
-  // the before-run evidence again, so a later candidate can be validated
-  // without paying the reproduction another time.
-  const already = snapshot.replays.find(
-    (result) => isCausalReplayResult(result, record),
-  );
-  if (already !== undefined) {
-    carry.beforeRun = {
-      outcome: already.original.outcome,
-      exitCode: already.original.exitCode,
-      output: already.original.output,
-      failure: already.original.failure === null ? null : {
-        intended: already.original.failure.intended,
-        reason: already.original.failure.reason,
-      },
-      limitations: [],
-      startedAt: 0,
-      endedAt: 0,
-    };
-    carry.fixtureRef = already.fixture.ref;
-    carry.fixtureDigest = already.fixture.digest;
-    carry.testIds = usableTestIds(already.fixture.testIds);
-    carry.replayCommandId = already.commands.replay;
-    carry.beforeReason = already.expected.beforeReason;
-    if (carry.testIds === null) {
-      return markBlocked(
-        record,
-        "missing_evidence",
-        "saved replay result has no trusted fixture test identity",
-        deps.clock.now(),
-      );
-    }
-    return null;
-  }
   const evidence = evidenceForRecord(snapshot, record);
+  const config = configFor(deps, record.repository);
+  const now = deps.clock.now();
   if (evidence === undefined || evidence === null || evidence.replay === null) {
     return markBlocked(
       record,
       "missing_evidence",
       "incident has no replay fixture",
-      deps.clock.now(),
+      now,
     );
   }
+  if (config === null) {
+    return markBlocked(
+      record,
+      "unavailable",
+      "repository not configured",
+      now,
+    );
+  }
+
+  // A saved replay result for this task's CURRENT head is the exact proof
+  // that head may be published. It is validated against the current
+  // evidence/config identities BEFORE any replay or model work; an invalid
+  // or mismatched record is missing evidence, stays immutable and is never
+  // replaced or replayed under the same deterministic id.
+  if (record.target.head !== null) {
+    const savedForHead = snapshot.replays.find(
+      (result) =>
+        result.taskId === record.id &&
+        result.candidate.revision === record.target.head,
+    );
+    if (savedForHead !== undefined) {
+      const validated = await validateSavedReplay(
+        deps,
+        record,
+        evidence,
+        config,
+        savedForHead,
+      );
+      if (validated.kind === "wait") {
+        return setWait(
+          record,
+          { reason: "unavailable", since: now, until: null },
+          now,
+        );
+      }
+      if (validated.kind === "invalid") {
+        return markBlocked(
+          record,
+          "missing_evidence",
+          "saved replay result does not match current evidence identities",
+          now,
+        );
+      }
+      carryFromSavedReplay(carry, savedForHead, validated.testIds);
+      return null;
+    }
+  }
+
+  // General prior original-proof reuse: once a durable causal ReplayResultV1
+  // exists for this exact task and original revision, the intended
+  // before-failure is proven and never rerun. A correction round has a NEW
+  // candidate head, so the current head is NOT part of this reuse, but the
+  // repository/fixture/command/test identities still must match the current
+  // evidence/config; any mismatch is the same missing-evidence block above.
+  const already = snapshot.replays.find(
+    (result) => isCausalReplayResult(result, record),
+  );
+  if (already !== undefined) {
+    const validated = await validateSavedReplay(
+      deps,
+      record,
+      evidence,
+      config,
+      already,
+    );
+    if (validated.kind === "wait") {
+      return setWait(
+        record,
+        { reason: "unavailable", since: now, until: null },
+        now,
+      );
+    }
+    if (validated.kind === "invalid") {
+      return markBlocked(
+        record,
+        "missing_evidence",
+        "saved replay result does not match current evidence identities",
+        now,
+      );
+    }
+    carryFromSavedReplay(carry, already, validated.testIds);
+    return null;
+  }
+
   if (record.failingRevision === null) {
     return markBlocked(
       record,
       "missing_evidence",
       "incident has no failing revision",
-      deps.clock.now(),
+      now,
     );
   }
   const replay = evidence.replay;
@@ -1285,7 +1335,7 @@ async function ensureBeforeReplay(
       record,
       "missing_evidence",
       "replay fixture digest not retained",
-      deps.clock.now(),
+      now,
     );
   }
   const testIds = await resolveFixtureTestIds(
@@ -1296,8 +1346,8 @@ async function ensureBeforeReplay(
   if (testIds.kind === "wait") {
     return setWait(
       record,
-      { reason: "unavailable", since: deps.clock.now(), until: null },
-      deps.clock.now(),
+      { reason: "unavailable", since: now, until: null },
+      now,
     );
   }
   if (testIds.kind === "invalid") {
@@ -1305,7 +1355,7 @@ async function ensureBeforeReplay(
       record,
       "missing_evidence",
       "fixture has no trusted test identity",
-      deps.clock.now(),
+      now,
     );
   }
   carry.testIds = testIds.value;
@@ -1322,11 +1372,21 @@ async function ensureBeforeReplay(
   if (!run.ok) {
     return setWait(
       record,
-      { reason: "unavailable", since: deps.clock.now(), until: null },
-      deps.clock.now(),
+      { reason: "unavailable", since: now, until: null },
+      now,
     );
   }
   const result = run.value;
+  // A before-run carrying limitations is never a clean intended failure:
+  // block as missing evidence BEFORE the intended failure is admitted.
+  if (result.limitations.length > 0) {
+    return markBlocked(
+      record,
+      "missing_evidence",
+      "original replay result carries unresolved limitations",
+      now,
+    );
+  }
   if (
     result.outcome === "failed" && result.failure !== null &&
     result.failure.intended
@@ -1344,16 +1404,91 @@ async function ensureBeforeReplay(
   if (result.outcome === "unavailable") {
     return setWait(
       record,
-      { reason: "unavailable", since: deps.clock.now(), until: null },
-      deps.clock.now(),
+      { reason: "unavailable", since: now, until: null },
+      now,
     );
   }
   return markBlocked(
     record,
     "missing_evidence",
     "original revision did not fail for the intended reason",
-    deps.clock.now(),
+    now,
   );
+}
+
+type SavedReplayValidationV1 =
+  | { kind: "ok"; testIds: readonly string[] }
+  | { kind: "invalid" }
+  | { kind: "wait" };
+
+/**
+ * Validate one saved replay result against the CURRENT evidence and
+ * configuration identities before it may supply proof again: causal shape
+ * (with exact repository identity), fixture ref/digest against the current
+ * evidence replay metadata, replay command against the evidence command,
+ * test command against the repository config, and a usable test-id set that
+ * matches the trusted ids resolved for the exact fixture. Fixture resolution
+ * unavailable is a wait; every other mismatch is invalid.
+ */
+async function validateSavedReplay(
+  deps: RepairCycleDepsV1,
+  record: WorkRecordV1,
+  evidence: IncidentEvidenceV1,
+  config: RepositoryConfigV1,
+  result: ReplayResultV1,
+): Promise<SavedReplayValidationV1> {
+  if (!isCausalReplayResult(result, record)) return { kind: "invalid" };
+  const replay = evidence.replay;
+  if (replay === null) return { kind: "invalid" };
+  if (
+    result.fixture.ref !== replay.fixtureRef ||
+    result.fixture.digest !== replay.fixtureDigest ||
+    result.commands.replay !== replay.commandId ||
+    result.commands.test !== config.commands.test
+  ) {
+    return { kind: "invalid" };
+  }
+  const resolved = await resolveFixtureTestIds(
+    deps,
+    result.fixture.ref,
+    result.fixture.digest,
+  );
+  if (resolved.kind === "wait") return { kind: "wait" };
+  if (resolved.kind === "invalid") return { kind: "invalid" };
+  const saved = usableTestIds(result.fixture.testIds);
+  if (saved === null || !sameStringArray(saved, resolved.value)) {
+    return { kind: "invalid" };
+  }
+  return { kind: "ok", testIds: resolved.value };
+}
+
+/**
+ * Carry the trusted saved-original proof for a later candidate validation:
+ * the reconstructed before-run copies the ACTUAL recorded limitations (never
+ * a fabricated empty array) and keeps the recorded failure identity.
+ */
+function carryFromSavedReplay(
+  carry: CarryV1,
+  result: ReplayResultV1,
+  testIds: readonly string[],
+): void {
+  carry.beforeRun = {
+    outcome: result.original.outcome,
+    exitCode: result.original.exitCode,
+    output: result.original.output,
+    failure: result.original.failure === null ? null : {
+      intended: result.original.failure.intended,
+      reason: result.original.failure.reason,
+    },
+    limitations: [...result.limitations],
+    startedAt: 0,
+    endedAt: 0,
+  };
+  carry.fixtureRef = result.fixture.ref;
+  carry.fixtureDigest = result.fixture.digest;
+  carry.testIds = [...testIds];
+  carry.replayCommandId = result.commands.replay;
+  carry.beforeReason = result.expected.beforeReason;
 }
 
 function summaryErrorType(
@@ -1420,13 +1555,6 @@ async function candidateValidated(
       ),
     };
   }
-  const existing = context.snapshot.replays.find(
-    (result) =>
-      result.taskId === record.id &&
-      result.candidate.revision === head &&
-      result.candidate.outcome === "passed",
-  );
-  if (existing !== undefined) return { kind: "ready" };
   const config = configFor(deps, record.repository);
   if (config === null) {
     return {
@@ -1439,6 +1567,41 @@ async function candidateValidated(
       ),
     };
   }
+  // A cached passed result for the exact current head is publish-ready only
+  // when it passes the causal predicate AND every currently carried identity
+  // (fixture ref/digest/test ids, replay command, config test command); any
+  // mismatch or non-causal saved proof is missing evidence and the saved
+  // record is never replaced, cleared or replayed under the same id.
+  const existing = context.snapshot.replays.find(
+    (result) =>
+      result.taskId === record.id &&
+      result.candidate.revision === head &&
+      result.candidate.outcome === "passed",
+  );
+  if (
+    existing !== undefined &&
+    (!isCausalReplayResult(existing, record) ||
+      carry.fixtureRef === null ||
+      carry.fixtureDigest === null ||
+      carry.testIds === null ||
+      carry.replayCommandId === null ||
+      existing.fixture.ref !== carry.fixtureRef ||
+      existing.fixture.digest !== carry.fixtureDigest ||
+      !sameStringArray(existing.fixture.testIds, carry.testIds) ||
+      existing.commands.replay !== carry.replayCommandId ||
+      existing.commands.test !== config.commands.test)
+  ) {
+    return {
+      kind: "blocked",
+      record: markBlocked(
+        record,
+        "missing_evidence",
+        "saved replay result does not match current evidence identities",
+        deps.clock.now(),
+      ),
+    };
+  }
+  if (existing !== undefined) return { kind: "ready" };
   const fixtureDigest = evidence.replay.fixtureDigest;
   if (fixtureDigest === null) {
     return {
@@ -1486,8 +1649,9 @@ async function candidateValidated(
   if (run.value.outcome !== "passed") {
     return { kind: "retry" };
   }
+  const after = run.value;
   // Persist the durable causal ReplayResultV1 with exact identities.
-  const result = await buildReplayResult(deps, record, carry, run.value);
+  const result = await buildReplayResult(deps, record, carry, after);
   if (result === null) {
     return {
       kind: "blocked",
@@ -1515,6 +1679,21 @@ async function candidateValidated(
     return persisted.kind === "state_error"
       ? { kind: "state_error", detail: persisted.detail }
       : { kind: "state_error", detail: "candidate replay checkpoint failed" };
+  }
+  // An after run carrying limitations is not a clean verification: the passed
+  // result (combined limitations included) is persisted above first, then the
+  // task is blocked with the replay-bearing record so the durable proof
+  // survives and is never replayed or replaced under the same id.
+  if (after.limitations.length > 0) {
+    return {
+      kind: "blocked",
+      record: markBlocked(
+        withEvidence,
+        "missing_evidence",
+        "candidate replay result carries unresolved limitations",
+        deps.clock.now(),
+      ),
+    };
   }
   return { kind: "ready" };
 }
@@ -1556,7 +1735,10 @@ async function buildReplayResult(
     },
     commands: { replay: carry.replayCommandId, test: config.commands.test },
     expected: { beforeReason: carry.beforeReason },
-    limitations: [],
+    limitations: combineUniqueLimitations(
+      carry.beforeRun.limitations,
+      after.limitations,
+    ),
     createdAt: deps.clock.now(),
   };
   try {
@@ -1564,6 +1746,22 @@ async function buildReplayResult(
   } catch {
     return null;
   }
+}
+
+/** Combined order-preserving unique limitation set across both replay runs. */
+function combineUniqueLimitations(
+  before: readonly string[],
+  after: readonly string[],
+): string[] {
+  const seen = new Set<string>();
+  const combined: string[] = [];
+  for (const limitation of [...before, ...after]) {
+    if (!seen.has(limitation)) {
+      seen.add(limitation);
+      combined.push(limitation);
+    }
+  }
+  return combined;
 }
 
 function readRun(result: IsolatedReplayResultV1, revision: GitSha) {
@@ -1791,10 +1989,16 @@ async function executeImplementationStep(
     return { kind: "state_error", detail: runCooling.detail };
   }
   if (runCooling.kind === "deferred") {
+    // The gate wait itself may have crossed the total run deadline, in which
+    // case the denial is a run-bounds fact, not the cooldown: match the
+    // refund proof ref and the returned static detail to the actual reason.
+    const deadlineCrossed = deps.clock.now() >= context.bounds.runDeadline;
     const refunded = await deps.budget.settleModelStart({
       id: durable.reservation.id,
       outcome: "confirmed_not_submitted",
-      proofRef: cooldownProofRef(durable.reservation.id),
+      proofRef: deadlineCrossed
+        ? runBoundsProofRef(durable.reservation.id)
+        : cooldownProofRef(durable.reservation.id),
     });
     if (refunded.status !== "settled" && refunded.status !== "idempotent") {
       return {
@@ -1815,7 +2019,9 @@ async function executeImplementationStep(
     if (persisted.kind !== "progress") return persisted;
     return {
       kind: "deferred",
-      detail: "github cooldown discovered before model run",
+      detail: deadlineCrossed
+        ? "implementation start crossed the run bounds after admission"
+        : "github cooldown discovered before model run",
     };
   }
 
@@ -2472,12 +2678,18 @@ async function requestReviewFor(
     return { kind: "state_error", detail: beforeSubmit.detail };
   }
   if (beforeSubmit.kind === "deferred") {
+    // The gate wait itself may have crossed the total run deadline, in which
+    // case the denial is a run-bounds fact, not the cooldown: match the
+    // refund proof ref and the returned static detail to the actual reason.
+    const deadlineCrossed = deps.clock.now() >= context.bounds.runDeadline;
     const refunded = await settleReviewCharge(
       deps,
       context,
       reservationId,
       "confirmed_not_submitted",
-      cooldownProofRef(reservationId),
+      deadlineCrossed
+        ? runBoundsProofRef(reservationId)
+        : cooldownProofRef(reservationId),
     );
     if (refunded.kind !== "progress") return refunded;
     const cleared = countReviewRound(
@@ -2492,7 +2704,9 @@ async function requestReviewFor(
     if (persistedClear.kind !== "progress") return persistedClear;
     return {
       kind: "deferred",
-      detail: "github cooldown discovered before review request",
+      detail: deadlineCrossed
+        ? "review request crossed the run bounds after admission"
+        : "github cooldown discovered before review request",
     };
   }
 
@@ -3485,6 +3699,11 @@ function usableTestIds(value: readonly string[]): string[] | null {
     seen.add(id);
   }
   return [...value];
+}
+
+/** Deterministic order-sensitive identity equality for test-id sets. */
+function sameStringArray(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((value, index) => value === b[index]);
 }
 
 async function readIssueForModel(
