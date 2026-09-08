@@ -76,3 +76,8 @@ export {
   sanitizeGatewayReplay,
   sanitizeRecordedUpstream,
 } from "./sanitize.ts";
+export {
+  GatewayReplayComposition,
+  type GatewayReplayCompositionOptionsV1,
+  type ReplayFixtureTestIdentityV1,
+} from "./replay-composition.ts";
