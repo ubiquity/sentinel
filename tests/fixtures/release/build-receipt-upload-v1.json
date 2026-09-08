@@ -1,0 +1,21 @@
+{
+  "producerCommit": "79ca71fcd080c5793a600f294db51a10940f7496",
+  "workflowBlobSha": "24d741ba4f25a69d02c905c1a49c8eb9680d3dd8",
+  "uploadAction": "ea165f8d65b6e75b540449e92b4886f43607fa02",
+  "artifactPackage": "@actions/artifact@2.3.2",
+  "archivePackage": "archiver@7.0.1",
+  "archiveSize": 404,
+  "archiveDigest": "sha256:a5983a25b9ecbc753f130c528438b6658baab0fe23dea4a44ca8a07242edc822",
+  "archiveBase64": "UEsDBBQACAAIAK0MKF0AAAAAAAAAAAAAAAAbAAAAc2VudGluZWwtYnVpbGQtcmVjZWlwdC5qc29ubZBLboQwEET3nAKxDmDzGQZWuQkyuD10AjbYbUYoyt0jxklmkSy7+vWn6iOK42QH69DopIv5y1lbWI1DMvZIujjxA24e6cgFZn7YMoVJoLzuUZ4EL8qqfoqCCJaVzk4R1Lux72o2996C+n9lnt2QJj/kP6jLJWiTSlhnc2THMr9aUC6fQMiztcNs1gU0hQM3pN5N4tzdtKNouBolu7KxbtpSXBhTRVvJoeaCs7ZiqqnaSxhcrXmD8fGrwNQPW/prD3Y8U/n26A5NExCOqeVFGZDB4yx7skI7MdKTDVbSoLnur9vukVhXJNFn9AVQSwcIqlsucewAAACCAQAAUEsBAi0DFAAIAAgArQwoXapbLnHsAAAAggEAABsAAAAAAAAAAAAgAKSBAAAAAHNlbnRpbmVsLWJ1aWxkLXJlY2VpcHQuanNvblBLBQYAAAAAAQABAEkAAAA1AQAAAAA=",
+  "receipt": {
+    "version": 1,
+    "repository": "ubiquity/ai.ubq.fi",
+    "run_id": "12345",
+    "run_attempt": "2",
+    "workflow_ref": "ubiquity/ai.ubq.fi/.github/workflows/deno-deploy.yml@refs/heads/development",
+    "git_sha": "79ca71fcd080c5793a600f294db51a10940f7496",
+    "project": "ai-ubq-fi",
+    "revision_id": "synthetic-r123",
+    "build_transaction_id": "github-actions:ubiquity/ai.ubq.fi:12345:2"
+  }
+}

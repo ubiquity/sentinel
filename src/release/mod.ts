@@ -53,6 +53,11 @@ export type {
   BuildReceiptResolverV1,
   BuildReceiptV1,
 } from "./resolver.ts";
+export { GithubBuildReceiptResolver } from "./build-receipt-resolver.ts";
+export type {
+  GithubBuildReceiptResolverAuthV1,
+  GithubBuildReceiptResolverOptionsV1,
+} from "./build-receipt-resolver.ts";
 export {
   buildAcceptanceResult,
   dueSlotIndex,
