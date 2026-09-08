@@ -7,6 +7,10 @@
  *   IncidentAdapter AND the fixture-identity source, the ReplayPortImpl is
  *   constructed with that exact composition as its fixture resolver, and the
  *   model/budget capabilities are the concrete module instances.
+ * - host-boundary identity: the controller SHA must be an exact lowercase
+ *   40-hex commit SHA; malformed values (including secret-like markers) are
+ *   rejected with one static non-echoing TypeError before any capability is
+ *   constructed, with no state/store/transport/model capability touched.
  * - static fail-closed rejection: an invalid config set, an invalid gateway
  *   repository identity, an unconfigured repository and an ambiguous match
  *   are rejected with static TypeError text before any instance exists.
@@ -25,7 +29,11 @@
 import assert from "node:assert/strict";
 
 import { RollingStartBudget } from "../../src/budget/mod.ts";
-import type { CommandId, WorkItemId } from "../../src/contracts/brands.ts";
+import type {
+  CommandId,
+  GitSha,
+  WorkItemId,
+} from "../../src/contracts/brands.ts";
 import type { ModelRunRequestV1 } from "../../src/contracts/ports.ts";
 import type { RepositoryConfigV1 } from "../../src/contracts/repository-config.ts";
 import type { RepositoryIdentityV1 } from "../../src/contracts/shared.ts";
@@ -44,6 +52,7 @@ import {
 import { DurableGitHubCooldownGate } from "../../src/repair/github-cooldown.ts";
 import { CodexImplementationPort } from "../../src/repair/model-port.ts";
 import { createRepairStateStore } from "../../src/state/mod.ts";
+import type { RepairGitStateStore } from "../../src/state/mod.ts";
 import {
   FakeClock,
   FakeGithub,
@@ -102,6 +111,39 @@ class CountingStore implements ArtifactStoreV1 {
     this.calls.push("stats");
     return Promise.reject(new Error("store must not be used in these tests"));
   }
+}
+
+/**
+ * A durable-state wrapper that counts every capability call. A rejected host
+ * composition must never touch the repair state store (neither read, write
+ * nor budget step), so these counters stay empty.
+ */
+function spyState(inner: RepairGitStateStore): {
+  state: RepairGitStateStore;
+  calls: string[];
+} {
+  const calls: string[] = [];
+  return {
+    calls,
+    state: {
+      readRepair: (...args: Parameters<RepairGitStateStore["readRepair"]>) => {
+        calls.push("readRepair");
+        return inner.readRepair(...args);
+      },
+      readRelease: (
+        ...args: Parameters<RepairGitStateStore["readRelease"]>
+      ) => {
+        calls.push("readRelease");
+        return inner.readRelease(...args);
+      },
+      writeRepair: (
+        ...args: Parameters<RepairGitStateStore["writeRepair"]>
+      ) => {
+        calls.push("writeRepair");
+        return inner.writeRepair(...args);
+      },
+    },
+  };
 }
 
 /** A fully valid host capability set; tests override individual fields. */
@@ -342,6 +384,88 @@ Deno.test(
       // None of the rejected compositions touched the transport or the store.
       assert.equal(fixture.transport.requests.length, 0);
       assert.deepEqual(fixture.gatewayStore.calls, []);
+      assert.equal(fixture.sessionCalls(), 0);
+    } finally {
+      await fixture.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "host factory: rejects malformed controllerSha before any capability construction with one static non-echoing TypeError",
+  async () => {
+    const fixture = await makeHostFixture();
+    try {
+      const stateSpy = spyState(fixture.options.state);
+      // Malformed controller identities: uppercase hex, wrong lengths (39/41
+      // and a SHA-256 digest-shaped 64), a non-hex character, values carrying
+      // a secret-like marker, and non-string input. None is an exact
+      // lowercase 40-hex commit SHA.
+      const malformedShas: unknown[] = [
+        "A".repeat(40),
+        SHA1.toUpperCase(),
+        "f".repeat(39),
+        "f".repeat(41),
+        "f".repeat(64),
+        `z${"f".repeat(39)}`,
+        "ghp_0123456789abcdef0123456789abcdef012345",
+        "authorization: Bearer 0123456789abcdef0123456789abcdef",
+        0x1234,
+        null,
+      ];
+      for (const controllerSha of malformedShas) {
+        // The poison isolation would throw its own TypeError if any instance
+        // were constructed first; the controllerSha reject must win.
+        assert.throws(
+          () =>
+            composeRepairHost({
+              ...fixture.options,
+              controllerSha: controllerSha as GitSha,
+              state: stateSpy.state,
+              replay: {
+                ...fixture.options.replay,
+                isolation: unverifiedIsolation(),
+              },
+            }),
+          {
+            name: "TypeError",
+            message:
+              "repair host configuration rejected: controller SHA is not an exact lowercase 40-hex commit SHA",
+          },
+        );
+      }
+      // The reject is static: its text never echoes the supplied value,
+      // including a secret-like marker.
+      const secretLike = "ghp_0123456789abcdef0123456789abcdef012345";
+      let secretError: unknown;
+      try {
+        composeRepairHost({
+          ...fixture.options,
+          controllerSha: secretLike as GitSha,
+        });
+        assert.fail("expected a static TypeError for the secret-like marker");
+      } catch (error) {
+        secretError = error;
+      }
+      assert.ok(secretError instanceof TypeError);
+      const secretMessage = (secretError as TypeError).message;
+      assert.equal(
+        secretMessage,
+        "repair host configuration rejected: controller SHA is not an exact lowercase 40-hex commit SHA",
+      );
+      assert.ok(
+        !secretMessage.includes(secretLike),
+        `reject text echoes the supplied value: ${secretMessage}`,
+      );
+      assert.ok(
+        !secretMessage.includes("ghp_"),
+        `reject text echoes a secret-like marker: ${secretMessage}`,
+      );
+      // No capability was constructed or touched: no transport request, no
+      // gateway store call, no durable state read/write and no model session.
+      assert.equal(fixture.transport.requests.length, 0);
+      assert.deepEqual(fixture.gatewayStore.calls, []);
+      assert.deepEqual(stateSpy.calls, []);
       assert.equal(fixture.sessionCalls(), 0);
     } finally {
       await fixture.cleanup();

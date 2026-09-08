@@ -13,6 +13,9 @@
  *
  * Fail-closed boundaries are preserved, never bypassed:
  *
+ * - The controller SHA is validated at this boundary as an exact lowercase
+ *   40-hex Git commit SHA before any instance is constructed; a malformed
+ *   value is rejected with one static `TypeError` that never echoes input.
  * - The complete config set is re-validated with the frozen
  *   `parseRepositoryConfigV1` parser, and the gateway adapter repository must
  *   match exactly one configured repository; invalid configs, an invalid
@@ -36,6 +39,7 @@
  * port itself.
  */
 
+import { isGitSha } from "../contracts/brands.ts";
 import type { CommandId, GitSha } from "../contracts/brands.ts";
 import type {
   Clock,
@@ -87,6 +91,8 @@ function sameRepositoryIdentity(
 }
 
 /** Static reject texts; no input-derived text is ever interpolated. */
+const STATIC_INVALID_CONTROLLER_SHA =
+  "repair host configuration rejected: controller SHA is not an exact lowercase 40-hex commit SHA";
 const STATIC_INVALID_CONFIG =
   "repair host configuration rejected: a repository configuration is invalid";
 const STATIC_INVALID_REPOSITORY =
@@ -171,7 +177,8 @@ export interface RepairHostOptionsV1 {
 
 /**
  * Compose one complete repair entrypoint dependency set from caller-supplied
- * capabilities. Rejects an invalid config set or a gateway repository that
+ * capabilities. Validates the controller SHA as an exact lowercase 40-hex Git
+ * commit SHA, then rejects an invalid config set or a gateway repository that
  * does not match exactly one configured repository with a static `TypeError`
  * before any instance is constructed; every other trust boundary keeps its
  * own fail-closed constructor behavior.
@@ -179,7 +186,14 @@ export interface RepairHostOptionsV1 {
 export function composeRepairHost(
   options: RepairHostOptionsV1,
 ): RepairEntrypointDepsV1 {
-  // 1. Validate the complete config set before anything is constructed.
+  // 1. Validate the controller identity before anything is constructed. The
+  //    exact lowercase-40-hex rule is the frozen brand predicate; the reject
+  //    text is static and never echoes the supplied value.
+  if (!isGitSha(options.controllerSha)) {
+    throw new TypeError(STATIC_INVALID_CONTROLLER_SHA);
+  }
+
+  // 2. Validate the complete config set before anything is constructed.
   const configs: RepositoryConfigV1[] = [];
   for (const config of options.configs) {
     try {
@@ -189,7 +203,7 @@ export function composeRepairHost(
     }
   }
 
-  // 2. Bind the gateway adapter repository to exactly one configured
+  // 3. Bind the gateway adapter repository to exactly one configured
   //    repository; the parsed set remains the single source of truth.
   let gatewayRepository: RepositoryIdentityV1;
   try {
@@ -211,7 +225,7 @@ export function composeRepairHost(
   }
   const target = matches[0];
 
-  // 3. One gateway composition: the incident adapter is built over the
+  // 4. One gateway composition: the incident adapter is built over the
   //    matched parsed config and the supplied store, and the replay
   //    composition wraps THAT adapter and THAT store.
   const adapter = new GatewayIncidentAdapter({
@@ -233,7 +247,7 @@ export function composeRepairHost(
     clock: options.clock,
   });
 
-  // 4. The replay port resolver is the exact composition instance; the port
+  // 5. The replay port resolver is the exact composition instance; the port
   //    config is the same matched parsed repository config.
   const replay = new ReplayPortImpl({
     config: target,
@@ -246,7 +260,7 @@ export function composeRepairHost(
     clock: options.clock,
   });
 
-  // 5. The implementation port keeps its fail-closed default receipt policy
+  // 6. The implementation port keeps its fail-closed default receipt policy
   //    unless the host supplies a verifier; no receipt is fabricated here.
   const model = new CodexImplementationPort({
     openSession: options.model.openSession,
@@ -257,7 +271,7 @@ export function composeRepairHost(
       new LocalCandidateCommitter(options.model.checkoutDir),
   });
 
-  // 6. One RollingStartBudget over the same repair state and config set.
+  // 7. One RollingStartBudget over the same repair state and config set.
   const budget = new RollingStartBudget({
     clock: options.clock,
     state: options.state,
