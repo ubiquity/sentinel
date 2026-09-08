@@ -33,6 +33,7 @@ import type {
 } from "../../src/contracts/ports.ts";
 import { portError, portOk } from "../../src/contracts/ports.ts";
 import type { RepositoryIdentityV1 } from "../../src/contracts/shared.ts";
+import type { ReleaseTargetEnvironmentV1 } from "../../src/contracts/release.ts";
 import type { ReleaseTargetConfigV1 } from "../../src/release/config.ts";
 import {
   GithubBuildReceiptResolver,
@@ -421,7 +422,7 @@ Deno.test("factory constructs the concrete Deno client and keeps the unavailable
   assert.equal(deps.clock, rig.options.clock);
   assert.equal(deps.stateRead, rig.state.read);
   assert.equal(deps.stateWrite, rig.state.write);
-  assert.equal(deps.repository, REPO);
+  assert.deepEqual(deps.repository, REPO);
   assert.equal(deps.environment, "production");
   assert.equal(deps.target.projectId, config.projectId);
   assert.equal(deps.resolver instanceof UnavailableBuildReceiptResolver, true);
@@ -614,6 +615,122 @@ Deno.test("factory rejects malformed resolver input without echoing values", () 
     assert.deepEqual(rig.state.calls, [], `${name}: no state access`);
     assert.equal(rig.denoAuth.calls, 0, `${name}: no credential access`);
     assert.equal(rig.transport.calls.length, 0, `${name}: no transport use`);
+  }
+});
+
+Deno.test("factory rejects a malformed explicit repository before any capability is used", () => {
+  // A deliberately binding-mismatched resolver is supplied so the
+  // repository fault wins over any resolver work: the explicit repository
+  // validation precedes resolver validation AND construction.
+  const cases: [string, unknown, string][] = [
+    ["not an object", "ubiquity/ai.ubq.fi", "ubiquity/ai.ubq.fi"],
+    ["missing installation id", {
+      owner: "ubiquity",
+      name: "ai.ubq.fi",
+    }, "installationId"],
+    ["empty owner", { owner: "", name: "ai.ubq.fi", installationId: 7 }, ""],
+    ["invalid owner marker", {
+      owner: "u biquity",
+      name: "ai.ubq.fi",
+      installationId: 7,
+    }, "u biquity"],
+    ["empty name", { owner: "ubiquity", name: "", installationId: 7 }, ""],
+    ["zero installation id", {
+      owner: "ubiquity",
+      name: "ai.ubq.fi",
+      installationId: 0,
+    }, "0"],
+    ["extra key", {
+      owner: "ubiquity",
+      name: "ai.ubq.fi",
+      installationId: 7,
+      extra: true,
+    }, "extra"],
+  ];
+  for (const [name, repository, marker] of cases) {
+    const rig = baseOptions({
+      resolver: resolverBinding({ project: "project-ubq" }),
+    });
+    const options: ReleaseHostOptionsV1 = {
+      ...rig.options,
+      repository: repository as unknown as RepositoryIdentityV1,
+    };
+    let fault: string | null = null;
+    try {
+      composeReleaseHost(options);
+    } catch (error) {
+      fault = error instanceof Error ? error.message : String(error);
+    }
+    assert.equal(
+      fault,
+      "release host repository identity is invalid",
+      name,
+    );
+    if (marker !== "") {
+      assert.equal(
+        fault!.includes(marker),
+        false,
+        `${name}: no supplied value is echoed`,
+      );
+    }
+    assert.deepEqual(rig.state.calls, [], `${name}: no state access`);
+    assert.equal(rig.denoAuth.calls, 0, `${name}: no credential access`);
+    assert.equal(rig.transport.calls.length, 0, `${name}: no transport use`);
+  }
+});
+
+Deno.test("factory rejects an invalid runtime environment before any capability is used", () => {
+  // The same binding-mismatched resolver proves environment validation also
+  // precedes resolver validation and construction.
+  const cases: [string, string][] = [
+    ["unknown env", "staging"],
+    ["trailing space", "production "],
+    ["uppercase", "PRODUCTION"],
+    ["empty", ""],
+  ];
+  for (const [name, environment] of cases) {
+    const rig = baseOptions({
+      resolver: resolverBinding({ project: "project-ubq" }),
+    });
+    const options: ReleaseHostOptionsV1 = {
+      ...rig.options,
+      environment: environment as unknown as ReleaseTargetEnvironmentV1,
+    };
+    let fault: string | null = null;
+    try {
+      composeReleaseHost(options);
+    } catch (error) {
+      fault = error instanceof Error ? error.message : String(error);
+    }
+    assert.equal(fault, "release host environment is invalid", name);
+    if (environment !== "") {
+      assert.equal(
+        fault!.includes(environment),
+        false,
+        `${name}: no supplied value is echoed`,
+      );
+    }
+    assert.deepEqual(rig.state.calls, [], `${name}: no state access`);
+    assert.equal(rig.denoAuth.calls, 0, `${name}: no credential access`);
+    assert.equal(rig.transport.calls.length, 0, `${name}: no transport use`);
+  }
+});
+
+Deno.test("factory returns the parsed repository and the validated environment", () => {
+  for (const environment of ["production", "isolated"] as const) {
+    const rig = baseOptions({
+      target: targetConfig({ projectId: "ai-ubq-fi" }),
+      resolver: resolverBinding({ environment }),
+    });
+    const options: ReleaseHostOptionsV1 = {
+      ...rig.options,
+      // A structurally equal mutable copy: the deps carry the parsed form.
+      repository: { ...REPO },
+      environment,
+    };
+    const deps = composeReleaseHost(options);
+    assert.deepEqual(deps.repository, REPO);
+    assert.equal(deps.environment, environment);
   }
 });
 
