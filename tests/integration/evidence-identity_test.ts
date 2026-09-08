@@ -1142,7 +1142,7 @@ function buildCausalBundle(
       digest: FIXTURE_DIGEST,
       testIds: ["repair:regression"],
     },
-    commands: { replay: "replay_capture", test: "test" },
+    commands: { replay: "replay_capture", test: "test_ci" },
     expected: { beforeReason: "GatewayError" },
     limitations: [],
     createdAt: T0,
