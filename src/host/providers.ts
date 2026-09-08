@@ -14,7 +14,9 @@
  *   kind/detail the existing consumers use (`auth_failed` / `invalid` with
  *   static detail). No credential, token, header name/value or thrown message
  *   is ever echoed, and a malformed value never reaches a `Headers`
- *   constructor or a transport;
+ *   constructor or a transport; a hostile accessor/property-enumeration
+ *   fault while the header record is read is the same typed `auth_failed`
+ *   malformed-record result, never a raw escape;
  * - the isolation adapter validates the raw attestation BEFORE any capability
  *   exists and throws one static non-echoing `TypeError` unless the
  *   attestation is the exact `v1` shape with `restrictedExecution === true`
@@ -152,7 +154,15 @@ export function createGatewayAuthProvider(
       if (typeof value !== "object" || value === null || Array.isArray(value)) {
         return malformedRecord();
       }
-      const entries: [string, string][] = Object.entries(value);
+      // A hostile accessor/proxy can fault while the record is enumerated
+      // (ownKeys/get traps): that fault is the SAME typed malformed-record
+      // failure, never a raw escape from the promised fail-closed boundary.
+      let entries: [string, string][];
+      try {
+        entries = Object.entries(value);
+      } catch {
+        return malformedRecord();
+      }
       if (entries.length > MAX_CREDENTIAL_HEADERS) return malformedRecord();
       for (const [name, headerValue] of entries) {
         if (
@@ -199,20 +209,26 @@ function malformedRecord(): PortResultV1<never> {
 export function createReplayIsolationHost(
   attestation: unknown,
 ): ReplayIsolationCapabilityV1 {
-  if (typeof attestation !== "object" || attestation === null) {
+  try {
+    if (typeof attestation !== "object" || attestation === null) {
+      throw new TypeError(ERR_ISOLATION);
+    }
+    const record = attestation as Record<string, unknown>;
+    if (record.version !== "v1" || record.restrictedExecution !== true) {
+      throw new TypeError(ERR_ISOLATION);
+    }
+    if (
+      typeof record.host !== "string" || record.host.length === 0 ||
+      typeof record.boundary !== "string" || record.boundary.length === 0 ||
+      typeof record.attestationRef !== "string" ||
+      record.attestationRef.length === 0
+    ) {
+      throw new TypeError(ERR_ISOLATION);
+    }
+    return { attestation: attestation as ReplayIsolationAttestationV1 };
+  } catch {
+    // A hostile accessor/proxy fault inside the attestation record is the
+    // SAME static non-echoing TypeError; nothing caller-controlled escapes.
     throw new TypeError(ERR_ISOLATION);
   }
-  const record = attestation as Record<string, unknown>;
-  if (record.version !== "v1" || record.restrictedExecution !== true) {
-    throw new TypeError(ERR_ISOLATION);
-  }
-  if (
-    typeof record.host !== "string" || record.host.length === 0 ||
-    typeof record.boundary !== "string" || record.boundary.length === 0 ||
-    typeof record.attestationRef !== "string" ||
-    record.attestationRef.length === 0
-  ) {
-    throw new TypeError(ERR_ISOLATION);
-  }
-  return { attestation: attestation as ReplayIsolationAttestationV1 };
 }
