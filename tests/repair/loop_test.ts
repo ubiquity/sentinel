@@ -1148,6 +1148,7 @@ Deno.test("closure failure retries closure only", async () => {
       reviews: [],
       replays: [],
       releaseRequests: [],
+      githubCooldowns: [],
     };
     const seeded = await rig.store.writeRepair(seed, null);
     assert.ok(seeded.ok && seeded.value.status === "applied");
@@ -1204,6 +1205,7 @@ function seededSnapshot(
     reviews: [],
     replays: [],
     releaseRequests: [],
+    githubCooldowns: [],
     ...extra,
   };
 }

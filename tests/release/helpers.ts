@@ -852,6 +852,7 @@ export async function publishRepairRequest(
     reviews: [],
     replays: [],
     releaseRequests: [request],
+    githubCooldowns: [],
   };
   const write = await repair.writeRepair(next, null);
   assert.ok(write.ok, "repair request write should succeed");

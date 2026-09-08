@@ -41,6 +41,7 @@ function snapshot(
     reviews: [],
     replays: [],
     releaseRequests: [],
+    githubCooldowns: [],
     ...overrides,
   });
 }

@@ -302,6 +302,7 @@ Deno.test("budget: unrelated state collections survive; settlement is idempotent
       reviews: [],
       replays: [],
       releaseRequests: [],
+      githubCooldowns: [],
     };
     const seeded = await store.writeRepair(seed, null);
     assert.ok(seeded.ok && seeded.value.status === "applied");

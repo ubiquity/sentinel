@@ -423,6 +423,7 @@ async function seedSnapshot(
     reviews: [],
     replays: [],
     releaseRequests: [],
+    githubCooldowns: [],
   });
   const written = await deps.state.writeRepair(seed, null);
   if (!written.ok || written.value.status !== "applied") return null;

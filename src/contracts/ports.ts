@@ -12,6 +12,8 @@ import type {
   GitSha,
   WorkItemId,
 } from "./brands.ts";
+import { parseGitHubRateLimitV1 } from "./github-cooldown.ts";
+import type { GitHubRateLimitV1 } from "./github-cooldown.ts";
 import type { IncidentEvidenceV1, IncidentSummaryV1 } from "./incident.ts";
 import type { ReplayLimitationV1 } from "./replay-result.ts";
 import type {
@@ -44,6 +46,11 @@ export type PortErrorKindV1 =
 export interface PortErrorV1 {
   kind: PortErrorKindV1;
   detail: string;
+  /**
+   * Structured rate-limit metadata, present only on rate_limited errors.
+   * Rate limiting is never encoded inside `detail` strings.
+   */
+  rateLimit?: GitHubRateLimitV1;
 }
 
 export type PortResultV1<T> = { ok: true; value: T } | {
@@ -58,8 +65,24 @@ export function portOk<T>(value: T): PortResultV1<T> {
 export function portError(
   kind: PortErrorKindV1,
   detail: string,
+  rateLimit?: GitHubRateLimitV1,
 ): PortResultV1<never> {
-  return { ok: false, error: { kind, detail } };
+  if (rateLimit !== undefined) {
+    if (kind !== "rate_limited") {
+      throw new TypeError(
+        "rate-limit metadata is only valid for rate_limited errors",
+      );
+    }
+    // Validate through the strict parser so a caller-supplied plain object
+    // cannot smuggle unvalidated metadata into an error.
+    parseGitHubRateLimitV1(rateLimit);
+  }
+  return {
+    ok: false,
+    error: rateLimit === undefined
+      ? { kind, detail }
+      : { kind, detail, rateLimit },
+  };
 }
 
 /**
@@ -290,6 +313,23 @@ export interface GitHubPort {
     request: MergeRequestV1,
   ): Promise<PortResultV1<MergeOutcomeV1>>;
   closeIssue(issueNumber: number): Promise<PortResultV1<IssueCloseOutcomeV1>>;
+}
+
+// ---------------------------------------------------------------------------
+// GitHubCooldownGateV1: durable cooldown in front of every authenticated
+// request. beforeRequest must be checked before any read or write for an
+// affected installation credential (intake included, before a work record
+// exists), and recordRateLimit persists an observed limit before any later
+// request. The production adapter and repair-loop wiring follow this contract
+// freeze; no fake production default is defined here.
+// ---------------------------------------------------------------------------
+
+export interface GitHubCooldownGateV1 {
+  beforeRequest(installationId: number): Promise<PortResultV1<void>>;
+  recordRateLimit(
+    installationId: number,
+    rateLimit: GitHubRateLimitV1,
+  ): Promise<PortResultV1<void>>;
 }
 
 // ---------------------------------------------------------------------------

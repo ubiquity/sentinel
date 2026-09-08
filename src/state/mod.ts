@@ -34,6 +34,8 @@
 import { parseBudgetReservationV1 } from "../contracts/budget-reservation.ts";
 import type { BudgetReservationV1 } from "../contracts/budget-reservation.ts";
 import { canonicalStringify } from "../contracts/canonical.ts";
+import { parseGitHubCooldownV1 } from "../contracts/github-cooldown.ts";
+import type { GitHubCooldownV1 } from "../contracts/github-cooldown.ts";
 import {
   parseIncidentEvidenceV1,
   parseIncidentSummaryV1,
@@ -205,10 +207,22 @@ function parseStateManifest(
   };
 }
 
+/**
+ * Identity source of one validated state record. Every record kind carries
+ * exactly one of the two: existing records identify by their string `id`,
+ * while the durable GitHub cooldown fragment is deliberately a kind-less
+ * plain data record addressing its storage slot by its positive installation
+ * id (`githubCooldowns/sha256(String(installationId)).json`).
+ */
+interface RecordIdentitySource {
+  id?: string;
+  installationId?: number;
+}
+
 interface RecordCollection {
   directory: string;
   kind: string;
-  parse: (input: unknown) => { id: string };
+  parse: (input: unknown) => RecordIdentitySource;
   rows: { id: string; text: string }[];
 }
 
@@ -254,6 +268,12 @@ const RECORD_COLLECTIONS: Record<StateKind, RecordCollection[]> = {
       directory: "releaseRequests",
       kind: "release_request",
       parse: parseReleaseRequestV1,
+      rows: [],
+    },
+    {
+      directory: "githubCooldowns",
+      kind: "github_cooldown",
+      parse: parseGitHubCooldownV1,
       rows: [],
     },
   ],
@@ -726,35 +746,47 @@ export class GitStateStore implements StateStore {
     next: RepairStateSnapshotV1 | ReleaseStateSnapshotV1,
     kind: StateKind,
   ): Promise<{ path: string; text: string }[]> {
-    const records: { id: string; value: unknown }[] = [];
+    const records: { id: string; directory: string; value: unknown }[] = [];
     if (kind === "repair") {
       const repair = next as RepairStateSnapshotV1;
-      records.push(
-        ...repair.incidents.map((record) => ({ id: record.id, value: record })),
-        ...repair.evidence.map((record) => ({ id: record.id, value: record })),
-        ...repair.work.map((record) => ({ id: record.id, value: record })),
-        ...repair.reservations.map((record) => ({
-          id: record.id,
-          value: record,
-        })),
-        ...repair.reviews.map((record) => ({ id: record.id, value: record })),
-        ...repair.replays.map((record) => ({ id: record.id, value: record })),
-        ...repair.releaseRequests.map((record) => ({
-          id: record.id,
-          value: record,
-        })),
-      );
+      const add = (recordKind: string, rows: readonly unknown[]) => {
+        // The directory is resolved through the same collection mapping the
+        // read loop validates, so the written layout cannot drift from it.
+        const directory = collectionDirectory(kind, recordKind);
+        for (const value of rows) {
+          records.push({
+            id: recordIdentity(value as RecordIdentitySource),
+            directory,
+            value,
+          });
+        }
+      };
+      add("incident_summary", repair.incidents);
+      add("incident_evidence", repair.evidence);
+      add("work", repair.work);
+      add("budget_reservation", repair.reservations);
+      add("review_receipt", repair.reviews);
+      add("replay_result", repair.replays);
+      add("release_request", repair.releaseRequests);
+      // Durable cooldowns are serialized explicitly: the fragment is
+      // deliberately a kind-less data record, so its collection directory and
+      // storage identity (sha256 of String(installationId)) are fixed by the
+      // collection mapping here, never inferred from the record content.
+      add("github_cooldown", repair.githubCooldowns);
     } else {
       const release = next as ReleaseStateSnapshotV1;
-      records.push(
-        ...release.releases.map((record) => ({ id: record.id, value: record })),
-      );
+      const directory = collectionDirectory(kind, "release_record");
+      for (const value of release.releases) {
+        records.push({
+          id: recordIdentity(value as RecordIdentitySource),
+          directory,
+          value,
+        });
+      }
     }
     return Promise.all(
       records.map(async (record) => ({
-        path: `${
-          collectionDirectory(kind, (record.value as { kind: string }).kind)
-        }/${await sha256Hex(record.id)}.json`,
+        path: `${record.directory}/${await sha256Hex(record.id)}.json`,
         text: `${canonicalStringify(record.value)}\n`,
       })),
     );
@@ -914,7 +946,7 @@ export class GitStateStore implements StateStore {
         )
       ) {
         const expectedHex = fileName.slice(0, 64);
-        let record: { id: string };
+        let record: RecordIdentitySource;
         try {
           record = collection.parse(JSON.parse(text));
         } catch {
@@ -933,14 +965,18 @@ export class GitStateStore implements StateStore {
             `state record in ${collection.directory} is not canonical JSON`,
           );
         }
-        const actualHex = await sha256Hex(record.id);
+        // The digest filename must equal sha256 of the record's storage
+        // identity: the record id for existing records, the positive
+        // installation id string for kind-less GitHub cooldowns.
+        const identity = recordIdentity(record);
+        const actualHex = await sha256Hex(identity);
         if (actualHex !== expectedHex) {
           return portError(
             "invalid",
             "state record file name does not match the record id",
           );
         }
-        records[collection.directory].push({ id: record.id, value: record });
+        records[collection.directory].push({ id: identity, value: record });
       }
     }
 
@@ -966,6 +1002,9 @@ export class GitStateStore implements StateStore {
           releaseRequests: orderRecords(
             records.releaseRequests,
           ) as ReleaseRequestV1[],
+          githubCooldowns: orderRecords(
+            records.githubCooldowns,
+          ) as GitHubCooldownV1[],
         };
         snapshot = parseRepairStateSnapshotV1(repair);
       } else {
@@ -1032,6 +1071,21 @@ function collectionDirectory(kind: StateKind, recordKind: string): string {
     throw new Error(`unknown record kind ${recordKind} for ${kind} state`);
   }
   return collection.directory;
+}
+
+/**
+ * Storage identity of one validated record. Existing records use their string
+ * id; the kind-less GitHub cooldown fragment is addressed by its positive
+ * installation id (sha256(String(installationId)).json). A validated record
+ * carries exactly one of the two; a record carrying neither is corrupt state
+ * and fails closed instead of being written to a wrong storage slot.
+ */
+function recordIdentity(record: RecordIdentitySource): string {
+  if (record.id !== undefined) return record.id;
+  if (record.installationId !== undefined) {
+    return String(record.installationId);
+  }
+  throw new Error("state record has no storage identity");
 }
 
 function orderRecords<T>(rows: { id: string; value: unknown }[]): T[] {
@@ -1335,6 +1389,29 @@ function validateRepairTransition(
     }
     // pending/unavailable observations may update observed reviewer, result,
     // findings and outcome — including becoming completed.
+  }
+  // Durable GitHub cooldowns are fail-closed preservation state: one record
+  // per affected installation, never dropped, never moved to a different
+  // installation, and a manual fail-closed hold (null deadline) can never be
+  // silently converted into a finite retry deadline. A new observation may
+  // refresh deadline, observation identity, backoff and observedAt for the
+  // same installation; the m01 writer owns that update policy.
+  for (const priorRecord of prior.githubCooldowns) {
+    const nextRecord = next.githubCooldowns.find(
+      (record) => record.installationId === priorRecord.installationId,
+    );
+    if (nextRecord === undefined) {
+      return "existing github cooldown cannot be dropped";
+    }
+    if (nextRecord.observedAt < priorRecord.observedAt) {
+      return "github cooldown observedAt cannot move backward";
+    }
+    if (
+      priorRecord.retryNotBefore === null &&
+      nextRecord.retryNotBefore !== null
+    ) {
+      return "a manual github cooldown hold cannot become a retry deadline";
+    }
   }
   return null;
 }

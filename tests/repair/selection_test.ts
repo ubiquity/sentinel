@@ -34,6 +34,7 @@ function snapshot(
     reviews: [],
     replays: [],
     releaseRequests: [],
+    githubCooldowns: [],
     ...extra,
   };
 }
