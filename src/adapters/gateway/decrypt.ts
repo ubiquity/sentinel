@@ -24,17 +24,21 @@
  *   `uos-sentinel-replay-v1\0<fingerprint>` (authenticity);
  * - bounded streaming gzip expansion (never Response.arrayBuffer());
  * - the 4-byte big-endian metadata-length envelope, request-body bound and
- *   strict producer metadata shape;
- * - both producer HMAC identities (`fingerprint`, `case-group`), the failure
- *   signature recomputed from the client observation, and the capture time.
+ *   strict producer metadata v2 shape (request plus the private upstream
+ *   trace; v1 request-only plaintext is an explicit unsupported version);
+ * - both producer HMAC identities (`fingerprint` now framed with canonical
+ *   upstream JSON under `uos-sentinel-replay-v2`, `case-group` unchanged as
+ *   the request-only v1 identity), the failure signature recomputed from the
+ *   client observation, and the capture time.
  *
  * Every failure returns a static sanitized typed error: no thrown messages,
- * payload excerpts or key material ever cross this boundary. Caller-owned key
- * and ciphertext buffers are never mutated, and temporary plaintext/crypto
- * buffers are zeroed after use. The returned plaintext is explicitly private:
- * it is not sanitized and it is never a replay fixture, and this module makes
- * no sanitization/provenance/upstream-capture claims (the producer captures
- * observations, not upstream response bytes).
+ * payload excerpts, trace bytes or key material ever cross this boundary.
+ * Caller-owned key and ciphertext buffers are never mutated, and temporary
+ * plaintext/crypto buffers are zeroed after use. The returned plaintext and
+ * private upstream trace are explicitly restricted: they are not sanitized
+ * and never a replay fixture, and this module makes no sanitization,
+ * provenance or complete-coverage claims (`ReplayMetadataV1.upstreamCaptured`
+ * and fixture digests remain out of scope).
  */
 
 import type { StoredArtifactV1 } from "./store.ts";
@@ -47,9 +51,20 @@ import {
 
 /** Producer HKDF/AAD namespace (source: sentinel_replay_capture.ts, frozen). */
 const RETAINED_NAMESPACE = "uos-sentinel-replay-v1";
+/** v2 fingerprint frame namespace (frozen upstream capture cutover). */
+const RETAINED_FINGERPRINT_NAMESPACE = "uos-sentinel-replay-v2";
 const RETAINED_KEY_BYTES = 32;
 const RETAINED_IV_BYTES = 12;
-const RETAINED_ENVELOPE_VERSION = 1;
+/** Private plaintext metadata version after the upstream capture cutover. */
+const RETAINED_METADATA_VERSION = 2;
+/** The v1 request-only metadata version: unsupported, never upstream proof. */
+const RETAINED_LEGACY_METADATA_VERSION = 1;
+/** Frozen private upstream snapshot version. */
+const RETAINED_UPSTREAM_VERSION = 1;
+/** Aggregate upstream capture bounds (frozen; once hit the producer truncates). */
+const RETAINED_UPSTREAM_MAX_ATTEMPTS = 8;
+const RETAINED_UPSTREAM_MAX_DECODED_BYTES = 131_072;
+const RETAINED_UPSTREAM_MAX_CHUNKS = 256;
 /** Producer `MAX_REPLAY_METADATA_BYTES`. */
 const RETAINED_METADATA_MAX_BYTES = 256 * 1_024;
 /** Producer `MAX_ACCEPTED_JSON_BODY_BYTES`. */
@@ -97,6 +112,7 @@ const METADATA_KEYS = [
   "request_id",
   "git_sha",
   "deno_revision",
+  "upstream",
 ] as const;
 const OBSERVATION_KEYS = [
   "status",
@@ -116,6 +132,68 @@ const CLIENT_OBSERVATION_KEYS = [
   "framing_valid",
   "provider_route",
 ] as const;
+
+/** Frozen private upstream envelope keys (docs/contracts.md §12). */
+const UPSTREAM_KEYS = [
+  "version",
+  "attempts",
+  "attempts_truncated",
+  "bytes_truncated",
+  "chunks_truncated",
+] as const;
+const UPSTREAM_ATTEMPT_KEYS = [
+  "provider",
+  "status",
+  "content_type",
+  "chunks_base64",
+  "terminal",
+] as const;
+const UPSTREAM_PROVIDERS = [
+  "chatgpt_codex",
+  "surplus",
+  "metered",
+  "cerebras",
+] as const;
+const UPSTREAM_CONTENT_TYPES = [
+  "text/event-stream",
+  "application/json",
+  "other",
+] as const;
+const UPSTREAM_TERMINALS = [
+  "pending",
+  "fetch_error",
+  "eof",
+  "read_error",
+  "cancelled",
+] as const;
+const UPSTREAM_PROVIDER_SET = new Set<string>(UPSTREAM_PROVIDERS);
+const UPSTREAM_CONTENT_TYPE_SET = new Set<string>(UPSTREAM_CONTENT_TYPES);
+const UPSTREAM_TERMINAL_SET = new Set<string>(UPSTREAM_TERMINALS);
+
+type RetainedUpstreamProvider = (typeof UPSTREAM_PROVIDERS)[number];
+type RetainedUpstreamContentType = (typeof UPSTREAM_CONTENT_TYPES)[number];
+type RetainedUpstreamTerminal = (typeof UPSTREAM_TERMINALS)[number];
+
+/** One authenticated provider dispatch attempt (frozen snake_case). */
+interface RetainedUpstreamAttemptWire {
+  provider: RetainedUpstreamProvider;
+  /** null until headers; otherwise an HTTP status code. */
+  status: number | null;
+  /** null before headers; otherwise the normalized MIME literal. */
+  content_type: RetainedUpstreamContentType | null;
+  /** Canonical padded standard-base64 chunk strings, in consumed order. */
+  chunks_base64: string[];
+  terminal: RetainedUpstreamTerminal;
+}
+
+/** Authenticated private upstream trace (frozen snake_case, no extras). */
+interface RetainedUpstreamWire {
+  version: 1;
+  attempts: RetainedUpstreamAttemptWire[];
+  attempts_truncated: boolean;
+  bytes_truncated: boolean;
+  chunks_truncated: boolean;
+}
 
 /** Producer internal failure observation (snake_case wire shape). */
 interface RetainedObservationWire {
@@ -165,6 +243,28 @@ export interface RetainedGatewayClientObservationV1 {
   providerRoute: string;
 }
 
+/** One authenticated upstream dispatch attempt (frozen snake_case names). */
+export interface RetainedGatewayUpstreamAttemptV1 {
+  provider: "chatgpt_codex" | "surplus" | "metered" | "cerebras";
+  status: number | null;
+  content_type: "text/event-stream" | "application/json" | "other" | null;
+  chunks_base64: readonly string[];
+  terminal: "pending" | "fetch_error" | "eof" | "read_error" | "cancelled";
+}
+
+/**
+ * Required private upstream trace, returned exactly as validated. No
+ * `complete`/`sanitized` flags are invented here: truthfulness is carried by
+ * the frozen terminals and truncation booleans only.
+ */
+export interface RetainedGatewayUpstreamV1 {
+  version: 1;
+  attempts: readonly RetainedGatewayUpstreamAttemptV1[];
+  attempts_truncated: boolean;
+  bytes_truncated: boolean;
+  chunks_truncated: boolean;
+}
+
 /**
  * The authenticated private-capture result: exactly the request and
  * observation fields the producer stored, plus the manifest identity that
@@ -191,6 +291,12 @@ export interface RetainedGatewayCaptureV1 {
   failureSignature: string;
   observation: RetainedGatewayObservationV1;
   clientObservation: RetainedGatewayClientObservationV1;
+  /**
+   * Private raw upstream trace (frozen snake_case), authenticated by the
+   * v2 fingerprint HMAC. Traces and request bytes stay restricted: never
+   * sanitized and never a replay fixture.
+   */
+  upstream: RetainedGatewayUpstreamV1;
   /** Private plaintext request body; never sanitized, never a replay fixture. */
   body: Uint8Array<ArrayBuffer>;
 }
@@ -225,6 +331,10 @@ export type RetainedCaptureErrorV1 =
   | {
     kind: "invalid_plaintext";
     detail: "retained capture plaintext metadata is invalid";
+  }
+  | {
+    kind: "unsupported_metadata_version";
+    detail: "retained capture metadata version is unsupported";
   }
   | {
     kind: "tampered_manifest";
@@ -317,6 +427,7 @@ export async function decryptRetainedGatewayCapture(
         failureSignature: metadata.failure_signature,
         observation: mapObservation(metadata.observation),
         clientObservation: mapClientObservation(metadata.client_observation),
+        upstream: mapUpstream(metadata.upstream),
         body: cloneBytes(metadata.bodyBytes),
       },
     };
@@ -484,7 +595,11 @@ type EnvelopeResult =
   }
   | {
     ok: false;
-    reason: "invalid_envelope" | "oversized_plaintext" | "invalid_plaintext";
+    reason:
+      | "invalid_envelope"
+      | "oversized_plaintext"
+      | "invalid_plaintext"
+      | "unsupported_metadata_version";
   };
 
 interface ParsedRetainedMetadata {
@@ -500,6 +615,7 @@ interface ParsedRetainedMetadata {
   request_id: string;
   git_sha: string;
   deno_revision: string;
+  upstream: RetainedUpstreamWire;
   /** Exact body slice of the envelope buffer (view, not a copy). */
   bodyBytes: Uint8Array<ArrayBuffer>;
 }
@@ -540,11 +656,13 @@ function decodeEnvelope(
     return { ok: false, reason: "invalid_plaintext" };
   }
   const metadata = parseMetadataObject(parsed);
-  if (metadata === null) return { ok: false, reason: "invalid_plaintext" };
+  if (!metadata.ok) {
+    return { ok: false, reason: metadata.reason };
+  }
   return {
     ok: true,
     metadata: {
-      ...metadata,
+      ...metadata.value,
       bodyBytes: bytes.subarray(bodyOffset),
     },
   };
@@ -552,52 +670,90 @@ function decodeEnvelope(
 
 function parseMetadataObject(
   value: unknown,
-): Omit<ParsedRetainedMetadata, "bodyBytes"> | null {
+):
+  | { ok: true; value: Omit<ParsedRetainedMetadata, "bodyBytes"> }
+  | {
+    ok: false;
+    reason: "invalid_plaintext" | "unsupported_metadata_version";
+  } {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    return null;
+    return { ok: false, reason: "invalid_plaintext" };
   }
   const obj = value as Record<string, unknown>;
-  if (!hasExactKeys(obj, METADATA_KEYS)) return null;
-  if (obj.version !== RETAINED_ENVELOPE_VERSION) return null;
+  // Hard cutover: request-only v1 plaintext is unsupported and never counts
+  // as upstream evidence; check the version before shape validation so the
+  // real v1 golden gets the explicit unsupported error.
+  if (obj.version === RETAINED_LEGACY_METADATA_VERSION) {
+    return { ok: false, reason: "unsupported_metadata_version" };
+  }
+  if (obj.version !== RETAINED_METADATA_VERSION) {
+    return { ok: false, reason: "invalid_plaintext" };
+  }
+  if (!hasExactKeys(obj, METADATA_KEYS)) {
+    return { ok: false, reason: "invalid_plaintext" };
+  }
   if (
     !Number.isSafeInteger(obj.captured_at_ms) ||
     (obj.captured_at_ms as number) < 0
   ) {
-    return null;
+    return { ok: false, reason: "invalid_plaintext" };
   }
-  if (obj.endpoint === null || typeof obj.endpoint !== "string") return null;
-  if (obj.method === null || typeof obj.method !== "string") return null;
+  if (obj.endpoint === null || typeof obj.endpoint !== "string") {
+    return { ok: false, reason: "invalid_plaintext" };
+  }
+  if (obj.method === null || typeof obj.method !== "string") {
+    return { ok: false, reason: "invalid_plaintext" };
+  }
   if (
     obj.content_type !== null && typeof obj.content_type !== "string"
   ) {
-    return null;
+    return { ok: false, reason: "invalid_plaintext" };
   }
-  if (!isCompatibilityHeaders(obj.compatibility_headers)) return null;
+  if (!isCompatibilityHeaders(obj.compatibility_headers)) {
+    return { ok: false, reason: "invalid_plaintext" };
+  }
   if (
     obj.failure_signature === null || typeof obj.failure_signature !== "string"
   ) {
-    return null;
+    return { ok: false, reason: "invalid_plaintext" };
   }
   const observation = parseObservation(obj.observation);
-  if (observation === null) return null;
+  if (observation === null) {
+    return { ok: false, reason: "invalid_plaintext" };
+  }
   const clientObservation = parseClientObservation(obj.client_observation);
-  if (clientObservation === null) return null;
+  if (clientObservation === null) {
+    return { ok: false, reason: "invalid_plaintext" };
+  }
   for (const key of ["request_id", "git_sha", "deno_revision"] as const) {
-    if (obj[key] === null || typeof obj[key] !== "string") return null;
+    if (obj[key] === null || typeof obj[key] !== "string") {
+      return { ok: false, reason: "invalid_plaintext" };
+    }
+  }
+  const upstream = parseUpstream(obj.upstream);
+  if (upstream === null) {
+    return { ok: false, reason: "invalid_plaintext" };
   }
   return {
-    version: obj.version as number,
-    captured_at_ms: obj.captured_at_ms as number,
-    endpoint: obj.endpoint as string,
-    method: obj.method as string,
-    content_type: obj.content_type as string | null,
-    compatibility_headers: obj.compatibility_headers as Record<string, string>,
-    failure_signature: obj.failure_signature as string,
-    observation,
-    client_observation: clientObservation,
-    request_id: obj.request_id as string,
-    git_sha: obj.git_sha as string,
-    deno_revision: obj.deno_revision as string,
+    ok: true,
+    value: {
+      version: obj.version as number,
+      captured_at_ms: obj.captured_at_ms as number,
+      endpoint: obj.endpoint as string,
+      method: obj.method as string,
+      content_type: obj.content_type as string | null,
+      compatibility_headers: obj.compatibility_headers as Record<
+        string,
+        string
+      >,
+      failure_signature: obj.failure_signature as string,
+      observation,
+      client_observation: clientObservation,
+      request_id: obj.request_id as string,
+      git_sha: obj.git_sha as string,
+      deno_revision: obj.deno_revision as string,
+      upstream,
+    },
   };
 }
 
@@ -660,6 +816,219 @@ function parseClientObservation(
   };
 }
 
+// ---------------------------------------------------------------------------
+// Private upstream trace parsing (docs/contracts.md §12)
+// ---------------------------------------------------------------------------
+
+/**
+ * Strict internal snapshot parser. Crypto-authenticated JSON is still
+ * untrusted input: exact keys, frozen enums, canonical padded base64, the
+ * aggregate decoded-byte/chunk/attempt bounds and every frozen cross-field
+ * relation are enforced before the trace is canonicalized or used.
+ */
+function parseUpstream(value: unknown): RetainedUpstreamWire | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const obj = value as Record<string, unknown>;
+  if (!hasExactKeys(obj, UPSTREAM_KEYS)) return null;
+  if (obj.version !== RETAINED_UPSTREAM_VERSION) return null;
+  for (
+    const key of [
+      "attempts_truncated",
+      "bytes_truncated",
+      "chunks_truncated",
+    ] as const
+  ) {
+    if (typeof obj[key] !== "boolean") return null;
+  }
+  if (!Array.isArray(obj.attempts)) return null;
+  if (obj.attempts.length > RETAINED_UPSTREAM_MAX_ATTEMPTS) return null;
+  const attempts: RetainedUpstreamAttemptWire[] = [];
+  let decodedBytes = 0;
+  let chunkCount = 0;
+  for (const item of obj.attempts) {
+    const parsed = parseUpstreamAttempt(item);
+    if (parsed === null) return null;
+    attempts.push(parsed.attempt);
+    decodedBytes += parsed.decodedBytes;
+    chunkCount += parsed.chunkCount;
+    if (decodedBytes > RETAINED_UPSTREAM_MAX_DECODED_BYTES) return null;
+    if (chunkCount > RETAINED_UPSTREAM_MAX_CHUNKS) return null;
+  }
+  return {
+    version: 1,
+    attempts,
+    attempts_truncated: obj.attempts_truncated as boolean,
+    bytes_truncated: obj.bytes_truncated as boolean,
+    chunks_truncated: obj.chunks_truncated as boolean,
+  };
+}
+
+interface ParsedUpstreamAttempt {
+  attempt: RetainedUpstreamAttemptWire;
+  decodedBytes: number;
+  chunkCount: number;
+}
+
+function parseUpstreamAttempt(value: unknown): ParsedUpstreamAttempt | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const obj = value as Record<string, unknown>;
+  if (!hasExactKeys(obj, UPSTREAM_ATTEMPT_KEYS)) return null;
+  if (typeof obj.provider !== "string") return null;
+  if (!UPSTREAM_PROVIDER_SET.has(obj.provider)) return null;
+  if (typeof obj.terminal !== "string") return null;
+  if (!UPSTREAM_TERMINAL_SET.has(obj.terminal)) return null;
+  let status: number | null;
+  if (obj.status === null) {
+    status = null;
+  } else if (
+    Number.isSafeInteger(obj.status) &&
+    (obj.status as number) >= 100 &&
+    (obj.status as number) <= 599
+  ) {
+    status = obj.status as number;
+  } else {
+    return null;
+  }
+  let contentType: RetainedUpstreamContentType | null;
+  if (obj.content_type === null) {
+    contentType = null;
+  } else if (typeof obj.content_type === "string") {
+    if (!UPSTREAM_CONTENT_TYPE_SET.has(obj.content_type)) return null;
+    contentType = obj.content_type as RetainedUpstreamContentType;
+  } else {
+    return null;
+  }
+  // Frozen header state: status and content_type are null together.
+  if ((status === null) !== (contentType === null)) return null;
+  if (!Array.isArray(obj.chunks_base64)) return null;
+  const decoded: Uint8Array<ArrayBuffer>[] = [];
+  let decodedBytes = 0;
+  try {
+    for (const encoded of obj.chunks_base64) {
+      if (typeof encoded !== "string") return null;
+      const bytes = decodeCanonicalBase64(encoded);
+      if (bytes === null) return null;
+      decoded.push(bytes);
+      decodedBytes += bytes.byteLength;
+    }
+    // Before-header attempts have no chunks; a fetch_error never got headers.
+    if (status === null && decoded.length !== 0) return null;
+    if (obj.terminal === "fetch_error" && status !== null) return null;
+    // Header-bearing read_error/cancelled/eof require a status (frozen §12).
+    if (
+      status === null &&
+      (obj.terminal === "eof" ||
+        obj.terminal === "read_error" ||
+        obj.terminal === "cancelled")
+    ) {
+      return null;
+    }
+    return {
+      attempt: {
+        provider: obj.provider as RetainedUpstreamProvider,
+        status,
+        content_type: contentType,
+        chunks_base64: obj.chunks_base64 as string[],
+        terminal: obj.terminal as RetainedUpstreamTerminal,
+      },
+      decodedBytes,
+      chunkCount: decoded.length,
+    };
+  } finally {
+    // Decoded chunk buffers exist only for validation/bounds; zero them.
+    zeroAll(decoded);
+  }
+}
+
+const CANONICAL_PADDED_BASE64_RE =
+  /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+const STANDARD_BASE64_ALPHABET =
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/**
+ * Strict canonical padded standard-base64 decode: exact alphabet, `%4 === 0`
+ * padded form with `=` only trailing, and zero pad bits (a re-encoding must
+ * return the identical string). Empty strings are not chunks (never valid).
+ */
+function decodeCanonicalBase64(text: string): Uint8Array<ArrayBuffer> | null {
+  if (text.length === 0 || !CANONICAL_PADDED_BASE64_RE.test(text)) {
+    return null;
+  }
+  let bits = 0;
+  let value = 0;
+  const bytes: number[] = [];
+  let lastDataChar = "";
+  for (let index = 0; index < text.length; index++) {
+    const char = text[index]!;
+    if (char === "=") continue;
+    lastDataChar = char;
+    const decoded = STANDARD_BASE64_ALPHABET.indexOf(char);
+    if (decoded === -1) return null;
+    value = (value << 6) | decoded;
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      bytes.push((value >>> bits) & 0xff);
+    }
+  }
+  const lastValue = STANDARD_BASE64_ALPHABET.indexOf(lastDataChar);
+  if (text.endsWith("==")) {
+    // 8 bits from 12: the last 4 bits must be zero.
+    if ((lastValue & 0x0f) !== 0) return null;
+  } else if (text.endsWith("=")) {
+    // 16 bits from 18: the last 2 bits must be zero.
+    if ((lastValue & 0x03) !== 0) return null;
+  }
+  return new Uint8Array(bytes);
+}
+
+// ---------------------------------------------------------------------------
+// Canonical upstream JSON (fingerprint frame, docs/contracts.md §12)
+// ---------------------------------------------------------------------------
+
+/**
+ * Frozen upstream frame: recursive lexicographic (UTF-16 code-unit) object-key
+ * sort, preserved array order, JSON.stringify primitive/string encoding and no
+ * whitespace. Only called after strict validation, so every value is a
+ * validated JSON primitive/array/plain object.
+ */
+function canonicalUpstreamJson(upstream: RetainedUpstreamWire): string {
+  return canonicalJson(upstream);
+}
+
+function canonicalJson(value: unknown): string {
+  if (value === null) return "null";
+  switch (typeof value) {
+    case "string":
+      return JSON.stringify(value);
+    case "number":
+      if (!Number.isFinite(value)) {
+        throw new Error("non-finite number in canonical upstream JSON");
+      }
+      return JSON.stringify(value);
+    case "boolean":
+      return value ? "true" : "false";
+    case "object": {
+      if (Array.isArray(value)) {
+        const items = value.map((item) => canonicalJson(item));
+        return `[${items.join(",")}]`;
+      }
+      const record = value as Record<string, unknown>;
+      const keys = Object.keys(record).sort();
+      const fields = keys.map((key) =>
+        `${JSON.stringify(key)}:${canonicalJson(record[key])}`
+      );
+      return `{${fields.join(",")}}`;
+    }
+    default:
+      throw new Error(`cannot canonically serialize ${typeof value}`);
+  }
+}
+
 function isCompatibilityHeaders(
   value: unknown,
 ): value is Record<string, string> {
@@ -719,11 +1088,14 @@ function stableHeaderText(headers: Record<string, string>): string {
 /**
  * Exact producer `fingerprintParts` message: 8-byte big-endian length frame
  * around [purpose label, method, endpoint, stable headers, body] plus, for the
- * fingerprint purpose only, the framed failure signature.
+ * fingerprint purpose only, the framed failure signature and one final frame
+ * of canonical upstream JSON under the v2 namespace. The case-group purpose
+ * stays exactly the v1 request-only identity.
  */
 function fingerprintParts(
   metadata: ParsedRetainedMetadata,
   purpose: "fingerprint" | "case-group",
+  upstreamFrame: Uint8Array<ArrayBuffer> | null,
 ): Uint8Array<ArrayBuffer>[] {
   const frame = (value: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer>[] => {
     const length = new Uint8Array(8);
@@ -734,8 +1106,11 @@ function fingerprintParts(
     );
     return [length, value];
   };
+  const namespace = purpose === "fingerprint"
+    ? `${RETAINED_FINGERPRINT_NAMESPACE}:fingerprint`
+    : `${RETAINED_NAMESPACE}:case-group`;
   const common = [
-    ...frame(TEXT_ENCODER.encode(`${RETAINED_NAMESPACE}:${purpose}`)),
+    ...frame(TEXT_ENCODER.encode(namespace)),
     ...frame(TEXT_ENCODER.encode(metadata.method)),
     ...frame(TEXT_ENCODER.encode(metadata.endpoint)),
     ...frame(
@@ -747,6 +1122,7 @@ function fingerprintParts(
       ...common,
       ...frame(metadata.bodyBytes),
       ...frame(TEXT_ENCODER.encode(metadata.failure_signature)),
+      ...frame(upstreamFrame!),
     ]
     : [...common, ...frame(metadata.bodyBytes)];
 }
@@ -788,15 +1164,24 @@ async function verifyProducerIdentities(
   metadata: ParsedRetainedMetadata,
   manifest: GatewayReplayManifestV1,
 ): Promise<boolean> {
-  const fingerprint = await hmacHex(
-    keyBytes,
-    "fingerprint",
-    fingerprintParts(metadata, "fingerprint"),
+  const upstreamFrame = TEXT_ENCODER.encode(
+    canonicalUpstreamJson(metadata.upstream),
   );
+  let fingerprint: string;
+  try {
+    fingerprint = await hmacHex(
+      keyBytes,
+      "fingerprint",
+      fingerprintParts(metadata, "fingerprint", upstreamFrame),
+    );
+  } finally {
+    // The canonical frame embeds private base64 trace bytes: zero it.
+    upstreamFrame.fill(0);
+  }
   const caseGroupDigest = await hmacHex(
     keyBytes,
     "case-group",
-    fingerprintParts(metadata, "case-group"),
+    fingerprintParts(metadata, "case-group", null),
   );
   if (fingerprint !== manifest.fingerprint) return false;
   if (caseGroupDigest !== manifest.caseGroupDigest) return false;
@@ -842,6 +1227,25 @@ function mapClientObservation(
   };
 }
 
+/** Private raw trace: passthrough with frozen snake_case names, no extras. */
+function mapUpstream(
+  upstream: RetainedUpstreamWire,
+): RetainedGatewayUpstreamV1 {
+  return {
+    version: upstream.version,
+    attempts: upstream.attempts.map((attempt) => ({
+      provider: attempt.provider,
+      status: attempt.status,
+      content_type: attempt.content_type,
+      chunks_base64: attempt.chunks_base64,
+      terminal: attempt.terminal,
+    })),
+    attempts_truncated: upstream.attempts_truncated,
+    bytes_truncated: upstream.bytes_truncated,
+    chunks_truncated: upstream.chunks_truncated,
+  };
+}
+
 function fail(
   kind: RetainedCaptureErrorV1["kind"],
 ): RetainedCaptureResultV1 {
@@ -862,6 +1266,8 @@ const ERROR_DETAILS: Record<RetainedCaptureErrorV1["kind"], string> = {
   invalid_envelope: "retained capture envelope is malformed",
   oversized_plaintext: "retained capture plaintext exceeds its size bound",
   invalid_plaintext: "retained capture plaintext metadata is invalid",
+  unsupported_metadata_version:
+    "retained capture metadata version is unsupported",
   tampered_manifest:
     "retained capture HMAC identity does not match its manifest",
 };

@@ -1,15 +1,32 @@
 /**
  * Retained-capture decryption boundary tests (Wave C integration writer).
  *
- * The success path connects the ACTUAL producer-generated golden capture
- * through the ACTUAL `LocalArtifactStore` put/get into
- * `decryptRetainedGatewayCapture`, proving the exact original request and
- * observations round trip. Every tamper/bound case uses public synthetic
- * bytes and the public synthetic key only; failures return static sanitized
- * typed errors with no plaintext or key leakage, and caller-owned buffers are
- * never mutated. No model/network calls, no Deno KV access, no target source
- * imports; the crafted envelopes for deeper validation implement the
- * producer protocol independently inside this test file.
+ * The real producer-golden-v1 fixture is the ORIGINAL target
+ * `9331946ef10d3b7259b5ca4933598dd380c1d794` v1 request-only plaintext and is
+ * never modified. Under the frozen v2 cutover it is an explicit
+ * unsupported-metadata regression plus an early-authentication/integrity
+ * negative fixture: its ciphertext still exercises every pre-metadata check
+ * (key, manifest, digest, AES-GCM), while its plaintext must be rejected as
+ * unsupported — never upstream proof, never a legacy fallback.
+ *
+ * The v2 success path is crafted independently in this file (producing the
+ * producer protocol outside the decryptor: HKDF + AES-GCM + gzip, the frozen
+ * 8-byte length frames, the `uos-sentinel-replay-v2:fingerprint` input
+ * namespace with the final canonical-upstream-JSON frame, the unchanged
+ * request-only `uos-sentinel-replay-v1:case-group` identity, and
+ * LocalArtifactStore put/get) and then run through
+ * `decryptRetainedGatewayCapture`, proving the exact request and private raw
+ * upstream trace round trip. The helpers never import the decryptor's
+ * parsers/canonicalizer: every expected value is produced from public
+ * synthetic bytes by this file's own framing, HMAC and canonical-JSON code.
+ * No current test claims actual v2 producer compatibility: the target m06
+ * producer is still being written, and the primary will regenerate a real
+ * producer-golden-v2.json and assign final cross-repository compatibility
+ * after it settles. Every tamper/bound case uses public synthetic bytes and
+ * the public synthetic key only; failures return static sanitized typed
+ * errors with no plaintext, trace or key leakage, and caller-owned buffers
+ * are never mutated. No model/network calls, no Deno KV access, no target
+ * source imports.
  */
 
 import assert from "node:assert/strict";
@@ -43,6 +60,20 @@ const STORE_LIMITS: ArtifactStoreLimitsV1 = {
   artifactMaxBytes: 64 * 1_024 * 1_024,
   retentionMaxAgeMs: 7 * 24 * 60 * 60 * 1_000,
 };
+
+/** Frozen producer namespaces (docs/contracts.md §12, mirror of capture.ts). */
+const RETAINED_NAMESPACE = "uos-sentinel-replay-v1";
+const RETAINED_FINGERPRINT_NAMESPACE = "uos-sentinel-replay-v2:fingerprint";
+const RETAINED_CASE_GROUP_NAMESPACE = "uos-sentinel-replay-v1:case-group";
+/** Exact producer capture lifetime (wire.ts `GATEWAY_REPLAY_TTL_MS`). */
+const RETAINED_TTL_MS = 48 * 60 * 60 * 1_000;
+/** Frozen aggregate upstream bounds. */
+const UPSTREAM_MAX_ATTEMPTS = 8;
+const UPSTREAM_MAX_DECODED_BYTES = 131_072;
+const UPSTREAM_MAX_CHUNKS = 256;
+
+const CAPTURE_ID_V2 = "synthetic-v2-capture-1";
+const CAPTURED_AT_V2 = 1_788_811_200_000;
 
 interface GoldenFixture {
   sourceSha: string;
@@ -170,7 +201,7 @@ async function craftEnvelope(
   { ciphertext: Uint8Array<ArrayBuffer>; iv: Uint8Array<ArrayBuffer> }
 > {
   const enc = new TextEncoder();
-  const salt = enc.encode("uos-sentinel-replay-v1");
+  const salt = enc.encode(RETAINED_NAMESPACE);
   const material = await crypto.subtle.importKey(
     "raw",
     keyBytes,
@@ -199,7 +230,7 @@ async function craftEnvelope(
   );
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const additionalData = enc.encode(
-    `uos-sentinel-replay-v1\u0000${fingerprint}`,
+    `${RETAINED_NAMESPACE}\u0000${fingerprint}`,
   );
   const encrypted = new Uint8Array(
     await crypto.subtle.encrypt(
@@ -227,12 +258,286 @@ function encodeEnvelope(
   return output;
 }
 
-function baseMetadata(
+// ---------------------------------------------------------------------------
+// Independent v2 producer-side helpers (frozen framing, no decryptor imports)
+// ---------------------------------------------------------------------------
+
+/** Canonical padded standard-base64 encoder (independent of src code). */
+function standardBase64(bytes: Uint8Array): string {
+  const alphabet =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  let output = "";
+  for (let offset = 0; offset < bytes.byteLength; offset += 3) {
+    const remaining = bytes.byteLength - offset;
+    const a = bytes[offset]!;
+    const b = remaining > 1 ? bytes[offset + 1]! : 0;
+    const c = remaining > 2 ? bytes[offset + 2]! : 0;
+    output += alphabet[a >> 2]!;
+    output += alphabet[((a & 0x03) << 4) | (b >> 4)]!;
+    output += remaining > 1 ? alphabet[((b & 0x0f) << 2) | (c >> 6)]! : "=";
+    output += remaining > 2 ? alphabet[c & 0x3f]! : "=";
+  }
+  return output;
+}
+
+/** Independent standard-base64 decoder (assertions only). */
+function decodeStandardBase64(text: string): Uint8Array<ArrayBuffer> {
+  const alphabet =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  let bits = 0;
+  let value = 0;
+  const bytes: number[] = [];
+  for (const char of text) {
+    if (char === "=") continue;
+    const decoded = alphabet.indexOf(char);
+    assert.notEqual(decoded, -1, "unexpected standard-base64 character");
+    value = (value << 6) | decoded;
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      bytes.push((value >>> bits) & 0xff);
+    }
+  }
+  return new Uint8Array(bytes);
+}
+
+/**
+ * Frozen canonical JSON: recursive UTF-16 code-unit key sort, preserved array
+ * order, JSON.stringify string/primitive encoding, no whitespace.
+ */
+function canonicalJson(value: unknown): string {
+  if (value === null) return "null";
+  switch (typeof value) {
+    case "string":
+      return JSON.stringify(value);
+    case "number":
+      return JSON.stringify(value);
+    case "boolean":
+      return value ? "true" : "false";
+    case "object": {
+      if (Array.isArray(value)) {
+        return `[${value.map((item) => canonicalJson(item)).join(",")}]`;
+      }
+      const record = value as Record<string, unknown>;
+      const keys = Object.keys(record).sort();
+      return `{${
+        keys.map((key) =>
+          `${JSON.stringify(key)}:${canonicalJson(record[key])}`
+        ).join(",")
+      }}`;
+    }
+    default:
+      throw new Error(`cannot canonically serialize ${typeof value}`);
+  }
+}
+
+/** Exact producer stable header text (sorted name:value lines). */
+function stableHeaderText(headers: Record<string, string>): string {
+  return Object.entries(headers)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([name, value]) => `${name}:${value}`)
+    .join("\n");
+}
+
+function toHex(bytes: Uint8Array): string {
+  return Array.from(bytes)
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+function frameParts(value: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer>[] {
+  const length = new Uint8Array(8);
+  new DataView(length.buffer).setBigUint64(0, BigInt(value.byteLength), false);
+  return [length, value];
+}
+
+function concatParts(
+  parts: readonly Uint8Array[],
+): Uint8Array<ArrayBuffer> {
+  const length = parts.reduce((sum, part) => sum + part.byteLength, 0);
+  const output = new Uint8Array(length);
+  let offset = 0;
+  for (const part of parts) {
+    output.set(part, offset);
+    offset += part.byteLength;
+  }
+  return output;
+}
+
+async function hmacHex(
+  keyBytes: Uint8Array<ArrayBuffer>,
+  purpose: "fingerprint" | "case-group",
+  parts: readonly Uint8Array<ArrayBuffer>[],
+): Promise<string> {
+  const material = await crypto.subtle.importKey(
+    "raw",
+    keyBytes,
+    "HKDF",
+    false,
+    ["deriveBits"],
+  );
+  const derived = await crypto.subtle.deriveBits(
+    {
+      name: "HKDF",
+      hash: "SHA-256",
+      salt: new TextEncoder().encode(RETAINED_NAMESPACE),
+      info: new TextEncoder().encode(purpose),
+    },
+    material,
+    256,
+  );
+  const key = await crypto.subtle.importKey(
+    "raw",
+    derived,
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const digest = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    concatParts(parts),
+  );
+  return toHex(new Uint8Array(digest));
+}
+
+/** Frozen v2 fingerprint: v2 namespace + method/endpoint/headers/body + framed
+ * failure signature + final framed canonical-upstream-JSON frame. */
+function v2Fingerprint(
+  keyBytes: Uint8Array<ArrayBuffer>,
+  metadata: Record<string, unknown>,
+  body: Uint8Array<ArrayBuffer>,
+): Promise<string> {
+  const enc = new TextEncoder();
+  const upstreamFrame = enc.encode(canonicalJson(metadata.upstream));
+  const parts = [
+    ...frameParts(enc.encode(RETAINED_FINGERPRINT_NAMESPACE)),
+    ...frameParts(enc.encode(metadata.method as string)),
+    ...frameParts(enc.encode(metadata.endpoint as string)),
+    ...frameParts(
+      enc.encode(
+        stableHeaderText(
+          metadata.compatibility_headers as Record<string, string>,
+        ),
+      ),
+    ),
+    ...frameParts(body),
+    ...frameParts(enc.encode(metadata.failure_signature as string)),
+    ...frameParts(upstreamFrame),
+  ];
+  return hmacHex(keyBytes, "fingerprint", parts);
+}
+
+/** Unchanged v1 request-only case-group identity (stable grouping). */
+function v2CaseGroup(
+  keyBytes: Uint8Array<ArrayBuffer>,
+  metadata: Record<string, unknown>,
+  body: Uint8Array<ArrayBuffer>,
+): Promise<string> {
+  const enc = new TextEncoder();
+  const parts = [
+    ...frameParts(enc.encode(RETAINED_CASE_GROUP_NAMESPACE)),
+    ...frameParts(enc.encode(metadata.method as string)),
+    ...frameParts(enc.encode(metadata.endpoint as string)),
+    ...frameParts(
+      enc.encode(
+        stableHeaderText(
+          metadata.compatibility_headers as Record<string, string>,
+        ),
+      ),
+    ),
+    ...frameParts(body),
+  ];
+  return hmacHex(keyBytes, "case-group", parts);
+}
+
+interface CraftedV2Variant {
+  metadata: Record<string, unknown>;
+  body: Uint8Array<ArrayBuffer>;
+  /** Override the advertised identity (stale-fingerprint tamper tests). */
+  fingerprint?: string;
+  caseGroupDigest?: string;
+  /** Manifest capture time; defaults to metadata.captured_at_ms. */
+  capturedAtMs?: number;
+}
+
+/** Independently crafted v2 capture: valid manifest + encrypted envelope. */
+async function craftV2Capture(
+  keyBytes: Uint8Array<ArrayBuffer>,
+  variant: CraftedV2Variant,
+): Promise<{
+  manifest: GatewayReplayManifestV1;
+  ciphertext: Uint8Array<ArrayBuffer>;
+}> {
+  const metadata = variant.metadata;
+  const body = variant.body;
+  const capturedAtMs = variant.capturedAtMs ??
+    (metadata.captured_at_ms as number);
+  const fingerprint = variant.fingerprint ??
+    await v2Fingerprint(keyBytes, metadata, body);
+  const caseGroupDigest = variant.caseGroupDigest ??
+    await v2CaseGroup(keyBytes, metadata, body);
+  const plaintext = encodeEnvelope(metadata, body);
+  const { ciphertext, iv } = await craftEnvelope(
+    plaintext,
+    fingerprint,
+    keyBytes,
+  );
+  const manifest = parseGatewayReplayManifestV1({
+    version: 1,
+    capture_id: CAPTURE_ID_V2,
+    fingerprint,
+    case_group_digest: caseGroupDigest,
+    captured_at_ms: capturedAtMs,
+    expires_at_ms: capturedAtMs + RETAINED_TTL_MS,
+    algorithm: "AES-256-GCM",
+    compression: "gzip",
+    iv: b64Url(iv),
+    chunk_count: 1,
+    ciphertext_bytes: ciphertext.byteLength,
+  });
+  return { manifest, ciphertext };
+}
+
+/** One frozen upstream attempt; `status`/`content_type` are null together. */
+function v2Attempt(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    provider: "surplus",
+    status: 200,
+    content_type: "text/event-stream",
+    chunks_base64: [] as string[],
+    terminal: "eof",
+    ...overrides,
+  };
+}
+
+function v2Upstream(
   overrides: Record<string, unknown> = {},
 ): Record<string, unknown> {
   return {
     version: 1,
-    captured_at_ms: readGolden().expected.captured_at_ms,
+    attempts: [] as Record<string, unknown>[],
+    attempts_truncated: false,
+    bytes_truncated: false,
+    chunks_truncated: false,
+    ...overrides,
+  };
+}
+
+function v2Body(): Uint8Array<ArrayBuffer> {
+  return new TextEncoder().encode(
+    '{"model":"synthetic-model","input":"v2 independently crafted fixture","stream":true}',
+  );
+}
+
+function baseMetadata(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    version: 2,
+    captured_at_ms: CAPTURED_AT_V2,
     endpoint: "/v1/responses",
     method: "POST",
     content_type: "application/json",
@@ -257,9 +562,32 @@ function baseMetadata(
       framing_valid: true,
       provider_route: "synthetic",
     },
-    request_id: "synthetic-request-1",
+    request_id: "synthetic-request-2",
     git_sha: "1".repeat(40),
-    deno_revision: "synthetic-revision-1",
+    deno_revision: "synthetic-revision-2",
+    upstream: v2Upstream({
+      attempts: [
+        v2Attempt({
+          provider: "surplus",
+          status: 200,
+          content_type: "text/event-stream",
+          chunks_base64: [
+            standardBase64(new TextEncoder().encode(
+              'event: message\ndata: {"ok":true}\n\n',
+            )),
+            standardBase64(new TextEncoder().encode("data: [DONE]\n\n")),
+          ],
+          terminal: "eof",
+        }),
+        v2Attempt({
+          provider: "chatgpt_codex",
+          status: null,
+          content_type: null,
+          chunks_base64: [],
+          terminal: "fetch_error",
+        }),
+      ],
+    }),
     ...overrides,
   };
 }
@@ -278,10 +606,32 @@ function manifestWith(
   });
 }
 
+/** Re-parse a manifest with frozen overrides (for on-wire tamper cases). */
+function manifestVariant(
+  manifest: GatewayReplayManifestV1,
+  overrides: Record<string, unknown>,
+): GatewayReplayManifestV1 {
+  return parseGatewayReplayManifestV1({
+    version: 1,
+    capture_id: manifest.captureId,
+    fingerprint: manifest.fingerprint,
+    case_group_digest: manifest.caseGroupDigest,
+    captured_at_ms: manifest.capturedAt,
+    expires_at_ms: manifest.expiresAt,
+    algorithm: manifest.algorithm,
+    compression: manifest.compression,
+    iv: manifest.iv,
+    chunk_count: manifest.chunkCount,
+    ciphertext_bytes: manifest.ciphertextBytes,
+    ...overrides,
+  });
+}
+
 function expectStaticFailure(
   result: RetainedCaptureResultV1,
   kind: RetainedCaptureErrorV1["kind"],
   detail: string,
+  neverContains: readonly string[] = [],
 ): void {
   assert.equal(result.ok, false, `expected ${kind} failure`);
   assert.deepEqual(
@@ -299,6 +649,13 @@ function expectStaticFailure(
       ),
       "fingerprint leaked",
     );
+    for (const marker of neverContains) {
+      if (marker.length === 0) continue;
+      assert.ok(
+        !serialized.includes(marker),
+        `private marker leaked: ${marker}`,
+      );
+    }
   }
 }
 
@@ -324,7 +681,11 @@ function hexToBytes(hex: string): Uint8Array<ArrayBuffer> {
   return bytes;
 }
 
-Deno.test("gateway decrypt: producer golden round-trips through the actual store", async () => {
+// ---------------------------------------------------------------------------
+// Real producer v1 golden: explicit unsupported regression
+// ---------------------------------------------------------------------------
+
+Deno.test("gateway decrypt: the producer v1 golden is an explicit unsupported-metadata regression", async () => {
   const golden = readGolden();
   assert.equal(
     golden.sourceSha,
@@ -345,27 +706,77 @@ Deno.test("gateway decrypt: producer golden round-trips through the actual store
   );
   try {
     const result = await decryptRetainedGatewayCapture(artifact, keyBytes);
-    assert.equal(result.ok, true, "golden capture must decrypt");
+    // The v1 request-only plaintext is not upstream proof and never a legacy
+    // fallback: the decryptor must report the frozen unsupported-version error
+    // with the static message, and no v1 value may be returned.
+    expectStaticFailure(
+      result,
+      "unsupported_metadata_version",
+      "retained capture metadata version is unsupported",
+    );
+    assertBuffersUnchanged(
+      beforeKey,
+      beforeCiphertext,
+      keyBytes,
+      ciphertext,
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Independently crafted v2 success + truthful trace representation
+// ---------------------------------------------------------------------------
+
+Deno.test("gateway decrypt: independently crafted v2 capture round-trips through the actual store", async () => {
+  const keyBytes = goldenKey();
+  const body = v2Body();
+  const metadata = baseMetadata();
+  const expectedAttempts = metadata.upstream as {
+    attempts: Record<string, unknown>[];
+    attempts_truncated: boolean;
+    bytes_truncated: boolean;
+    chunks_truncated: boolean;
+  };
+  const { manifest, ciphertext } = await craftV2Capture(keyBytes, {
+    metadata,
+    body,
+  });
+  const beforeKey = new Uint8Array(keyBytes);
+  const beforeCiphertext = new Uint8Array(ciphertext);
+
+  const { artifact, cleanup } = await retainThroughStore(
+    ciphertext,
+    manifest,
+    manifest.capturedAt,
+  );
+  try {
+    const result = await decryptRetainedGatewayCapture(artifact, keyBytes);
+    assert.equal(
+      result.ok,
+      true,
+      "independently crafted v2 capture must decrypt",
+    );
     if (!result.ok) return;
     const value = result.value;
-    const expected = golden.expected;
-    assert.equal(value.version, expected.version);
+    assert.equal(value.version, 1);
     assert.equal(value.captureId, manifest.captureId);
     assert.equal(value.fingerprint, manifest.fingerprint);
     assert.equal(value.caseGroupDigest, manifest.caseGroupDigest);
-    assert.equal(value.capturedAt, expected.captured_at_ms);
+    assert.equal(value.capturedAt, CAPTURED_AT_V2);
     assert.equal(value.expiresAt, manifest.expiresAt);
-    assert.equal(value.requestId, expected.request_id);
-    assert.equal(value.gitSha, expected.git_sha);
-    assert.equal(value.denoRevision, expected.deno_revision);
-    assert.equal(value.endpoint, expected.endpoint);
-    assert.equal(value.method, expected.method);
-    assert.equal(value.contentType, expected.content_type);
-    assert.deepEqual(
-      value.compatibilityHeaders,
-      expected.compatibility_headers,
+    assert.equal(value.requestId, "synthetic-request-2");
+    assert.equal(value.endpoint, "/v1/responses");
+    assert.equal(value.method, "POST");
+    assert.equal(value.contentType, "application/json");
+    assert.deepEqual(value.compatibilityHeaders, {
+      accept: "text/event-stream",
+    });
+    assert.equal(
+      value.failureSignature,
+      '{"status":502,"stream":true,"completed":false,"terminal_type":null,"failure_kind":"missing_sse_terminal","framing_valid":true,"provider_route":"synthetic"}',
     );
-    assert.equal(value.failureSignature, expected.failure_signature);
     assert.deepEqual(value.observation, {
       status: 502,
       stream: true,
@@ -384,21 +795,820 @@ Deno.test("gateway decrypt: producer golden round-trips through the actual store
       framingValid: true,
       providerRoute: "synthetic",
     });
-    assert.equal(
-      new TextDecoder().decode(value.body),
-      expected.body,
-      "exact original request body must round trip",
+    // Exact request must round trip byte-for-byte.
+    assert.deepEqual(value.body, body, "exact request bytes must round trip");
+    // Private raw upstream trace: exact frozen snake_case shape and bytes.
+    assert.equal(value.upstream.version, 1);
+    assert.equal(value.upstream.attempts_truncated, false);
+    assert.equal(value.upstream.bytes_truncated, false);
+    assert.equal(value.upstream.chunks_truncated, false);
+    assert.equal(value.upstream.attempts.length, 2);
+    assert.deepEqual(
+      value.upstream.attempts.map((attempt) => ({
+        provider: attempt.provider,
+        status: attempt.status,
+        content_type: attempt.content_type,
+        terminal: attempt.terminal,
+      })),
+      [
+        {
+          provider: "surplus",
+          status: 200,
+          content_type: "text/event-stream",
+          terminal: "eof",
+        },
+        {
+          provider: "chatgpt_codex",
+          status: null,
+          content_type: null,
+          terminal: "fetch_error",
+        },
+      ],
+      "attempt fields must survive exactly",
     );
-    assertBuffersUnchanged(
-      beforeKey,
-      beforeCiphertext,
-      keyBytes,
-      ciphertext,
+    const firstChunks = (expectedAttempts.attempts[0] as {
+      chunks_base64: string[];
+    }).chunks_base64;
+    assert.deepEqual(
+      value.upstream.attempts[0]!.chunks_base64,
+      firstChunks,
+      "canonical base64 chunk strings must survive exactly",
+    );
+    // Independent decoding proves the raw upstream bytes survived.
+    assert.deepEqual(
+      decodeStandardBase64(value.upstream.attempts[0]!.chunks_base64[0]!),
+      new TextEncoder().encode('event: message\ndata: {"ok":true}\n\n'),
+      "raw upstream chunk bytes must survive",
+    );
+    assert.deepEqual(
+      decodeStandardBase64(value.upstream.attempts[0]!.chunks_base64[1]!),
+      new TextEncoder().encode("data: [DONE]\n\n"),
+      "raw upstream chunk bytes must survive",
+    );
+    assert.deepEqual(
+      value.upstream.attempts[1]!.chunks_base64,
+      [],
+      "before-header attempt must have no chunks",
+    );
+    assertBuffersUnchanged(beforeKey, beforeCiphertext, keyBytes, ciphertext);
+  } finally {
+    await cleanup();
+  }
+});
+
+Deno.test("gateway decrypt: all terminal variants and truncation flags are truthfully represented", async () => {
+  const keyBytes = goldenKey();
+  const attempts = [
+    // pending without headers: no chunks.
+    v2Attempt({
+      provider: "metered",
+      status: null,
+      content_type: null,
+      chunks_base64: [],
+      terminal: "pending",
+    }),
+    // pending after headers: partial body, empty consumed chunk list.
+    v2Attempt({
+      provider: "cerebras",
+      status: 200,
+      content_type: "application/json",
+      chunks_base64: [],
+      terminal: "pending",
+    }),
+    // dispatch failure: no headers.
+    v2Attempt({
+      provider: "surplus",
+      status: null,
+      content_type: null,
+      chunks_base64: [],
+      terminal: "fetch_error",
+    }),
+    // consumed to network EOF with raw bytes.
+    v2Attempt({
+      provider: "chatgpt_codex",
+      status: 502,
+      content_type: "text/event-stream",
+      chunks_base64: [
+        standardBase64(new TextEncoder().encode("data: one\n\n")),
+        standardBase64(new TextEncoder().encode("data: two\n\n")),
+      ],
+      terminal: "eof",
+    }),
+    // interrupted read with bytes consumed so far and normalized MIME "other".
+    v2Attempt({
+      provider: "metered",
+      status: 503,
+      content_type: "other",
+      chunks_base64: [
+        standardBase64(new TextEncoder().encode("partial")),
+      ],
+      terminal: "read_error",
+    }),
+    // cancellation after response start with an empty body.
+    v2Attempt({
+      provider: "cerebras",
+      status: 200,
+      content_type: "application/json",
+      chunks_base64: [],
+      terminal: "cancelled",
+    }),
+  ];
+  const metadata = baseMetadata({
+    upstream: v2Upstream({
+      attempts,
+      attempts_truncated: false,
+      bytes_truncated: true,
+      chunks_truncated: true,
+    }),
+  });
+  const body = v2Body();
+  const { manifest, ciphertext } = await craftV2Capture(keyBytes, {
+    metadata,
+    body,
+  });
+  const digest = await sha256hex(ciphertext);
+  const artifact = makeArtifact(ciphertext, manifest, digest);
+  const result = await decryptRetainedGatewayCapture(artifact, keyBytes);
+  assert.equal(result.ok, true, "all terminal variants must decrypt");
+  if (!result.ok) return;
+  const upstream = result.value.upstream;
+  assert.equal(upstream.attempts_truncated, false);
+  assert.equal(upstream.bytes_truncated, true);
+  assert.equal(upstream.chunks_truncated, true);
+  assert.deepEqual(
+    upstream.attempts.map((attempt) => ({
+      provider: attempt.provider,
+      status: attempt.status,
+      content_type: attempt.content_type,
+      terminal: attempt.terminal,
+      chunks: attempt.chunks_base64.length,
+    })),
+    [
+      {
+        provider: "metered",
+        status: null,
+        content_type: null,
+        terminal: "pending",
+        chunks: 0,
+      },
+      {
+        provider: "cerebras",
+        status: 200,
+        content_type: "application/json",
+        terminal: "pending",
+        chunks: 0,
+      },
+      {
+        provider: "surplus",
+        status: null,
+        content_type: null,
+        terminal: "fetch_error",
+        chunks: 0,
+      },
+      {
+        provider: "chatgpt_codex",
+        status: 502,
+        content_type: "text/event-stream",
+        terminal: "eof",
+        chunks: 2,
+      },
+      {
+        provider: "metered",
+        status: 503,
+        content_type: "other",
+        terminal: "read_error",
+        chunks: 1,
+      },
+      {
+        provider: "cerebras",
+        status: 200,
+        content_type: "application/json",
+        terminal: "cancelled",
+        chunks: 0,
+      },
+    ],
+    "terminals, header state and chunks must survive exactly",
+  );
+});
+
+Deno.test("gateway decrypt: an empty upstream trace is accepted and returned truthfully", async () => {
+  const keyBytes = goldenKey();
+  const metadata = baseMetadata({
+    upstream: v2Upstream({ attempts: [] }),
+  });
+  const body = v2Body();
+  const { manifest, ciphertext } = await craftV2Capture(keyBytes, {
+    metadata,
+    body,
+  });
+  const digest = await sha256hex(ciphertext);
+  const artifact = makeArtifact(ciphertext, manifest, digest);
+  const result = await decryptRetainedGatewayCapture(artifact, keyBytes);
+  assert.equal(result.ok, true, "empty trace must decrypt");
+  if (!result.ok) return;
+  assert.deepEqual(result.value.upstream, {
+    version: 1,
+    attempts: [],
+    attempts_truncated: false,
+    bytes_truncated: false,
+    chunks_truncated: false,
+  });
+});
+
+// ---------------------------------------------------------------------------
+// HMAC negatives: reach the identity checks with valid v2 metadata
+// ---------------------------------------------------------------------------
+
+Deno.test("gateway decrypt: case-group HMAC tampering fails as tampered_manifest", async () => {
+  const keyBytes = goldenKey();
+  const body = v2Body();
+  const { manifest, ciphertext } = await craftV2Capture(keyBytes, {
+    metadata: baseMetadata(),
+    body,
+  });
+  const tamperedManifest = manifestVariant(manifest, {
+    case_group_digest: "a".repeat(64),
+  });
+  const { artifact, cleanup } = await retainThroughStore(
+    ciphertext,
+    tamperedManifest,
+    manifest.capturedAt,
+  );
+  try {
+    const result = await decryptRetainedGatewayCapture(artifact, keyBytes);
+    expectStaticFailure(
+      result,
+      "tampered_manifest",
+      "retained capture HMAC identity does not match its manifest",
+      [manifest.fingerprint, "data: [DONE]"],
     );
   } finally {
     await cleanup();
   }
 });
+
+Deno.test("gateway decrypt: client observation tampering fails the failure-signature identity", async () => {
+  const keyBytes = goldenKey();
+  const metadata = baseMetadata({
+    client_observation: {
+      status: 503,
+      stream: true,
+      completed: false,
+      terminal_type: null,
+      failure_kind: "missing_sse_terminal",
+      framing_valid: true,
+      provider_route: "synthetic",
+    },
+  });
+  const body = v2Body();
+  const { manifest, ciphertext } = await craftV2Capture(keyBytes, {
+    metadata,
+    body,
+  });
+  const { artifact, cleanup } = await retainThroughStore(
+    ciphertext,
+    manifest,
+    manifest.capturedAt,
+  );
+  try {
+    const result = await decryptRetainedGatewayCapture(artifact, keyBytes);
+    // The v2 fingerprint and case-group identities both match; only the
+    // recomputed failure signature disagrees with the bound signature text.
+    expectStaticFailure(
+      result,
+      "tampered_manifest",
+      "retained capture HMAC identity does not match its manifest",
+      [manifest.fingerprint, "data: [DONE]"],
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+Deno.test("gateway decrypt: capture-time tampering fails against the manifest", async () => {
+  const keyBytes = goldenKey();
+  const shifted = CAPTURED_AT_V2 + 60_000;
+  const metadata = baseMetadata({ captured_at_ms: shifted });
+  const body = v2Body();
+  const { manifest, ciphertext } = await craftV2Capture(keyBytes, {
+    metadata,
+    body,
+    // Manifest keeps the true capture time; only the authenticated plaintext
+    // was shifted, so the producer capture-time identity must reject it.
+    capturedAtMs: CAPTURED_AT_V2,
+  });
+  const { artifact, cleanup } = await retainThroughStore(
+    ciphertext,
+    manifest,
+    manifest.capturedAt,
+  );
+  try {
+    const result = await decryptRetainedGatewayCapture(artifact, keyBytes);
+    expectStaticFailure(
+      result,
+      "tampered_manifest",
+      "retained capture HMAC identity does not match its manifest",
+      [manifest.fingerprint, "data: [DONE]"],
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+Deno.test("gateway decrypt: changed trace with recomputed ciphertext but stale fingerprint fails HMAC", async () => {
+  const keyBytes = goldenKey();
+  const body = v2Body();
+  const original = await craftV2Capture(keyBytes, {
+    metadata: baseMetadata(),
+    body,
+  });
+  // Same request, same signature: reuse the computed identities of the
+  // original trace while the plaintext carries a CHANGED trace. The ciphertext
+  // is re-encrypted under the stale fingerprint (AAD), so AES-GCM succeeds and
+  // the HMAC check is what rejects the capture.
+  const changed = await craftV2Capture(keyBytes, {
+    metadata: baseMetadata({
+      upstream: v2Upstream({
+        attempts: [
+          v2Attempt({
+            provider: "surplus",
+            status: 200,
+            content_type: "text/event-stream",
+            chunks_base64: [
+              standardBase64(new TextEncoder().encode("data: one\n\n")),
+            ],
+            terminal: "eof",
+          }),
+        ],
+      }),
+    }),
+    body,
+    fingerprint: original.manifest.fingerprint,
+    caseGroupDigest: original.manifest.caseGroupDigest,
+  });
+  assert.equal(changed.manifest.fingerprint, original.manifest.fingerprint);
+  const digest = await sha256hex(changed.ciphertext);
+  const artifact = makeArtifact(changed.ciphertext, changed.manifest, digest);
+  const result = await decryptRetainedGatewayCapture(artifact, keyBytes);
+  expectStaticFailure(
+    result,
+    "tampered_manifest",
+    "retained capture HMAC identity does not match its manifest",
+    [original.manifest.fingerprint, "data: one"],
+  );
+});
+
+Deno.test("gateway decrypt: partial and complete traces share the case-group but not the fingerprint", async () => {
+  const keyBytes = goldenKey();
+  const body = v2Body();
+  const sharedRequest = baseMetadata();
+  const completeMetadata = {
+    ...sharedRequest,
+    upstream: v2Upstream({
+      attempts: [
+        v2Attempt({
+          provider: "surplus",
+          status: 200,
+          content_type: "text/event-stream",
+          chunks_base64: [
+            standardBase64(new TextEncoder().encode("data: one\n\n")),
+            standardBase64(new TextEncoder().encode("data: two\n\n")),
+            standardBase64(new TextEncoder().encode("data: [DONE]\n\n")),
+          ],
+          terminal: "eof",
+        }),
+      ],
+    }),
+  };
+  const partialMetadata = {
+    ...sharedRequest,
+    upstream: v2Upstream({
+      attempts: [
+        v2Attempt({
+          provider: "surplus",
+          status: 200,
+          content_type: "text/event-stream",
+          chunks_base64: [
+            standardBase64(new TextEncoder().encode("data: one\n\n")),
+          ],
+          terminal: "eof",
+        }),
+      ],
+      attempts_truncated: false,
+      bytes_truncated: true,
+      chunks_truncated: true,
+    }),
+  };
+  const complete = await craftV2Capture(keyBytes, {
+    metadata: completeMetadata,
+    body,
+  });
+  const partial = await craftV2Capture(keyBytes, {
+    metadata: partialMetadata,
+    body,
+  });
+  const completeResult = await decryptRetainedGatewayCapture(
+    makeArtifact(
+      complete.ciphertext,
+      complete.manifest,
+      await sha256hex(complete.ciphertext),
+    ),
+    keyBytes,
+  );
+  const partialResult = await decryptRetainedGatewayCapture(
+    makeArtifact(
+      partial.ciphertext,
+      partial.manifest,
+      await sha256hex(partial.ciphertext),
+    ),
+    keyBytes,
+  );
+  assert.equal(completeResult.ok, true, "complete trace must decrypt");
+  assert.equal(partialResult.ok, true, "partial trace must decrypt");
+  if (!completeResult.ok || !partialResult.ok) return;
+  // Same request-only case-group; the upstream frame separates the traces.
+  assert.equal(
+    partialResult.value.caseGroupDigest,
+    completeResult.value.caseGroupDigest,
+  );
+  assert.notEqual(
+    partialResult.value.fingerprint,
+    completeResult.value.fingerprint,
+    "partial and complete traces must not suppress one another",
+  );
+  // Truthful coverage: the partial trace reports its own truncation state.
+  assert.equal(completeResult.value.upstream.bytes_truncated, false);
+  assert.equal(completeResult.value.upstream.chunks_truncated, false);
+  assert.equal(
+    completeResult.value.upstream.attempts[0]!.chunks_base64.length,
+    3,
+  );
+  assert.equal(partialResult.value.upstream.bytes_truncated, true);
+  assert.equal(partialResult.value.upstream.chunks_truncated, true);
+  assert.equal(
+    partialResult.value.upstream.attempts[0]!.chunks_base64.length,
+    1,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Strict parsing: canonical base64, cross-field relations, bounds
+// ---------------------------------------------------------------------------
+
+Deno.test("gateway decrypt: canonical-padding and malformed base64 chunks are rejected", async () => {
+  const keyBytes = goldenKey();
+  const body = v2Body();
+  const cases: Array<[string, string]> = [
+    // `QR==` has nonzero trailing pad bits (never produced canonically).
+    ["QR==", "nonzero trailing pad bits"],
+    ["AA=", "missing padding character"],
+    ["", "empty chunk string"],
+    ["QQ", "unpadded"],
+    ["AA--", "url-safe alphabet character"],
+  ];
+  for (const [chunk, label] of cases) {
+    const metadata = baseMetadata({
+      upstream: v2Upstream({
+        attempts: [
+          v2Attempt({
+            chunks_base64: [chunk],
+            terminal: "eof",
+          }),
+        ],
+      }),
+    });
+    const { manifest, ciphertext } = await craftV2Capture(keyBytes, {
+      metadata,
+      body,
+    });
+    const artifact = makeArtifact(
+      ciphertext,
+      manifest,
+      await sha256hex(ciphertext),
+    );
+    const result = await decryptRetainedGatewayCapture(artifact, keyBytes);
+    assert.ok(!result.ok, `expected invalid_plaintext for: ${label}`);
+    expectStaticFailure(
+      result,
+      "invalid_plaintext",
+      "retained capture plaintext metadata is invalid",
+      [chunk, "data: [DONE]"],
+    );
+  }
+});
+
+Deno.test("gateway decrypt: frozen upstream cross-field relationships are enforced", async () => {
+  const keyBytes = goldenKey();
+  const body = v2Body();
+  const cases: Array<[string, Record<string, unknown>]> = [
+    [
+      "status null with content_type set",
+      v2Upstream({
+        attempts: [
+          v2Attempt({ status: null, content_type: "application/json" }),
+        ],
+      }),
+    ],
+    [
+      "headers present but content_type null",
+      v2Upstream({
+        attempts: [
+          v2Attempt({ status: 200, content_type: null }),
+        ],
+      }),
+    ],
+    [
+      "fetch_error with headers",
+      v2Upstream({
+        attempts: [
+          v2Attempt({ status: 200, terminal: "fetch_error" }),
+        ],
+      }),
+    ],
+    [
+      "eof without headers",
+      v2Upstream({
+        attempts: [
+          v2Attempt({
+            status: null,
+            content_type: null,
+            chunks_base64: [],
+            terminal: "eof",
+          }),
+        ],
+      }),
+    ],
+    [
+      "read_error without headers",
+      v2Upstream({
+        attempts: [
+          v2Attempt({
+            status: null,
+            content_type: null,
+            chunks_base64: [],
+            terminal: "read_error",
+          }),
+        ],
+      }),
+    ],
+    [
+      "cancelled without headers",
+      v2Upstream({
+        attempts: [
+          v2Attempt({
+            status: null,
+            content_type: null,
+            chunks_base64: [],
+            terminal: "cancelled",
+          }),
+        ],
+      }),
+    ],
+    [
+      "before-header attempt with chunks",
+      v2Upstream({
+        attempts: [
+          v2Attempt({
+            status: null,
+            content_type: null,
+            chunks_base64: [standardBase64(new TextEncoder().encode("x"))],
+          }),
+        ],
+      }),
+    ],
+    [
+      "status below 100",
+      v2Upstream({
+        attempts: [v2Attempt({ status: 99 })],
+      }),
+    ],
+    [
+      "status above 599",
+      v2Upstream({
+        attempts: [v2Attempt({ status: 600 })],
+      }),
+    ],
+    [
+      "unknown provider",
+      v2Upstream({
+        attempts: [v2Attempt({ provider: "bogus_provider" })],
+      }),
+    ],
+    [
+      "unknown terminal",
+      v2Upstream({
+        attempts: [v2Attempt({ terminal: "bogus_terminal" })],
+      }),
+    ],
+    [
+      "unknown attempt key",
+      v2Upstream({
+        attempts: [{ ...v2Attempt(), bogus_key: true }],
+      }),
+    ],
+    [
+      "missing attempt key",
+      v2Upstream({
+        attempts: [(() => {
+          const attempt = v2Attempt();
+          delete attempt.content_type;
+          return attempt;
+        })()],
+      }),
+    ],
+    ["unknown upstream key", v2Upstream({ bogus_key: true })],
+    ["upstream version 2", v2Upstream({ version: 2 })],
+    ["non-boolean truncation flag", v2Upstream({ bytes_truncated: "yes" })],
+    ["attempts not an array", v2Upstream({ attempts: {} })],
+    [
+      "chunk not a string",
+      v2Upstream({
+        attempts: [v2Attempt({ chunks_base64: [42] })],
+      }),
+    ],
+  ];
+  for (const [label, upstream] of cases) {
+    const metadata = baseMetadata({ upstream });
+    const { manifest, ciphertext } = await craftV2Capture(keyBytes, {
+      metadata,
+      body,
+    });
+    const artifact = makeArtifact(
+      ciphertext,
+      manifest,
+      await sha256hex(ciphertext),
+    );
+    const result = await decryptRetainedGatewayCapture(artifact, keyBytes);
+    assert.ok(!result.ok, `expected invalid_plaintext for: ${label}`);
+    expectStaticFailure(
+      result,
+      "invalid_plaintext",
+      "retained capture plaintext metadata is invalid",
+      [manifest.fingerprint, "data: [DONE]"],
+    );
+  }
+});
+
+Deno.test("gateway decrypt: aggregate upstream bounds are enforced (at-max accepted, over rejected)", async () => {
+  const keyBytes = goldenKey();
+  const body = v2Body();
+
+  // At the attempt limit with the truncation flag: accepted.
+  const maxAttempts = Array.from(
+    { length: UPSTREAM_MAX_ATTEMPTS },
+    () =>
+      v2Attempt({
+        provider: "surplus",
+        status: null,
+        content_type: null,
+        chunks_base64: [],
+        terminal: "fetch_error",
+      }),
+  );
+  const atMaxAttempts = await craftV2Capture(keyBytes, {
+    metadata: baseMetadata({
+      upstream: v2Upstream({
+        attempts: maxAttempts,
+        attempts_truncated: true,
+      }),
+    }),
+    body,
+  });
+  const atMaxAttemptsResult = await decryptRetainedGatewayCapture(
+    makeArtifact(
+      atMaxAttempts.ciphertext,
+      atMaxAttempts.manifest,
+      await sha256hex(atMaxAttempts.ciphertext),
+    ),
+    keyBytes,
+  );
+  assert.equal(
+    atMaxAttemptsResult.ok,
+    true,
+    "8 attempts with truncation flag must be accepted",
+  );
+
+  // At the chunk limit with 1-byte chunks: accepted.
+  const chunkLimit = Array.from(
+    { length: UPSTREAM_MAX_CHUNKS },
+    () => "AA==",
+  );
+  const atMaxChunks = await craftV2Capture(keyBytes, {
+    metadata: baseMetadata({
+      upstream: v2Upstream({
+        attempts: [v2Attempt({ chunks_base64: chunkLimit })],
+        chunks_truncated: true,
+      }),
+    }),
+    body,
+  });
+  const atMaxChunksResult = await decryptRetainedGatewayCapture(
+    makeArtifact(
+      atMaxChunks.ciphertext,
+      atMaxChunks.manifest,
+      await sha256hex(atMaxChunks.ciphertext),
+    ),
+    keyBytes,
+  );
+  assert.equal(
+    atMaxChunksResult.ok,
+    true,
+    "256 chunks must be accepted",
+  );
+
+  // Over the attempt limit: rejected.
+  const overAttempts = await craftV2Capture(keyBytes, {
+    metadata: baseMetadata({
+      upstream: v2Upstream({
+        attempts: [
+          ...maxAttempts,
+          v2Attempt({
+            provider: "cerebras",
+            status: null,
+            content_type: null,
+            chunks_base64: [],
+            terminal: "fetch_error",
+          }),
+        ],
+        attempts_truncated: true,
+      }),
+    }),
+    body,
+  });
+  const overAttemptsResult = await decryptRetainedGatewayCapture(
+    makeArtifact(
+      overAttempts.ciphertext,
+      overAttempts.manifest,
+      await sha256hex(overAttempts.ciphertext),
+    ),
+    keyBytes,
+  );
+  expectStaticFailure(
+    overAttemptsResult,
+    "invalid_plaintext",
+    "retained capture plaintext metadata is invalid",
+    [overAttempts.manifest.fingerprint],
+  );
+
+  // Over the chunk limit: rejected.
+  const overChunks = await craftV2Capture(keyBytes, {
+    metadata: baseMetadata({
+      upstream: v2Upstream({
+        attempts: [v2Attempt({ chunks_base64: [...chunkLimit, "AA=="] })],
+        chunks_truncated: true,
+      }),
+    }),
+    body,
+  });
+  const overChunksResult = await decryptRetainedGatewayCapture(
+    makeArtifact(
+      overChunks.ciphertext,
+      overChunks.manifest,
+      await sha256hex(overChunks.ciphertext),
+    ),
+    keyBytes,
+  );
+  expectStaticFailure(
+    overChunksResult,
+    "invalid_plaintext",
+    "retained capture plaintext metadata is invalid",
+    [overChunks.manifest.fingerprint],
+  );
+
+  // Over the decoded-byte limit: the one near-128KiB trace, rejected.
+  const bigBytes = new Uint8Array(UPSTREAM_MAX_DECODED_BYTES + 1).fill(0x41);
+  const overBytes = await craftV2Capture(keyBytes, {
+    metadata: baseMetadata({
+      upstream: v2Upstream({
+        attempts: [
+          v2Attempt({
+            chunks_base64: [standardBase64(bigBytes)],
+          }),
+        ],
+        bytes_truncated: true,
+      }),
+    }),
+    body,
+  });
+  const overBytesResult = await decryptRetainedGatewayCapture(
+    makeArtifact(
+      overBytes.ciphertext,
+      overBytes.manifest,
+      await sha256hex(overBytes.ciphertext),
+    ),
+    keyBytes,
+  );
+  expectStaticFailure(
+    overBytesResult,
+    "invalid_plaintext",
+    "retained capture plaintext metadata is invalid",
+    [overBytes.manifest.fingerprint],
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Early integrity/authentication negatives (unchanged golden pre-metadata)
+// ---------------------------------------------------------------------------
 
 Deno.test("gateway decrypt: wrong key fails closed without plaintext leakage", async () => {
   const manifest = goldenManifest();
@@ -527,130 +1737,9 @@ Deno.test("gateway decrypt: AAD tampering (changed manifest fingerprint) fails a
   }
 });
 
-Deno.test("gateway decrypt: case-group HMAC tampering fails as tampered_manifest", async () => {
-  const manifest = goldenManifest();
-  const ciphertext = goldenCiphertext();
-  const tamperedManifest = manifestWith(
-    {
-      fingerprint: manifest.fingerprint,
-      capture_id: manifest.captureId,
-      captured_at_ms: manifest.capturedAt,
-      expires_at_ms: manifest.expiresAt,
-      ciphertext_bytes: ciphertext.byteLength,
-      case_group_digest: "a".repeat(64),
-    },
-    ciphertext.byteLength,
-    decodeBase64Url(manifest.iv)!,
-  );
-  const { artifact, cleanup } = await retainThroughStore(
-    ciphertext,
-    tamperedManifest,
-    manifest.capturedAt,
-  );
-  try {
-    const result = await decryptRetainedGatewayCapture(artifact, goldenKey());
-    expectStaticFailure(
-      result,
-      "tampered_manifest",
-      "retained capture HMAC identity does not match its manifest",
-    );
-  } finally {
-    await cleanup();
-  }
-});
-
-Deno.test("gateway decrypt: client observation tampering fails the failure-signature identity", async () => {
-  const keyBytes = goldenKey();
-  const manifest = goldenManifest();
-  const metadata = baseMetadata({
-    client_observation: {
-      status: 503,
-      stream: true,
-      completed: false,
-      terminal_type: null,
-      failure_kind: "missing_sse_terminal",
-      framing_valid: true,
-      provider_route: "synthetic",
-    },
-  });
-  const body = new TextEncoder().encode(readGolden().expected.body as string);
-  const plaintext = encodeEnvelope(metadata, body);
-  const { ciphertext, iv } = await craftEnvelope(
-    plaintext,
-    manifest.fingerprint,
-    keyBytes,
-  );
-  const crafted = manifestWith(
-    {
-      fingerprint: manifest.fingerprint,
-      capture_id: manifest.captureId,
-      case_group_digest: manifest.caseGroupDigest,
-      captured_at_ms: manifest.capturedAt,
-      expires_at_ms: manifest.expiresAt,
-      ciphertext_bytes: ciphertext.byteLength,
-    },
-    ciphertext.byteLength,
-    iv,
-  );
-  const { artifact, cleanup } = await retainThroughStore(
-    ciphertext,
-    crafted,
-    manifest.capturedAt,
-  );
-  try {
-    const result = await decryptRetainedGatewayCapture(artifact, keyBytes);
-    expectStaticFailure(
-      result,
-      "tampered_manifest",
-      "retained capture HMAC identity does not match its manifest",
-    );
-  } finally {
-    await cleanup();
-  }
-});
-
-Deno.test("gateway decrypt: capture-time tampering fails against the manifest", async () => {
-  const keyBytes = goldenKey();
-  const manifest = goldenManifest();
-  const shifted = manifest.capturedAt + 60_000;
-  // Tamper only the authenticated plaintext: the manifest stays untouched, so
-  // the producer capture-time identity check must reject the discrepancy.
-  const metadata = baseMetadata({ captured_at_ms: shifted });
-  const body = new TextEncoder().encode(readGolden().expected.body as string);
-  const plaintext = encodeEnvelope(metadata, body);
-  const { ciphertext, iv } = await craftEnvelope(
-    plaintext,
-    manifest.fingerprint,
-    keyBytes,
-  );
-  const crafted = manifestWith(
-    {
-      fingerprint: manifest.fingerprint,
-      capture_id: manifest.captureId,
-      case_group_digest: manifest.caseGroupDigest,
-      captured_at_ms: manifest.capturedAt,
-      expires_at_ms: manifest.expiresAt,
-      ciphertext_bytes: ciphertext.byteLength,
-    },
-    ciphertext.byteLength,
-    iv,
-  );
-  const { artifact, cleanup } = await retainThroughStore(
-    ciphertext,
-    crafted,
-    manifest.capturedAt,
-  );
-  try {
-    const result = await decryptRetainedGatewayCapture(artifact, keyBytes);
-    expectStaticFailure(
-      result,
-      "tampered_manifest",
-      "retained capture HMAC identity does not match its manifest",
-    );
-  } finally {
-    await cleanup();
-  }
-});
+// ---------------------------------------------------------------------------
+// Envelope and size-bounds negatives
+// ---------------------------------------------------------------------------
 
 Deno.test("gateway decrypt: envelope length prefix beyond the buffer fails as invalid_envelope", async () => {
   const keyBytes = goldenKey();
