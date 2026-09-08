@@ -1660,15 +1660,26 @@ async function handleModelReceipt(
   const completed = receipt.outcome === "completed" && candidate !== null &&
     candidate.head !== null;
   if (!completed) {
+    // Only OUR sanitized loop-stop marker gets the exact failed_command_loop
+    // blocker message; every other incomplete receipt keeps the generic
+    // message. The settlement write moved the authoritative head, so the
+    // block is persisted against the reloaded state (never a stale CAS).
+    const loopStopped = receipt.error === "failed_command_loop";
     const blocked = await settleAndBlock(
       deps,
       reservationId,
       "ambiguous",
       record,
-      "model run did not complete with a trusted candidate",
+      loopStopped
+        ? "failed_command_loop"
+        : "model run did not complete with a trusted candidate",
       now,
     );
-    return persistTransition(deps, context, replaceWorkMutation(blocked));
+    return persistAfterSettlement(
+      deps,
+      context.bounds,
+      replaceWorkMutation(blocked),
+    );
   }
   const head = candidate!.head!;
   const protectedHit = candidate!.changedPaths.some((path) =>

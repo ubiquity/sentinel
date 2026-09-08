@@ -4,9 +4,9 @@
  * Adapted idea and the four-identical-failed-pairs pattern from
  * OpenHands/software-agent-sdk at
  * df2ea8fa5542d5d2a543e108bc8b2d4fbbab34b1
- * (clients/typescript/src/conversation/stuck-detector.ts, MIT); see the
- * forthcoming docs/THIRD_PARTY_NOTICES.md for the attribution, license text
- * and modification record. No upstream framework, server, workspace or event
+ * (clients/typescript/src/conversation/stuck-detector.ts, MIT); see the root
+ * THIRD_PARTY_NOTICES.md for the attribution, license text and modification
+ * record. No upstream framework, server, workspace or event
  * classes are imported; this is an independent small state machine over
  * sanitized scalar observations.
  *
@@ -110,8 +110,7 @@ export class FailedCommandLoopGuard {
     }
     this.seenItemIds.add(input.itemId);
 
-    const failed =
-      input.conclusiveFailure === true &&
+    const failed = input.conclusiveFailure === true &&
       typeof input.exitCode === "number" &&
       Number.isInteger(input.exitCode) &&
       input.exitCode !== 0;
