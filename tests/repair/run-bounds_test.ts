@@ -171,6 +171,7 @@ function seededSnapshot(
     reviews: [],
     replays: [],
     releaseRequests: [],
+    githubCooldowns: [],
     ...extra,
   };
 }

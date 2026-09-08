@@ -9,6 +9,8 @@
 import type { GitSha } from "./brands.ts";
 import { parseBudgetReservationV1 } from "./budget-reservation.ts";
 import type { BudgetReservationV1 } from "./budget-reservation.ts";
+import { parseGitHubCooldownV1 } from "./github-cooldown.ts";
+import type { GitHubCooldownV1 } from "./github-cooldown.ts";
 import { parseIncidentEvidenceV1, parseIncidentSummaryV1 } from "./incident.ts";
 import type { IncidentEvidenceV1, IncidentSummaryV1 } from "./incident.ts";
 import { parseReleaseRecordV1, parseReleaseRequestV1 } from "./release.ts";
@@ -47,6 +49,7 @@ export interface RepairStateSnapshotV1 {
   reviews: ReviewReceiptV1[];
   replays: ReplayResultV1[];
   releaseRequests: ReleaseRequestV1[];
+  githubCooldowns: GitHubCooldownV1[];
 }
 
 export interface ReleaseStateSnapshotV1 {
@@ -71,6 +74,7 @@ const REPAIR_KEYS = [
   "reviews",
   "replays",
   "releaseRequests",
+  "githubCooldowns",
 ] as const;
 const RELEASE_KEYS = [
   "version",
@@ -135,6 +139,12 @@ export function parseRepairStateSnapshotV1(
     MaxItems.snapshotRecords,
     parseReleaseRequestV1,
   );
+  const githubCooldowns = expectArray(
+    obj.githubCooldowns,
+    "$.githubCooldowns",
+    MaxItems.snapshotRecords,
+    parseGitHubCooldownV1,
+  );
 
   // Frozen parsers reject duplicate ids instead of last-wins maps; a record
   // set that lost one of two same-id records is corrupted state, not a merge.
@@ -145,6 +155,8 @@ export function parseRepairStateSnapshotV1(
   expectUniqueIds(reviews, "$.reviews");
   expectUniqueIds(replays, "$.replays");
   expectUniqueIds(releaseRequests, "$.releaseRequests");
+  // Cooldowns have no string id; one record per affected installation.
+  expectUniqueInstallationIds(githubCooldowns, "$.githubCooldowns");
 
   return {
     version: "v1",
@@ -159,6 +171,7 @@ export function parseRepairStateSnapshotV1(
     reviews,
     replays,
     releaseRequests,
+    githubCooldowns,
   };
 }
 
@@ -205,5 +218,23 @@ function expectUniqueIds(
       );
     }
     seen.add(record.id);
+  }
+}
+
+/** One durable cooldown per affected installation; duplicates are corruption. */
+function expectUniqueInstallationIds(
+  records: readonly GitHubCooldownV1[],
+  path: string,
+): void {
+  const seen = new Set<number>();
+  for (const [index, record] of records.entries()) {
+    if (seen.has(record.installationId)) {
+      fail(
+        `${path}[${index}].installationId`,
+        "invalid_lifecycle",
+        "duplicate installation id",
+      );
+    }
+    seen.add(record.installationId);
   }
 }

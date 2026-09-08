@@ -14,6 +14,7 @@ import assert from "node:assert/strict";
 import type { GitSha } from "../../src/contracts/brands.ts";
 import { asFindingFingerprint } from "../../src/contracts/brands.ts";
 import { canonicalStringify } from "../../src/contracts/canonical.ts";
+import { parseGitHubCooldownV1 } from "../../src/contracts/github-cooldown.ts";
 import type {
   ReleaseStateSnapshotV1,
   RepairStateSnapshotV1,
@@ -81,6 +82,7 @@ function repairSnapshot(
     reviews: [],
     replays: [],
     releaseRequests: [],
+    githubCooldowns: [],
     ...overrides,
   };
 }
@@ -97,6 +99,21 @@ function releaseSnapshot(
     releases: [],
     ...overrides,
   };
+}
+
+/** Minimal valid durable GitHub cooldown, parsed by the frozen parser. */
+function githubCooldown(
+  installationId: number,
+  overrides: Record<string, unknown> = {},
+): ReturnType<typeof parseGitHubCooldownV1> {
+  return parseGitHubCooldownV1({
+    installationId,
+    retryNotBefore: null,
+    observedAt: T0,
+    observationId: "a".repeat(64),
+    secondaryBackoff: 0,
+    ...overrides,
+  });
 }
 
 async function makeCtx(prefix: string): Promise<Ctx> {
@@ -2028,6 +2045,242 @@ Deno.test("state: canonical raw remote records with duplicate artifact refs are 
         ),
     }, ctx.env);
     const read = await store.readRepair();
+    assert.ok(!read.ok);
+    if (!read.ok) assert.equal(read.error.kind, "invalid");
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+Deno.test("state: github cooldowns roundtrip per installation and survive unrelated writes", async () => {
+  const ctx = await makeCtx("cooldown-roundtrip");
+  try {
+    const store = storeAt(ctx, "a", "repair");
+    // Two affected installations: one explicit manual fail-closed hold (null
+    // deadline) and one bounded fallback deadline carrying the fallback index.
+    const manual = githubCooldown(7);
+    const fallback = githubCooldown(42, {
+      retryNotBefore: T0 + 120_000,
+      observationId: "b".repeat(64),
+      secondaryBackoff: 2,
+    });
+    const head1 = appliedHead(
+      await store.writeRepair(
+        repairSnapshot({ githubCooldowns: [manual, fallback] }),
+        null,
+      ),
+    );
+
+    // Durable storage mapping: exactly one sha256(String(installationId))
+    // json file per affected installation in the githubCooldowns collection.
+    const tree = await gitRunAt(
+      ctx,
+      [
+        "--git-dir",
+        ctx.bare,
+        "ls-tree",
+        "-r",
+        "--name-only",
+        REPAIR_STATE_REF,
+      ],
+    );
+    assert.ok(tree.ok);
+    const paths = tree.stdout.split("\n").filter((line) => line.length > 0);
+    assert.ok(paths.includes(`githubCooldowns/${await sha256Hex("7")}.json`));
+    assert.ok(paths.includes(`githubCooldowns/${await sha256Hex("42")}.json`));
+
+    // A fresh store reads the exact collection back, deterministic order by
+    // installation id string ("42" before "7").
+    const read = await storeAt(ctx, "b", "repair").readRepair();
+    assert.ok(read.ok && read.value.status === "found");
+    if (read.ok && read.value.status === "found") {
+      assert.deepEqual(read.value.snapshot.githubCooldowns, [fallback, manual]);
+      assert.equal(
+        read.value.snapshot.githubCooldowns[0].installationId,
+        42,
+      );
+      assert.equal(read.value.snapshot.githubCooldowns[0].secondaryBackoff, 2);
+      assert.equal(
+        read.value.snapshot.githubCooldowns[1].retryNotBefore,
+        null,
+      );
+    } else {
+      assert.fail("expected a found snapshot");
+    }
+
+    // An unrelated repair write (a new work record) preserves both cooldowns.
+    const head2 = appliedHead(
+      await store.writeRepair(
+        repairSnapshot({
+          stateHead: head1,
+          sequence: 2,
+          updatedAt: T0 + 2000,
+          work: [workRecord("w:1")],
+          githubCooldowns: [manual, fallback],
+        }),
+        head1,
+      ),
+    );
+    const read2 = await storeAt(ctx, "c", "repair").readRepair();
+    assert.ok(read2.ok && read2.value.status === "found");
+    if (read2.ok && read2.value.status === "found") {
+      assert.equal(read2.value.snapshot.work[0]?.id, "w:1");
+      assert.deepEqual(read2.value.snapshot.githubCooldowns, [
+        fallback,
+        manual,
+      ]);
+    } else {
+      assert.fail("expected a found snapshot");
+    }
+
+    // A new observation may refresh the same installation's record (later
+    // deadline, later observation, new backoff); the manual hold stays null.
+    const refreshed = githubCooldown(42, {
+      retryNotBefore: T0 + 240_000,
+      observedAt: T0 + 5000,
+      observationId: "c".repeat(64),
+      secondaryBackoff: 3,
+    });
+    const head3 = appliedHead(
+      await store.writeRepair(
+        repairSnapshot({
+          stateHead: head2,
+          sequence: 3,
+          updatedAt: T0 + 3000,
+          work: [workRecord("w:1")],
+          githubCooldowns: [manual, refreshed],
+        }),
+        head2,
+      ),
+    );
+
+    // Silently dropping a cooldown is invalid: the gate must never lose an
+    // affected installation's hold.
+    const dropped = await store.writeRepair(
+      repairSnapshot({
+        stateHead: head3,
+        sequence: 4,
+        updatedAt: T0 + 4000,
+        work: [workRecord("w:1")],
+        githubCooldowns: [manual],
+      }),
+      head3,
+    );
+    assert.ok(!dropped.ok);
+    if (!dropped.ok) assert.equal(dropped.error.kind, "invalid");
+
+    // A manual fail-closed hold can never become a retry deadline.
+    const converted = await store.writeRepair(
+      repairSnapshot({
+        stateHead: head3,
+        sequence: 4,
+        updatedAt: T0 + 4000,
+        work: [workRecord("w:1")],
+        githubCooldowns: [
+          githubCooldown(7, { retryNotBefore: T0 + 60_000 }),
+          refreshed,
+        ],
+      }),
+      head3,
+    );
+    assert.ok(!converted.ok);
+    if (!converted.ok) assert.equal(converted.error.kind, "invalid");
+
+    // observedAt cannot move backward on an existing cooldown.
+    const backward = await store.writeRepair(
+      repairSnapshot({
+        stateHead: head3,
+        sequence: 4,
+        updatedAt: T0 + 4000,
+        work: [workRecord("w:1")],
+        githubCooldowns: [
+          manual,
+          githubCooldown(42, {
+            retryNotBefore: T0 + 120_000,
+            observedAt: T0 + 1000,
+            observationId: "b".repeat(64),
+            secondaryBackoff: 2,
+          }),
+        ],
+      }),
+      head3,
+    );
+    assert.ok(!backward.ok);
+    if (!backward.ok) assert.equal(backward.error.kind, "invalid");
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+Deno.test("state: malformed github cooldown records fail closed on read", async () => {
+  const ctx = await makeCtx("cooldown-tamper");
+  try {
+    const store = storeAt(ctx, "a", "repair");
+    const cooldown = githubCooldown(7);
+    const head1 = appliedHead(
+      await store.writeRepair(
+        repairSnapshot({ githubCooldowns: [cooldown] }),
+        null,
+      ),
+    );
+    const file7 = `${await sha256Hex("7")}.json`;
+
+    // A non-digest file name in the cooldown collection is rejected.
+    await pushRawTree(ctx, head1, REPAIR_STATE_REF, {
+      "manifest.json": rawManifestText(2, T0 + 2000, head1),
+      "githubCooldowns/not-a-digest.json": `${canonicalStringify(cooldown)}\n`,
+    }, ctx.env);
+    let read = await store.readRepair();
+    assert.ok(!read.ok);
+    if (!read.ok) assert.equal(read.error.kind, "invalid");
+    let head = await remoteHead(ctx, REPAIR_STATE_REF);
+
+    // The file name must hash to String(installationId): a record under the
+    // sha256 of a different installation is misplaced state.
+    await pushRawTree(ctx, head, REPAIR_STATE_REF, {
+      "manifest.json": rawManifestText(2, T0 + 2000, head),
+      [`githubCooldowns/${await sha256Hex("8")}.json`]: `${
+        canonicalStringify(cooldown)
+      }\n`,
+    }, ctx.env);
+    read = await store.readRepair();
+    assert.ok(!read.ok);
+    if (!read.ok) assert.equal(read.error.kind, "invalid");
+    head = await remoteHead(ctx, REPAIR_STATE_REF);
+
+    // Reordered keys are not the canonical bytes and are rejected.
+    await pushRawTree(ctx, head, REPAIR_STATE_REF, {
+      "manifest.json": rawManifestText(2, T0 + 2000, head),
+      [`githubCooldowns/${file7}`]: `${
+        JSON.stringify({
+          installationId: 7,
+          retryNotBefore: null,
+          observedAt: T0,
+          observationId: "a".repeat(64),
+          secondaryBackoff: 0,
+        })
+      }\n`,
+    }, ctx.env);
+    read = await store.readRepair();
+    assert.ok(!read.ok);
+    if (!read.ok) assert.equal(read.error.kind, "invalid");
+    head = await remoteHead(ctx, REPAIR_STATE_REF);
+
+    // A record failing the frozen parser (invalid installation id) is
+    // rejected instead of being admitted with a fabricated storage identity.
+    await pushRawTree(ctx, head, REPAIR_STATE_REF, {
+      "manifest.json": rawManifestText(2, T0 + 2000, head),
+      [`githubCooldowns/${file7}`]: `${
+        canonicalStringify({
+          installationId: 0,
+          retryNotBefore: null,
+          observedAt: T0,
+          observationId: "a".repeat(64),
+          secondaryBackoff: 0,
+        })
+      }\n`,
+    }, ctx.env);
+    read = await store.readRepair();
     assert.ok(!read.ok);
     if (!read.ok) assert.equal(read.error.kind, "invalid");
   } finally {
