@@ -17,10 +17,13 @@
  *   release-only `ReleaseStateWriter`; no repair write capability, budget,
  *   model or work-record surface exists on this seam.
  *
- * The factory validates the target through `validateReleaseTargetConfig` and
- * requires `validateStabilityPolicy` to pass BEFORE constructing anything, and
- * rejects repository/environment/project binding mismatches and malformed
- * resolver input with static `TypeError` text (no value is ever echoed).
+ * The factory validates the explicit release `repository` with the frozen
+ * `parseRepositoryIdentity` parser and requires the runtime `environment` to
+ * be exactly `production` or `isolated` BEFORE anything is constructed, then
+ * validates the target through `validateReleaseTargetConfig`, requires
+ * `validateStabilityPolicy` to pass, and rejects repository/environment/project
+ * binding mismatches and malformed resolver input with static `TypeError` text
+ * (no value is ever echoed).
  *
  * Capability boundary: this composition seam never reads `Deno.env`, the
  * filesystem, the network, credentials, state or any repair capability; it
@@ -60,6 +63,8 @@ import { UnavailableBuildReceiptResolver } from "../release/resolver.ts";
 
 /** Static reject texts; no input value is ever echoed. */
 const ERR_POLICY = "release host stability policy is rejected";
+const ERR_REPOSITORY = "release host repository identity is invalid";
+const ERR_ENVIRONMENT = "release host environment is invalid";
 const ERR_RESOLVER_INPUT = "release host resolver input is invalid";
 const ERR_RESOLVER_REPOSITORY =
   "release host resolver repository does not match the release target";
@@ -128,6 +133,20 @@ export interface ReleaseHostOptionsV1 {
 export function composeReleaseHost(
   options: ReleaseHostOptionsV1,
 ): ReleaseEntrypointDepsV1 {
+  // The explicit host binding is validated before anything is constructed:
+  // the frozen parser normalizes the repository identity, and the runtime
+  // environment must be exactly `production` or `isolated`. A fault is a
+  // static TypeError and no supplied value is ever echoed.
+  let repository: RepositoryIdentityV1;
+  try {
+    repository = parseRepositoryIdentity(options.repository, "$");
+  } catch {
+    throw new TypeError(ERR_REPOSITORY);
+  }
+  const environment = options.environment;
+  if (environment !== "production" && environment !== "isolated") {
+    throw new TypeError(ERR_ENVIRONMENT);
+  }
   const target = validateReleaseTargetConfig(options.target);
   const policyCheck = validateStabilityPolicy(options.policy);
   if (!policyCheck.ok) {
@@ -150,8 +169,8 @@ export function composeReleaseHost(
     clock: options.clock,
     stateRead: options.stateRead,
     stateWrite: options.stateWrite,
-    repository: options.repository,
-    environment: options.environment,
+    repository,
+    environment,
     target,
     policy: options.policy,
     deno,
