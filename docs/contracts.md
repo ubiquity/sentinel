@@ -1152,3 +1152,31 @@ recover exact request and raw upstream bytes with truthful coverage. Producer
 golden fixture must be regenerated using actual target functions with public
 synthetic data. Existing independent tamper/HMAC/bounds tests must be updated to
 v2, not bypassed. No model/network/GitHub/deploy calls in local tests.
+
+## GitHub installation cooldown
+
+`RepairStateSnapshotV1.githubCooldowns` is required. Each record contains
+`installationId`, `retryNotBefore`, `observedAt`, `observationId`, and
+`secondaryBackoff`. The installation ID is a positive safe integer; timestamps
+are nonnegative safe integers; the observation ID is lowercase SHA-256; the
+backoff index is in 0..10. An explicit null deadline means a manual hold. State
+writes cannot drop a retained cooldown, move its observation backward, or turn
+its manual hold into a finite deadline.
+
+A confirmed GitHub rate-limit error can carry validated `rateLimit` metadata:
+`kind` (primary or secondary), `observedAt`, `retryNotBefore`, `observationId`,
+and `fallback`. Generic authorization denial does not create a cooldown. Server
+deadlines are never shortened to fit a run. Secondary limits without a usable
+hint start at one minute; distinct later fallback observations increase the
+bounded delay. Duplicate observations do not increase it. Successful requests do
+not clear retained deadlines.
+
+The trusted host must supply the same `DurableGitHubCooldownGate` instance to
+its GitHub client, installation-token provider, GitHub port, and repair
+entrypoint. The gate uses the repair state store and Clock; it has no model,
+release-write, timer, or retry capability. Every check reads durable state.
+Rate-limit recording settles before the caller returns. A state read, parse,
+write, or CAS failure latches that gate instance closed, including subsequent
+model admission checks. A new process reads the retained state before it can
+make affected requests. Ordinary cooldown denial is reconsidered at the saved
+deadline and does not latch a fault.
