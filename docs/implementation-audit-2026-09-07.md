@@ -1,6 +1,6 @@
 # Sentinel implementation divergence audit
 
-Audit date: 2026-09-07. Initial source baseline: `5ed87855c4bd911b2bd395e2ce7a9c09e7c326de`. Latest accepted local source: `c2fa5ce` at 22:53 UTC, canonical branch `codex/master-plan-gfa795549e5`. This is an implementation audit, not a replacement plan or production acceptance receipt. `docs/build-status.md` remains the single progress ledger. Dated follow-ups below preserve the investigation history; later acceptance entries supersede earlier defect status.
+Audit started: 2026-09-07; refreshed 2026-09-08 00:23 UTC. Initial source baseline: `5ed87855c4bd911b2bd395e2ce7a9c09e7c326de`. Current committed canonical HEAD: `487b15c278287a06a290e257c5e2892d0e3891d9`, branch `codex/master-plan-gfa795549e5`; upstream consumer changes remain unaccepted working-tree drafts. This is an implementation audit, not a replacement plan or production acceptance receipt. `docs/build-status.md` remains the single progress ledger. Dated follow-ups below preserve the investigation history; later acceptance entries supersede earlier defect status.
 
 ## Governing documents
 
@@ -12,7 +12,7 @@ The plan's opening status and planned-lane labels describe its planning snapshot
 
 ## Finding
 
-Current correction (23:37 UTC): actual gateway discovery is blocked by a producer/consumer provenance mismatch. The 23:28 index acceptance proves wire parsing and capture binding, not successful consumption by `GatewayIncidentAdapter`. See the final checkpoint below.
+Current status (00:29 UTC): the provenance and artifact-reference mismatches are fixed locally at target `8d70e385`. The actual adapter consumes the actual handler output through retained-store decryption. Upstream recording and v2 decryption are drafted, but real-producer interoperability is not yet accepted. The consumer's worker tests missed a required terminal/header relationship; the correction now passes 84 independently executed gateway tests. Safe replay and runtime assembly remain incomplete.
 
 The code follows the proposed polling architecture at module level, but the complete production path is not assembled. The main divergence is between tested component behavior and the required autonomous delivery outcome. Both scheduled commands still reach direct entrypoints that throw for missing host wiring. Passing the local harness cannot establish a working standalone deployment.
 
@@ -97,3 +97,26 @@ Immediate next work: reconcile trusted endpoint provenance between producer and 
 The DSH URL-projection draft passes 26 target tests, but independent actual adapter acceptance still rejects its records. A second incompatible wire field is now identified: target index refs are `capture:<id>`, while the domain restricted-ref parser allows `artifact`, `fixture` and `secret` schemes. The actual retained store uses `artifact://sentinel/<incidentId>/<captureId>`. The original wire-parser-only test missed both constraints.
 
 The candidate is not accepted. A bounded target correction now maps validated internal capture refs to the exact retained artifact namespace at the wire projection only, preserving storage identities and digests. Primary acceptance has been extended through actual adapter listing, actual evidence read, actual retained store and standalone decryption, with temporary storage and synthetic data. No model/network/deployment call is part of that check.
+
+## Actual producer-to-consumer discovery accepted locally at 23:56 UTC
+
+Target commit `8d70e3853562cf320ccc6f3baa3cc37ae919154a` fixes both wire/domain mismatches without changing internal storage identities. Known endpoint classifications map to fixed canonical gateway URLs; unknown endpoints map to the gateway origin. Validated internal capture refs map to the exact `artifact://sentinel/<incidentId>/<captureId>` retained-store identity, preserving ciphertext digest and historical timestamp/expiry.
+
+Independent full-consumer probe `m06-provenance-actual-adapter-v3.ts` passed: actual synthetic failure through the authenticated gateway handler → actual adapter listing → actual adapter evidence read → actual temporary LocalArtifactStore → standalone authenticated decryption → exact original request. The discovered reference exactly matches the retained artifact reference. Request-only evidence still has `replay: null`, as required. Receipt `591bceabb6cc0ae63ee09ee9914b02c17ad0b9b53f9be3f4389670cde15755a5/bde8a6fe-5533-47b3-a74f-1894826023ad` is fresh, exit0. Independent focused suite passed26 tests, zero failures, receipt `591bceabb6cc0ae63ee09ee9914b02c17ad0b9b53f9be3f4389670cde15755a5/1f619c3f-c573-4a94-befe-96c202f69824`. Source/test/toolchain hashes matched before/after fresh acceptance and after commit hooks; configured formatting/lint/build/test type checks passed.
+
+This supersedes the two wire mismatch blockers above. These changes remain local, unreviewed, unpublished and undeployed. The next coordinated upstream producer and decryptor assignments are active against frozen contracts section12. Their in-progress drafts are not accepted code and do not yet prove replay capture, trusted sanitization or production delivery.
+
+## Upstream consumer validation and remaining assembly (2026-09-08 00:29 UTC)
+
+The v2 consumer draft initially accepted eof/read_error/cancelled with no response headers. Primary inspection and the target's independent native inspection both found this violation of contracts section12. A bounded DSH correction first reproduced failure through the actual full decryptor with an independently encrypted envelope, then added the minimum guard and all three negative cases. Fresh primary validation passed84gateway tests and gateway type checking, with unchanged source/test/old-golden/config hashes. Exact receipts and worker settlement are in build-status.md. Source changes are still uncommitted and await actual producer compatibility; these checks do not prove the producer or safe replay.
+
+Reverified assembly gaps:
+
+- Both scheduled workflows call the existing Deno tasks whose direct entrypoints throw for missing trusted host capabilities (`src/main.ts`, `src/release-main.ts`).
+- `makeRepairRig` constructs FakeGithub, FakeReplay and FakeModel. Adapter-specific tests do not establish the required full real-adapter lifecycle.
+- Gateway `readIncident` returns `replay: null`; decryption is not connected to trusted positive sanitization, permanent CI fixture preparation and fixture identity resolution.
+- The implementation model port defaults to an unavailable receipt verifier and refuses to open a session. A production session factory and actual receipt verifier remain required.
+- Runtime review transport still needs authenticated completed-clean and finding-bearing results bound to the current candidate head.
+- The build receipt resolver returns unavailable for every request. The actual target build receipt producer/resolver and exclusive promotion handover remain required.
+
+The producer worker continues recorder/provider/handler tests on its recorded m06 lane. Its two native read-only children completed, but their advisory source inspection is not runtime acceptance. The prepared actual handler → adapter → retained store → v2 decrypt probe and the real committed-producer golden have not run. No publication, deployment, activation, rollback drill or autonomous production delivery occurred.
