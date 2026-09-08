@@ -13,8 +13,10 @@
  */
 
 import type { FixtureDigest, GitSha } from "../contracts/brands.ts";
+import { canonicalStringify } from "../contracts/canonical.ts";
 import type {
   Clock,
+  GitHubCooldownGateV1,
   GitHubPort,
   ImplementationPort,
   IncidentAdapter,
@@ -179,6 +181,17 @@ export interface RepairCycleDepsV1 {
   /** Exact Sentinel controller SHA that owns every new work record; immutable. */
   controllerSha: GitSha;
   github: GitHubPort;
+  /**
+   * The one durable GitHub cooldown gate. The trusted host MUST supply the
+   * same DurableGitHubCooldownGate instance it injected into the GitHub
+   * client/token acquisition and the GitHubPort implementation — there is no
+   * independent/default gate here. beforeRequest is checked before any GitHub
+   * read (issue intake, published ref reads) and before any model reservation
+   * or publication; an ordinary rate_limited denial defers the operation
+   * (a cooling installation never reaches a fake port, a state write or a
+   * model reservation) and a gate fault fails closed as state_error.
+   */
+  githubCooldown: GitHubCooldownGateV1;
   incidents: IncidentAdapter;
   replay: ReplayPort;
   /**
@@ -267,6 +280,10 @@ export async function runRepairCycle(
   // bounds are deferred so that lower-ranked deterministic work still runs;
   // the run ends in the existing typed "margin" outcome when nothing remains.
   const deferred = new Set<string>();
+  // Intake is polled exactly once per run. A deferred (cooldown or bound)
+  // iteration must never re-poll the sources: subsequent loop iterations reuse
+  // the run-local deferral tracking instead of repeating intake reads.
+  let intakePolled = false;
 
   for (;;) {
     if (deps.clock.now() >= runDeadline) {
@@ -302,9 +319,15 @@ export async function runRepairCycle(
       };
     }
 
-    if (steps === 0) {
+    if (!intakePolled) {
+      intakePolled = true;
       const intake = await pollIntake(deps, context);
       sourceError = intake.error;
+      // A cooldown gate fault is a state trust failure, never a source error:
+      // it stops the run before any external effect.
+      if (intake.result.kind === "state_error") {
+        return { status: "state_error", detail: intake.result.detail };
+      }
       if (intake.changed) {
         if (intake.result.kind !== "progress") {
           return {
@@ -314,6 +337,22 @@ export async function runRepairCycle(
         }
         didWork = true;
         steps++;
+      }
+
+      // Intake (and the shared cooldown gate behind it) is awaited wall-clock
+      // work: the authoritative head may have moved even when no source row
+      // changed. Synchronize once before any ranking/decision so unrelated
+      // state movement can never admit a model against a stale context; an
+      // unavailable or conflicting reread is a state trust failure.
+      const synchronized = await synchronizeSnapshot(deps, context);
+      if (synchronized.status === "unavailable") {
+        return { status: "state_error", detail: "repair state unavailable" };
+      }
+      if (synchronized.status === "conflict") {
+        return {
+          status: "state_error",
+          detail: "repair state moved with conflicting contents",
+        };
       }
     }
 
@@ -360,7 +399,9 @@ export async function runRepairCycle(
     if (selected === null) {
       return {
         status: "margin",
-        detail: cannotFit ?? "no operation fits the remaining run margin",
+        detail: deferred.size > 0
+          ? "all eligible work is deferred (cooldown or run bounds)"
+          : cannotFit ?? "no operation fits the remaining run margin",
       };
     }
 
@@ -435,10 +476,26 @@ async function persistTransition(
   context: LoopContextV1,
   mutate: (draft: RepairStateSnapshotV1) => void,
 ): Promise<StepResultV1> {
-  const base = context.snapshot;
+  // Safe snapshot synchronization: the durable cooldown gate writes
+  // githubCooldowns through the SAME repair state store, so the authoritative
+  // head may have moved since this context was loaded (also covering the
+  // reread after intake). A moved head is accepted ONLY when the canonical
+  // non-cooldown contents are unchanged — admitting own cooldown-only writes
+  // but never blindly applying a stale work mutation atop another writer.
+  const synchronized = await synchronizeSnapshot(deps, context);
+  if (synchronized.status === "unavailable") {
+    return { kind: "state_error", detail: "repair state unavailable" };
+  }
+  if (synchronized.status === "conflict") {
+    return {
+      kind: "state_error",
+      detail: "repair state moved with conflicting contents",
+    };
+  }
+  const base = synchronized.snapshot;
   const draft: RepairStateSnapshotV1 = {
     ...base,
-    stateHead: context.head,
+    stateHead: synchronized.head,
     sequence: base.sequence + 1,
     updatedAt: deps.clock.now(),
     incidents: [...base.incidents],
@@ -448,6 +505,9 @@ async function persistTransition(
     reviews: [...base.reviews],
     replays: [...base.replays],
     releaseRequests: [...base.releaseRequests],
+    // The draft always clones the cooldown records: a synthesized snapshot
+    // never shares (or mutates) the gate's persisted array.
+    githubCooldowns: [...base.githubCooldowns],
   };
   mutate(draft);
   let parsed: RepairStateSnapshotV1;
@@ -456,7 +516,7 @@ async function persistTransition(
   } catch {
     return { kind: "state_error", detail: "invalid persisted transition" };
   }
-  const written = await deps.state.writeRepair(parsed, context.head);
+  const written = await deps.state.writeRepair(parsed, synchronized.head);
   if (written.ok && written.value.status === "applied") {
     context.snapshot = parsed;
     context.head = written.value.head;
@@ -473,6 +533,76 @@ async function persistTransition(
     kind: "state_error",
     detail: "checkpoint CAS conflict or ambiguity",
   };
+}
+
+/**
+ * Reread the actual strict repair state and reconcile it with the loaded
+ * context. An unchanged head proceeds (the authoritative state equals the
+ * loaded contents). A moved head is accepted ONLY when the canonical
+ * non-cooldown contents equal the original context (excluding stateHead,
+ * sequence, updatedAt and githubCooldowns): that admits the shared gate's
+ * cooldown-only write while never applying a stale work mutation atop another
+ * writer; any other movement is "conflict" (state_error at the caller). The
+ * reread is strictly re-validated before it is compared or adopted: a read,
+ * strict-parse or canonical-compare fault is "unavailable" (fail closed, never
+ * trusted or written back). The context is refreshed when the gate's write is
+ * accepted so the transition is computed against the authoritative head.
+ */
+async function synchronizeSnapshot(
+  deps: RepairCycleDepsV1,
+  context: LoopContextV1,
+): Promise<
+  | { status: "ok"; snapshot: RepairStateSnapshotV1; head: GitSha }
+  | { status: "unavailable" }
+  | { status: "conflict" }
+> {
+  try {
+    const read = await deps.state.readRepair();
+    if (!read.ok || read.value.status !== "found") {
+      return { status: "unavailable" };
+    }
+    // The read view is transport-only: every reread is strictly re-parsed
+    // (a corrupt row must never reach a comparison or a write-back).
+    const snapshot = parseRepairStateSnapshotV1(read.value.snapshot);
+    const fresh = { snapshot, head: read.value.head };
+    if (fresh.head === context.head) return { status: "ok", ...fresh };
+    if (!sameNonCooldownContents(context.snapshot, fresh.snapshot)) {
+      return { status: "conflict" };
+    }
+    context.snapshot = fresh.snapshot;
+    context.head = fresh.head;
+    return { status: "ok", ...fresh };
+  } catch {
+    return { status: "unavailable" };
+  }
+}
+
+/** Canonical equality of the non-cooldown snapshot contents. */
+function sameNonCooldownContents(
+  original: RepairStateSnapshotV1,
+  other: RepairStateSnapshotV1,
+): boolean {
+  return canonicalStringify({
+    version: original.version,
+    kind: original.kind,
+    incidents: original.incidents,
+    evidence: original.evidence,
+    work: original.work,
+    reservations: original.reservations,
+    reviews: original.reviews,
+    replays: original.replays,
+    releaseRequests: original.releaseRequests,
+  }) === canonicalStringify({
+    version: other.version,
+    kind: other.kind,
+    incidents: other.incidents,
+    evidence: other.evidence,
+    work: other.work,
+    reservations: other.reservations,
+    reviews: other.reviews,
+    replays: other.replays,
+    releaseRequests: other.releaseRequests,
+  });
 }
 
 function replaceWorkMutation(
@@ -504,6 +634,15 @@ interface IntakeResultV1 {
   result: StepResultV1;
   changed: boolean;
   error: string | null;
+}
+
+/** A cooldown gate fault during intake is a state trust failure: run-terminal. */
+function intakeFault(detail: string): IntakeResultV1 {
+  return {
+    result: { kind: "state_error", detail },
+    changed: false,
+    error: detail,
+  };
 }
 
 async function pollIntake(
@@ -593,9 +732,24 @@ async function pollIntake(
       }
       // New incident: a trusted base must be observed before a record is owned.
       // The page read is awaited wall-clock time: no new source read (base
-      // ref) may start after the total deadline.
+      // ref) may start after the total deadline. The shared cooldown gate is
+      // checked before every base read: an ordinary rate_limited denial is a
+      // normal deferral (this summary is not admitted until its base is
+      // observed, and no source error is fabricated); a gate fault is a state
+      // trust failure which stops intake.
       if (deps.clock.now() >= context.bounds.runDeadline) {
         break;
+      }
+      const cooled = await checkGithubCooldown(
+        deps,
+        summary.repository,
+        context.bounds,
+      );
+      if (cooled.kind === "state_error") {
+        return intakeFault(cooled.detail);
+      }
+      if (cooled.kind === "deferred") {
+        continue;
       }
       const base = await readBase(deps, summary.repository);
       if (base === null) {
@@ -631,54 +785,81 @@ async function pollIntake(
     deps.clock.now() < context.bounds.runDeadline
   ) {
     // No new issue intake read starts at/after the total deadline (the
-    // incident reads above are awaited wall-clock time).
-    const issues = await deps.github.listOpenIssues();
-    if (!issues.ok) {
-      error = `issue source unavailable: ${issues.error.kind}`;
-    } else {
-      const seenIssues = new Set<string>();
-      const baseByRepository = new Map<string, GitSha | null>();
-      for (const issue of issues.value) {
-        if (issue.state !== "open") continue;
-        const issueKey =
-          `${issueRepository.owner}/${issueRepository.name}#${issue.number}`;
-        if (seenIssues.has(issueKey)) continue;
-        seenIssues.add(issueKey);
-        const existing = context.snapshot.work.find(
-          (record) =>
-            record.source.kind === "issue" &&
-            record.repository.owner === issueRepository.owner &&
-            record.repository.name === issueRepository.name &&
-            record.source.id === String(issue.number),
-        );
-        if (existing !== undefined) continue;
+    // incident reads above are awaited wall-clock time). The shared cooldown
+    // gate is checked before issue intake: a cooling installation never calls
+    // the GitHub port (not even a fake one); an ordinary rate_limited denial
+    // is a normal deferral that leaves the source state untouched, and a gate
+    // fault is a state trust failure that stops the run.
+    const issueCooled = await checkGithubCooldown(
+      deps,
+      issueRepository,
+      context.bounds,
+    );
+    if (issueCooled.kind === "state_error") {
+      return intakeFault(issueCooled.detail);
+    }
+    if (issueCooled.kind === "ok") {
+      const issues = await deps.github.listOpenIssues();
+      if (!issues.ok) {
+        error = `issue source unavailable: ${issues.error.kind}`;
+      } else {
+        const seenIssues = new Set<string>();
+        const baseByRepository = new Map<string, GitSha | null>();
+        for (const issue of issues.value) {
+          if (issue.state !== "open") continue;
+          const issueKey =
+            `${issueRepository.owner}/${issueRepository.name}#${issue.number}`;
+          if (seenIssues.has(issueKey)) continue;
+          seenIssues.add(issueKey);
+          const existing = context.snapshot.work.find(
+            (record) =>
+              record.source.kind === "issue" &&
+              record.repository.owner === issueRepository.owner &&
+              record.repository.name === issueRepository.name &&
+              record.source.id === String(issue.number),
+          );
+          if (existing !== undefined) continue;
 
-        const repositoryKey =
-          `${issueRepository.owner}/${issueRepository.name}`;
-        let base = baseByRepository.get(repositoryKey);
-        if (base === undefined) {
-          // The issue read above is awaited wall-clock time: stop before a
-          // new base-ref read after the total deadline.
-          if (deps.clock.now() >= context.bounds.runDeadline) break;
-          base = await readBase(deps, issueRepository);
-          baseByRepository.set(repositoryKey, base);
+          const repositoryKey =
+            `${issueRepository.owner}/${issueRepository.name}`;
+          let base = baseByRepository.get(repositoryKey);
+          if (base === undefined) {
+            // The issue read above is awaited wall-clock time: stop before a
+            // new base-ref read after the total deadline. The gate is checked
+            // before every base read; a deferral admits nothing and caches
+            // nothing (the next run re-lists and re-reads).
+            if (deps.clock.now() >= context.bounds.runDeadline) break;
+            const baseCooled = await checkGithubCooldown(
+              deps,
+              issueRepository,
+              context.bounds,
+            );
+            if (baseCooled.kind === "state_error") {
+              return intakeFault(baseCooled.detail);
+            }
+            if (baseCooled.kind === "deferred") {
+              continue;
+            }
+            base = await readBase(deps, issueRepository);
+            baseByRepository.set(repositoryKey, base);
+          }
+          if (base === null) {
+            error = `base unavailable for ${issueRepository.name}`;
+            continue;
+          }
+          newWork.push(createIssueWork({
+            number: issue.number,
+            title: issue.title,
+            labels: issue.labels,
+            createdAt: issue.createdAt,
+          }, {
+            controllerSha: deps.controllerSha,
+            repository: issueRepository,
+            observedBase: base,
+            now,
+          }));
+          changed = true;
         }
-        if (base === null) {
-          error = `base unavailable for ${issueRepository.name}`;
-          continue;
-        }
-        newWork.push(createIssueWork({
-          number: issue.number,
-          title: issue.title,
-          labels: issue.labels,
-          createdAt: issue.createdAt,
-        }, {
-          controllerSha: deps.controllerSha,
-          repository: issueRepository,
-          observedBase: base,
-          now,
-        }));
-        changed = true;
       }
     }
   }
@@ -1458,6 +1639,65 @@ async function executeImplementationStep(
     );
   }
 
+  // A cooling installation never reserves a model start: the shared gate is
+  // checked before the issue read (the first GitHub prerequisite) and again
+  // immediately before the admission below.
+  const cooling = await checkGithubCooldown(
+    deps,
+    record.repository,
+    context.bounds,
+  );
+  if (cooling.kind === "state_error") {
+    return { kind: "state_error", detail: cooling.detail };
+  }
+  if (cooling.kind === "deferred") {
+    return { kind: "deferred", detail: cooling.detail };
+  }
+
+  // The issue value is read BEFORE the reservation (and after the initial
+  // gate): an unavailable issue returns a wait with ZERO reservation/model and
+  // never an ambiguous unsent model intent. The value is kept for the model
+  // invocation below.
+  const issue = await readIssueForModel(deps, record);
+  if (issue === "unavailable") {
+    return persistWork(
+      deps,
+      context,
+      setWait(
+        record,
+        { reason: "unavailable", since: now, until: null },
+        now,
+      ),
+    );
+  }
+
+  // Recheck the latest shared gate and the run bounds after this awaited
+  // prerequisite: a newly discovered rate limit must never consume an
+  // admission, and a start that crossed the cutoff stays deferred with zero
+  // reservation.
+  const admissionCooling = await checkGithubCooldown(
+    deps,
+    record.repository,
+    context.bounds,
+  );
+  if (admissionCooling.kind === "state_error") {
+    return { kind: "state_error", detail: admissionCooling.detail };
+  }
+  if (admissionCooling.kind === "deferred") {
+    return { kind: "deferred", detail: admissionCooling.detail };
+  }
+  const startsAt = deps.clock.now();
+  if (
+    startsAt >= bounds.modelCutoff ||
+    startsAt + bound.maxDurationMs + OPERATION_MARGIN_MS > bounds.runDeadline
+  ) {
+    return {
+      kind: "deferred",
+      detail:
+        "implementation start is past the model cutoff or no longer fits the run bounds",
+    };
+  }
+
   const reservation = await deps.budget.reserveModelStart({
     repository: record.repository,
     taskId: record.id,
@@ -1536,26 +1776,51 @@ async function executeImplementationStep(
   );
   if (persisted.kind !== "progress") return persisted;
 
-  // Invocation happens strictly after the durable intent exists.
-  const issue = await readIssueForModel(deps, current);
-  if (issue === "unavailable") {
-    const blocked = await settleAndBlock(
+  // Recheck the shared gate immediately before the model run: the durable
+  // admission and intent writes were awaited wall-clock work. A cooldown
+  // discovered now is a KNOWN-NOT-SUBMITTED denial: the start is refunded
+  // with the existing confirmed_not_submitted settlement (sanitized cooldown
+  // proof ref), the unsent intent is cleared, and the step defers so the
+  // already-counted attempt gives the next run a fresh reservation identity.
+  const runCooling = await checkGithubCooldown(
+    deps,
+    record.repository,
+    context.bounds,
+  );
+  if (runCooling.kind === "state_error") {
+    return { kind: "state_error", detail: runCooling.detail };
+  }
+  if (runCooling.kind === "deferred") {
+    const refunded = await deps.budget.settleModelStart({
+      id: durable.reservation.id,
+      outcome: "confirmed_not_submitted",
+      proofRef: cooldownProofRef(durable.reservation.id),
+    });
+    if (refunded.status !== "settled" && refunded.status !== "idempotent") {
+      return {
+        kind: "state_error",
+        detail: "cooldown admission settlement failed",
+      };
+    }
+    const afterRefund = await loadSnapshot(deps, context.bounds);
+    if (afterRefund === null) {
+      return { kind: "state_error", detail: "repair state unavailable" };
+    }
+    const cleared = clearIntent(withIntent, deps.clock.now());
+    const persisted = await persistTransition(
       deps,
-      durable.reservation.id,
-      "ambiguous",
-      withIntent,
-      "issue state unavailable before model run",
-      deps.clock.now(),
+      afterRefund,
+      replaceWorkMutation(cleared),
     );
-    return persistAfterSettlement(
-      deps,
-      context.bounds,
-      replaceWorkMutation(blocked),
-    );
+    if (persisted.kind !== "progress") return persisted;
+    return {
+      kind: "deferred",
+      detail: "github cooldown discovered before model run",
+    };
   }
 
-  // Late-admission recheck: the durable admission and intent/issue preparation
-  // are awaited wall-clock work, so the cutoff (or the declared-maximum-plus-
+  // Late-admission recheck: the durable admission and intent preparation are
+  // awaited wall-clock work, so the cutoff (or the declared-maximum-plus-
   // margin fit) may have been crossed AFTER the entry gate. A start that is
   // provably never submitted is refunded with confirmed_not_submitted (never
   // charged as ambiguous or submitted), its unsent intent is cleared, and the
@@ -1811,6 +2076,20 @@ async function executePublishStep(
   if (head === null) {
     return { kind: "state_error", detail: "publish without candidate head" };
   }
+  // Publication is a GitHub read/write: gate before any remote effect (the
+  // concrete adapter rechecks each remote call; a cooling installation never
+  // reaches a fake port or writes a fresh push intent).
+  const cooling = await checkGithubCooldown(
+    deps,
+    record.repository,
+    context.bounds,
+  );
+  if (cooling.kind === "state_error") {
+    return { kind: "state_error", detail: cooling.detail };
+  }
+  if (cooling.kind === "deferred") {
+    return { kind: "deferred", detail: cooling.detail };
+  }
   const branch = candidateBranch(record.id);
 
   if (record.intent !== null) {
@@ -1886,11 +2165,14 @@ async function executePublishStep(
     expectedRemoteHead,
   );
   if (!push.ok) {
+    // The saved push intent must stay durable: the response may have been
+    // lost after the write, and the next run reconciles the exact remote ref
+    // before repeating rather than blindly retrying an ambiguous write.
     return persistWork(
       deps,
       context,
       setWait(
-        record,
+        withIntent,
         { reason: "unavailable", since: now, until: null },
         now,
       ),
@@ -1926,6 +2208,19 @@ async function createPullRequestFor(
   const now = deps.clock.now();
   const head = record.target.head!;
   const branch = candidateBranch(record.id);
+  // PR creation is a GitHub write: gate before the PR intent is written (a
+  // cooling installation never writes a pull_request intent it cannot act on).
+  const cooling = await checkGithubCooldown(
+    deps,
+    record.repository,
+    context.bounds,
+  );
+  if (cooling.kind === "state_error") {
+    return { kind: "state_error", detail: cooling.detail };
+  }
+  if (cooling.kind === "deferred") {
+    return { kind: "deferred", detail: cooling.detail };
+  }
   const intent = {
     kind: "pull_request" as const,
     key: pullRequestIntentKey(head),
@@ -1967,11 +2262,14 @@ async function createPullRequestFor(
     expectedHeadRef: head,
   });
   if (!created.ok) {
+    // The saved pull_request intent must stay durable: the response may have
+    // been lost after the write, and the next run reconciles the exact head
+    // ref before repeating rather than blindly retrying an ambiguous write.
     return persistWork(
       deps,
       context,
       setWait(
-        record,
+        withIntent,
         { reason: "unavailable", since: now, until: null },
         now,
       ),
@@ -2026,6 +2324,35 @@ async function requestReviewFor(
   }
   const head = record.target.head!;
   const operationKey = reviewOperationKey(prNumber, head);
+
+  // A cooling installation never reserves a review request: the shared gate is
+  // checked immediately before the admission (the only awaited prerequisite is
+  // the bounds check already done above).
+  const cooling = await checkGithubCooldown(
+    deps,
+    record.repository,
+    context.bounds,
+  );
+  if (cooling.kind === "state_error") {
+    return { kind: "state_error", detail: cooling.detail };
+  }
+  if (cooling.kind === "deferred") {
+    return { kind: "deferred", detail: cooling.detail };
+  }
+  // The cooling check was awaited wall-clock work and only guards the total
+  // deadline: recheck the 90-minute model cutoff (and the deadline) at the
+  // current clock immediately before the admission, so a start that crossed
+  // the bounds stays deferred with zero reservation.
+  const requestAt = deps.clock.now();
+  if (
+    requestAt >= context.bounds.modelCutoff ||
+    requestAt >= context.bounds.runDeadline
+  ) {
+    return {
+      kind: "deferred",
+      detail: "review request is past the run bounds",
+    };
+  }
 
   // Review requests share the one rolling model-start budget: durable
   // admission precedes invocation, with a deterministic task/head/round
@@ -2129,13 +2456,53 @@ async function requestReviewFor(
   );
   if (persisted.kind !== "progress") return persisted;
 
-  // Late-admission recheck: the durable admission and intent write are awaited
-  // wall-clock work, so the 90-minute cutoff OR the total run deadline (a
-  // tighter caller deadline already governs it) may have been crossed AFTER
-  // the entry gate. A review start that is provably never submitted is
-  // refunded with confirmed_not_submitted, its unsent intent is cleared, and
-  // the round counter it already prepared gives the next run a fresh
-  // reservation identity so it resumes without a duplicate start.
+  // Recheck the shared gate immediately before the requestReview call: the
+  // reservation and intent writes were awaited wall-clock work. A cooldown
+  // discovered now is a known-not-submitted denial: the admission is refunded
+  // with the existing confirmed_not_submitted settlement (sanitized cooldown
+  // proof ref), the unsent intent is cleared, and the prepared round gives the
+  // next run a fresh reservation identity so it resumes without a duplicate
+  // start.
+  const beforeSubmit = await checkGithubCooldown(
+    deps,
+    record.repository,
+    context.bounds,
+  );
+  if (beforeSubmit.kind === "state_error") {
+    return { kind: "state_error", detail: beforeSubmit.detail };
+  }
+  if (beforeSubmit.kind === "deferred") {
+    const refunded = await settleReviewCharge(
+      deps,
+      context,
+      reservationId,
+      "confirmed_not_submitted",
+      cooldownProofRef(reservationId),
+    );
+    if (refunded.kind !== "progress") return refunded;
+    const cleared = countReviewRound(
+      clearIntent(withIntent, deps.clock.now()),
+      deps.clock.now(),
+    );
+    const persistedClear = await persistAfterSettlement(
+      deps,
+      context.bounds,
+      replaceWorkMutation(cleared),
+    );
+    if (persistedClear.kind !== "progress") return persistedClear;
+    return {
+      kind: "deferred",
+      detail: "github cooldown discovered before review request",
+    };
+  }
+
+  // Late-admission recheck AFTER the final beforeSubmit gate: the gate wait is
+  // awaited wall-clock work, so the 90-minute cutoff OR the total run deadline
+  // (a tighter caller deadline already governs it) may have been crossed with
+  // the grant. A review start that is provably never submitted is refunded
+  // with confirmed_not_submitted, its unsent intent is cleared, and the round
+  // counter it already prepared gives the next run a fresh reservation
+  // identity so it resumes without a duplicate start.
   if (
     deps.clock.now() >= context.bounds.modelCutoff ||
     deps.clock.now() >= context.bounds.runDeadline
@@ -2273,6 +2640,21 @@ async function reconcilePublishIntent(
 ): Promise<StepResultV1> {
   const intent = record.intent!;
   const now = deps.clock.now();
+  // Reconciliation observes exact remote objects: gate before the first
+  // external call. A cooldown deferral keeps the intent durable (it is never
+  // cleared without an exact observation), so the next run reconciles the same
+  // operation exactly once.
+  const cooling = await checkGithubCooldown(
+    deps,
+    record.repository,
+    context.bounds,
+  );
+  if (cooling.kind === "state_error") {
+    return { kind: "state_error", detail: cooling.detail };
+  }
+  if (cooling.kind === "deferred") {
+    return { kind: "deferred", detail: cooling.detail };
+  }
   if (intent.kind === "push") {
     const ref = await deps.github.readRef(`refs/heads/${intent.branch}`);
     if (!ref.ok) {
@@ -2441,6 +2823,20 @@ async function observeReview(
   const head = record.target.head;
   if (pr === null || head === null) {
     return { kind: "state_error", detail: "review without PR/head identity" };
+  }
+  // Review observation is a GitHub read: gate before the external call. A
+  // cooldown deferral mutates nothing (the pending wait and review intent stay
+  // durable) so the next run observes the exact remote state once.
+  const cooling = await checkGithubCooldown(
+    deps,
+    record.repository,
+    context.bounds,
+  );
+  if (cooling.kind === "state_error") {
+    return { kind: "state_error", detail: cooling.detail };
+  }
+  if (cooling.kind === "deferred") {
+    return { kind: "deferred", detail: cooling.detail };
   }
   const observed = await deps.github.observeReview({
     operationKey: reviewOperationKey(pr, head),
@@ -2612,6 +3008,20 @@ async function executeMerge(
   record: WorkRecordV1,
 ): Promise<StepResultV1> {
   const now = deps.clock.now();
+  // Merge is a GitHub write: gate before any preparation or intent write (a
+  // cooling installation never writes a merge intent it cannot act on; the
+  // concrete adapter separately rechecks the gate at the call).
+  const cooling = await checkGithubCooldown(
+    deps,
+    record.repository,
+    context.bounds,
+  );
+  if (cooling.kind === "state_error") {
+    return { kind: "state_error", detail: cooling.detail };
+  }
+  if (cooling.kind === "deferred") {
+    return { kind: "deferred", detail: cooling.detail };
+  }
   const config = configFor(deps, record.repository);
   const receipt = context.snapshot.reviews.find((review) =>
     review.pullRequest.number === record.target.pr &&
@@ -2672,11 +3082,14 @@ async function executeMerge(
 
   const merged = await deps.github.mergePullRequest(mergeRequest);
   if (!merged.ok) {
+    // The saved merge intent must stay durable: the response may have been
+    // lost after the write, and the next run reconciles the exact remote PR
+    // state before repeating rather than blindly retrying an ambiguous write.
     return persistWork(
       deps,
       context,
       setWait(
-        record,
+        withIntent,
         { reason: "unavailable", since: now, until: now + CHECK_POLL_MS },
         now,
       ),
@@ -2758,6 +3171,20 @@ async function reconcileMergeIntent(
 ): Promise<StepResultV1> {
   if (record.target.pr === null || record.target.head === null) {
     return { kind: "state_error", detail: "merge intent without identity" };
+  }
+  // Merge reconciliation observes the exact remote PR state: gate before the
+  // read. A cooldown deferral keeps the merge intent durable so the next run
+  // reconciles the exact same operation once.
+  const cooling = await checkGithubCooldown(
+    deps,
+    record.repository,
+    context.bounds,
+  );
+  if (cooling.kind === "state_error") {
+    return { kind: "state_error", detail: cooling.detail };
+  }
+  if (cooling.kind === "deferred") {
+    return { kind: "deferred", detail: cooling.detail };
   }
   const pr = await deps.github.readPullRequest(record.target.pr);
   if (!pr.ok) {
@@ -2965,12 +3392,24 @@ async function retryClosure(
   const now = deps.clock.now();
   // The issue_closure intent is durable: the closure mutation never starts
   // at/after the total deadline (the release read may have crossed it), so
-  // the next run retries the exact closure once.
+  // the next run retries the exact closure once. The shared cooldown gate is
+  // checked before the closure write: a deferral keeps the closure intent.
   if (now >= context.bounds.runDeadline) {
     return {
       kind: "margin",
       detail: "issue closure crossed the total run deadline",
     };
+  }
+  const cooling = await checkGithubCooldown(
+    deps,
+    record.repository,
+    context.bounds,
+  );
+  if (cooling.kind === "state_error") {
+    return { kind: "state_error", detail: cooling.detail };
+  }
+  if (cooling.kind === "deferred") {
+    return { kind: "deferred", detail: cooling.detail };
   }
   const closed = await deps.github.closeIssue(issueNumber);
   if (!closed.ok) {
@@ -3118,6 +3557,72 @@ function normalizePathPrefix(value: string): string {
  */
 function runBoundsProofRef(reservationId: string): string {
   return `artifact://sentinel/run-bounds/${reservationId}`;
+}
+
+/**
+ * Restricted trusted proof ref for an admission whose start was provably
+ * never submitted because the durable GitHub cooldown was discovered during
+ * preparation. Same sanitized artifact-reference pattern as the run-bound
+ * proof; no new storage/config surface.
+ */
+function cooldownProofRef(reservationId: string): string {
+  return `artifact://sentinel/github-cooldown/${reservationId}`;
+}
+
+// ---------------------------------------------------------------------------
+// GitHub cooldown guard: the narrow loop-side check.
+// ---------------------------------------------------------------------------
+
+type GithubCooldownCheckV1 =
+  | { kind: "ok" }
+  | { kind: "deferred"; detail: string }
+  | { kind: "state_error"; detail: string };
+
+/**
+ * Narrow shared-gate check for one affected installation. An ordinary
+ * rate_limited denial is a NORMAL cooldown deferral (the operation is skipped
+ * and no source state is cleared or rewritten); a thrown gate, a latched
+ * fault or any other denial kind is a state trust failure (state_error). The
+ * injected gate is the exact same instance the trusted host gave the GitHub
+ * client/token acquisition and the GitHubPort, so the loop guard prevents a
+ * cooling installation from ever reaching a fake port or reserving a model.
+ * The gate wait is awaited wall-clock time: AFTER it resolves, an otherwise
+ * granted request whose wait crossed the total run deadline is a normal
+ * deferral, so no intake/base read or publication/review/merge/closure begins
+ * past the bound (a gate fault still retains state_error).
+ */
+async function checkGithubCooldown(
+  deps: RepairCycleDepsV1,
+  repository: RepositoryIdentityV1,
+  bounds: RunBoundsV1,
+): Promise<GithubCooldownCheckV1> {
+  let result: PortResultV1<void>;
+  try {
+    result = await deps.githubCooldown.beforeRequest(
+      repository.installationId,
+    );
+  } catch {
+    return {
+      kind: "state_error",
+      detail: "github cooldown gate unavailable",
+    };
+  }
+  if (!result.ok) {
+    if (result.error.kind === "rate_limited") {
+      return { kind: "deferred", detail: "github cooldown active" };
+    }
+    return {
+      kind: "state_error",
+      detail: "github cooldown gate denied",
+    };
+  }
+  if (deps.clock.now() >= bounds.runDeadline) {
+    return {
+      kind: "deferred",
+      detail: "github cooldown wait crossed the run deadline",
+    };
+  }
+  return { kind: "ok" };
 }
 
 /** Preserve the exact request timestamp across durable review waits. */

@@ -33,6 +33,7 @@ import type { RepositoryConfigV1 } from "./contracts/repository-config.ts";
 import type { BudgetControllerV1 } from "./budget/mod.ts";
 import type {
   Clock,
+  GitHubCooldownGateV1,
   GitHubPort,
   ImplementationPort,
   IncidentAdapter,
@@ -59,6 +60,15 @@ export interface RepairEntrypointDepsV1 {
   /** Exact Sentinel controller SHA that owns every new work record. */
   controllerSha: GitSha;
   github: GitHubPort;
+  /**
+   * The one durable GitHub cooldown gate. The trusted host MUST supply the
+   * SAME DurableGitHubCooldownGate instance it injected into the GitHub
+   * client/token acquisition and the GitHubPort implementation — there is no
+   * independent/default gate constructed here. The loop checks it before any
+   * GitHub read, model reservation or publication; this entrypoint passes the
+   * exact object through unchanged.
+   */
+  githubCooldown: GitHubCooldownGateV1;
   incidents: IncidentAdapter;
   replay: ReplayPort;
   /** Trusted fixture test-identity lookup paired with the replay resolver. */
@@ -125,6 +135,7 @@ export function runRepairEntrypoint(
       configs,
       controllerSha: deps.controllerSha,
       github: deps.github,
+      githubCooldown: deps.githubCooldown,
       incidents: deps.incidents,
       replay: deps.replay,
       fixtureIdentities: deps.fixtureIdentities,
