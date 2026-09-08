@@ -22,6 +22,7 @@ import {
   FakeReplay,
 } from "../repair/helpers.ts";
 import { createRepairStateStore } from "../../src/state/mod.ts";
+import { DurableGitHubCooldownGate } from "../../src/repair/github-cooldown.ts";
 import { runRepairEntrypoint } from "../../src/main.ts";
 import {
   evidenceFixture,
@@ -46,6 +47,10 @@ Deno.test(
         scratchDir: `${ctx.tmp}/scratch-repair`,
         remoteUrl: ctx.remoteUrl,
       });
+      const githubCooldown = new DurableGitHubCooldownGate({
+        state: store,
+        clock,
+      });
       const configs = repairConfigs({
         sessionBound: { maxDurationMs: 240_000, maxOutputChars: 200_000 },
       });
@@ -66,6 +71,7 @@ Deno.test(
         configs,
         controllerSha: SHA1,
         github,
+        githubCooldown,
         incidents,
         replay,
         model,
@@ -102,6 +108,10 @@ Deno.test(
         scratchDir: `${ctx.tmp}/scratch-repair`,
         remoteUrl: ctx.remoteUrl,
       });
+      const githubCooldown = new DurableGitHubCooldownGate({
+        state: store,
+        clock,
+      });
       const configs = repairConfigs({
         sessionBound: { maxDurationMs: 240_000, maxOutputChars: 200_000 },
       });
@@ -116,6 +126,7 @@ Deno.test(
         configs,
         controllerSha: SHA1,
         github,
+        githubCooldown,
         incidents,
         replay,
         model,
@@ -148,6 +159,10 @@ Deno.test(
         scratchDir: `${ctx.tmp}/scratch-repair`,
         remoteUrl: ctx.remoteUrl,
       });
+      const githubCooldown = new DurableGitHubCooldownGate({
+        state: store,
+        clock,
+      });
       const configs = repairConfigs({
         sessionBound: { maxDurationMs: 240_000, maxOutputChars: 200_000 },
       });
@@ -167,6 +182,7 @@ Deno.test(
         configs,
         controllerSha: SHA1,
         github,
+        githubCooldown,
         incidents,
         replay,
         model,
@@ -203,6 +219,10 @@ Deno.test(
         scratchDir: `${ctx.tmp}/scratch-repair`,
         remoteUrl: ctx.remoteUrl,
       });
+      const githubCooldown = new DurableGitHubCooldownGate({
+        state: store,
+        clock,
+      });
       const configs = repairConfigs({
         sessionBound: { maxDurationMs: 240_000, maxOutputChars: 200_000 },
       });
@@ -224,6 +244,7 @@ Deno.test(
         configs,
         controllerSha: SHA1,
         github,
+        githubCooldown,
         incidents,
         replay,
         model,
@@ -245,6 +266,7 @@ Deno.test(
         configs,
         controllerSha: SHA1,
         github,
+        githubCooldown,
         incidents,
         replay,
         model,

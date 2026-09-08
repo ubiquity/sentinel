@@ -23,6 +23,7 @@ import {
   REPAIR_RUN_CEILING_MS,
   runRepairCycle,
 } from "../../src/repair/loop.ts";
+import { DurableGitHubCooldownGate } from "../../src/repair/github-cooldown.ts";
 import type { FakeGithubOptionsV1, FakeReplayOptionsV1 } from "./helpers.ts";
 import {
   AdvancingFakeGithub,
@@ -107,6 +108,7 @@ function makeRig(
 ): RigV1 {
   const clock = new FakeClock(T0);
   const state = new MemoryState();
+  const githubCooldown = new DurableGitHubCooldownGate({ state, clock });
   const configs = repairConfigs({
     sessionBound: { maxDurationMs: 240_000, maxOutputChars: 200_000 },
   });
@@ -138,6 +140,7 @@ function makeRig(
       configs,
       controllerSha: SHA1,
       github,
+      githubCooldown,
       incidents,
       replay,
       model,

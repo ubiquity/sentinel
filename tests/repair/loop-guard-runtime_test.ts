@@ -167,6 +167,7 @@ Deno.test("loop-guard runtime: real entrypoint stops first loop and admits secon
       configs,
       controllerSha: SHA1,
       github: rig.github,
+      githubCooldown: rig.githubCooldown,
       incidents: rig.incidents,
       replay: rig.replay,
       model,
