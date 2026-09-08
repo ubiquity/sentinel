@@ -3667,8 +3667,9 @@ async function resolveFixtureTestIds(
   const replayWithIdentity = deps.replay as
     & ReplayPort
     & Partial<ReplayFixtureIdentitySourceV1>;
-  const resolveTestIds = deps.fixtureIdentities?.resolveTestIds ??
-    (typeof replayWithIdentity.resolveTestIds === "function"
+  const resolveTestIds = deps.fixtureIdentities !== undefined
+    ? deps.fixtureIdentities.resolveTestIds.bind(deps.fixtureIdentities)
+    : (typeof replayWithIdentity.resolveTestIds === "function"
       ? replayWithIdentity.resolveTestIds.bind(replayWithIdentity)
       : null);
   if (resolveTestIds === null) return { kind: "invalid" };

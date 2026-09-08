@@ -29,9 +29,8 @@
  *   PERMITS: the composed gateway fixture is provenance-redacted, so a real
  *   replay of the exact original revision fails for the intended reason AND
  *   carries the truthful `fixture_redacted` limitation; the repair loop's
- *   fixture-metadata consumer keeps the typed unavailable wait
- *   (nextStep "work" / wait.reason "unavailable") on that pass — no
- *   implementation is invented and no gate is weakened. The SAME composed
+ *   bound fixture-metadata consumer runs the replay and blocks on that
+ *   limitation — no implementation is invented and no gate is weakened. The SAME composed
  *   ReplayPortImpl is then invoked directly at the exact original and toy
  *   candidate revisions to prove the redacted before-failure and
  *   after-pass outcomes truthfully (the after pass carries the SAME
@@ -54,8 +53,8 @@
  *   60×30s continuous samples, accepted record);
  * - issue/delivery bookkeeping: the accepted request's issue is closed
  *   (closure-only retry semantics) and the record reaches `done`; the
- *   second (receipt-less) request and the redaction-limited incident stay
- *   in the typed unavailable wait at their actual consumers;
+ *   second (receipt-less) request stays in its typed unavailable wait and the
+ *   redaction-limited incident stays blocked on missing evidence;
  * - the truthful release-receipt boundary: the ONLY authentic build receipt
  *   available in this harness is the immutable fixture receipt bound to the
  *   fixture producer commit, so requests for any other merged revision
@@ -1517,34 +1516,33 @@ Deno.test(
       assert.equal(state1.incidents.length, 1);
       assert.equal(state1.incidents[0]!.fingerprint, rig.fingerprint);
       assert.equal(state1.work.length, 3);
-      assert.equal(state1.work[0]!.nextStep, "work");
-      assert.equal(state1.work[0]!.wait?.reason, "unavailable");
+      assert.equal(state1.work[0]!.nextStep, "blocked");
+      assert.equal(state1.work[0]!.blocker?.kind, "missing_evidence");
       const incident = state1.work.find((work) =>
         work.source.kind === "incident"
       )!;
       assert.ok(incident);
       assert.equal(incident.related.incidentId, INCIDENT_A);
       assert.equal(incident.failingRevision, toy.originalSha);
-      // Truthful redaction/unavailable boundary: the incident STAYS in the
-      // work step with the typed `unavailable` wait at its actual consumer on
-      // this pass. It is never asserted as an immediate blocked state, and no
-      // clean replay result is fabricated for it.
-      assert.equal(incident.nextStep, "work");
-      assert.equal(incident.blocker, null);
-      assert.equal(incident.wait?.reason, "unavailable");
+      // Truthful redaction boundary: the bound fixture resolver reaches the
+      // real replay port, which records the redaction limitation and blocks
+      // before any implementation can be admitted. No clean replay result is
+      // fabricated for the incident.
+      assert.equal(incident.nextStep, "blocked");
+      assert.equal(incident.blocker?.kind, "missing_evidence");
       assert.equal(
         rig.replayRuntime.runs.filter((run) => run.executable === "deno")
           .length,
-        0,
-        "the composed loop ran no target command on this pass",
+        1,
+        "the composed loop ran the redacted before replay once",
       );
 
       // The SAME composed chain is then invoked DIRECTLY to prove the
       // redacted before-failure boundary truthfully at the exact original
       // revision: readIncident → resolveTestIds → composed ReplayPortImpl.
-      // This is direct-port evidence of the redaction contract (the loop's
-      // fixture-metadata consumer keeps the typed unavailable wait above);
-      // it is never mistaken for a clean loop verification.
+      // This is direct-port evidence of the redaction contract alongside the
+      // loop's bound fixture-metadata consumer; it is never mistaken for a
+      // clean loop verification.
       const composedRead = await (deps.incidents as GatewayReplayComposition)
         .readIncident(INCIDENT_A);
       assert.ok(composedRead.ok, JSON.stringify(composedRead));
@@ -1603,15 +1601,15 @@ Deno.test(
         "one retained encrypted artifact",
       );
 
-      // The DIRECT composed before-run executed at the exact original
-      // revision through the real ReplayPortImpl: the recorded runtime
-      // captured exactly one target command (`deno task test`) in a
-      // disposable clone of the toy source.
+      // The loop's redacted before-run and the DIRECT composed before-run
+      // both execute at the exact original revision through the real
+      // ReplayPortImpl. The recorded runtime captures two target commands
+      // (`deno task test`) in disposable clones of the toy source.
       const targetRuns1 = rig.replayRuntime.runs.filter((run) =>
         run.executable === "deno"
       );
-      assert.equal(targetRuns1.length, 1);
-      const before = targetRuns1[0]!;
+      assert.equal(targetRuns1.length, 2);
+      const before = targetRuns1[1]!;
       assert.deepEqual(before.args, ["task", "test"]);
       assert.match(before.cwd, /sentinel-replay-/);
       assert.equal(before.exitCode, 1, "original revision must fail");
@@ -1695,8 +1693,8 @@ Deno.test(
       );
       assert.equal(
         targetRuns2.length,
-        2,
-        "one direct before-run + one direct after-run through the same composed ReplayPort",
+        3,
+        "one loop before-run plus one direct before-run and one direct after-run through the same composed ReplayPort",
       );
 
       // ---- Run 2: the first review completes; issue one merges exactly. --
@@ -1846,8 +1844,8 @@ Deno.test(
       // ---- Run 4: the repair loop observes the accepted release and
       // performs the issue/delivery bookkeeping: the accepted request's issue
       // is closed (closure-only retry) and the record reaches `done`; the
-      // receipt-less request and the redaction-limited incident stay in their
-      // typed unavailable waits at their actual consumers. ---------------
+      // receipt-less request stays in its typed unavailable wait while the
+      // redaction-limited incident remains blocked on missing evidence. -----
       rig.clock.advance(5 * 60_000 + 1);
       const fourth = await rig.run();
       assert.equal(fourth.status, "idle", JSON.stringify(fourth));
@@ -1872,11 +1870,11 @@ Deno.test(
         "unavailable",
         "typed wait at the release acceptance consumer",
       );
-      assert.equal(incidentFinal.nextStep, "work");
+      assert.equal(incidentFinal.nextStep, "blocked");
       assert.equal(
-        incidentFinal.wait?.reason,
-        "unavailable",
-        "the redaction-limited incident keeps the typed unavailable wait",
+        incidentFinal.blocker?.kind,
+        "missing_evidence",
+        "the redaction-limited incident stays blocked on missing evidence",
       );
       assert.equal(state4.releaseRequests.length, 2);
       // No model start for the incident or after acceptance.
