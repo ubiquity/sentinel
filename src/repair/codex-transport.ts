@@ -89,6 +89,13 @@ const DEFAULT_CLOSE_WRITE_DRAIN_MS = 2_000;
 const DEFAULT_CLOSE_STREAM_SETTLE_MS = 1_000;
 
 export interface CodexSessionV1 {
+  /**
+   * Start the owned subprocess when the session is lazy.  Test doubles may
+   * omit this method; the model port treats the capability as optional.
+   * Keeping startup here lets a trusted host return a concrete session
+   * without relying on an undocumented pre-open convention.
+   */
+  open?(): void;
   /** Send one request; resolves with the JSON-RPC result payload. */
   send(method: string, params: unknown): Promise<unknown>;
   /** Send one notification (no response expected; e.g. `initialized`). */
@@ -169,11 +176,20 @@ export class CodexSubprocessSession implements CodexSessionV1 {
 
   /** Spawn the child with a cleared environment and start the read pumps. */
   open(): void {
-    if (this.child !== null) {
+    if (this.closed) {
+      // Closed sessions fail closed BEFORE the idempotent open guard: an
+      // opened-then-closed session must never silently present as open again
+      // (its child handle is still set), and a never-opened closed session
+      // must never respawn. No model work can start after close.
       throw new CodexProtocolError(
-        "unexpected_frame",
-        "transport already open",
+        "child_exited_without_terminal",
+        "transport already closed",
       );
+    }
+    if (this.child !== null) {
+      // Opening is idempotent so a trusted host may pre-open the session and
+      // the model port may also enforce the lazy-session boundary safely.
+      return;
     }
     const command = new Deno.Command(this.options.command[0], {
       args: this.options.command.slice(1),

@@ -69,9 +69,11 @@ import type {
 import type { ReplayRuntimeV1 } from "../replay/runtime.ts";
 import { CodexImplementationPort } from "../repair/model-port.ts";
 import type {
+  CandidateCommitterV1,
   CheckoutResolverV1,
   ReceiptVerifierV1,
 } from "../repair/model-port.ts";
+import { LocalCandidateCommitter } from "../repair/model-port.ts";
 import type { CodexSessionV1 } from "../repair/codex-transport.ts";
 import { RollingStartBudget } from "../budget/mod.ts";
 
@@ -136,6 +138,8 @@ export interface RepairHostModelOptionsV1 {
   checkoutDir: string;
   /** Local checkout identity resolver; optional (port default is local git). */
   checkout?: CheckoutResolverV1;
+  /** Optional trusted host commit step; defaults to the local checkout committer. */
+  commitCandidate?: CandidateCommitterV1;
   /**
    * Trusted-host receipt verifier; the factory NEVER supplies one, so the
    * default unverified-receipt policy stays active unless the host provides
@@ -249,6 +253,8 @@ export function composeRepairHost(
     checkoutDir: options.model.checkoutDir,
     checkout: options.model.checkout,
     receiptVerifier: options.model.receiptVerifier,
+    commitCandidate: options.model.commitCandidate ??
+      new LocalCandidateCommitter(options.model.checkoutDir),
   });
 
   // 6. One RollingStartBudget over the same repair state and config set.

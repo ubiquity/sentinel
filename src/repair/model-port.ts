@@ -108,6 +108,128 @@ export interface CheckoutResolverV1 {
   >;
 }
 
+/**
+ * Trusted host capability that turns a completed model working tree into one
+ * candidate commit. The model session itself may be unable to write `.git`
+ * metadata under the app-server workspace sandbox; this capability runs after
+ * the session has settled, outside that sandbox, and never publishes or edits
+ * durable Sentinel state.
+ */
+export interface CandidateCommitterV1 {
+  commit(base: GitSha): Promise<boolean>;
+}
+
+/**
+ * Local candidate committer for a trusted host. It only commits when HEAD is
+ * still the requested base and the model left a non-empty working-tree
+ * change. A model-created descendant is accepted for later identity
+ * validation; an unrelated or malformed checkout fails closed.
+ */
+export class LocalCandidateCommitter implements CandidateCommitterV1 {
+  constructor(
+    private readonly checkoutDir: string,
+    private readonly message = "sentinel: autonomous repair candidate",
+  ) {}
+
+  async commit(base: GitSha): Promise<boolean> {
+    const before = await this.run(["rev-parse", "HEAD"]);
+    if (before === null || !/^[0-9a-f]{40}$/.test(before.trim())) {
+      return false;
+    }
+    const beforeSha = before.trim() as GitSha;
+    const ancestry = await this.runResult([
+      "merge-base",
+      "--is-ancestor",
+      base,
+      beforeSha,
+    ]);
+    if (ancestry === null || ancestry.code !== 0) return false;
+
+    // The model may have created its own commit when the host permits it.
+    // Leave that exact descendant untouched; the resolver will bind it to the
+    // requested base and changed paths below.
+    if (beforeSha !== base) return true;
+
+    const status = await this.run([
+      "status",
+      "--porcelain=v1",
+      "-z",
+      "--untracked-files=all",
+    ]);
+    if (status === null || status.length === 0) return false;
+    // Unmerged entries cannot be made into a trusted candidate by guessing at
+    // conflict resolution. Keep every other path under the host's normal
+    // protected-path and review gates.
+    const entries = status.split("\0").filter((entry) => entry.length > 0);
+    if (
+      entries.some((entry) => {
+        const x = entry[0] ?? "";
+        const y = entry[1] ?? "";
+        return x === "U" || y === "U" || (x === "A" && y === "A") ||
+          (x === "D" && y === "D");
+      })
+    ) return false;
+
+    const staged = await this.runResult(["add", "-A", "--", "."]);
+    if (staged === null || staged.code !== 0) return false;
+    const diff = await this.runResult([
+      "diff",
+      "--cached",
+      "--quiet",
+      "--exit-code",
+    ]);
+    if (diff === null || diff.code === 0 || diff.code !== 1) return false;
+    const committed = await this.runResult([
+      "-c",
+      "user.name=Sentinel",
+      "-c",
+      "user.email=sentinel@localhost",
+      "commit",
+      "--no-verify",
+      "-m",
+      this.message,
+    ]);
+    if (committed === null || committed.code !== 0) return false;
+    const after = await this.run(["rev-parse", "HEAD"]);
+    if (after === null || !/^[0-9a-f]{40}$/.test(after.trim())) return false;
+    return after.trim() !== base;
+  }
+
+  private async run(args: string[]): Promise<string | null> {
+    const result = await this.runResult(args);
+    return result?.code === 0 ? result.stdout : null;
+  }
+
+  private async runResult(args: string[]): Promise<
+    {
+      code: number;
+      stdout: string;
+    } | null
+  > {
+    try {
+      const result = await new Deno.Command("git", {
+        args: ["-C", this.checkoutDir, ...args],
+        clearEnv: true,
+        env: {
+          PATH: Deno.env.get("PATH") ?? "/usr/bin:/bin",
+          HOME: this.checkoutDir,
+          GIT_CONFIG_GLOBAL: "/dev/null",
+          GIT_CONFIG_SYSTEM: "/dev/null",
+          GIT_TERMINAL_PROMPT: "0",
+        },
+        stdout: "piped",
+        stderr: "piped",
+      }).output();
+      return {
+        code: result.code,
+        stdout: new TextDecoder().decode(result.stdout),
+      };
+    } catch {
+      return null;
+    }
+  }
+}
+
 /** Default resolver: local git in the checkout with a cleared environment. */
 export class LocalCheckoutResolver implements CheckoutResolverV1 {
   constructor(
@@ -182,6 +304,8 @@ export interface CodexImplementationPortOptionsV1 {
   checkout?: CheckoutResolverV1;
   /** Trusted-host receipt verifier; the default never certifies. */
   receiptVerifier?: ReceiptVerifierV1;
+  /** Optional trusted host commit step for sandboxed model checkouts. */
+  commitCandidate?: CandidateCommitterV1;
   /** Grace for terminal settlement after an interrupt request. */
   interruptSettlementGraceMs?: number;
 }
@@ -215,6 +339,10 @@ export class CodexImplementationPort implements ImplementationPort {
     const invocationId = `codex-${request.taskId}-${Date.now()}`;
     try {
       session = await this.options.openSession();
+      // CodexSubprocessSession is intentionally lazy so construction remains
+      // side-effect free.  Open it at the exact model boundary; an already
+      // opened concrete session is accepted because open() is idempotent.
+      session.open?.();
       await this.initialize(session);
       const prompt = buildPrompt(request);
       const thread = await this.startThread(session, request, prompt);
@@ -278,6 +406,11 @@ export class CodexImplementationPort implements ImplementationPort {
   > {
     const response = await session.send("thread/start", {
       model: request.model,
+      // The thread response is the only app-server model/effort evidence
+      // available to this bounded port.  Bind the required runtime effort in
+      // the thread config as well as the per-turn override below so the
+      // observed thread receipt cannot silently inherit a weaker host default.
+      config: { model_reasoning_effort: request.reasoning },
       cwd: this.options.checkoutDir,
       // Bounded isolated-checkout write capability: the session may write
       // within the secret-free checkout only (the thread cwd is the checkout
@@ -842,20 +975,6 @@ export class CodexImplementationPort implements ImplementationPort {
     },
     settled: AwaitedSettlementV1,
   ): Promise<PortResultV1<ModelRunReceiptV1>> {
-    const checkout = this.options.checkout ?? new LocalCheckoutResolver(
-      this.options.checkoutDir,
-      request.base,
-    );
-    const resolved = settled.terminal?.status === "completed" &&
-        !settled.loopStopped
-      ? await checkout.resolve()
-      : null;
-    const candidate: CandidateOutcomeV1 | null = resolved === null ? null : {
-      head: resolved.head,
-      checkpointSha: resolved.checkpointSha,
-      changedPaths: resolved.changedPaths,
-    };
-
     const evidence: ActualSessionEvidenceV1 = {
       threadModel: thread.model,
       threadModelProvider: thread.provider,
@@ -881,6 +1000,36 @@ export class CodexImplementationPort implements ImplementationPort {
         "model receipt mismatch: observed model/effort differ from requested Luna/max",
       );
     }
+    if (settled.terminal?.status === "completed" && !settled.loopStopped) {
+      if (this.options.commitCandidate !== undefined) {
+        const committed = await this.options.commitCandidate.commit(
+          request.base,
+        );
+        if (!committed) {
+          return portError(
+            "unavailable",
+            "candidate checkout could not be committed",
+          );
+        }
+      }
+    }
+    const checkout = this.options.checkout ?? new LocalCheckoutResolver(
+      this.options.checkoutDir,
+      request.base,
+    );
+    const resolved = settled.terminal?.status === "completed" &&
+        !settled.loopStopped
+      ? await checkout.resolve()
+      : null;
+    const candidate: CandidateOutcomeV1 | null = resolved !== null &&
+        resolved.head !== null && resolved.head !== request.base &&
+        resolved.changedPaths.length > 0
+      ? {
+        head: resolved.head,
+        checkpointSha: resolved.checkpointSha,
+        changedPaths: resolved.changedPaths,
+      }
+      : null;
     if (settled.loopStopped) {
       // Own early loop stop: the model/session did not fail as an application
       // defect and no candidate may be produced — even if a completed terminal

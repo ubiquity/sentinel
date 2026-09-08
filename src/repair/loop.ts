@@ -2130,7 +2130,8 @@ async function handleModelReceipt(
   const now = deps.clock.now();
   const candidate = receipt.candidate;
   const completed = receipt.outcome === "completed" && candidate !== null &&
-    candidate.head !== null;
+    candidate.head !== null && candidate.head !== record.target.base &&
+    candidate.changedPaths.length > 0;
   if (!completed) {
     // Only OUR sanitized loop-stop marker gets the exact failed_command_loop
     // blocker message; every other incomplete receipt keeps the generic
