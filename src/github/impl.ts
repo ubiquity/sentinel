@@ -171,6 +171,7 @@ export class GitHubPortImpl implements GitHubPort {
   private readonly trustedResolutionAuthors: ReadonlySet<string>;
   private readonly resolutionVerifier: HumanResolutionVerifierV1 | null;
   private readonly findingCap: number;
+  private readonly cooldownGate: GitHubCooldownGateV1;
 
   constructor(options: GitHubPortOptionsV1) {
     this.repository = options.repository;
@@ -190,6 +191,7 @@ export class GitHubPortImpl implements GitHubPort {
     this.trustedResolutionAuthors = new Set(options.trustedResolutionAuthors);
     this.resolutionVerifier = options.resolutionVerifier ?? null;
     this.findingCap = options.findingCap ?? DEFAULT_FINDING_CAP;
+    this.cooldownGate = options.cooldownGate;
     this.client = new GitHubApiClient({
       repository: options.repository,
       apiBaseUrl: options.apiBaseUrl ?? "https://api.github.com",
@@ -267,7 +269,9 @@ export class GitHubPortImpl implements GitHubPort {
     expectedRef: GitSha | null,
   ): Promise<PortResultV1<WriteOutcomeV1>> {
     // 1. Exact expected-ref check against the authoritative remote identity.
-    const current = await this.git.readRemoteRef(ref);
+    const current = await this.gatedRemoteCall(() =>
+      this.git.readRemoteRef(ref)
+    );
     if (!current.ok) return current;
     if (expectedRef === null) {
       // A new deterministic head ref cannot overwrite a conflicting existing ref.
@@ -294,7 +298,9 @@ export class GitHubPortImpl implements GitHubPort {
     // 3. Publish through the trusted executor (never forced). The executor
     // atomically guards the exact advertised ref inside the push transaction;
     // a remote movement after this precheck is rejected, never applied.
-    const pushed = await this.git.push(ref, sha, expectedRef);
+    const pushed = await this.gatedRemoteCall(() =>
+      this.git.push(ref, sha, expectedRef)
+    );
     if (!pushed.ok) return pushed;
     switch (pushed.value.status) {
       case "applied":
@@ -309,7 +315,10 @@ export class GitHubPortImpl implements GitHubPort {
         break;
     }
     // 4. Ambiguous effect: reread the exact remote identity and reconcile.
-    const after = await this.git.readRemoteRef(ref);
+    // A cooldown denial or a failed reread keeps the effect unconfirmed: the
+    // outcome stays ambiguous, never failed/applied, and the push is never
+    // repeated.
+    const after = await this.gatedRemoteCall(() => this.git.readRemoteRef(ref));
     if (!after.ok) {
       // The reread itself failed: the effect remains unconfirmed.
       return portOk("ambiguous");
@@ -473,13 +482,15 @@ export class GitHubPortImpl implements GitHubPort {
     }
     // Exactly one transport submission; a lost response stays ambiguous and is
     // reconciled later by the operation key.
-    const submitted = await this.reviewService.submitReview({
-      operationKey: request.operationKey,
-      prNumber: request.prNumber,
-      expectedHead: request.expectedHead,
-      expectedBase: request.expectedBase,
-      expectedReviewer: request.expectedReviewer,
-    });
+    const submitted = await this.gatedRemoteCall(() =>
+      this.reviewService.submitReview({
+        operationKey: request.operationKey,
+        prNumber: request.prNumber,
+        expectedHead: request.expectedHead,
+        expectedBase: request.expectedBase,
+        expectedReviewer: request.expectedReviewer,
+      })
+    );
     if (!submitted.ok) return submitted;
     switch (submitted.value.status) {
       case "submitted":
@@ -507,10 +518,12 @@ export class GitHubPortImpl implements GitHubPort {
     }
     const pull = await this.client.readPullRequest(request.prNumber);
     if (!pull.ok) return pull;
-    const service = await this.reviewService.readReview({
-      operationKey: request.operationKey,
-      requestId: null,
-    });
+    const service = await this.gatedRemoteCall(() =>
+      this.reviewService.readReview({
+        operationKey: request.operationKey,
+        requestId: null,
+      })
+    );
     if (!service.ok) return service;
     let reviews: GitHubReviewWireV1[] = [];
     let comments: GitHubReviewCommentWireV1[] = [];
@@ -764,6 +777,50 @@ export class GitHubPortImpl implements GitHubPort {
   // Internal helpers
   // -------------------------------------------------------------------------
 
+  /**
+   * One narrow guard for the remote invocations that bypass the HTTP client's
+   * own gate (trusted git transport and injected review-service transport).
+   * The durable cooldown gate is checked immediately before the actual remote
+   * call, and a typed rate-limited result is settled into the gate before the
+   * error is returned. Gate throws are sanitized to unavailable; the remote
+   * operation is never retried or mutated, and a gate denial is returned
+   * as-is.
+   */
+  private async gatedRemoteCall<T>(
+    operation: () => Promise<PortResultV1<T>>,
+  ): Promise<PortResultV1<T>> {
+    let granted: PortResultV1<void>;
+    try {
+      granted = await this.cooldownGate.beforeRequest(
+        this.repository.installationId,
+      );
+    } catch {
+      return portError("unavailable", "cooldown gate unavailable");
+    }
+    if (!granted.ok) return granted;
+    const result = await operation();
+    if (result.ok) return result;
+    if (
+      result.error.kind !== "rate_limited" ||
+      result.error.rateLimit === undefined
+    ) {
+      return result;
+    }
+    let recorded: PortResultV1<void>;
+    try {
+      recorded = await this.cooldownGate.recordRateLimit(
+        this.repository.installationId,
+        result.error.rateLimit,
+      );
+    } catch {
+      return portError("unavailable", "cooldown gate unavailable");
+    }
+    if (!recorded.ok) {
+      return portError("unavailable", "cooldown gate unavailable");
+    }
+    return result;
+  }
+
   private async currentReviewEvidence(
     prNumber: number,
     merge: {
@@ -774,10 +831,12 @@ export class GitHubPortImpl implements GitHubPort {
     | { ok: true; normalized: ReviewNormalizationV1 | null }
     | { ok: false; error: PortErrorV1 }
   > {
-    const service = await this.reviewService.readReview({
-      operationKey: null,
-      requestId: merge.review.requestId,
-    });
+    const service = await this.gatedRemoteCall(() =>
+      this.reviewService.readReview({
+        operationKey: null,
+        requestId: merge.review.requestId,
+      })
+    );
     if (!service.ok) {
       return { ok: false, error: service.error };
     }
