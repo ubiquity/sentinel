@@ -340,3 +340,9 @@ Canonical source is ancestry-preserving merge `83bffd4252fbe217372b532cb87f35103
 | §7 release and §1 delivery | Release identity, resolver binding, 204 promotion and 60-slot acceptance are exercised with injected fakes. | No hosted build receipt, exclusive target handover, deployed runtime, isolated rollback, two autonomous deliveries, continued selection or six-hour observation is proven. |
 
 Disposition: local implementation is accepted through repair-host identity validation. The plan-level divergence remains trusted workflow assembly and every live delivery gate. No activation, publication, deployment, target handover or live write was performed.
+
+## Integrated candidate Codex review (2026-09-08 22:05 UTC)
+
+The local Codex review `codex review --commit 83bffd4252fbe217372b532cb87f35103be1f445` completed for the exact canonical candidate in `/Users/nv/repos/ubiquity/sentinel/.codex-worktrees/master-plan-gfa795549e5` (session `01a0830b-99f8-7583-8696-ac04885fe79d`). It reported no actionable defects and no P0/P1 findings. The reviewer did not execute tests; the applicable independent exact-head evidence remains the focused `8/8` and full `673`-test receipts recorded above. This is a local source review only: no authenticated target review, publication, deployment, target handover, rollback drill or live delivery was performed.
+
+The divergence disposition is unchanged. Scheduled workflows still call fail-closed direct entrypoints without trusted state, gateway/replay, GitHub, model/review, credential or build-receipt assembly; the target m06 work remains local and outside this graph; and no two autonomous deliveries, continued eligible selection or six-hour observation is proven.
