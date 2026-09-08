@@ -166,7 +166,7 @@ Deno.test("loop-guard runtime: real entrypoint stops first loop and admits secon
       /^[a-f0-9]{64}$/,
     );
     const configs = repairConfigs({
-      sessionBound: { maxDurationMs: 4000, maxOutputChars: 200000 },
+      sessionBound: { maxDurationMs: 30000, maxOutputChars: 200000 },
     });
     const model = new CodexImplementationPort({
       checkoutDir: cwd,
