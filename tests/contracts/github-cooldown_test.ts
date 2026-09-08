@@ -426,16 +426,16 @@ Deno.test("portError: invalid metadata is rejected via the strict parser", () =>
 Deno.test("GitHubCooldownGateV1: structural implementation satisfies the interface", async () => {
   const calls: string[] = [];
   const gate: GitHubCooldownGateV1 = {
-    async beforeRequest(installationId: number) {
+    beforeRequest(installationId: number) {
       calls.push(`before:${installationId}`);
-      return { ok: true, value: undefined };
+      return Promise.resolve({ ok: true as const, value: undefined });
     },
-    async recordRateLimit(
+    recordRateLimit(
       installationId: number,
       observed: GitHubRateLimitV1,
     ) {
       calls.push(`record:${installationId}:${observed.kind}`);
-      return { ok: true, value: undefined };
+      return Promise.resolve({ ok: true as const, value: undefined });
     },
   };
   const before = await gate.beforeRequest(7);
