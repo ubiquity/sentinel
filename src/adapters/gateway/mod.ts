@@ -65,3 +65,14 @@ export {
   parseGatewayReplayPageV1,
   replayManifestToWire,
 } from "./wire.ts";
+export {
+  createProtocolSanitizer,
+  type GatewayRestrictedProvenanceV1,
+  type GatewaySanitizedRequestV1,
+  type GatewaySanitizerPolicyV1,
+  type ProtocolSanitizer,
+  type SanitizedGatewayFixtureV1,
+  type SanitizedGatewayReplayV1,
+  sanitizeGatewayReplay,
+  sanitizeRecordedUpstream,
+} from "./sanitize.ts";
