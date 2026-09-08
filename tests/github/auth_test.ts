@@ -16,6 +16,7 @@ import type { JwtClaimsV1 } from "../../src/github/auth.ts";
 import {
   accessTokenWire,
   FakeClock,
+  FakeCooldownGate,
   httpRespond,
   REPO,
   ScriptedHttpTransport,
@@ -166,6 +167,7 @@ function providerWith(
     apiBaseUrl: "https://api.github.com",
     http: transport.fetch.bind(transport),
     clock,
+    cooldownGate: new FakeCooldownGate(),
     signer: { signJwt: signer.signJwt.bind(signer) },
     jwtLifetimeMs: overrides.jwtLifetimeMs ?? 10 * 60_000,
     refreshSkewMs: overrides.refreshSkewMs ?? 60_000,

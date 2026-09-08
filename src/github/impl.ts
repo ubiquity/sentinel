@@ -30,9 +30,11 @@ import { asFindingFingerprint } from "../contracts/brands.ts";
 import { canonicalStringifySha256 } from "../contracts/canonical.ts";
 import { parseMergeRequestV1 } from "../contracts/merge-request.ts";
 import type {
+  Clock,
   GitHubBranchProtectionsV1,
   GitHubChecksV1,
   GitHubCheckV1,
+  GitHubCooldownGateV1,
   GitHubPort,
   GitHubRefV1,
   IssueCloseOutcomeV1,
@@ -49,11 +51,7 @@ import type {
   WriteOutcomeV1,
 } from "../contracts/ports.ts";
 import { portError, portOk } from "../contracts/ports.ts";
-import type {
-  Clock,
-  GitHubIssueV1,
-  GitHubPullRequestV1,
-} from "../contracts/ports.ts";
+import type { GitHubIssueV1, GitHubPullRequestV1 } from "../contracts/ports.ts";
 import type { RepositoryIdentityV1 } from "../contracts/shared.ts";
 import {
   expectNonEmptyString,
@@ -89,6 +87,11 @@ export interface GitHubPortOptionsV1 {
   http: HttpTransportV1;
   /** Installation token provider (injected; never created here). */
   auth: GitHubAuthProviderV1;
+  /**
+   * Durable cooldown gate in front of every authenticated request. Required
+   * trusted capability: no permissive production default exists.
+   */
+  cooldownGate: GitHubCooldownGateV1;
   clock: Clock;
   /** Trusted git executor for push publication and base ancestry. */
   git: GitExecutorV1;
@@ -192,6 +195,8 @@ export class GitHubPortImpl implements GitHubPort {
       apiBaseUrl: options.apiBaseUrl ?? "https://api.github.com",
       http: options.http,
       auth: options.auth,
+      cooldownGate: options.cooldownGate,
+      clock: options.clock,
       perPage: options.perPage,
       maxPages: options.maxPages,
       maxItems: options.maxItems,
@@ -589,7 +594,11 @@ export class GitHubPortImpl implements GitHubPort {
       merge.pullRequestNumber,
       merge,
     );
-    if (!normalizedRes.ok) return portError(...normalizedRes.error);
+    if (!normalizedRes.ok) {
+      // The existing error object is returned as-is: rate-limit metadata
+      // must survive every reconstruction.
+      return { ok: false, error: normalizedRes.error };
+    }
     const normalized = normalizedRes.normalized;
     if (normalized === null) {
       return blocked("review_required", pull.value.head);
@@ -763,26 +772,26 @@ export class GitHubPortImpl implements GitHubPort {
     },
   ): Promise<
     | { ok: true; normalized: ReviewNormalizationV1 | null }
-    | { ok: false; error: [PortErrorV1["kind"], string] }
+    | { ok: false; error: PortErrorV1 }
   > {
     const service = await this.reviewService.readReview({
       operationKey: null,
       requestId: merge.review.requestId,
     });
     if (!service.ok) {
-      return { ok: false, error: [service.error.kind, service.error.detail] };
+      return { ok: false, error: service.error };
     }
     const pull = await this.client.readPullRequest(prNumber);
     if (!pull.ok) {
-      return { ok: false, error: [pull.error.kind, pull.error.detail] };
+      return { ok: false, error: pull.error };
     }
     const reviews = await this.client.readReviews(prNumber);
     if (!reviews.ok) {
-      return { ok: false, error: [reviews.error.kind, reviews.error.detail] };
+      return { ok: false, error: reviews.error };
     }
     const comments = await this.client.readReviewComments(prNumber);
     if (!comments.ok) {
-      return { ok: false, error: [comments.error.kind, comments.error.detail] };
+      return { ok: false, error: comments.error };
     }
     // The service must answer for the EXACT submission the receipt records:
     // the receipt id is derived from the operation key (`review-{key}`), so
@@ -807,7 +816,7 @@ export class GitHubPortImpl implements GitHubPort {
     if (!observation.ok) {
       return {
         ok: false,
-        error: [observation.error.kind, observation.error.detail],
+        error: observation.error,
       };
     }
     if (observation.value.status !== "completed") {

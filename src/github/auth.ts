@@ -20,7 +20,12 @@
  * value, token or key material is ever echoed.
  */
 
-import type { Clock, PortResultV1 } from "../contracts/ports.ts";
+import type { GitHubRateLimitV1 } from "../contracts/github-cooldown.ts";
+import type {
+  Clock,
+  GitHubCooldownGateV1,
+  PortResultV1,
+} from "../contracts/ports.ts";
 import { portError, portOk } from "../contracts/ports.ts";
 import type { RepositoryIdentityV1 } from "../contracts/shared.ts";
 import {
@@ -33,6 +38,7 @@ import {
 } from "../contracts/validation.ts";
 import type { HttpTransportV1 } from "./http.ts";
 import { createDeadline } from "./http.ts";
+import { classifyGitHubRateLimit } from "./rate-limit.ts";
 
 /** Finite default bound on one JWT signing operation (hangs cannot block). */
 export const DEFAULT_SIGN_DEADLINE_MS = 15_000;
@@ -347,6 +353,11 @@ export interface InstallationTokenOptionsV1 {
   apiBaseUrl?: string;
   http: HttpTransportV1;
   clock: Clock;
+  /**
+   * Durable cooldown gate checked before any cached token, signing or token
+   * HTTP. Required trusted capability: no permissive production default.
+   */
+  cooldownGate: GitHubCooldownGateV1;
   signer: JwtSignerV1;
   jwtLifetimeMs?: number;
   jwtSkewMs?: number;
@@ -426,6 +437,11 @@ export class GitHubInstallationTokenProvider {
    * logged or embedded in an error.
    */
   async authorizationHeader(): Promise<PortResultV1<string>> {
+    // The durable cooldown gate is checked before any cached-token
+    // short-circuit, signing or token HTTP: a blocked installation never
+    // reaches the network through this provider either.
+    const gate = await this.checkGate();
+    if (gate !== null) return gate;
     const now = this.options.clock.now();
     if (
       this.cached !== null &&
@@ -435,6 +451,8 @@ export class GitHubInstallationTokenProvider {
     }
     const token = await this.fetchFreshInstallationToken(now);
     if (!token.ok) return token;
+    // Only a successfully exchanged token is ever cached; a failure (rate
+    // limit included) never poisons or refreshes the cache.
     this.cached = {
       token: token.value.token,
       expiresAt: token.value.expiresAt,
@@ -481,6 +499,11 @@ export class GitHubInstallationTokenProvider {
         "jwt signing failed",
       );
     }
+    // The gate is re-checked immediately before the token HTTP: signing may
+    // have taken long enough for the cooldown state to change, and a blocked
+    // installation must never issue the token request.
+    const gateAgain = await this.checkGate();
+    if (gateAgain !== null) return gateAgain;
     const url = `${this.apiBaseUrl}${
       INSTALLATION_ACCESS_TOKEN_PATH.replace(
         "{installation_id}",
@@ -498,6 +521,30 @@ export class GitHubInstallationTokenProvider {
     } catch {
       return portError("unavailable", "installation token request failed");
     }
+    // Classify the response with the injected clock: a confirmed rate limit
+    // is durably recorded before the typed error propagates, and the
+    // observation is never encoded in a detail string. Generic 403 stays an
+    // auth failure. A thrown classifier or failed recording is the sanitized
+    // unavailable failure — nothing token-shaped ever escapes.
+    let rateLimit: GitHubRateLimitV1 | null;
+    try {
+      rateLimit = await classifyGitHubRateLimit(
+        response,
+        this.options.clock.now(),
+      );
+    } catch {
+      return portError("unavailable", "installation token request failed");
+    }
+    if (rateLimit !== null) {
+      if (!(await this.recordRateLimit(rateLimit))) {
+        return portError("unavailable", "installation token request failed");
+      }
+      return portError(
+        "rate_limited",
+        "installation token request rate limited",
+        rateLimit,
+      );
+    }
     if (response.status === 200 || response.status === 201) {
       return parseAccessTokenResponse(
         response.bodyText,
@@ -506,9 +553,7 @@ export class GitHubInstallationTokenProvider {
     }
     if (response.status === 401 || response.status === 403) {
       return portError(
-        response.status === 403 && isRateLimited(response.headers)
-          ? "rate_limited"
-          : "auth_failed",
+        "auth_failed",
         "installation token request was rejected",
       );
     }
@@ -523,6 +568,60 @@ export class GitHubInstallationTokenProvider {
     }
     return portError("unavailable", "installation token request failed");
   }
+
+  /**
+   * Await the durable gate read, bounded by a fresh existing-duration sign
+   * deadline: a hung gate cannot block the provider, and a gate that settles
+   * late (after its bound fired) never leads to a request. A thrown gate is
+   * the sanitized static unavailable failure. A blocked installation returns
+   * the gate's own typed error, preserved.
+   */
+  private async checkGate(): Promise<PortResultV1<never> | null> {
+    const deadline = createDeadline(this.signDeadlineMs);
+    try {
+      let result: PortResultV1<void>;
+      try {
+        const gatePromise = Promise.resolve().then(() =>
+          this.options.cooldownGate.beforeRequest(
+            this.options.repository.installationId,
+          )
+        );
+        // A gate that settles after the deadline fired must never surface as
+        // an unhandled rejection.
+        gatePromise.catch(() => {});
+        result = await deadline.race(gatePromise);
+      } catch {
+        return portError("unavailable", "installation token request failed");
+      }
+      if (deadline.fired()) {
+        return portError("unavailable", "installation token request failed");
+      }
+      if (!result.ok) return { ok: false, error: result.error };
+      return null;
+    } finally {
+      deadline.dispose();
+    }
+  }
+
+  /**
+   * Durably record an observed rate limit before any later token request.
+   * Persistence is awaited to settlement directly — no sign deadline or
+   * timer races it, so the observation cannot be abandoned. A
+   * thrown/rejected gate or failed persistence is false (the caller
+   * overrides with unavailable and no further request may start).
+   */
+  private async recordRateLimit(
+    rateLimit: GitHubRateLimitV1,
+  ): Promise<boolean> {
+    try {
+      return (await this.options.cooldownGate.recordRateLimit(
+        this.options.repository.installationId,
+        rateLimit,
+      )).ok;
+    } catch {
+      return false;
+    }
+  }
 }
 
 function authHeaders(header: string): ReadonlyMap<string, string> {
@@ -532,10 +631,6 @@ function authHeaders(header: string): ReadonlyMap<string, string> {
   map.set("x-github-api-version", "2022-11-28");
   map.set("content-type", "application/json");
   return map;
-}
-
-function isRateLimited(headers: Headers): boolean {
-  return headers.get("x-ratelimit-remaining") === "0";
 }
 
 function parseAccessTokenResponse(

@@ -12,9 +12,12 @@
  */
 
 import type { GitSha } from "../contracts/brands.ts";
+import type { GitHubRateLimitV1 } from "../contracts/github-cooldown.ts";
 import type {
+  Clock,
   GitHubBranchProtectionsV1,
   GitHubChecksV1,
+  GitHubCooldownGateV1,
   GitHubIssueV1,
   GitHubPullRequestV1,
   GitHubRefV1,
@@ -29,8 +32,13 @@ import {
   tryParse,
 } from "../contracts/validation.ts";
 import type { GitHubAuthProviderV1 } from "./auth.ts";
-import { createDeadline, DEFAULT_HTTP_DEADLINE_MS } from "./http.ts";
+import {
+  createDeadline,
+  type DeadlineV1,
+  DEFAULT_HTTP_DEADLINE_MS,
+} from "./http.ts";
 import type { HttpRequestV1, HttpResponseV1, HttpTransportV1 } from "./http.ts";
+import { classifyGitHubRateLimit } from "./rate-limit.ts";
 import {
   parseBranchRuleWire,
   parseCheckRunWire,
@@ -59,6 +67,13 @@ export interface GitHubApiClientOptionsV1 {
   apiBaseUrl: string;
   http: HttpTransportV1;
   auth: GitHubAuthProviderV1;
+  /**
+   * Durable cooldown gate in front of every authenticated request. Required
+   * trusted capability: no permissive production default exists.
+   */
+  cooldownGate: GitHubCooldownGateV1;
+  /** Injectable clock for rate-limit observation timestamps. */
+  clock: Clock;
   /** Paged read bounds (safety limits; exceeding them is unavailable). */
   perPage?: number;
   maxPages?: number;
@@ -385,7 +400,7 @@ export class GitHubApiClient {
       },
     );
     if (raw.status === "error") {
-      return portError(raw.error.kind, raw.error.detail);
+      return portError(raw.error.kind, raw.error.detail, raw.error.rateLimit);
     }
     if (raw.status === "lost") {
       // The response was lost; the pull may have been created. The port
@@ -419,7 +434,7 @@ export class GitHubApiClient {
       { sha },
     );
     if (raw.status === "error") {
-      return portError(raw.error.kind, raw.error.detail);
+      return portError(raw.error.kind, raw.error.detail, raw.error.rateLimit);
     }
     if (raw.status === "lost") {
       // The response was lost; the merge may have been applied. The port
@@ -500,7 +515,7 @@ export class GitHubApiClient {
       if (raw.status === "lost") {
         return portError("unavailable", "GitHub API request failed");
       }
-      return portError(raw.error.kind, raw.error.detail);
+      return portError(raw.error.kind, raw.error.detail, raw.error.rateLimit);
     });
   }
 
@@ -509,11 +524,16 @@ export class GitHubApiClient {
     url: string,
     body: Record<string, unknown> | null,
   ): Promise<RawSendResult> {
-    // One finite whole-operation deadline starts before authentication and
-    // covers the HTTP request and body read. A hung injected auth provider
-    // cannot block the operation beyond it.
+    // One finite whole-operation deadline starts before authentication,
+    // covers the gate reads, the HTTP request and the body read. A hung
+    // injected gate or auth provider cannot block the operation beyond it.
     const deadline = createDeadline(this.requestDeadlineMs);
     try {
+      // Durable cooldown gate before authentication: a blocked installation
+      // never reaches the provider or the network, and its typed error is
+      // preserved (including rate-limit metadata).
+      const before = await this.requestGate(deadline);
+      if (before !== null) return before;
       let header: PortResultV1<string>;
       try {
         const authPromise = Promise.resolve().then(() =>
@@ -534,13 +554,28 @@ export class GitHubApiClient {
           },
         };
       }
-      if (!header.ok) return { status: "error", error: header.error };
+      if (!header.ok) {
+        // Auth can fail with typed rate-limit metadata (token refresh was
+        // throttled): the observation is durably recorded before the error
+        // propagates. Duplicate identity recording is safe — the real gate is
+        // idempotent — and a recording failure overrides with unavailable.
+        const recorded = await this.recordGateRateLimit(
+          deadline,
+          header.error.rateLimit,
+        );
+        if (recorded !== null) return recorded;
+        return { status: "error", error: header.error };
+      }
       if (header.value.includes("\r") || header.value.includes("\n")) {
         return {
           status: "error",
           error: { kind: "invalid", detail: "invalid authorization header" },
         };
       }
+      // The gate is re-checked immediately before the request, and an expired
+      // whole-operation deadline never submits HTTP.
+      const again = await this.requestGate(deadline);
+      if (again !== null) return again;
       let response: HttpResponseV1;
       try {
         response = await deadline.race(
@@ -563,9 +598,92 @@ export class GitHubApiClient {
         // have been submitted), a read is unavailable.
         return { status: "lost" };
       }
+      // Classification is intercepted here, before mapError: a confirmed
+      // rate-limit observation is durably recorded before any typed error
+      // leaves this method, and no request starts while persistence is
+      // unsettled. A thrown classifier (or recordRateLimit) never escapes;
+      // it becomes the sanitized static unavailable failure.
+      let rateLimit: GitHubRateLimitV1 | null;
+      try {
+        rateLimit = await classifyGitHubRateLimit(
+          response,
+          this.options.clock.now(),
+        );
+      } catch {
+        return unavailable();
+      }
+      if (rateLimit !== null) {
+        const recorded = await this.recordGateRateLimit(deadline, rateLimit);
+        if (recorded !== null) return recorded;
+        return {
+          status: "error",
+          error: {
+            kind: "rate_limited",
+            detail: "GitHub API rate limit exceeded",
+            rateLimit,
+          },
+        };
+      }
       return { status: "response", response };
     } finally {
       deadline.dispose();
+    }
+  }
+
+  /**
+   * Await the durable gate read, bounded by the whole-operation deadline. A
+   * thrown gate, an expired bound or a late resolution is the sanitized
+   * static unavailable failure — never an escaped error, never a request. A
+   * real gate answer (blocked) is preserved as-is and prevents HTTP.
+   */
+  private async requestGate(
+    deadline: DeadlineV1,
+  ): Promise<RawSendResult | null> {
+    let result: PortResultV1<void>;
+    try {
+      const gatePromise = Promise.resolve().then(() =>
+        this.options.cooldownGate.beforeRequest(this.repository.installationId)
+      );
+      // A gate that settles after the deadline fired must never surface as an
+      // unhandled rejection.
+      gatePromise.catch(() => {});
+      result = await deadline.race(gatePromise);
+    } catch {
+      return unavailable();
+    }
+    if (deadline.fired()) return unavailable();
+    if (!result.ok) return { status: "error", error: result.error };
+    return null;
+  }
+
+  /**
+   * Durably record a rate-limit observation. Persistence is awaited to
+   * settlement directly — never raced against the operation deadline, so a
+   * record cannot be abandoned mid-write while a later request proceeds.
+   * Returns null on success (or when there is no observation); a
+   * thrown/rejected gate or failed persistence overrides with the sanitized
+   * static unavailable failure and prevents any further request. The
+   * deadline is checked only after persistence has settled: an expired bound
+   * after a completed record is still unavailable, but it can never make
+   * this method return before persistence completes.
+   */
+  private async recordGateRateLimit(
+    deadline: DeadlineV1,
+    rateLimit: GitHubRateLimitV1 | undefined,
+  ): Promise<RawSendResult | null> {
+    if (rateLimit === undefined) return null;
+    try {
+      const result = await Promise.resolve().then(() =>
+        this.options.cooldownGate.recordRateLimit(
+          this.repository.installationId,
+          rateLimit,
+        )
+      );
+      if (deadline.fired()) return unavailable();
+      if (!result.ok) return unavailable();
+      return null;
+    } catch {
+      return unavailable();
     }
   }
 
@@ -603,7 +721,11 @@ export class GitHubApiClient {
         return portError("unavailable", "GitHub API request failed");
       }
       if (sent.status === "error") {
-        return portError(sent.error.kind, sent.error.detail);
+        return portError(
+          sent.error.kind,
+          sent.error.detail,
+          sent.error.rateLimit,
+        );
       }
       const response = sent.response;
       if (response.status !== 200) {
@@ -641,6 +763,14 @@ export class GitHubApiClient {
 
 function repoPath(repository: RepositoryIdentityV1): string {
   return `${repository.owner}/${repository.name}`;
+}
+
+/** Sanitized static transport-boundary failure (no status/body/URL echoed). */
+function unavailable(): RawSendResult {
+  return {
+    status: "error",
+    error: { kind: "unavailable", detail: "GitHub API request failed" },
+  };
 }
 
 function parseWire<T>(
