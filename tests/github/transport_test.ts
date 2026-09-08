@@ -21,6 +21,7 @@ import {
   checkRunWire,
   completedServiceRead,
   FakeClock,
+  FakeCooldownGate,
   FakeGitExecutor,
   FakeReviewService,
   httpRespond,
@@ -327,6 +328,7 @@ Deno.test("token provider: a hung injected signer cannot block past its bound", 
     apiBaseUrl: "https://api.github.com",
     http: transport.fetch.bind(transport),
     clock: new FakeClock(T0),
+    cooldownGate: new FakeCooldownGate(),
     signer: {
       signJwt(): Promise<PortResultV1<string>> {
         // The injected signer ignores everything and never settles.

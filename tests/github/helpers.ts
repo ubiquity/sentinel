@@ -3,8 +3,10 @@
 // return canned values — no product logic lives in the fakes, every check
 // asserts on the real adapter methods and the recorded requests.
 import type { GitSha } from "../../src/contracts/brands.ts";
+import type { GitHubRateLimitV1 } from "../../src/contracts/github-cooldown.ts";
 import type {
   Clock,
+  GitHubCooldownGateV1,
   PortErrorV1,
   PortResultV1,
 } from "../../src/contracts/ports.ts";
@@ -172,6 +174,31 @@ export function httpThrow(
   urlPart: string,
 ): ScriptEntry {
   return { kind: "throw", method, urlPart };
+}
+
+// ---------------------------------------------------------------------------
+// Fake durable cooldown gate
+// ---------------------------------------------------------------------------
+
+/**
+ * Test-only cooldown gate: every read is allowed and every observed rate
+ * limit is recorded. It is isolated to this suite — the production gate is a
+ * required constructor capability and never has a permissive module default.
+ */
+export class FakeCooldownGate implements GitHubCooldownGateV1 {
+  beforeRequests: number[] = [];
+  recorded: { installationId: number; rateLimit: GitHubRateLimitV1 }[] = [];
+  beforeRequest(installationId: number): Promise<PortResultV1<void>> {
+    this.beforeRequests.push(installationId);
+    return Promise.resolve(portOk(undefined));
+  }
+  recordRateLimit(
+    installationId: number,
+    rateLimit: GitHubRateLimitV1,
+  ): Promise<PortResultV1<void>> {
+    this.recorded.push({ installationId, rateLimit });
+    return Promise.resolve(portOk(undefined));
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -624,6 +651,7 @@ export interface MakePortOptions {
   /** Custom transport override (defaults to the scripted transport). */
   http?: HttpTransportV1;
   auth?: GitHubAuthProviderV1;
+  cooldownGate?: GitHubCooldownGateV1;
   git?: GitExecutorV1;
   review?: ReviewServiceTransportV1;
   clock?: Clock;
@@ -648,6 +676,7 @@ export function makePort(
     apiBaseUrl: options.apiBaseUrl ?? "https://api.github.com",
     http: options.http ?? transport.fetch.bind(transport) as HttpTransportV1,
     auth: options.auth ?? new FakeAuthProvider(),
+    cooldownGate: options.cooldownGate ?? new FakeCooldownGate(),
     clock: options.clock ?? new FakeClock(T0),
     git: options.git ?? new FakeGitExecutor(),
     reviewService: options.review ?? new FakeReviewService(),
