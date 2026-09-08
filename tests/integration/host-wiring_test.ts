@@ -18,10 +18,16 @@
  *   static non-echoing TypeError before construction;
  * - the credential/header closure adapters map thrown and malformed values to
  *   the existing typed fail-closed results without echoing any value and
- *   without any downstream transport call;
+ *   without any downstream transport call; a hostile accessor or
+ *   property-enumeration fault inside the adapters is the same typed
+ *   fail-closed result, never a raw escape;
  * - malformed/mismatched repository identities, an unconfigured composed
  *   repository, an invalid controller SHA and an invalid release environment
  *   are rejected with static non-echoing TypeErrors before construction;
+ * - malformed top-level clock / cooldown-gate shapes and hostile accessor or
+ *   property-enumeration faults inside the nested shape validators are
+ *   rejected with the same static non-echoing TypeErrors before construction,
+ *   and no input-derived text is ever echoed;
  * - one bounded composed repair/release pass over disposable local Git and
  *   fake transports: idle repair with no model session and no gateway write,
  *   waiting release with no Deno call, no promotion and no release record.
@@ -575,6 +581,93 @@ Deno.test(
 );
 
 Deno.test(
+  "provider adapters: hostile accessor or enumeration faults stay inside the typed fail-closed boundary",
+  async () => {
+    // --- Gateway: a throwing ownKeys trap (property enumeration) is the
+    // existing typed malformed-record failure, never a raw error or echo.
+    const enumeratingHeaders = new Proxy(
+      { Authorization: "Bearer synthetic-token" },
+      {
+        ownKeys() {
+          throw new Error("EXOTIC-ENUMERATION-FAULT");
+        },
+      },
+    ) as unknown as Record<string, string>;
+    const enumerated = await createGatewayAuthProvider(
+      () => enumeratingHeaders,
+    ).headers();
+    assert.equal(enumerated.ok, false);
+    if (!enumerated.ok) {
+      assert.equal(enumerated.error.kind, "auth_failed");
+      assert.equal(
+        enumerated.error.detail,
+        "gateway auth provider returned malformed headers",
+      );
+      assert.ok(
+        !enumerated.error.detail.includes("EXOTIC-ENUMERATION-FAULT"),
+        "no raw enumeration fault is echoed",
+      );
+    }
+
+    // --- Gateway: a throwing get trap during the same enumeration is also
+    // the existing typed malformed-record failure, no echo.
+    const throwingGetterHeaders = new Proxy(
+      { Authorization: "Bearer synthetic-token" },
+      {
+        get(target, key) {
+          if (key === "Authorization") throw new Error("EXOTIC-HEADER-READ");
+          return Reflect.get(target, key);
+        },
+      },
+    ) as unknown as Record<string, string>;
+    const getterOutcome = await createGatewayAuthProvider(
+      () => throwingGetterHeaders,
+    ).headers();
+    assert.equal(getterOutcome.ok, false);
+    if (!getterOutcome.ok) {
+      assert.equal(getterOutcome.error.kind, "auth_failed");
+      assert.equal(
+        getterOutcome.error.detail,
+        "gateway auth provider returned malformed headers",
+      );
+      assert.ok(
+        !getterOutcome.error.detail.includes("EXOTIC-HEADER-READ"),
+        "no raw accessor fault is echoed",
+      );
+    }
+
+    // --- Isolation: a hostile attestation accessor is the same static
+    // non-echoing TypeError, never the raw thrown value.
+    const hostileAttestation = new Proxy(
+      {
+        version: "v1",
+        restrictedExecution: true,
+        host: "harness",
+        boundary: "bounded test host",
+        attestationRef: "attestation://harness/v1",
+      },
+      {
+        get(target, key) {
+          if (key === "restrictedExecution") {
+            throw new Error("EXOTIC-ATTESTATION-READ");
+          }
+          return Reflect.get(target, key);
+        },
+      },
+    );
+    assert.throws(
+      () => createReplayIsolationHost(hostileAttestation),
+      (error: unknown) =>
+        error instanceof TypeError &&
+        error.message.startsWith(
+          "replay isolation host rejected: the attestation does not prove restricted execution",
+        ) &&
+        !error.message.includes("EXOTIC-ATTESTATION-READ"),
+    );
+  },
+);
+
+Deno.test(
   "host assembly: malformed/mismatched identities and invalid capability shapes fail with static non-echoing TypeErrors",
   async () => {
     const rig = await makeWiringRig("rejections");
@@ -684,6 +777,205 @@ Deno.test(
         },
         "trusted host assembly rejected: model session opener shape is invalid",
       );
+    } finally {
+      await rig.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "host assembly: malformed top-level clock or cooldown gate fails before any seam constructor",
+  async () => {
+    const rig = await makeWiringRig("clock-gate");
+    try {
+      const expectRejection = (
+        options: TrustedHostOptionsV1,
+        message: string,
+      ) => {
+        assert.throws(
+          () => assembleTrustedHost(options),
+          (error: unknown) =>
+            error instanceof TypeError && error.message === message,
+        );
+      };
+
+      // Wrong clock shape: the clock is an explicit capability, never a
+      // default; no downstream seam may see it.
+      expectRejection(
+        { ...rig.options, clock: { tick: () => 1 } as never },
+        "trusted host assembly rejected: clock shape is invalid",
+      );
+
+      // Malformed cooldown gate: the required gate methods are missing.
+      expectRejection(
+        { ...rig.options, githubCooldown: {} as never },
+        "trusted host assembly rejected: github cooldown gate shape is invalid",
+      );
+
+      // Hostile clock accessor: the SAME static error, nothing echoed.
+      const hostileClock = new Proxy(rig.options.clock, {
+        get(target, key) {
+          if (key === "now") throw new Error("EXOTIC-CLOCK-VALUE");
+          return Reflect.get(target, key);
+        },
+      }) as never;
+      expectRejection(
+        { ...rig.options, clock: hostileClock },
+        "trusted host assembly rejected: clock shape is invalid",
+      );
+
+      // Hostile gate accessor: the SAME static error, nothing echoed.
+      const hostileGate = new Proxy(rig.gate, {
+        get(target, key) {
+          if (key === "beforeRequest") throw new Error("EXOTIC-GATE-VALUE");
+          return Reflect.get(target, key);
+        },
+      }) as never;
+      expectRejection(
+        { ...rig.options, githubCooldown: hostileGate },
+        "trusted host assembly rejected: github cooldown gate shape is invalid",
+      );
+
+      // Every rejection happened before construction: no transport, gate,
+      // credential or model capability was touched.
+      assert.equal(rig.githubTransport.requests.length, 0);
+      assert.equal(rig.gatewayTransport.requests.length, 0);
+      assert.equal(rig.denoTransport.calls.length, 0);
+      assert.deepEqual(rig.gate.beforeRequests, []);
+      assert.equal(rig.sessionCalls(), 0);
+    } finally {
+      await rig.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "host assembly: hostile accessor and enumeration faults inside nested shape validation become static non-echoing TypeErrors",
+  async () => {
+    const rig = await makeWiringRig("accessor-faults");
+    try {
+      const expectRejection = (
+        options: TrustedHostOptionsV1,
+        message: string,
+      ) => {
+        assert.throws(
+          () => assembleTrustedHost(options),
+          (error: unknown) =>
+            error instanceof TypeError && error.message === message,
+        );
+      };
+
+      // Gateway transport: a throwing accessor is the transport shape error.
+      const hostileGateway = new Proxy(rig.options.repair.gateway, {
+        get(target, key) {
+          if (key === "transport") {
+            throw new Error("EXOTIC-GATEWAY-TRANSPORT");
+          }
+          return Reflect.get(target, key);
+        },
+      }) as never;
+      expectRejection(
+        {
+          ...rig.options,
+          repair: { ...rig.options.repair, gateway: hostileGateway },
+        },
+        "trusted host assembly rejected: gateway transport shape is invalid",
+      );
+
+      // Repair state read: a throwing accessor is the repair state error.
+      const hostileState = new Proxy(rig.options.repair.state, {
+        get(target, key) {
+          if (key === "readRepair") throw new Error("EXOTIC-REPAIR-STATE");
+          return Reflect.get(target, key);
+        },
+      }) as never;
+      expectRejection(
+        {
+          ...rig.options,
+          repair: { ...rig.options.repair, state: hostileState },
+        },
+        "trusted host assembly rejected: repair state capability shape is invalid",
+      );
+
+      // Replay source kind: a throwing accessor is the replay source error.
+      const hostileSource = new Proxy(rig.options.repair.replay.source, {
+        get(target, key) {
+          if (key === "kind") throw new Error("EXOTIC-SOURCE-KIND");
+          return Reflect.get(target, key);
+        },
+      }) as never;
+      expectRejection(
+        {
+          ...rig.options,
+          repair: {
+            ...rig.options.repair,
+            replay: { ...rig.options.repair.replay, source: hostileSource },
+          },
+        },
+        "trusted host assembly rejected: replay source shape is invalid",
+      );
+
+      // Model session opener: a throwing accessor is the model session error.
+      const hostileModel = new Proxy(rig.options.repair.model, {
+        get(target, key) {
+          if (key === "openSession") throw new Error("EXOTIC-MODEL-SESSION");
+          return Reflect.get(target, key);
+        },
+      }) as never;
+      expectRejection(
+        {
+          ...rig.options,
+          repair: { ...rig.options.repair, model: hostileModel },
+        },
+        "trusted host assembly rejected: model session opener shape is invalid",
+      );
+
+      // GitHub review service: a throwing accessor is the review shape error.
+      const hostileGithub = new Proxy(rig.options.github, {
+        get(target, key) {
+          if (key === "reviewService") {
+            throw new Error("EXOTIC-REVIEW-SERVICE");
+          }
+          return Reflect.get(target, key);
+        },
+      }) as never;
+      expectRejection(
+        { ...rig.options, github: hostileGithub },
+        "trusted host assembly rejected: github review service shape is invalid",
+      );
+
+      // Release Deno auth: a throwing accessor is the release Deno error.
+      const hostileDeno = new Proxy(rig.options.release.deno, {
+        get(target, key) {
+          if (key === "auth") throw new Error("EXOTIC-DENO-AUTH");
+          return Reflect.get(target, key);
+        },
+      }) as never;
+      expectRejection(
+        {
+          ...rig.options,
+          release: { ...rig.options.release, deno: hostileDeno },
+        },
+        "trusted host assembly rejected: release Deno capability shape is invalid",
+      );
+
+      // Hostile property enumeration on the github seam: the static github
+      // input error, never the raw trap error, and no constructor has run.
+      const enumeratingGithub = new Proxy(rig.options.github, {
+        ownKeys() {
+          throw new Error("EXOTIC-ENUMERATION");
+        },
+      }) as never;
+      expectRejection(
+        { ...rig.options, github: enumeratingGithub },
+        "trusted host assembly rejected: github host inputs are invalid",
+      );
+
+      assert.equal(rig.githubTransport.requests.length, 0);
+      assert.equal(rig.gatewayTransport.requests.length, 0);
+      assert.equal(rig.denoTransport.calls.length, 0);
+      assert.deepEqual(rig.gate.beforeRequests, []);
+      assert.equal(rig.sessionCalls(), 0);
     } finally {
       await rig.cleanup();
     }

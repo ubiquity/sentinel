@@ -41,18 +41,22 @@
  * restricted-execution attestation fails closed before construction.
  *
  * Validation order (fail fast, static non-echoing `TypeError` text only):
- * capability shapes, controller SHA, config set and every repository identity
- * are re-validated with the frozen contracts, the three repository bindings
- * must agree exactly with the composed repair repository and it must match
- * exactly one configured repository, the release target/policy are
- * re-validated, and the isolation attestation must prove restricted
- * execution — all BEFORE any downstream instance is constructed.
+ * the ONE clock and the ONE cooldown gate shapes, every capability shape,
+ * controller SHA, config set and repository identity are re-validated with
+ * the frozen contracts, the three repository bindings must agree exactly
+ * with the composed repair repository and it must match exactly one
+ * configured repository, the release target/policy are re-validated, and the
+ * isolation attestation must prove restricted execution — all BEFORE any
+ * downstream instance is constructed.
  */
 
 import { isGitSha } from "../contracts/brands.ts";
 import type { Clock, GitHubCooldownGateV1 } from "../contracts/ports.ts";
 import { parseRepositoryConfigV1 } from "../contracts/repository-config.ts";
-import type { RepositoryConfigV1 } from "../contracts/repository-config.ts";
+import type {
+  RepositoryConfigV1,
+  StabilityPolicyV1,
+} from "../contracts/repository-config.ts";
 import { parseRepositoryIdentity } from "../contracts/shared.ts";
 import type { RepositoryIdentityV1 } from "../contracts/shared.ts";
 import {
@@ -91,6 +95,9 @@ const ERR_RELEASE_MISMATCH =
   "trusted host assembly rejected: the release repository does not match the composed repair repository";
 const ERR_TOP_LEVEL =
   "trusted host assembly rejected: host options are invalid";
+const ERR_CLOCK = "trusted host assembly rejected: clock shape is invalid";
+const ERR_COOLDOWN =
+  "trusted host assembly rejected: github cooldown gate shape is invalid";
 const ERR_GITHUB_INPUT =
   "trusted host assembly rejected: github host inputs are invalid";
 const ERR_GITHUB_HTTP =
@@ -198,31 +205,71 @@ export function assembleTrustedHost(
   options: TrustedHostOptionsV1,
 ): TrustedHostAssemblyV1 {
   // 1. Top-level shape: the assembly is a composition seam, not a default.
+  //    The ONE clock and the ONE cooldown gate are hoisted capabilities, so
+  //    they are validated here — before any sub-record is dereferenced and
+  //    before any downstream constructor runs. Every read is a contained
+  //    readField/spreadRecord: a hostile accessor or property-enumeration
+  //    fault is the SAME static non-echoing TypeError the shape check would
+  //    reject with, never a raw thrown value.
   expectRecord(options, ERR_TOP_LEVEL);
-  expectRecord(options.github, ERR_GITHUB_INPUT);
-  expectRecord(options.repair, ERR_REPAIR_INPUT);
-  expectRecord(options.release, ERR_RELEASE_INPUT);
+  const clock = readField<Clock>(options, "clock", ERR_CLOCK);
+  expectMethod(clock, "now", ERR_CLOCK);
+  const githubCooldown = readField<GitHubCooldownGateV1>(
+    options,
+    "githubCooldown",
+    ERR_COOLDOWN,
+  );
+  expectRecord(githubCooldown, ERR_COOLDOWN);
+  expectCallable(
+    readField(githubCooldown, "beforeRequest", ERR_COOLDOWN),
+    ERR_COOLDOWN,
+  );
+  expectCallable(
+    readField(githubCooldown, "recordRateLimit", ERR_COOLDOWN),
+    ERR_COOLDOWN,
+  );
+  const githubInput = readField<
+    Omit<GitHubHostOptionsV1, "clock" | "cooldownGate">
+  >(options, "github", ERR_GITHUB_INPUT);
+  expectRecord(githubInput, ERR_GITHUB_INPUT);
+  const repairInput = readField<
+    Omit<RepairHostOptionsV1, "clock" | "github" | "githubCooldown">
+  >(options, "repair", ERR_REPAIR_INPUT);
+  expectRecord(repairInput, ERR_REPAIR_INPUT);
+  const releaseInput = readField<Omit<ReleaseHostOptionsV1, "clock">>(
+    options,
+    "release",
+    ERR_RELEASE_INPUT,
+  );
+  expectRecord(releaseInput, ERR_RELEASE_INPUT);
 
   // 2. Required capability shapes (fail-closed before any instance exists,
   //    and before any sub-record is dereferenced).
-  validateGitHubShapes(options.github);
-  validateRepairShapes(options.repair);
-  validateReleaseShapes(options.release);
+  validateGitHubShapes(githubInput);
+  validateRepairShapes(repairInput);
+  validateReleaseShapes(releaseInput);
 
   // 3. Controller identity: exact lowercase 40-hex Git commit SHA (frozen
   //    brand predicate) before any config or instance processing.
-  if (!isGitSha(options.repair.controllerSha)) {
+  if (!isGitSha(readField(repairInput, "controllerSha", ERR_CONTROLLER_SHA))) {
     throw new TypeError(ERR_CONTROLLER_SHA);
   }
 
-  // 4. Complete config set through the frozen parser; rejections are static.
+  // 4. Complete config set through the frozen parser; rejections are static
+  //    and the whole pass is contained (a hostile array/enumeration fault is
+  //    the same static config error, never a raw throw).
   const configs: RepositoryConfigV1[] = [];
-  for (const config of options.repair.configs) {
-    try {
+  try {
+    const configSet = readField<readonly unknown[]>(
+      repairInput,
+      "configs",
+      ERR_CONFIGS,
+    );
+    for (const config of configSet) {
       configs.push(parseRepositoryConfigV1(config));
-    } catch {
-      throw new TypeError(ERR_CONFIGS);
     }
+  } catch {
+    throw new TypeError(ERR_CONFIGS);
   }
 
   // 5. Every repository identity through the frozen parser, then prove the
@@ -232,12 +279,14 @@ export function assembleTrustedHost(
   //    configured set — a drift is a host wiring fault, never a late
   //    resolve-time surprise.
   const githubRepository = parseIdentity(
-    options.github.repository,
+    readField(githubInput, "repository", ERR_GITHUB_REPOSITORY),
     "$",
     ERR_GITHUB_REPOSITORY,
   );
+  const gatewayRecord = readField(repairInput, "gateway", ERR_GATEWAY_INPUT);
+  expectRecord(gatewayRecord, ERR_GATEWAY_INPUT);
   const gatewayRepository = parseIdentity(
-    options.repair.gateway.repository,
+    readField(gatewayRecord, "repository", ERR_GATEWAY_REPOSITORY),
     "$",
     ERR_GATEWAY_REPOSITORY,
   );
@@ -250,7 +299,7 @@ export function assembleTrustedHost(
   if (matches.length === 0) throw new TypeError(ERR_UNCONFIGURED_REPOSITORY);
   if (matches.length > 1) throw new TypeError(ERR_AMBIGUOUS_REPOSITORY);
   const releaseRepository = parseIdentity(
-    options.release.repository,
+    readField(releaseInput, "repository", ERR_RELEASE_REPOSITORY),
     "$",
     ERR_RELEASE_REPOSITORY,
   );
@@ -261,29 +310,37 @@ export function assembleTrustedHost(
   // 6. Restricted-execution attestation: the concrete port requirement is
   //    enforced at this boundary too, so a false/absent attestation fails
   //    closed before the replay port could even refuse construction.
-  const isolation = options.repair.replay.isolation as unknown as
-    | { attestation?: unknown }
-    | null;
+  const replayRecord = readField(repairInput, "replay", ERR_REPLAY_INPUT);
+  expectRecord(replayRecord, ERR_REPLAY_INPUT);
+  const isolation = readField(
+    replayRecord,
+    "isolation",
+    ERR_REPLAY_INPUT,
+  ) as unknown as { attestation?: unknown } | null;
   expectRecord(isolation, ERR_REPLAY_INPUT);
-  createReplayIsolationHost(isolation.attestation);
+  createReplayIsolationHost(
+    readField(isolation, "attestation", ERR_REPLAY_INPUT),
+  );
 
   // 7. Compose the three seams. The assembly's explicit clock/cooldown gate/
   //    composed GitHub port override any sub-record value, so a single shared
   //    gate and one executor identity are structural, not conventional.
+  //    spreadRecord snapshots each validated input into a plain record, so a
+  //    later enumeration fault is the same static input error.
   const github = composeGitHubHost({
-    ...options.github,
-    clock: options.clock,
-    cooldownGate: options.githubCooldown,
+    ...spreadRecord(githubInput, ERR_GITHUB_INPUT),
+    clock,
+    cooldownGate: githubCooldown,
   });
   const repair = composeRepairHost({
-    ...options.repair,
-    clock: options.clock,
+    ...spreadRecord(repairInput, ERR_REPAIR_INPUT),
+    clock,
     github: github.port,
-    githubCooldown: options.githubCooldown,
+    githubCooldown,
   });
   const release = composeReleaseHost({
-    ...options.release,
-    clock: options.clock,
+    ...spreadRecord(releaseInput, ERR_RELEASE_INPUT),
+    clock,
   });
 
   return { repair, release, github };
@@ -318,14 +375,34 @@ function parseIdentity(
 function validateGitHubShapes(
   github: Omit<GitHubHostOptionsV1, "clock" | "cooldownGate">,
 ): void {
-  expectCallable(github.http, ERR_GITHUB_HTTP);
-  expectMethod(github.auth, "authorizationHeader", ERR_GITHUB_AUTH);
-  expectRecord(github.reviewService, ERR_GITHUB_REVIEW);
-  expectCallable(github.reviewService.submitReview, ERR_GITHUB_REVIEW);
-  expectCallable(github.reviewService.readReview, ERR_GITHUB_REVIEW);
-  if (github.resolutionVerifier !== undefined) {
+  expectCallable(readField(github, "http", ERR_GITHUB_HTTP), ERR_GITHUB_HTTP);
+  expectMethod(
+    readField(github, "auth", ERR_GITHUB_AUTH),
+    "authorizationHeader",
+    ERR_GITHUB_AUTH,
+  );
+  const reviewService = readField(
+    github,
+    "reviewService",
+    ERR_GITHUB_REVIEW,
+  );
+  expectRecord(reviewService, ERR_GITHUB_REVIEW);
+  expectCallable(
+    readField(reviewService, "submitReview", ERR_GITHUB_REVIEW),
+    ERR_GITHUB_REVIEW,
+  );
+  expectCallable(
+    readField(reviewService, "readReview", ERR_GITHUB_REVIEW),
+    ERR_GITHUB_REVIEW,
+  );
+  const resolutionVerifier = readField(
+    github,
+    "resolutionVerifier",
+    ERR_GITHUB_RESOLVER,
+  );
+  if (resolutionVerifier !== undefined) {
     expectMethod(
-      github.resolutionVerifier,
+      resolutionVerifier,
       "verifyResolution",
       ERR_GITHUB_RESOLVER,
     );
@@ -335,99 +412,171 @@ function validateGitHubShapes(
 function validateRepairShapes(
   repair: Omit<RepairHostOptionsV1, "clock" | "github" | "githubCooldown">,
 ): void {
-  if (!Array.isArray(repair.configs)) {
+  if (!Array.isArray(readField(repair, "configs", ERR_CONFIGS))) {
     throw new TypeError(ERR_CONFIGS);
   }
   // Repair state: read + repair-write capability shape (never a release
   // writer; the release writer is only accepted by the release assembly).
-  expectRecord(repair.state, ERR_REPAIR_STATE);
-  expectCallable(repair.state.readRepair, ERR_REPAIR_STATE);
-  expectCallable(repair.state.writeRepair, ERR_REPAIR_STATE);
+  const state = readField(repair, "state", ERR_REPAIR_STATE);
+  expectRecord(state, ERR_REPAIR_STATE);
+  expectCallable(
+    readField(state, "readRepair", ERR_REPAIR_STATE),
+    ERR_REPAIR_STATE,
+  );
+  expectCallable(
+    readField(state, "writeRepair", ERR_REPAIR_STATE),
+    ERR_REPAIR_STATE,
+  );
 
-  const gateway = repair.gateway;
+  const gateway = readField(repair, "gateway", ERR_GATEWAY_INPUT);
   expectRecord(gateway, ERR_GATEWAY_INPUT);
-  expectCallable(gateway.transport, ERR_GATEWAY_TRANSPORT);
-  expectMethod(gateway.auth, "headers", ERR_GATEWAY_AUTH);
-  expectRecord(gateway.store, ERR_GATEWAY_STORE);
-  if (!(gateway.keyBytes instanceof Uint8Array)) {
+  expectCallable(
+    readField(gateway, "transport", ERR_GATEWAY_TRANSPORT),
+    ERR_GATEWAY_TRANSPORT,
+  );
+  expectMethod(
+    readField(gateway, "auth", ERR_GATEWAY_AUTH),
+    "headers",
+    ERR_GATEWAY_AUTH,
+  );
+  const store = readField(gateway, "store", ERR_GATEWAY_STORE);
+  expectRecord(store, ERR_GATEWAY_STORE);
+  const keyBytes = readField(gateway, "keyBytes", ERR_GATEWAY_KEY);
+  if (!(keyBytes instanceof Uint8Array)) {
     throw new TypeError(ERR_GATEWAY_KEY);
   }
 
-  const replay = repair.replay;
+  const replay = readField(repair, "replay", ERR_REPLAY_INPUT);
   expectRecord(replay, ERR_REPLAY_INPUT);
-  const source = replay.source as unknown as Record<string, unknown> | null;
+  const source = readField(replay, "source", ERR_REPLAY_SOURCE);
   if (typeof source !== "object" || source === null) {
     throw new TypeError(ERR_REPLAY_SOURCE);
   }
-  if (source.kind !== "local" && source.kind !== "remote") {
+  const sourceRecord = source as Record<string, unknown>;
+  const sourceKind = readField(sourceRecord, "kind", ERR_REPLAY_SOURCE);
+  if (sourceKind !== "local" && sourceKind !== "remote") {
     throw new TypeError(ERR_REPLAY_SOURCE);
   }
-  if (source.kind === "local" && typeof source.path !== "string") {
+  if (
+    sourceKind === "local" &&
+    typeof readField(sourceRecord, "path", ERR_REPLAY_SOURCE) !== "string"
+  ) {
     throw new TypeError(ERR_REPLAY_SOURCE);
   }
-  if (source.kind === "remote" && typeof source.url !== "string") {
+  if (
+    sourceKind === "remote" &&
+    typeof readField(sourceRecord, "url", ERR_REPLAY_SOURCE) !== "string"
+  ) {
     throw new TypeError(ERR_REPLAY_SOURCE);
   }
-  if (typeof replay.scratchDir !== "string" || replay.scratchDir.length === 0) {
+  const scratchDir = readField(replay, "scratchDir", ERR_REPLAY_INPUT);
+  if (typeof scratchDir !== "string" || scratchDir.length === 0) {
     throw new TypeError(ERR_REPLAY_INPUT);
   }
-  expectRecord(replay.policy, ERR_REPLAY_POLICY);
-  expectRecord(replay.isolation, ERR_REPLAY_INPUT);
+  expectRecord(
+    readField(replay, "policy", ERR_REPLAY_POLICY),
+    ERR_REPLAY_POLICY,
+  );
+  const replayIsolation = readField(replay, "isolation", ERR_REPLAY_INPUT);
+  expectRecord(replayIsolation, ERR_REPLAY_INPUT);
 
-  const model = repair.model;
+  const model = readField(repair, "model", ERR_MODEL_INPUT);
   expectRecord(model, ERR_MODEL_INPUT);
-  expectCallable(model.openSession, ERR_MODEL_SESSION);
-  if (typeof model.checkoutDir !== "string" || model.checkoutDir.length === 0) {
+  expectCallable(
+    readField(model, "openSession", ERR_MODEL_SESSION),
+    ERR_MODEL_SESSION,
+  );
+  const checkoutDir = readField(model, "checkoutDir", ERR_MODEL_CHECKOUT);
+  if (typeof checkoutDir !== "string" || checkoutDir.length === 0) {
     throw new TypeError(ERR_MODEL_CHECKOUT);
   }
-  if (model.checkout !== undefined) {
-    expectMethod(model.checkout, "resolve", ERR_MODEL_INPUT);
+  const checkout = readField(model, "checkout", ERR_MODEL_INPUT);
+  if (checkout !== undefined) {
+    expectMethod(checkout, "resolve", ERR_MODEL_INPUT);
   }
-  if (model.commitCandidate !== undefined) {
-    expectMethod(model.commitCandidate, "commit", ERR_MODEL_INPUT);
+  const commitCandidate = readField(
+    model,
+    "commitCandidate",
+    ERR_MODEL_INPUT,
+  );
+  if (commitCandidate !== undefined) {
+    expectMethod(commitCandidate, "commit", ERR_MODEL_INPUT);
   }
-  if (model.receiptVerifier !== undefined) {
-    expectCallable(model.receiptVerifier, ERR_MODEL_RECEIPT);
+  const receiptVerifier = readField(
+    model,
+    "receiptVerifier",
+    ERR_MODEL_RECEIPT,
+  );
+  if (receiptVerifier !== undefined) {
+    expectCallable(receiptVerifier, ERR_MODEL_RECEIPT);
   }
 }
 
 function validateReleaseShapes(
   release: Omit<ReleaseHostOptionsV1, "clock">,
 ): void {
-  if (
-    release.environment !== "production" && release.environment !== "isolated"
-  ) {
+  const environment = readField(
+    release,
+    "environment",
+    ERR_RELEASE_ENVIRONMENT,
+  );
+  if (environment !== "production" && environment !== "isolated") {
     throw new TypeError(ERR_RELEASE_ENVIRONMENT);
   }
-  expectRecord(release.target, ERR_RELEASE_TARGET);
+  const target = readField(release, "target", ERR_RELEASE_TARGET);
+  expectRecord(target, ERR_RELEASE_TARGET);
   try {
-    validateReleaseTargetConfig(release.target);
+    validateReleaseTargetConfig(target);
   } catch {
     throw new TypeError(ERR_RELEASE_TARGET);
   }
-  expectRecord(release.policy, ERR_RELEASE_POLICY);
-  const policyCheck = validateStabilityPolicy(release.policy);
+  const policy = readField(release, "policy", ERR_RELEASE_POLICY);
+  expectRecord(policy, ERR_RELEASE_POLICY);
+  let policyCheck: ReturnType<typeof validateStabilityPolicy>;
+  try {
+    policyCheck = validateStabilityPolicy(
+      policy as unknown as StabilityPolicyV1,
+    );
+  } catch {
+    throw new TypeError(ERR_RELEASE_POLICY);
+  }
   if (!policyCheck.ok) throw new TypeError(ERR_RELEASE_POLICY);
 
-  const stateRead = release.stateRead as unknown;
+  const stateRead = readField(release, "stateRead", ERR_RELEASE_STATE_READ);
   expectRecord(stateRead, ERR_RELEASE_STATE_READ);
   expectCallable(
-    (stateRead as { readRepair?: unknown }).readRepair,
+    readField(stateRead, "readRepair", ERR_RELEASE_STATE_READ),
     ERR_RELEASE_STATE_READ,
   );
   expectCallable(
-    (stateRead as { readRelease?: unknown }).readRelease,
+    readField(stateRead, "readRelease", ERR_RELEASE_STATE_READ),
     ERR_RELEASE_STATE_READ,
   );
-  expectRecord(release.stateWrite, ERR_RELEASE_STATE_WRITE);
-  expectCallable(release.stateWrite.writeRelease, ERR_RELEASE_STATE_WRITE);
+  const stateWrite = readField(
+    release,
+    "stateWrite",
+    ERR_RELEASE_STATE_WRITE,
+  );
+  expectRecord(stateWrite, ERR_RELEASE_STATE_WRITE);
+  expectCallable(
+    readField(stateWrite, "writeRelease", ERR_RELEASE_STATE_WRITE),
+    ERR_RELEASE_STATE_WRITE,
+  );
 
-  const deno = release.deno;
+  const deno = readField(release, "deno", ERR_RELEASE_DENO);
   expectRecord(deno, ERR_RELEASE_DENO);
-  expectCallable(deno.transport, ERR_RELEASE_DENO);
-  expectMethod(deno.auth, "bearerToken", ERR_RELEASE_DENO);
-  if (release.resolver !== undefined) {
-    expectMethod(release.resolver, "resolve", ERR_RELEASE_RESOLVER);
+  expectCallable(
+    readField(deno, "transport", ERR_RELEASE_DENO),
+    ERR_RELEASE_DENO,
+  );
+  expectMethod(
+    readField(deno, "auth", ERR_RELEASE_DENO),
+    "bearerToken",
+    ERR_RELEASE_DENO,
+  );
+  const resolver = readField(release, "resolver", ERR_RELEASE_RESOLVER);
+  if (resolver !== undefined) {
+    expectMethod(resolver, "resolve", ERR_RELEASE_RESOLVER);
   }
 }
 
@@ -454,5 +603,39 @@ function expectMethod(
   error: string,
 ): void {
   expectRecord(value, error);
-  expectCallable((value as Record<string, unknown>)[method], error);
+  expectCallable(readField(value, method, error), error);
+}
+
+/**
+ * Read one field with the get trap contained: a hostile accessor/proxy fault
+ * is the same static non-echoing TypeError the field's own shape check would
+ * reject with, so nothing caller-controlled can escape this validation
+ * boundary as a raw error or value.
+ */
+function readField<Value = unknown>(
+  record: Record<string, unknown>,
+  key: string,
+  error: string,
+): Value {
+  try {
+    return record[key] as Value;
+  } catch {
+    throw new TypeError(error);
+  }
+}
+
+/**
+ * Snapshot one validated record into a plain object with property
+ * enumeration contained: a hostile ownKeys/get trap is the same static
+ * non-echoing TypeError, and downstream seams never see a proxy.
+ */
+function spreadRecord<Value extends object>(
+  record: Value,
+  error: string,
+): Value {
+  try {
+    return { ...record } as Value;
+  } catch {
+    throw new TypeError(error);
+  }
 }
