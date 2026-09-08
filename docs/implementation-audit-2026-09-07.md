@@ -327,3 +327,16 @@ Canonical source is merge commit `67924dd0ba77499674b5a01a50ac3671c50e9641` in `
 | §7 release and §1 delivery outcome | Release identity, resolver binding, 204 promotion and 60-slot acceptance are exercised with injected fakes; exact-head full harness is green. | No hosted build receipt, exclusive target handover, deployed runtime, isolated rollback, two autonomous deliveries, continued eligible selection or six-hour observation is proven. |
 
 Disposition: the local implementation is accepted through release-host binding validation, but the plan still diverges at trusted workflow assembly and all live delivery gates. No activation, publication, deployment, target handover or live write was performed.
+
+## Exact-head audit after repair-host controller identity validation (2026-09-08 22:00 UTC)
+
+Canonical source is ancestry-preserving merge `83bffd4252fbe217372b532cb87f35103be1f445` in `/Users/nv/repos/ubiquity/sentinel/.codex-worktrees/master-plan-gfa795549e5`; the accepted worker tip `1e9029c352fbbf3993c82f081b95ecf654881e48` is an ancestor. `src/host/repair.ts` now validates `controllerSha` as an exact lowercase 40-hex Git commit SHA before constructing any capability, with static non-echoing failure text. The focused repair-host suite passed `8/8` in fresh receipt `cc48556d9d6816f2605c36c352452867e2de5be694f7aa26c8a9330e9268c576/08435ceb-fb53-4d92-a306-a7b7cdd99042`; the exact-head `deno task test:local` receipt `cc48556d9d6816f2605c36c352452867e2de5be694f7aa26c8a9330e9268c576/cf67eff9-b5b9-4523-a63b-e11f57a35d31` passed `673` tests across `68` steps with zero failures. Formatting, lint and type checks passed. The worker archive was unavailable at its sandbox boundary, so these are primary fresh checks; no external capability or target mutation was available.
+
+| Master-plan surface | Exact-head local evidence | Remaining divergence |
+| --- | --- | --- |
+| §4 / §9 scheduled entrypoints | Repair and release host factories, runner seams, fail-closed direct-entrypoint tests and repair controller identity validation pass. | Both workflows still invoke direct `repair:run` / `release:run` without trusted state, adapters, transports, credentials or receipt assembly. |
+| §5 model admission and §7 review/merge | Durable rolling budget, exact-head state machines, local fake review/merge paths and host-boundary checks pass. | No credential-backed model session, authenticated current-head review, aggregate publication or accepted target PR exists. |
+| §6 captured request → replay | Gateway retention, sanitization, fixture binding and replay composition remain green in the full harness. | No trusted production host joins target capture to the repair loop, and no live permanent causal receipt or owner-approved retention/key assembly exists. |
+| §7 release and §1 delivery | Release identity, resolver binding, 204 promotion and 60-slot acceptance are exercised with injected fakes. | No hosted build receipt, exclusive target handover, deployed runtime, isolated rollback, two autonomous deliveries, continued selection or six-hour observation is proven. |
+
+Disposition: local implementation is accepted through repair-host identity validation. The plan-level divergence remains trusted workflow assembly and every live delivery gate. No activation, publication, deployment, target handover or live write was performed.
