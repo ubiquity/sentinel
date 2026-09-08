@@ -17,7 +17,9 @@
  * - target/policy/binding faults are rejected BEFORE anything is constructed
  *   (zero capability use), with static TypeError text;
  * - the composed deps drive an unavailable-resolver release entrypoint cycle
- *   against temporary real Git state without promotion.
+ *   against temporary real Git state without promotion;
+ * - direct execution of the release entrypoint stays a static fail-closed
+ *   fault until a trusted host supplies capability wiring.
  *
  * No network, no model call, no credentials, no GitHub writes or deployment.
  */
@@ -661,4 +663,24 @@ Deno.test("composed deps drive an unavailable-resolver entrypoint cycle without 
   } finally {
     await ctx.cleanup();
   }
+});
+
+Deno.test("direct release entrypoint execution stays a static fail-closed fault", async () => {
+  // The host factory ships no capability wiring: executing src/release-main.ts
+  // directly must still terminate with the static fault, and the repository
+  // must never present a live activation path.
+  const command = new Deno.Command("deno", {
+    args: ["run", "--quiet", "src/release-main.ts"],
+    cwd: Deno.cwd(),
+    stdout: "piped",
+    stderr: "piped",
+  });
+  const result = await command.output();
+  assert.notEqual(result.code, 0);
+  const output = new TextDecoder().decode(result.stdout) +
+    new TextDecoder().decode(result.stderr);
+  assert.ok(
+    output.includes("requires injected trusted capabilities"),
+    `unexpected direct-execution output: ${output}`,
+  );
 });
