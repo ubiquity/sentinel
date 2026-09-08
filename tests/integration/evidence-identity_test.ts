@@ -71,6 +71,7 @@ import type { ReplayResultV1 } from "../../src/contracts/replay-result.ts";
 import { parseRepairStateSnapshotV1 } from "../../src/contracts/state-snapshots.ts";
 import type { RepairStateSnapshotV1 } from "../../src/contracts/state-snapshots.ts";
 import { candidateBranch } from "../../src/repair/keys.ts";
+import { DurableGitHubCooldownGate } from "../../src/repair/github-cooldown.ts";
 import { createRepairStateStore } from "../../src/state/mod.ts";
 import { runRepairEntrypoint } from "../../src/main.ts";
 import {
@@ -203,6 +204,10 @@ Deno.test(
         scratchDir: `${ctx.tmp}/scratch-repair`,
         remoteUrl: ctx.remoteUrl,
       });
+      const githubCooldown = new DurableGitHubCooldownGate({
+        state: store,
+        clock: loopClock,
+      });
       const configs = repairConfigs({
         // A bounded session fits the synthetic 10-minute run deadline; the
         // declared operation margin must not stop the evidence stage.
@@ -223,6 +228,7 @@ Deno.test(
           configs,
           controllerSha: SHA1,
           github,
+          githubCooldown,
           incidents: gateway.adapter,
           replay,
           model,
@@ -376,6 +382,10 @@ Deno.test(
         scratchDir: `${ctx.tmp}/scratch-repair`,
         remoteUrl: ctx.remoteUrl,
       });
+      const githubCooldown = new DurableGitHubCooldownGate({
+        state: store,
+        clock: loopClock,
+      });
       const configs = repairConfigs({
         sessionBound: { maxDurationMs: 240_000, maxOutputChars: 200_000 },
       });
@@ -427,6 +437,7 @@ Deno.test(
           configs,
           controllerSha: SHA1,
           github,
+          githubCooldown,
           incidents: gateway.adapter,
           replay,
           model,
@@ -723,6 +734,7 @@ async function makeIntakeGatewayRig(
     scratchDir: `${ctx.tmp}/scratch-repair`,
     remoteUrl: ctx.remoteUrl,
   });
+  const githubCooldown = new DurableGitHubCooldownGate({ state: store, clock });
   const configs = repairConfigs({
     sessionBound: { maxDurationMs: 240_000, maxOutputChars: 200_000 },
   });
@@ -737,6 +749,7 @@ async function makeIntakeGatewayRig(
       configs,
       controllerSha: SHA1,
       github,
+      githubCooldown,
       incidents: gateway.adapter,
       replay,
       model,
@@ -1002,6 +1015,7 @@ async function makeEvidenceRig(
     scratchDir: `${ctx.tmp}/scratch-repair`,
     remoteUrl: ctx.remoteUrl,
   });
+  const githubCooldown = new DurableGitHubCooldownGate({ state: store, clock });
   const configs = repairConfigs({
     sessionBound: { maxDurationMs: 240_000, maxOutputChars: 200_000 },
   });
@@ -1038,6 +1052,7 @@ async function makeEvidenceRig(
       configs,
       controllerSha: SHA1,
       github,
+      githubCooldown,
       incidents,
       replay,
       model,

@@ -50,6 +50,7 @@ import {
 } from "../../src/state/mod.ts";
 import { runRepairEntrypoint } from "../../src/main.ts";
 import { runReleaseEntrypoint } from "../../src/release-main.ts";
+import { DurableGitHubCooldownGate } from "../../src/repair/github-cooldown.ts";
 import type { GitCtxV1 } from "../release/helpers.ts";
 import {
   acceptedEvent,
@@ -168,6 +169,7 @@ export interface RepairRigV1 {
   store: ReturnType<typeof createRepairStateStore>;
   releaseStore: ReturnType<typeof createReleaseStateStore>;
   github: FakeGithub;
+  githubCooldown: DurableGitHubCooldownGate;
   incidents: FakeIncidents;
   replay: FakeReplay;
   model: FakeModel;
@@ -198,6 +200,7 @@ export async function makeRepairRig(
     scratchDir: `${ctx.tmp}/scratch-release`,
     remoteUrl: ctx.remoteUrl,
   });
+  const githubCooldown = new DurableGitHubCooldownGate({ state: store, clock });
   const configs = repairConfigs({
     sessionBound: { maxDurationMs: 240_000, maxOutputChars: 200_000 },
     ...options.configOverrides,
@@ -221,6 +224,7 @@ export async function makeRepairRig(
       configs,
       controllerSha: SHA1,
       github,
+      githubCooldown,
       incidents,
       replay,
       model,
@@ -244,6 +248,7 @@ export async function makeRepairRig(
     store,
     releaseStore,
     github,
+    githubCooldown,
     incidents,
     replay,
     model,

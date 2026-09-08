@@ -22,6 +22,7 @@ import type { RepairStateSnapshotV1 } from "../../src/contracts/state-snapshots.
 import type { ReleaseStateSnapshotV1 } from "../../src/contracts/state-snapshots.ts";
 import type { WorkRecordV1 } from "../../src/contracts/work-record.ts";
 import { candidateBranch, pushIntentKey } from "../../src/repair/keys.ts";
+import { DurableGitHubCooldownGate } from "../../src/repair/github-cooldown.ts";
 import { runRepairCycle } from "../../src/repair/loop.ts";
 import {
   DEP_0,
@@ -140,6 +141,7 @@ async function makeRig(
     scratchDir: `${ctx.tmp}/release-scratch`,
     remoteUrl: ctx.remoteUrl,
   });
+  const githubCooldown = new DurableGitHubCooldownGate({ state: store, clock });
   const configs = repairConfigs({
     sessionBound: { maxDurationMs: 240_000, maxOutputChars: 200_000 },
     ...options.configOverrides,
@@ -163,6 +165,7 @@ async function makeRig(
       configs,
       controllerSha: SHA1,
       github,
+      githubCooldown,
       incidents,
       replay,
       model,

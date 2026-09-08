@@ -46,6 +46,7 @@ import type { RepairEntrypointDepsV1 } from "../../src/main.ts";
 import type { ReleaseEntrypointDepsV1 } from "../../src/release-main.ts";
 import { RollingStartBudget } from "../../src/budget/mod.ts";
 import { createRepairStateStore } from "../../src/state/mod.ts";
+import { DurableGitHubCooldownGate } from "../../src/repair/github-cooldown.ts";
 import { runRepairEntrypoint } from "../../src/main.ts";
 import {
   DEP_2,
@@ -116,6 +117,10 @@ Deno.test(
         scratchDir: `${ctx.tmp}/scratch-repair`,
         remoteUrl: ctx.remoteUrl,
       });
+      const githubCooldown = new DurableGitHubCooldownGate({
+        state: store,
+        clock,
+      });
       const configs = [
         ...repairConfigs(),
         repositoryConfig(REPO_2, { perHour: 3, perSevenDays: 9 }),
@@ -134,6 +139,7 @@ Deno.test(
           configs,
           controllerSha: SHA1,
           github,
+          githubCooldown,
           incidents: new FakeIncidents({ summaries: [], evidence: null }),
           replay: new FakeReplay(),
           model: new FakeModel(),
@@ -373,6 +379,10 @@ Deno.test(
         scratchDir: `${ctx.tmp}/scratch-repair`,
         remoteUrl: ctx.remoteUrl,
       });
+      const githubCooldown = new DurableGitHubCooldownGate({
+        state: store,
+        clock: loopClock,
+      });
       const configs = repairConfigs({
         // A bounded session fits the synthetic 10-minute run deadline; the
         // declared operation margin check must not stop the evidence stage.
@@ -392,6 +402,7 @@ Deno.test(
         configs,
         controllerSha: SHA1,
         github,
+        githubCooldown,
         incidents: gateway.adapter,
         replay,
         model,
@@ -509,6 +520,10 @@ Deno.test(
         scratchDir: `${ctx.tmp}/scratch-repair`,
         remoteUrl: ctx.remoteUrl,
       });
+      const githubCooldown = new DurableGitHubCooldownGate({
+        state: store,
+        clock: loopClock,
+      });
       const configs = repairConfigs({
         // See the discovery test above for the bounded session rationale.
         sessionBound: { maxDurationMs: 240_000, maxOutputChars: 200_000 },
@@ -527,6 +542,7 @@ Deno.test(
         configs,
         controllerSha: SHA1,
         github,
+        githubCooldown,
         incidents: gateway.adapter,
         replay,
         model,
