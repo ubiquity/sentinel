@@ -34,7 +34,7 @@ function obs(
   };
 }
 
-async function observe(
+function observe(
   guard: FailedCommandLoopGuard,
   overrides: Partial<FailedCommandObservation> = {},
 ): Promise<FailedCommandLoopResult> {

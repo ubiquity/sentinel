@@ -63,7 +63,7 @@ async function write(fx: Fixture, name: string, text: string): Promise<void> {
   await Deno.writeTextFile(abs, text);
 }
 
-async function checkpoint(fx: Fixture): Promise<string | null> {
+function checkpoint(fx: Fixture): Promise<string | null> {
   return checkoutContentCheckpoint(fx.dir);
 }
 
