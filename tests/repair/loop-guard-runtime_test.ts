@@ -14,6 +14,18 @@ import { gitRun } from "../state/helpers.ts";
 const pause = (ms: number) =>
   new Promise<void>((resolve) => setTimeout(resolve, ms));
 
+/**
+ * One-shot event signal: a waiter never starts early when the signal already
+ * fired before it began waiting, and a fire after settlement is a no-op.
+ */
+function signal(): { promise: Promise<void>; fire: () => void } {
+  let fire: () => void = () => {};
+  const promise = new Promise<void>((resolve) => {
+    fire = resolve;
+  });
+  return { promise, fire };
+}
+
 class ScriptSession implements CodexSessionV1 {
   handler: ((event: CodexServerNotificationV1) => void) | null = null;
   job: Promise<void> = Promise.resolve();
@@ -21,6 +33,10 @@ class ScriptSession implements CodexSessionV1 {
   steers = 0;
   interrupts = 0;
   closed = false;
+  /** Fired exactly once when the guard's steer request is delivered. */
+  private readonly steerObserved = signal();
+  /** Fired exactly once when the guard's interrupt request is delivered. */
+  private readonly interruptObserved = signal();
   constructor(
     readonly number: number,
     readonly cwd: string,
@@ -58,12 +74,19 @@ class ScriptSession implements CodexSessionV1 {
       );
       this.steers++;
       this.order.push(`steer:${this.number}`);
+      // Signal from a later task, never synchronously: the port records the
+      // acknowledgement in its microtask continuation after this send
+      // resolves, and every microtask runs before any timer, so the producer
+      // cannot emit the post-ack failures before the port observed the ack.
+      // Event-loop ordering only — no wall-clock delay is required.
+      setTimeout(() => this.steerObserved.fire(), 0);
       return Promise.resolve({ turnId: `u${this.number}` });
     }
     if (method === "turn/interrupt") {
       this.interrupts++;
       this.order.push(`interrupt:${this.number}`);
       this.terminal("interrupted");
+      this.interruptObserved.fire();
       return Promise.resolve({});
     }
     throw new Error(`unexpected method ${method}`);
@@ -85,9 +108,10 @@ class ScriptSession implements CodexSessionV1 {
     }
     for (let i = 1; i <= 6; i++) {
       if (i === 5) {
-        for (let tries = 0; this.steers === 0 && tries < 60; tries++) {
-          await pause(25);
-        }
+        // Deterministic synchronization: wait for the guard's steer event
+        // instead of polling, so parallel scheduler load cannot expire the
+        // wait before the runtime has delivered its decision.
+        await this.steerObserved.promise;
         assert.equal(this.steers, 1, "four failures must steer");
       }
       await pause(200);
@@ -107,9 +131,9 @@ class ScriptSession implements CodexSessionV1 {
       });
       this.emit("item/completed", { threadId: "t1", turnId: "u1", item });
     }
-    for (let tries = 0; this.interrupts === 0 && tries < 60; tries++) {
-      await pause(25);
-    }
+    // Deterministic synchronization: wait for the guard's interrupt event
+    // instead of polling for the post-ack settlement.
+    await this.interruptObserved.promise;
     assert.equal(this.interrupts, 1, "two post-ack failures must interrupt");
   }
   async close() {
