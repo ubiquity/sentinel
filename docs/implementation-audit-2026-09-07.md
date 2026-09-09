@@ -365,3 +365,18 @@ The host boundary review found two follow-up risks. The top-level assembly does 
 | §7 release and §1 delivery outcome | Release identity, receipt binding, promotion status, and acceptance sampling pass with injected fakes. | No hosted build receipt, exclusive target handover, deployed runtime, isolated rollback drill, two autonomous deliveries, continued eligible selection, or six-hour observation is proven. |
 
 Disposition: the implementation is locally composed through trusted host assembly, with one full-harness scheduling failure and the two host hardening gaps above. The plan still diverges at production workflow assembly and every live delivery gate. No activation, publication, deployment, target handover, or live write occurred.
+
+## Exact-head post-hardening implementation audit (2026-09-09 00:29 UTC)
+
+Canonical source is `/Users/nv/repos/ubiquity/sentinel/.codex-worktrees/master-plan-gfa795549e5` on `codex/master-plan-gfa795549e5` at `dde125febf4ef31f31764804f01f2934a4a15d00`. The fresh receipt `cc48556d9d6816f2605c36c352452867e2de5be694f7aa26c8a9330e9268c576/3e35e0ca-783c-4853-b0d9-ae962bcf4e74` ran `deno task test:local` in that exact worktree and passed `683` tests across `68` steps with zero failures in `1050564ms`; formatting, lint, and credential-free type checks passed. The harness now type-checks `src/host/host.ts` and `src/host/providers.ts` as well as the existing module list. The receipt predates this ledger commit and the harness-list edit is the only tracked difference at execution time; no product behavior changed.
+
+| Master-plan surface | Exact-head local evidence | Divergence or status |
+| --- | --- | --- |
+| §4 / §9 entrypoints and host composition | Host assembly, provider adapters, repair/release factories, runners, fail-closed entrypoints, and the full credential-free harness pass locally. | `.github/workflows/repair.yml:41` and `release.yml:39` still call direct `repair:run`/`release:run`; no trusted production capability assembly is supplied. |
+| §5 model admission and §7 review/merge | Durable rolling budgets, exact-head state machines, model boundary, local fake transports, and host validation pass. | No credential-backed model session or verifier, authenticated current-head review, aggregate Sentinel publication, or accepted target PR exists. |
+| §6 captured request → replay | Gateway discovery/retention, sanitization, fixture identity binding, and replay composition pass with temporary stores and injected transports. | No owner-approved production retention/key assembly or live causal receipt joins the target capture to the repair loop. |
+| §7 release and §1 outcome | Deterministic release identity, receipt binding, promotion, rollback protections, and 60-slot sampling pass against fakes. | No hosted build receipt, exclusive target handover, deployed runtime, isolated rollback drill, two autonomous deliveries, continued selection, or six-hour observation is proven. |
+
+The preceding `14548e1f-c996-47e1-8eea-0e744ad5d365` execution is not used for exact-head evidence because its archive recorded root `development` at `9da7f77`; the canonical `3e35e0ca-783c-4853-b0d9-ae962bcf4e74` receipt supersedes it. The v1 and v2 loop-guard hardening lanes are rejected and preserved without integration; all task-owned processes and `yes` descendants are settled.
+
+Disposition: local implementation is accepted through the post-hardening harness checkpoint. The plan remains divergent at trusted workflow activation and every live delivery gate. No model, GitHub, publication, deployment, target handover, activation, or live write occurred.
