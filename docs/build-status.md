@@ -34,7 +34,7 @@ to keep retrying. Scope changes require an Astra entry with the reason.
 | T10 Production ownership and activation | pending / Astra; depends on T09 | Authorized drain and exclusive release ownership verified; trusted runtime deployed with approved capabilities | Existing gateway workflow retains promotion. Do not remove it before replacement proof or run two production writers. |
 | T11 Two autonomous deliveries | pending / Astra; depends on T10 | Two distinct eligible deliveries with exact PR/review/merge/revision/closure receipts; at least one actual captured incident with permanent regression | Discover incidents first, then priority selection. Do not assign an unrelated capture to a preselected issue. |
 | T12 Six-hour observation | pending / Astra; depends on activation and verified receipts | Six observed hours, continued eligible selection, stability evidence and no unresolved ownership/recovery fault | Record actual start/end and gaps; setup time or waiting for approval does not count. |
-| T13 Preserved work reconciliation | in_progress / Astra | Every unintegrated task tip and dirty source draft has explicit disposition; no accepted work stranded | All registered Sentinel worker tips except T01 are canonical ancestors at this check. Several historical lanes retain untracked source/test drafts and two tracked test edits; preserve and compare them before accepting or rejecting. Root docs tip `9da7f77` is separate and must not be mistaken for latest implementation. |
+| T13 Preserved work reconciliation | accepted / Astra, fresh audit below | Every unintegrated task tip and dirty source draft has explicit disposition; no accepted work stranded | Fresh Astra found no missing production behavior in the listed drafts. All committed worker tips except active T01 are ancestors; root docs tip `9da7f77` is now an ancestor through tree-unchanged merge `c3f6ffb94028671746453d3a8f56ea1a9272ec09`. Dirty diagnostics and rejected/superseded drafts remain preserved, with dispositions below. |
 
 Closed facts, do not reassign: source PR #2 merged 2026-09-09 05:57:55 UTC
 from `0d85c3aad210d856dd8e39db33509bc335e6fc81`; observed remote development
@@ -89,9 +89,45 @@ superseded by this register and its recorded source checks.
 - The temporary Luna preflight supervisor returned without launching DSH or
   changing files and is settled. It is not an additional implementation owner.
 - T13: fresh read-only Astra auditor `/root/fresh_audit_preserved_work` is
-  comparing historical dirty drafts against canonical and integrated commits.
-  It has no inherited conversation and no write, test, launch or cleanup
-  authority. Its disposition report is pending; existing files remain preserved.
+  session `01a08797-7d7b-7653-b856-2c2a31188daf`, verified model `gpt-6-astra`,
+  fresh context. It completed its read-only audit at 19:17 UTC against source
+  `b994b74`, with no tests, writes or launches. Astra accepted the dispositions
+  below; existing files remain preserved. It did not audit T01.
+
+### T13 accepted preserved-work dispositions (2026-09-09 19:18 UTC)
+
+Lane names below have prefix `.codex-worktrees/master-plan-wave-c-`.
+
+| Preserved lane/files | Disposition and evidence |
+| --- | --- |
+| Root `development`, `docs/oss-reuse-plan-2026-09-07.md` | Root-only `9da7f77` equals integrated `9331b1b`: patch ID `deaf9e8cad3954c1f495bab24ba42ec78ecdf2fb`, document blob `063bf4e0f8d37639c6a36ff5eefa4ba52f682c88`. Normal no-ff merge `c3f6ffb94028671746453d3a8f56ea1a9272ec09` preserves ancestry with zero tree change; root unrelated state retained. |
+| `composed-lifecycle-v5-ade8b86d09e`, `v6-ab0c532b586`, `v7-ae19655ac3b`: integration test drafts | Rejected as superseded diagnostics. `e7b8b58` plus `26837e0` contain accepted behavior; v6 adds logging, v7 adds prototype/debug wrappers. No missing behavior found. |
+| `composed-lifecycle-v8-ad75876c0e7`: integration test | Integrated-equivalent to `e7b8b589438f`; `26837e0` subsequently fixes actual resolver/loop boundary. Preserve older draft. |
+| `github-host-a1879ba20b9`: host source/test | Integrated-equivalent to `d3ef9b357025`; source matches canonical; test fixture corrected to real issue-list array by `81b38c8`. |
+| `host-assembly-aa44d5e5d6`: repair host source/test | Integrated-equivalent to `40273d7a9f5c`; candidate committing and controller identity verification `1e9029c` supersede draft. |
+| `release-host-ab9fd345448`: release host source/test | Integrated-equivalent to `7e34dc509df2`; `10b8eb9` adds repository/environment and direct-entrypoint checks. |
+| `loop-guard-determinism-a515c2acb86`: runtime test edit | Integrated-equivalent to `70248189a3b9`; `fbd1866` supplies stable observation generation, interruption wakeup and bounded fixture lifetime. |
+| `loop-guard-hardening-v1-a73c90b7b93`: boundary test edit | Rejected: draft repeats `c1` and ends edit case before its fourth failure, weakening the event sequence. Useful signal synchronization already in `0d85c3a`; do not import draft. |
+| v7 `scratch_kill_test.ts`, `scratch_runtime_test.ts`; hardening-v2 `tests/repair/_scratch_debug_test.ts` | Preserved diagnostics, excluded from acceptance/integration. No distinct missing assertion found; canonical tests cover settlement and bounded termination. |
+
+### T02/T03 interface evidence, not runtime acceptance
+
+Astra fetched https://learn.chatgpt.com/docs/app-server on 2026-09-09 and
+generated the installed `codex-cli 0.153.4` JSON schemas locally under
+`/tmp/sentinel-runtime-schema-20260909-1916` without starting a model or server.
+`ThreadStartResponse` supplies configured model/provider/effort;
+`ModelReroutedNotification` supplies from/to model and reason;
+`TurnCompletedNotification` supplies thread and turn. This check found no
+provider-observed model-and-effort receipt in those surfaces. Do not relabel
+configured metadata as that receipt. T02 remains unresolved; a bounded request
+receipt source/design decision is needed before implementation.
+
+`review/start` and completed `exitedReviewMode` plus `turn/completed` provide
+documented local review lifecycle, but the result contains review text, not a
+GitHub review ID. A trusted host must bind local operation/head/completion to a
+published GitHub review receipt, or the contract must be explicitly revised.
+No live review was requested and no production service is claimed. This avoids
+repeating the earlier report's blocked schema-generation investigation.
 
 ## Historical entries — not the current task list
 
