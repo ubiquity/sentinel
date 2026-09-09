@@ -8,6 +8,16 @@ import { gitRun, REPO, SHA1, SHA3, testGitEnv } from "../state/helpers.ts";
 import { asWorkItemId } from "../../src/contracts/brands.ts";
 import { checkoutContentCheckpoint } from "../../src/repair/checkout-content.ts";
 const pause = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/** One-shot event signal that also works when fired before a waiter starts. */
+function signal(): { promise: Promise<void>; fire: () => void } {
+  let fire: () => void = () => {};
+  const promise = new Promise<void>((resolve) => {
+    fire = resolve;
+  });
+  return { promise, fire };
+}
+
 type Mode =
   | "duplicate"
   | "stale"
@@ -34,6 +44,8 @@ async function probe(mode: Mode) {
   let callback: ((e: CodexServerNotificationV1) => void) | null = null;
   let scriptError: unknown = null;
   let steers = 0, interrupts = 0, closes = 0;
+  const steerObserved = signal();
+  const interruptObserved = signal();
   const emit = (method: string, params: unknown) =>
     callback?.({ method, params });
   const terminal = (status = "completed") =>
@@ -77,6 +89,9 @@ async function probe(mode: Mode) {
       if (method === "turn/steer") {
         steers++;
         assert.equal((params as Record<string, unknown>).expectedTurnId, "u");
+        // Resolve from a later task so the model port's send continuation has
+        // observed the response before the producer emits more work.
+        setTimeout(() => steerObserved.fire(), 0);
         if (mode === "unsupported" || mode === "stop-race") {
           return Promise.reject(new Error("unsupported"));
         }
@@ -91,6 +106,7 @@ async function probe(mode: Mode) {
             turn: { id: "old", status: "completed" },
           });
         } else terminal(mode === "stop-race" ? "completed" : "interrupted");
+        interruptObserved.fire();
         return Promise.resolve({});
       }
       return Promise.reject(new Error("unexpected method"));
@@ -144,12 +160,25 @@ async function probe(mode: Mode) {
             });
           }
           if (mode === "hung-steer" && i === 4) {
-            for (let n = 0; steers === 0 && n < 40; n++) await pause(25);
+            await Promise.race([
+              steerObserved.promise,
+              interruptObserved.promise,
+            ]);
             break;
           }
         }
+        // Wait for the model port's interrupt before flushing a terminal event
+        // in modes whose contract requires the early-stop path. A fixed sleep
+        // made the fixture race the asynchronous observation drain under the
+        // full harness load.
+        if (
+          mode === "unsupported" || mode === "late-start" ||
+          mode === "stop-race" || mode === "output" || mode === "wrong-terminal"
+        ) {
+          await interruptObserved.promise;
+        }
         await pause(200);
-        if (interrupts === 0) terminal();
+        terminal();
       })().catch((error) => {
         scriptError = error;
         terminal("failed");
