@@ -7,9 +7,9 @@ is evidence, not a second queue. Only the current GPT-6 Astra integration owner
 may edit this file. Workers return proposed updates and immutable evidence;
 READY means awaiting Astra acceptance. Do not create replacement task lists.
 
-Last reconciled: 2026-09-09 19:14 UTC by Astra session
+Last reconciled: 2026-09-09 19:48 UTC by Astra session
 `01a08416-3171-7c82-ab91-dcbab6817b89` at canonical source/ledger tip
-`b994b74324b771bda103952487f44ba38a0996ac`. Canonical lane remains
+`22201cffd339980fc474d774f0afd8d6118d81b1`. Canonical lane remains
 `/Users/nv/repos/ubiquity/sentinel/.codex-worktrees/master-plan-gfa795549e5`,
 branch `codex/master-plan-gfa795549e5`. No production activation is accepted.
 The owner now supervises DSH directly for the small causal correction, per the
@@ -22,7 +22,7 @@ to keep retrying. Scope changes require an Astra entry with the reason.
 
 | ID | State / owner | Required acceptance | Evidence or exact next action |
 | --- | --- | --- | --- |
-| T01 Causal capture verifier | in_progress / Astra supervising DSH | Concrete restricted execution of original and sanitized input at the same original SHA; intended failure observed in both; identical safe fixture passes candidate through the real local loop; privacy and negative cases preserved | Existing lane `master-plan-wave-c-capture-replay-aa41dd093a9`, starting tip `55555dc4d782039df0153f27f13041fd501fccd9`; 156 prior passing tests relied on a test-only causal oracle. Implement that missing concrete verifier; no new lane. Launch receipt pending. |
+| T01 Causal capture verifier | in_progress / Astra supervising DSH | Concrete restricted execution of original and sanitized input at the same original SHA; intended failure observed in both; identical safe fixture passes candidate through the real local loop; privacy and negative cases preserved | Existing lane `master-plan-wave-c-capture-replay-aa41dd093a9`, starting tip `55555dc4d782039df0153f27f13041fd501fccd9`; prior 156 tests used a test-only oracle. First correction stopped for a proven static-import boundary flaw; fresh Astra audit and verified Seatbelt probe inform the active third assignment below; the second run was stopped for a known nested-sandbox execution limit. No implementation acceptance yet. |
 | T02 Runtime model receipt | pending / Astra | A supported trusted source proves actual provider/model/effort and completion; unavailable evidence fails closed | Resolve exact receipt source from existing interfaces before assigning host wiring; configured thread metadata is insufficient. No runtime model probe authorized by this row. |
 | T03 Runtime review transport | pending / Astra | Concrete completed review transport and durable receipt bind operation, PR, head, reviewer and terminal result; no silence-as-clean | Resolve the real clean-review receipt/service interface. Report 02 is a dependency inventory, not implementation proof. |
 | T04 Gateway replay consumer | pending / Astra; depends on T01 | Actual target command consumes the safe permanent fixture, fails original, passes candidate, and runs in target validation | Target `7b93b579eecf5392730453f1407a66a552fd7c48` lacks the configured replay command; reconcile target ownership and approve the concrete command interface before writing target files. |
@@ -77,8 +77,9 @@ superseded by this register and its recorded source checks.
   tip `55555dc4d782039df0153f27f13041fd501fccd9`; local PID `71927`, persistent
   exec handle `33026`, DSH session `355bd62b-0553-4e7f-b2ca-b3e654913d62`.
   Exact cwd and `NODE_ENV=production` were checked. The persisted request header
-  confirms `deepseek-official / deepseek-v4-flash-vision-exp / max`; completion
-  and tests are pending. No DSH descendants are authorized.
+  confirms `deepseek-official / deepseek-v4-flash-vision-exp / max`. This run was
+  deliberately stopped at 19:27 UTC after a confirmed design flaw; see below.
+  It has no terminal result or accepted tests. No DSH descendants were authorized.
 - Immutable T01 assignment and stream are host-local under
   `/tmp/sentinel-causal-correction-20260909-1911.{md,jsonl}`. Registered focused
   evidence target: `overnight-causal-capture`. First edit or precise blocker
@@ -93,6 +94,73 @@ superseded by this register and its recorded source checks.
   fresh context. It completed its read-only audit at 19:17 UTC against source
   `b994b74`, with no tests, writes or launches. Astra accepted the dispositions
   below; existing files remain preserved. It did not audit T01.
+
+### T01 intervention and corrected continuation (2026-09-09 19:35 UTC)
+
+The initial assignment's Deno-only filesystem restriction was incorrect. The
+37 ms credential-free synthetic probe
+`cc48556d9d6816f2605c36c352452867e2de5be694f7aa26c8a9330e9268c576/0407a35d-c02d-48ec-b24e-b962f83edcd6`
+proved that a static import reads JSON outside `--allow-read`. Astra verified
+PID71927's exact cwd and lack of descendants, sent SIGTERM, and verified exit.
+The exec wrapper returned zero but there was no DSH terminal result: this is an
+interrupted, unaccepted run. All edits were preserved. No unrelated process was
+stopped and no new worktree was created.
+
+Fresh read-only Astra `/root/fresh_audit_causal_boundary` independently required
+corrections: clone from an existing cwd; validate both input paths before any
+private write (the second path was skipped); separate original/sanitized caches;
+stop before the second execution on uncertain settlement; preserve uncertain
+scratch and verify normal cleanup; reject invalid UTF-8; bind the fixed consumer
+path; constrain output to safe protocol evidence; complete old test-schema
+references. This audit did not accept the unfinished candidate or run tests.
+
+Astra then tested the installed macOS Seatbelt boundary with synthetic data.
+The minimal initial profile lacked dyld bootstrap/mapping permissions; the next
+probe had the wrong cwd. Both causes were corrected explicitly, without widening
+access to the user workspace. Final immutable profile:
+`/tmp/sentinel-deno-import-boundary-profile-v3-20260909.sb`.
+Final positive receipt
+`cc48556d9d6816f2605c36c352452867e2de5be694f7aa26c8a9330e9268c576/e4aeed4b-1a56-4623-ba43-c8b79a2aaf78`
+executes allowed source; negative receipt
+`cc48556d9d6816f2605c36c352452867e2de5be694f7aa26c8a9330e9268c576/a0133b32-75ae-4a63-99a9-9398cd36dcdd`
+rejects the outside static import with OS permission denial. The negative probe's
+child exit1 is the expected rejection, not product acceptance failure. This is
+local runner feasibility only; T05 production isolation remains open.
+
+The corrected immutable assignment is
+`/tmp/sentinel-causal-correction-v2-20260909-1934.md`, with the same stem's
+`.jsonl` and `.stderr` logs. DSH resumed the preserved dirty candidate at
+19:35 UTC, PID `76937`, exec handle `19026`, session
+`f4d66d2e-2e0b-4615-b65a-8c8dff5a26f8`. Exact cwd, `NODE_ENV=production` and
+persisted `deepseek-official / deepseek-v4-flash-vision-exp / max` header are
+verified. First correction expected within five minutes, focused result within
+25–30 minutes. No child agents. Same focused evidence target and scope; no
+fallback to permission-only execution. Fresh independent acceptance remains
+required before integration. Do not repeat the disproved boundary or the
+resolved bootstrap/cwd probes.
+
+### T01 execution-context correction (2026-09-09 19:48 UTC)
+
+The second run was stopped at 19:41 UTC after repeated sandbox probes inside
+DSH's restricted tool shell returned `sandbox_apply: Operation not permitted`,
+including a trivial allow-default probe. This is an execution-context limit,
+not a failure of the independently verified profile. PID `76937` exited and
+had no remaining descendants; incomplete edits remain preserved and unaccepted.
+Fresh Astra auditor `fresh_audit_causal_boundary` approved the revised division:
+DSH implements and performs static/pure checks; the integration owner performs
+registered real execution checks from the verified host context. No permissions
+were broadened and no alternate sandbox was authorized.
+
+Immutable assignment `/tmp/sentinel-causal-correction-v3-20260909-1943.md`
+launched at 19:47 UTC in the same worker lane, PID `78418`, exec handle `5962`,
+persisted DSH session `d6197b32-45dd-4600-9d25-10d1317efcdf`. Exact cwd and
+`NODE_ENV=production` were verified; persisted request config confirms
+`deepseek-official / deepseek-v4-flash-vision-exp / max`. No child agents,
+worktrees, commits, runtime tests or further sandbox probes are assigned to DSH.
+First edit checkpoint is five minutes; scoped handback is expected within
+20–25 minutes. Root runs `overnight-causal-capture` after settlement, then
+requests a fresh audit of the frozen candidate before acceptance. Stream and
+stderr use the assignment stem with `.jsonl` and `.stderr` extensions.
 
 ### T13 accepted preserved-work dispositions (2026-09-09 19:18 UTC)
 
