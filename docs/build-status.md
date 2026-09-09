@@ -7,13 +7,14 @@ is evidence, not a second queue. Only the current GPT-6 Astra integration owner
 may edit this file. Workers return proposed updates and immutable evidence;
 READY means awaiting Astra acceptance. Do not create replacement task lists.
 
-Last reconciled: 2026-09-09 20:41 UTC by Astra session
+Last reconciled: 2026-09-09 21:35 UTC by Astra session
 `01a08416-3171-7c82-ab91-dcbab6817b89` at canonical source/ledger tip
-`090b8aa0a610a3e6d11c74c587699b6d8f2e370a`. Canonical lane remains
+`acc69c94ca292496dec73d636fad1c165f5b19ec` before this documentation update. Canonical lane remains
 `/Users/nv/repos/ubiquity/sentinel/.codex-worktrees/master-plan-gfa795549e5`,
 branch `codex/master-plan-gfa795549e5`. No production activation is accepted.
-The owner now supervises DSH directly for the small causal correction, per the
-user's 19:07 UTC instruction; runtime implementation remains Luna/max.
+The owner supervises DSH directly, per the user's 19:07 UTC instruction.
+The causal correction is accepted; current work is T02/T03 contract resolution.
+Runtime implementation remains Luna/max. No DSH implementation writer is active.
 
 Task states: pending, in_progress, ready, accepted, blocked, rejected. Only
 accepted closes a task, and only after the acceptance evidence below exists.
@@ -23,8 +24,8 @@ to keep retrying. Scope changes require an Astra entry with the reason.
 | ID | State / owner | Required acceptance | Evidence or exact next action |
 | --- | --- | --- | --- |
 | T01 Causal capture verifier | accepted / Astra, fresh audit and canonical check below | Concrete restricted execution of original and sanitized input at the same original SHA; intended failure observed in both; identical safe fixture passes candidate through the real local loop; privacy and negative cases preserved | Worker correction `7491c68` and original `55555dc` are canonical ancestors through merge `090b8aa`. Fresh final Astra audit accepted the exact frozen candidate; canonical focused host suite passed 186/186. Local macOS slice only; T04 target consumer, T05 production isolation and T08 full aggregate acceptance remain open. No active DSH writer. |
-| T02 Runtime model receipt | pending / Astra | A supported trusted source proves actual provider/model/effort and completion; unavailable evidence fails closed | Resolve exact receipt source from existing interfaces before assigning host wiring; configured thread metadata is insufficient. No runtime model probe authorized by this row. |
-| T03 Runtime review transport | pending / Astra | Concrete completed review transport and durable receipt bind operation, PR, head, reviewer and terminal result; no silence-as-clean | Resolve the real clean-review receipt/service interface. Report 02 is a dependency inventory, not implementation proof. |
+| T02 Runtime model receipt | blocked / Astra prepares owner decision | A supported trusted source proves actual provider/model/effort and completion; unavailable evidence fails closed | Bounded interface investigation below found no documented provider-observed model/effort producer. Owner must approve an explicit request/runtime evidence contract or supply a supported stronger receipt source. No runtime probe authorized by this row. |
+| T03 Runtime review transport | pending / Astra | Concrete completed review transport and durable receipt bind operation, PR, head, reviewer and terminal result; no silence-as-clean | Local review lifecycle is documented; concrete adapter constraints and a two-sample probe proposal are below. Actual clean/finding output and authorized GitHub publisher identity remain unverified; no coding assignment yet. |
 | T04 Gateway replay consumer | pending / Astra; depends on T01 | Actual target command consumes the safe permanent fixture, fails original, passes candidate, and runs in target validation | Target `7b93b579eecf5392730453f1407a66a552fd7c48` lacks the configured replay command; reconcile target ownership and approve the concrete command interface before writing target files. |
 | T05 Production replay isolation | pending / Astra | Real filesystem/network/credential/process restrictions tested on the execution host; arbitrary target commands cannot escape; no caller boolean as proof | Existing Deno process groups establish lifetime only. Choose and verify the host boundary; local restricted consumer proof does not close production isolation. |
 | T06 Trusted host wiring | pending / Astra; depends on T01–T05 | Real entrypoints assemble scoped authentication, durable state CAS, incident/replay/model/review and release capabilities; missing capabilities fail closed | Observer run `34389188768`: `observe_auth_missing`; repair `34388944531` and release `34388818273`: host wiring absent. Assemble existing ports with verified contracts, not another injected stub. |
@@ -274,6 +275,118 @@ GitHub review ID. A trusted host must bind local operation/head/completion to a
 published GitHub review receipt, or the contract must be explicitly revised.
 No live review was requested and no production service is claimed. This avoids
 repeating the earlier report's blocked schema-generation investigation.
+
+### T02/T03 bounded contract investigation — 2026-09-09 21:34 UTC
+
+Source inspected: canonical `acc69c94ca292496dec73d636fad1c165f5b19ec`.
+Tracked source is unchanged. Eight pre-existing diagnostic directories remain
+untracked and preserved. No model probe, test execution, GitHub write, DSH
+writer, telemetry configuration change or additional worktree was launched.
+
+Official sources fetched on this date:
+
+- https://learn.chatgpt.com/docs/app-server
+- https://learn.chatgpt.com/docs/config-file/config-advanced#observability-and-telemetry
+- https://learn.chatgpt.com/docs/config-file/config-reference
+
+T02 finding: app-server documents configured thread identity, turn overrides,
+service model rerouting and terminal completion. OTel documents conversation
+model/reasoning settings, API attempt/status/duration, stream completion and
+usage metadata. These pages do not establish an authoritative backend-observed
+model AND effort receipt. This is a bounded negative finding about the checked
+interfaces, not a claim that no such provider interface can exist. Another
+schema scan or an adapter that returns configured values as observed values
+does not resolve it. The default verifier must continue to return unavailable.
+
+The existing `ActualSessionEvidenceV1` lacks invocation/thread/turn/request
+correlation, and `ReceiptVerifierV1` returns model/effort without verified
+provider identity. The terminal handler already checks the exact thread and
+turn; those IDs are lost at the verifier boundary. Reroute handling currently
+checks neither ID and retains only the last from/to event. Wiring a callback
+alone cannot meet T02. A real producer must bind evidence to the exact operation and all applicable turns/requests,
+check provider identity and Luna/max, retain reroutes and terminal outcome,
+and reject missing, mismatched or ambiguous success claims. Retain correlated
+failed/interrupted receipts for accounting and diagnosis; they cannot authorize
+a successful candidate or review.
+
+Proposed owner decision, NOT an accepted change: use trusted host records of
+actual submitted model/provider/effort settings, all overrides, correlated
+service routing events and successful terminal/output evidence as the runtime
+receipt. Call this request/runtime evidence, never provider attestation.
+Preserve Luna/max and no fallback. Missing correlation or uncertain routing
+remains unavailable. Absence of a reroute event alone cannot prove backend
+identity. Approving this interpretation would change the stronger existing
+T02 acceptance contract and needs explicit recording before implementation.
+The alternative is to retain that contract and name a supported provider
+receipt producer; do not keep assigning workers to invent one.
+
+T03 adapter constraints, proposed and not implemented:
+
+1. Reserve budget and persist operation identity before starting review; recover
+   ambiguous starts without automatically starting a second review.
+2. Freeze repository/base/head and review the full aggregate diff. A single
+   `commit` target is insufficient for a multi-commit PR. Verify the supported
+   `baseBranch` target's resolved comparison/merge base against the frozen
+   expected diff; a moving branch label is insufficient evidence.
+3. Bind returned review thread, turn and completed result item to that operation.
+   `exitedReviewMode.review` is text; require successful matching terminal
+   completion and nonempty output. Missing output is unavailable, not clean.
+4. Establish real clean and finding-bearing samples before implementing strict
+   normalization. Positively recognize the entire supported result, including
+   an explicit clean verdict. Current parsing can treat unlabelled prose as
+   zero findings and retains only labelled lines from multiline bodies; this
+   needs correction, not another service completion boolean. Two samples do
+   not prove general parser completeness. Reject malformed, unknown, truncated
+   or ambiguous results;
+   preserve all substantive findings and do not let the implementation worker
+   produce its own accepted review.
+5. A trusted host may publish the completed review through an explicitly
+   authorized GitHub identity and retain the exact review ID, head, publisher
+   and output binding. Local Codex completion supplies no GitHub review ID.
+   Do not impersonate the Codex connector bot or assume that the PR author's
+   App can satisfy required-review protections. Publisher identity and branch
+   eligibility remain unresolved deployment choices. Keep the actual GitHub
+   publisher identity distinct from Codex execution provenance.
+6. Persist publication intent and reconcile uncertain GitHub outcomes using
+   the exact operation and returned/recovered object identity. Existing
+   normalization must still bind standing review ID/author/head, terminal
+   result and findings; changed head/base invalidates affected evidence.
+
+Concrete next experiment, pending owner authorization: at most two local
+`review/start` invocations against frozen synthetic aggregate diffs, one clean
+and one containing a known defect, using Luna/max and the existing approved
+Codex authentication. Establish the effective review model and effort first:
+`review_model` can override the session model, while `review/start` has no
+model/effort fields. Do not infer review identity from the parent session.
+Bound each to ten minutes with no automatic retry or
+continuation; reserve both starts before invocation and leave ambiguous starts
+charged. Capture only the required request, routing, thread/turn, review item
+and terminal evidence in restricted host-local artifacts. Use read-only review
+checkouts, no target credentials or GitHub/deployment writes, and no shared
+telemetry/configuration change. If required bounds or model selection cannot
+be enforced through the existing interface, stop before inference. A missing
+expected finding or unverifiable clean result is a failed sample, not grounds
+to weaken parsing. These samples can establish the local adapter shape; they
+cannot attest backend effort or prove GitHub review publication/eligibility.
+
+Read-only publisher/rules check at 21:36 UTC: host assembly still requires an
+injected `trustedReviewer`; no concrete publisher was found in the checked
+entrypoints. For `ubiquity/ai.ubq.fi` development, GitHub returned HTTP 404
+"Branch not protected" from the protection endpoint and an empty effective
+rules array. This does not waive the plan's review gate or prove that a proposed
+App identity can submit a qualifying review. The attempted #208 review lookup
+returned 404 and supplies no usable reviewer receipt. Do not infer a publisher
+from historical suggestions or the operator's CLI login.
+
+Fresh read-only Astra audit `/root/fresh_t02_t03_contract_audit` reviewed source
+`acc69c9` and this proposal without inherited worker conversation. It confirmed
+the T02 blocker and the bounded sample scope, and required the review-model,
+whole-result parsing, publisher-provenance and failure-receipt distinctions
+now recorded above. This accepts the investigation's limits, not runtime code
+or the proposed acceptance-policy change. No tests or model probes were run.
+
+No acceptance row is closed by this investigation. T06 stays dependent on real
+T02/T03 producers; no new stub or nullable field is a completed capability.
 
 ## Historical entries — not the current task list
 
