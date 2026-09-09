@@ -7,9 +7,9 @@ is evidence, not a second queue. Only the current GPT-6 Astra integration owner
 may edit this file. Workers return proposed updates and immutable evidence;
 READY means awaiting Astra acceptance. Do not create replacement task lists.
 
-Last reconciled: 2026-09-09 19:48 UTC by Astra session
+Last reconciled: 2026-09-09 20:41 UTC by Astra session
 `01a08416-3171-7c82-ab91-dcbab6817b89` at canonical source/ledger tip
-`22201cffd339980fc474d774f0afd8d6118d81b1`. Canonical lane remains
+`090b8aa0a610a3e6d11c74c587699b6d8f2e370a`. Canonical lane remains
 `/Users/nv/repos/ubiquity/sentinel/.codex-worktrees/master-plan-gfa795549e5`,
 branch `codex/master-plan-gfa795549e5`. No production activation is accepted.
 The owner now supervises DSH directly for the small causal correction, per the
@@ -22,7 +22,7 @@ to keep retrying. Scope changes require an Astra entry with the reason.
 
 | ID | State / owner | Required acceptance | Evidence or exact next action |
 | --- | --- | --- | --- |
-| T01 Causal capture verifier | in_progress / Astra supervising DSH | Concrete restricted execution of original and sanitized input at the same original SHA; intended failure observed in both; identical safe fixture passes candidate through the real local loop; privacy and negative cases preserved | Existing lane `master-plan-wave-c-capture-replay-aa41dd093a9`, starting tip `55555dc4d782039df0153f27f13041fd501fccd9`; prior 156 tests used a test-only oracle. First correction stopped for a proven static-import boundary flaw; fresh Astra audit and verified Seatbelt probe inform the active third assignment below; the second run was stopped for a known nested-sandbox execution limit. No implementation acceptance yet. |
+| T01 Causal capture verifier | accepted / Astra, fresh audit and canonical check below | Concrete restricted execution of original and sanitized input at the same original SHA; intended failure observed in both; identical safe fixture passes candidate through the real local loop; privacy and negative cases preserved | Worker correction `7491c68` and original `55555dc` are canonical ancestors through merge `090b8aa`. Fresh final Astra audit accepted the exact frozen candidate; canonical focused host suite passed 186/186. Local macOS slice only; T04 target consumer, T05 production isolation and T08 full aggregate acceptance remain open. No active DSH writer. |
 | T02 Runtime model receipt | pending / Astra | A supported trusted source proves actual provider/model/effort and completion; unavailable evidence fails closed | Resolve exact receipt source from existing interfaces before assigning host wiring; configured thread metadata is insufficient. No runtime model probe authorized by this row. |
 | T03 Runtime review transport | pending / Astra | Concrete completed review transport and durable receipt bind operation, PR, head, reviewer and terminal result; no silence-as-clean | Resolve the real clean-review receipt/service interface. Report 02 is a dependency inventory, not implementation proof. |
 | T04 Gateway replay consumer | pending / Astra; depends on T01 | Actual target command consumes the safe permanent fixture, fails original, passes candidate, and runs in target validation | Target `7b93b579eecf5392730453f1407a66a552fd7c48` lacks the configured replay command; reconcile target ownership and approve the concrete command interface before writing target files. |
@@ -34,7 +34,7 @@ to keep retrying. Scope changes require an Astra entry with the reason.
 | T10 Production ownership and activation | pending / Astra; depends on T09 | Authorized drain and exclusive release ownership verified; trusted runtime deployed with approved capabilities | Existing gateway workflow retains promotion. Do not remove it before replacement proof or run two production writers. |
 | T11 Two autonomous deliveries | pending / Astra; depends on T10 | Two distinct eligible deliveries with exact PR/review/merge/revision/closure receipts; at least one actual captured incident with permanent regression | Discover incidents first, then priority selection. Do not assign an unrelated capture to a preselected issue. |
 | T12 Six-hour observation | pending / Astra; depends on activation and verified receipts | Six observed hours, continued eligible selection, stability evidence and no unresolved ownership/recovery fault | Record actual start/end and gaps; setup time or waiting for approval does not count. |
-| T13 Preserved work reconciliation | accepted / Astra, fresh audit below | Every unintegrated task tip and dirty source draft has explicit disposition; no accepted work stranded | Fresh Astra found no missing production behavior in the listed drafts. All committed worker tips except active T01 are ancestors; root docs tip `9da7f77` is now an ancestor through tree-unchanged merge `c3f6ffb94028671746453d3a8f56ea1a9272ec09`. Dirty diagnostics and rejected/superseded drafts remain preserved, with dispositions below. |
+| T13 Preserved work reconciliation | accepted / Astra, fresh audit below | Every unintegrated task tip and dirty source draft has explicit disposition; no accepted work stranded | Fresh Astra found no missing production behavior in the listed drafts. All committed accepted worker tips, including T01 after merge `090b8aa`, are canonical ancestors; root docs tip `9da7f77` is now an ancestor through tree-unchanged merge `c3f6ffb94028671746453d3a8f56ea1a9272ec09`. Dirty diagnostics and rejected/superseded drafts remain preserved, with dispositions below. |
 
 Closed facts, do not reassign: source PR #2 merged 2026-09-09 05:57:55 UTC
 from `0d85c3aad210d856dd8e39db33509bc335e6fc81`; observed remote development
@@ -161,6 +161,84 @@ First edit checkpoint is five minutes; scoped handback is expected within
 20–25 minutes. Root runs `overnight-causal-capture` after settlement, then
 requests a fresh audit of the frozen candidate before acceptance. Stream and
 stderr use the assignment stem with `.jsonl` and `.stderr` extensions.
+
+At 20:06 UTC Astra stopped PID `78418` after verifying its exact cwd and no
+descendants. DSH invoked the evidence tool with incomplete Deno permissions
+(`homedir` denied, then invalid sys descriptor `os`), then bypassed registered
+capture with raw piped test runs and repeated permission changes. The assignment
+required returning that limit. Process exit is verified; no terminal completed
+result exists, so this run is interrupted and unaccepted. Eight changed files
+are preserved. Frozen manifest `/tmp/sentinel-t01-frozen-v3-20260909-2006.json`
+has SHA-256 `2588c16f15ab9202612d0027ff46a1e7aee2f6bc48956730498569889005f3cf`.
+
+Root ran the registered suite from the verified host, adding read permission
+only for `/usr/bin/sandbox-exec` and `/Users/nv/.deno/bin/deno` metadata required
+by the new verifier. Receipt
+`cc48556d9d6816f2605c36c352452867e2de5be694f7aa26c8a9330e9268c576/ddef23af-11e5-4f05-980c-0386bef0e734`
+is fresh execution, 122937 ms, exit 1: 179 passed and 2 failed. Actual sandboxed
+original/sanitized execution and real repair-loop positives passed. Failures:
+negative constructor assertion expects the wrong error text; scripted positive
+calls realPath after successful cleanup. Its next argv-index assertion is also
+wrong. Do not rerun unchanged bytes.
+
+Fresh context Astra `fresh_t01_candidate_audit` independently rejected acceptance:
+P1 loose matcher still hashes arbitrary private diagnostics; P1 sibling-isolation
+negative cases use absent files or fail first on environment access. It also
+found the wrong argv index. Source confirms the real original-SHA executions,
+input-path validation, isolated caches and cleanup. The next bounded correction
+must use exact safe diagnostic lines, existing synthetic sibling targets and
+correct assertion timing. Root owns all further checks; DSH edits only. No
+broader verifier rewrite, sandbox investigation or replacement worktree.
+
+The fresh auditor approved the exact correction: fixed supported matcher before
+scratch creation; exact exit 1, empty stderr and validated fixed stdout; both
+directions of sibling access including sanitized-to-original; realpaths captured
+before cleanup. At 20:12 UTC root launched edit-only assignment
+`/tmp/sentinel-causal-correction-v4-20260909-2011.md`, PID `89594`, exec `70658`,
+session `a77bc84c-35ac-4500-b915-274b12fff2ec`; exact cwd, production NODE_ENV and
+persisted required DeepSeek Vision/max header verified. Only verifier source,
+proof comments, verifier tests and integration tests are assigned. All checks
+are root-owned; no test/tooling/probe work, new worktree or descendants. First
+edit expected within three minutes and finite correction within 10–15 minutes.
+
+The edit-only run completed and exited at 20:28 UTC. First edit was late (about
+eight minutes), but the run produced the exact audited corrections and did not
+repeat test-tool setup. Root host receipt
+`cc48556d9d6816f2605c36c352452867e2de5be694f7aa26c8a9330e9268c576/0282697b-e755-4b39-886b-394282a9d541`
+passed 186/186 in 116379 ms. Root format/lint checks then found six unformatted
+files and five mechanical lint issues. A bounded cleanup run at 20:32 UTC,
+PID `97515`, exec `88414`, session `a00f7a1e-65ae-48cc-b2c3-bd94eed93e28`,
+verified required model/max and production NODE_ENV, completed and exited at
+20:33 UTC. It applied only those lint fixes and formatting; no tests or new
+implementation scope. All task-owned DSH writers are now settled.
+
+Final eight-file manifest `/tmp/sentinel-t01-final-candidate-20260909-2033.json`
+has SHA-256 `a74cec0422047331ce20cc87cf6fc170bec17c8848a61e01df443265f1ef99f0`.
+Final fresh format `be9f9346-a4c8-4f10-a0ce-eb508c1715b9` and lint
+`ce2e4cf5-f5dc-4bd4-8634-400f2783ecc6` passed in the same evidence namespace.
+Final frozen host suite `2bd04712-75bb-4baa-9371-f8a868f9091d` passed 186/186
+in 118757 ms. Fresh context Astra `fresh_t01_final_acceptance` independently
+matched all eight hashes, found no T01 P0/P1 and accepted for integration.
+It verified concrete execution, safe diagnostics, input and identity binding,
+both-direction existing-target denial tests, cleanup and the real repair loop;
+it did not rerun tests. Its acceptance explicitly leaves T04/T05/T08 open.
+
+Root committed the accepted eight-file correction as `7491c68` and merged its
+branch with ancestry preserved into canonical `090b8aa0a610a3e6d11c74c587699b6d8f2e370a`.
+Both original worker tip `55555dc` and correction are canonical ancestors.
+Combined canonical focused validation passed 186/186 in 119435 ms at
+`cc48556d9d6816f2605c36c352452867e2de5be694f7aa26c8a9330e9268c576/5e944fef-dab8-4063-9938-472862da6d41`.
+This is fresh execution of canonical source `090b8aa`, not a cache hit. Full
+aggregate review and the complete harness are still T08. Align the normal macOS test harness's
+read permissions for the installed executable metadata before that full run;
+the registered focused host command already grants the two exact paths.
+Worker checkout is clean; canonical retains only this ledger update and the
+eight preexisting untracked diagnostic directories. Test-created temporary
+directories are settled and removed. Root unrelated `error.log` is preserved.
+No new worktree, production activation, push or PR was performed in this
+correction. Aggregate publication/review remains T08 after its declared
+implementation dependencies; do not reinterpret this local acceptance as
+reviewed, published, deployed or live delivery proof.
 
 ### T13 accepted preserved-work dispositions (2026-09-09 19:18 UTC)
 
