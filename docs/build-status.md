@@ -1,5 +1,100 @@
 # Build status
 
+## Active task register — Astra owned
+
+This section is the current authoritative task list. The dated history below
+is evidence, not a second queue. Only the current GPT-6 Astra integration owner
+may edit this file. Workers return proposed updates and immutable evidence;
+READY means awaiting Astra acceptance. Do not create replacement task lists.
+
+Last reconciled: 2026-09-09 19:14 UTC by Astra session
+`01a08416-3171-7c82-ab91-dcbab6817b89` at canonical source/ledger tip
+`b994b74324b771bda103952487f44ba38a0996ac`. Canonical lane remains
+`/Users/nv/repos/ubiquity/sentinel/.codex-worktrees/master-plan-gfa795549e5`,
+branch `codex/master-plan-gfa795549e5`. No production activation is accepted.
+The owner now supervises DSH directly for the small causal correction, per the
+user's 19:07 UTC instruction; runtime implementation remains Luna/max.
+
+Task states: pending, in_progress, ready, accepted, blocked, rejected. Only
+accepted closes a task, and only after the acceptance evidence below exists.
+An unavailable credential or owner choice is a named dependency, not permission
+to keep retrying. Scope changes require an Astra entry with the reason.
+
+| ID | State / owner | Required acceptance | Evidence or exact next action |
+| --- | --- | --- | --- |
+| T01 Causal capture verifier | in_progress / Astra supervising DSH | Concrete restricted execution of original and sanitized input at the same original SHA; intended failure observed in both; identical safe fixture passes candidate through the real local loop; privacy and negative cases preserved | Existing lane `master-plan-wave-c-capture-replay-aa41dd093a9`, starting tip `55555dc4d782039df0153f27f13041fd501fccd9`; 156 prior passing tests relied on a test-only causal oracle. Implement that missing concrete verifier; no new lane. Launch receipt pending. |
+| T02 Runtime model receipt | pending / Astra | A supported trusted source proves actual provider/model/effort and completion; unavailable evidence fails closed | Resolve exact receipt source from existing interfaces before assigning host wiring; configured thread metadata is insufficient. No runtime model probe authorized by this row. |
+| T03 Runtime review transport | pending / Astra | Concrete completed review transport and durable receipt bind operation, PR, head, reviewer and terminal result; no silence-as-clean | Resolve the real clean-review receipt/service interface. Report 02 is a dependency inventory, not implementation proof. |
+| T04 Gateway replay consumer | pending / Astra; depends on T01 | Actual target command consumes the safe permanent fixture, fails original, passes candidate, and runs in target validation | Target `7b93b579eecf5392730453f1407a66a552fd7c48` lacks the configured replay command; reconcile target ownership and approve the concrete command interface before writing target files. |
+| T05 Production replay isolation | pending / Astra | Real filesystem/network/credential/process restrictions tested on the execution host; arbitrary target commands cannot escape; no caller boolean as proof | Existing Deno process groups establish lifetime only. Choose and verify the host boundary; local restricted consumer proof does not close production isolation. |
+| T06 Trusted host wiring | pending / Astra; depends on T01–T05 | Real entrypoints assemble scoped authentication, durable state CAS, incident/replay/model/review and release capabilities; missing capabilities fail closed | Observer run `34389188768`: `observe_auth_missing`; repair `34388944531` and release `34388818273`: host wiring absent. Assemble existing ports with verified contracts, not another injected stub. |
+| T07 Activation decisions | pending / Astra prepares; user decides | Finite model limits/session bounds, retention duration/aggregate storage/key capability, stability baseline/thresholds, credential scopes, protected paths, isolated target and handover owner recorded | Correct report 03: retention omitted from its bundled request; 40 MiB capacity unproven; proposed #207/#208 not an eligible final capture pair. Prepare one concrete decision request after available facts are resolved. |
+| T08 Integrated delivery | pending / Astra; depends on T01–T06 | Accepted worker tips are canonical ancestors; exact candidate passes integrated harness, current-head Codex review and required CI; resulting PR merged | Earlier source PR #2 is already merged; do not recreate it or redo fixed D6. New accepted changes require a new integrated candidate and evidence. |
+| T09 Isolated release and rollback | pending / Astra; depends on T07–T08 | Exact candidate/prior revisions, real promotion, continuous acceptance and exact restoration proved in isolated environment | Perform before production promotion ownership transfer. Health alone is insufficient. |
+| T10 Production ownership and activation | pending / Astra; depends on T09 | Authorized drain and exclusive release ownership verified; trusted runtime deployed with approved capabilities | Existing gateway workflow retains promotion. Do not remove it before replacement proof or run two production writers. |
+| T11 Two autonomous deliveries | pending / Astra; depends on T10 | Two distinct eligible deliveries with exact PR/review/merge/revision/closure receipts; at least one actual captured incident with permanent regression | Discover incidents first, then priority selection. Do not assign an unrelated capture to a preselected issue. |
+| T12 Six-hour observation | pending / Astra; depends on activation and verified receipts | Six observed hours, continued eligible selection, stability evidence and no unresolved ownership/recovery fault | Record actual start/end and gaps; setup time or waiting for approval does not count. |
+| T13 Preserved work reconciliation | in_progress / Astra | Every unintegrated task tip and dirty source draft has explicit disposition; no accepted work stranded | All registered Sentinel worker tips except T01 are canonical ancestors at this check. Several historical lanes retain untracked source/test drafts and two tracked test edits; preserve and compare them before accepting or rejecting. Root docs tip `9da7f77` is separate and must not be mistaken for latest implementation. |
+
+Closed facts, do not reassign: source PR #2 merged 2026-09-09 05:57:55 UTC
+from `0d85c3aad210d856dd8e39db33509bc335e6fc81`; observed remote development
+`22ac38871d6261c844f8419f80fcf038ddcdf133`. GitHub statuses array/latest-context
+fix is `f9cde17`. These facts do not close the remaining production tasks.
+
+### Fresh Astra verification and loop recovery
+
+1. Verify canonical path, branch, HEAD, dirty state, worktree tips, current writer
+   processes and latest handbacks. Transfer write ownership only after settlement.
+2. Review each active row against source and existing evidence. Record exact
+   revision, host, execution/cache status and acceptance surface; invalidate only
+   evidence affected by changed bytes or conditions. Never rerun to recover logs.
+3. Review the last failed checkpoint and correction before retrying. A repeated
+   unchanged failure needs a different concrete action, not another broad audit,
+   fresh worktree, or replacement goal. Use supported intervention for task-owned
+   workers; do not stop unrelated sessions.
+4. Update this register with findings, rejected claims, owner, next action and
+   the evidence reference. Keep raw payloads and secrets outside Git. Record
+   worker launch identity and expected checkpoint before accepting its launch.
+5. Integrate only accepted work. Distinguish ready, committed, integrated,
+   reviewed, merged, deployed and live acceptance. No worker may mark its own
+   output accepted here.
+6. Before accepting a major milestone, and before resuming after repeated
+   failure or a checkpoint without useful progress, request a fresh read-only
+   GPT-6 Astra audit with no inherited worker conversation. Supply this task
+   contract, exact diff and existing evidence. Record its pass, correction or
+   blocker report here before proceeding. This is separate from required Codex
+   PR review and does not authorize duplicate tests or another implementation
+   writer. The auditor cannot approve production choices reserved to the user.
+
+Independent review reference:
+`/Users/nv/.local/state/sentinel-audits/2026-09-09/agent-results-review-1841.md`.
+The original result files remain evidence snapshots; stale claims in them are
+superseded by this register and its recorded source checks.
+
+### Current bounded execution receipts
+
+- T01: Astra directly launched DSH at 19:12 UTC from the existing clean worker
+  tip `55555dc4d782039df0153f27f13041fd501fccd9`; local PID `71927`, persistent
+  exec handle `33026`, DSH session `355bd62b-0553-4e7f-b2ca-b3e654913d62`.
+  Exact cwd and `NODE_ENV=production` were checked. The persisted request header
+  confirms `deepseek-official / deepseek-v4-flash-vision-exp / max`; completion
+  and tests are pending. No DSH descendants are authorized.
+- Immutable T01 assignment and stream are host-local under
+  `/tmp/sentinel-causal-correction-20260909-1911.{md,jsonl}`. Registered focused
+  evidence target: `overnight-causal-capture`. First edit or precise blocker
+  expected within ten minutes, focused result approximately thirty minutes.
+  Print mode has no live steering. Diagnose stalled/repeated failures and use
+  only verified task-owned stop authority if required; preserve changes and
+  settle descendants before any replacement. Elapsed time alone is not failure.
+- The temporary Luna preflight supervisor returned without launching DSH or
+  changing files and is settled. It is not an additional implementation owner.
+- T13: fresh read-only Astra auditor `/root/fresh_audit_preserved_work` is
+  comparing historical dirty drafts against canonical and integrated commits.
+  It has no inherited conversation and no write, test, launch or cleanup
+  authority. Its disposition report is pending; existing files remain preserved.
+
+## Historical entries — not the current task list
+
 ## Canonical state
 
 - Owner: primary orchestrator for master-plan-gfa795549e5.
