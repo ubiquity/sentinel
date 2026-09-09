@@ -1,5 +1,6 @@
 .codex-worktrees/
 .sentinel/
+.sentinel-artifacts/
 .env
 .env.*
 !.env.example
@@ -13,3 +14,5 @@
 /sentinel-harness-failure-*/
 # Wave C integration suite disposable repositories and scratch dirs
 /sentinel-integration-test-*/
+# Read-only observer disposable test stores
+/sentinel-observe-test-*/

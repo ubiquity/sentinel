@@ -1,0 +1,46 @@
+# Read-only encrypted evidence intake for the standalone Sentinel target.
+#
+# This workflow has no contents:write permission and receives no model, state,
+# Deno promotion or GitHub App capability. The observer can only GET the
+# authenticated ai.ubq.fi incident index and replay export, then write the
+# provider's encrypted capture bytes to the runner's private workspace.
+name: sentinel-observe
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sentinel-observe
+  cancel-in-progress: false
+
+jobs:
+  observe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      # Both values are protected repository secrets. They are never echoed
+      # and are not available to pull-request workflows from forks.
+      SENTINEL_GATEWAY_AUTH_JSON: ${{ secrets.SENTINEL_GATEWAY_AUTH_JSON }}
+      SENTINEL_REPLAY_KEY_B64: ${{ secrets.SENTINEL_REPLAY_KEY_B64 }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - name: Collect encrypted gateway evidence (read-only)
+        run: deno task observe:run
+      - name: Upload encrypted capture store
+        if: ${{ always() && hashFiles('.sentinel-artifacts/entries/**') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: sentinel-encrypted-evidence-${{ github.run_id }}
+          path: .sentinel-artifacts/entries
+          if-no-files-found: error
+          # Short bounded scratch retention while the durable owner-approved
+          # evidence store is still an activation decision.
+          retention-days: 1

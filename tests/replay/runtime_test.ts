@@ -169,7 +169,9 @@ Deno.test("output cap retains a bounded prefix and flags truncation", async () =
     const run = runtime();
     const result = await run.run(command(
       root,
-      ["-c", "printf 'x%.0s' {1..5000}"],
+      // Keep the producer POSIX-sh compatible: ubuntu's /bin/sh is dash and
+      // does not expand bash's {1..5000} brace range.
+      ["-c", "i=0; while [ $i -lt 5000 ]; do printf x; i=$((i + 1)); done"],
       5000,
       128,
     ));

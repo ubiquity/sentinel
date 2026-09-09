@@ -1374,3 +1374,23 @@ existing target workflow, but standalone release ownership, current-head clean
 review, trusted host credentials and live model caps, retention, stability,
 isolated rollback, two autonomous deliveries and six-hour observation are
 still unresolved.
+
+## Observer candidate fresh acceptance (2026-09-09 02:30 UTC)
+
+The observer candidate was rechecked from the canonical worktree at source
+revision `4907920665d07e1da5e88346cc4081a8fe2e0a1f` after the earlier local and
+published failures. The output-cap fixture now uses a POSIX `/bin/sh` loop
+instead of Bash brace expansion, so GitHub's Ubuntu runner and macOS use the
+same producer behavior. The fresh task-owned receipt
+`cc48556d9d6816f2605c36c352452867e2de5be694f7aa26c8a9330e9268c576/618a6c5b-ecfe-4852-bc8d-98029c1b998f`
+executed `deno task test:local` in `fresh` mode and passed with executor and
+child exit `0`, `687` tests across `68` steps, and `23m26s` duration. It also
+covered the new `observe-host_test.ts`; formatting, lint and type checks passed
+within the harness. Focused observer, replay-runtime and loop-guard receipts
+are recorded separately in the task evidence store.
+
+This closes the local deterministic acceptance gate for the observer slice. It
+does not publish or activate the workflow, configure its protected secrets,
+extend durable retention, enable repair or release, or establish live target
+ownership. The earlier failure entries remain historical evidence for the
+superseded candidate and old published head.
