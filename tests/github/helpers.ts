@@ -479,8 +479,10 @@ export function checksPageWire(runs: unknown[]): Record<string, unknown> {
   return { total_count: runs.length, check_runs: runs };
 }
 
-export function statusesPageWire(statuses: unknown[]): Record<string, unknown> {
-  return { total_count: statuses.length, statuses };
+export function statusesPageWire(statuses: unknown[]): unknown[] {
+  // GitHub's commit-status endpoint returns a top-level array. The combined
+  // status endpoint has an object envelope, but this route does not.
+  return statuses;
 }
 
 export function commitStatusWire(

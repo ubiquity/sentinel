@@ -1206,29 +1206,56 @@ type RequiredChecksState = "pass" | "pending" | "failed";
  * check runs share the same required name space. A missing or not-completed
  * observation is pending; any failed conclusion (including skipped, neutral,
  * timed_out, cancelled or action_required) is failed; only completed
- * `success` observations pass. When both APIs report a context, every
- * observation must be successful.
+ * `success` observations pass. GitHub returns historical observations for a
+ * context, so only the newest observation (by its completion/start time) is
+ * evaluated; an older pending or failed status must not override a newer pass.
  */
 export function requiredChecksState(
   requiredNames: string[],
   checks: GitHubCheckV1[],
 ): RequiredChecksState {
+  const latest = latestChecksByName(checks);
   let pending = false;
   for (const name of requiredNames) {
-    const runs = checks.filter((check) => check.name === name);
-    if (runs.length === 0) {
+    const run = latest.get(name);
+    if (run === undefined) {
       pending = true;
       continue;
     }
-    for (const run of runs) {
-      if (run.status !== "completed" || run.conclusion === null) {
-        pending = true;
-        continue;
-      }
-      if (run.conclusion !== "success") return "failed";
+    if (run.status !== "completed" || run.conclusion === null) {
+      pending = true;
+      continue;
     }
+    if (run.conclusion !== "success") return "failed";
   }
   return pending ? "pending" : "pass";
+}
+
+/**
+ * Collapse historical check observations to one current value per context.
+ * Commit statuses are returned newest-first, while check runs expose explicit
+ * timestamps; the timestamp provides the same rule across both APIs. Equal
+ * timestamps keep the first observation, preserving GitHub's newest-first
+ * ordering without inventing a tie-breaker.
+ */
+function latestChecksByName(
+  checks: GitHubCheckV1[],
+): Map<string, GitHubCheckV1> {
+  const latest = new Map<string, GitHubCheckV1>();
+  for (const check of checks) {
+    const previous = latest.get(check.name);
+    if (
+      previous === undefined ||
+      checkObservationTime(check) > checkObservationTime(previous)
+    ) {
+      latest.set(check.name, check);
+    }
+  }
+  return latest;
+}
+
+function checkObservationTime(check: GitHubCheckV1): number {
+  return check.completedAt ?? check.startedAt ?? -1;
 }
 
 function blocked(

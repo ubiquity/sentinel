@@ -284,10 +284,9 @@ export class GitHubApiClient {
       `/repos/${repoPath(this.repository)}/commits/${sha}/statuses`,
       { per_page: String(this.perPage) },
       (body) => {
-        const obj = expectRecord(body, "$");
         return expectArray(
-          obj.statuses,
-          "$.statuses",
+          body,
+          "$",
           this.maxItems,
           (v) => v,
         ) as unknown[];

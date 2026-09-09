@@ -866,6 +866,37 @@ Deno.test("mergePullRequest: required checks must pass on the exact head", async
   assert.equal(blockedReason(empty), "checks_pending");
   assert.equal(putCount(emptyPort.transport), 0);
 
+  // Commit statuses are historical and returned newest-first. A newer
+  // successful status for a context supersedes an older pending observation.
+  const historicalPort = mergedPort(happyScript({
+    checks: [checkRunWire({ name: "other" })],
+    statuses: [
+      commitStatusWire({
+        context: "ci",
+        state: "success",
+        created_at: "2026-09-07T01:00:00Z",
+        updated_at: "2026-09-07T01:01:00Z",
+      }),
+      commitStatusWire({
+        context: "ci",
+        state: "pending",
+        created_at: "2026-09-07T00:00:00Z",
+        updated_at: "2026-09-07T00:01:00Z",
+      }),
+    ],
+    extra: [
+      httpRespond(
+        "PUT",
+        "/repos/ubiquity/sentinel/pulls/1/merge",
+        200,
+        mergeResponseWire(SHA3),
+      ),
+    ],
+  }));
+  const historical = await historicalPort.port.mergePullRequest(mergeRequest());
+  assert.ok(historical.ok, JSON.stringify(historical));
+  if (historical.ok) assert.equal(historical.value.outcome, "merged");
+
   // Legacy commit-status contexts share the required check namespace with
   // check-runs and must satisfy a required context when the run API has no
   // matching name.
