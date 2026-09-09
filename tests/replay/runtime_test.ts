@@ -169,7 +169,10 @@ Deno.test("output cap retains a bounded prefix and flags truncation", async () =
     const run = runtime();
     const result = await run.run(command(
       root,
-      ["-c", "printf 'x%.0s' {1..5000}"],
+      // Bash-only brace expansion emits 1 byte under dash (the CI runner's
+      // /bin/sh); the POSIX loop emits exactly 5000 bytes on every supported
+      // sh so the 128-byte retained-prefix and truncation assertions hold.
+      ["-c", 'i=0; while [ "$i" -lt 5000 ]; do printf x; i=$((i + 1)); done'],
       5000,
       128,
     ));
