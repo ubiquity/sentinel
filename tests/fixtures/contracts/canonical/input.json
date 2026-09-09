@@ -1,0 +1,15 @@
+{
+  "nested": [
+    {
+      "z": 1,
+      "a": "x"
+    },
+    {
+      "b": 2
+    }
+  ],
+  "text": "café ☕ é",
+  "num": 0.5,
+  "flag": true,
+  "nothing": null
+}

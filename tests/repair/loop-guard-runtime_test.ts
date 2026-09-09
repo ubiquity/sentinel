@@ -1,0 +1,266 @@
+import assert from "node:assert/strict";
+import { makeRepairRig, SHA1 } from "../integration/helpers.ts";
+import { repairConfigs } from "./helpers.ts";
+import { RollingStartBudget } from "../../src/budget/mod.ts";
+import { runRepairEntrypoint } from "../../src/main.ts";
+import { CodexImplementationPort } from "../../src/repair/model-port.ts";
+import type {
+  CodexServerNotificationV1,
+  CodexSessionV1,
+} from "../../src/repair/codex-transport.ts";
+import { checkoutContentCheckpoint } from "../../src/repair/checkout-content.ts";
+import { gitRun } from "../state/helpers.ts";
+
+const pause = (ms: number) =>
+  new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/**
+ * One-shot event signal: a waiter never starts early when the signal already
+ * fired before it began waiting, and a fire after settlement is a no-op.
+ */
+function signal(): { promise: Promise<void>; fire: () => void } {
+  let fire: () => void = () => {};
+  const promise = new Promise<void>((resolve) => {
+    fire = resolve;
+  });
+  return { promise, fire };
+}
+
+class ScriptSession implements CodexSessionV1 {
+  handler: ((event: CodexServerNotificationV1) => void) | null = null;
+  job: Promise<void> = Promise.resolve();
+  failure: unknown = null;
+  steers = 0;
+  interrupts = 0;
+  closed = false;
+  /** Fired exactly once when the guard's steer request is delivered. */
+  private readonly steerObserved = signal();
+  /** Fired exactly once when the guard's interrupt request is delivered. */
+  private readonly interruptObserved = signal();
+  constructor(
+    readonly number: number,
+    readonly cwd: string,
+    readonly order: string[],
+  ) {}
+  emit(method: string, params: unknown) {
+    this.handler?.({ method, params });
+  }
+  terminal(status: string) {
+    this.order.push(`terminal:${this.number}`);
+    this.emit("turn/completed", {
+      threadId: `t${this.number}`,
+      turn: { id: `u${this.number}`, status, durationMs: 1 },
+    });
+  }
+  send(method: string, params: unknown): Promise<unknown> {
+    if (method === "initialize") {
+      return Promise.resolve({ userAgent: "scripted" });
+    }
+    if (method === "thread/start") {
+      return Promise.resolve({
+        thread: { id: `t${this.number}` },
+        model: "gpt-5.6-luna",
+        reasoningEffort: "max",
+        modelProvider: "scripted",
+      });
+    }
+    if (method === "turn/start") {
+      return Promise.resolve({ turn: { id: `u${this.number}` } });
+    }
+    if (method === "turn/steer") {
+      assert.equal(
+        (params as Record<string, unknown>).expectedTurnId,
+        `u${this.number}`,
+      );
+      this.steers++;
+      this.order.push(`steer:${this.number}`);
+      // Signal from a later task, never synchronously: the port records the
+      // acknowledgement in its microtask continuation after this send
+      // resolves, and every microtask runs before any timer, so the producer
+      // cannot emit the post-ack failures before the port observed the ack.
+      // Event-loop ordering only — no wall-clock delay is required.
+      setTimeout(() => this.steerObserved.fire(), 0);
+      return Promise.resolve({ turnId: `u${this.number}` });
+    }
+    if (method === "turn/interrupt") {
+      this.interrupts++;
+      this.order.push(`interrupt:${this.number}`);
+      this.terminal("interrupted");
+      // Release EVERY pending producer wait: a duration-bound interrupt may
+      // arrive while the producer is still waiting for the steer. Releasing
+      // the steer wait here makes the one-steer assertion below fail
+      // explicitly instead of leaving close() pending on a never-fired
+      // signal forever.
+      this.steerObserved.fire();
+      this.interruptObserved.fire();
+      return Promise.resolve({});
+    }
+    throw new Error(`unexpected method ${method}`);
+  }
+  notify() {}
+  onServerRequest() {}
+  onNotification(handler: (event: CodexServerNotificationV1) => void) {
+    this.handler = handler;
+    this.job = this.produce().catch((error) => {
+      this.failure = error;
+      this.terminal("failed");
+    });
+  }
+  async produce() {
+    if (this.number === 2) {
+      await pause(10);
+      this.terminal("failed");
+      return;
+    }
+    const item = (i: number) => ({
+      id: `c${i}`,
+      type: "commandExecution",
+      command: "deno check app.ts",
+      cwd: this.cwd,
+      status: "failed",
+      aggregatedOutput: "error: Type checking failed",
+      exitCode: 1,
+    });
+    // One start, then the four repeated failures back-to-back: every start
+    // advances the guard's progress generation, and an observation whose
+    // checkpoint/hash work is still in flight when the next start arrives is
+    // invalidated and never counted. Wall-clock pacing would therefore let
+    // scheduler load turn the repeated failures inconclusive and the steer
+    // would never be delivered. Keeping all completions in this single
+    // stable generation window makes the four failures consecutive under
+    // any load; no timing is relied on.
+    this.emit("item/started", {
+      threadId: "t1",
+      turnId: "u1",
+      item: { ...item(1), status: "inProgress" },
+    });
+    for (let i = 1; i <= 4; i++) {
+      this.emit("item/completed", {
+        threadId: "t1",
+        turnId: "u1",
+        item: item(i),
+      });
+    }
+    // Deterministic synchronization: wait for the guard's steer event. If the
+    // model duration bound fires first, the interrupt send releases this wait
+    // and the assertion below turns the early interruption into an explicit
+    // test failure instead of a false success.
+    await this.steerObserved.promise;
+    assert.equal(this.steers, 1, "four failures must steer");
+    // Two post-ack failures, still in the same stable generation: the steer
+    // notify above runs only after the port observed the acknowledgement, so
+    // these are captured as post-ack evidence and counted.
+    for (let i = 5; i <= 6; i++) {
+      this.emit("item/completed", {
+        threadId: "t1",
+        turnId: "u1",
+        item: item(i),
+      });
+    }
+    // Deterministic synchronization: wait for the guard's interrupt event
+    // instead of polling for the post-ack settlement.
+    await this.interruptObserved.promise;
+    assert.equal(this.interrupts, 1, "two post-ack failures must interrupt");
+  }
+  async close() {
+    await this.job;
+    await pause(50);
+    this.closed = true;
+    this.order.push(`close:${this.number}`);
+  }
+}
+
+Deno.test("loop-guard runtime: real entrypoint stops first loop and admits second after terminal and close", async () => {
+  const issues = [{ number: 1, createdAt: 1 }, { number: 2, createdAt: 2 }];
+  const rig = await makeRepairRig("reuse-primary", {
+    summaries: false,
+    github: { issues, openIssues: issues },
+  });
+  const sessions: ScriptSession[] = [];
+  const order: string[] = [];
+  try {
+    const cwd = await Deno.realPath(rig.ctx.work);
+    const init = await gitRun(cwd, [
+      "commit",
+      "--allow-empty",
+      "-m",
+      "checkpoint probe",
+    ], rig.ctx.env);
+    assert.ok(init.ok, init.stderr);
+    assert.match(
+      (await checkoutContentCheckpoint(cwd)) ?? "",
+      /^[a-f0-9]{64}$/,
+    );
+    // Finite test-local model bound: six observations run serially through
+    // the guard pipeline, each bounded by the 5s checkout-snapshot deadline,
+    // so 120s leaves a clear margin over that 30s worst case under scheduler
+    // load while still fitting the 10-minute run deadline.
+    const configs = repairConfigs({
+      sessionBound: { maxDurationMs: 120000, maxOutputChars: 200000 },
+    });
+    const model = new CodexImplementationPort({
+      checkoutDir: cwd,
+      interruptSettlementGraceMs: 100,
+      receiptVerifier: (e) =>
+        e.threadModel === "gpt-5.6-luna" && e.threadEffort === "max"
+          ? { observedModel: "gpt-5.6-luna", observedReasoning: "max" }
+          : null,
+      openSession: () => {
+        if (sessions.length > 0) {
+          assert.ok(sessions[0].closed, "next writer started before close");
+        }
+        const session = new ScriptSession(sessions.length + 1, cwd, order);
+        order.push(`open:${session.number}`);
+        sessions.push(session);
+        return Promise.resolve(session);
+      },
+    });
+    const result = await runRepairEntrypoint({
+      clock: rig.clock,
+      state: rig.store,
+      configs,
+      controllerSha: SHA1,
+      github: rig.github,
+      githubCooldown: rig.githubCooldown,
+      incidents: rig.incidents,
+      replay: rig.replay,
+      model,
+      budget: new RollingStartBudget({
+        clock: rig.clock,
+        state: rig.store,
+        configs,
+      }),
+    }, { deadline: rig.clock.now() + 600000, stepLimit: 16 });
+    const snapshot = await rig.snapshot();
+    for (const session of sessions) assert.equal(session.failure, null);
+    assert.equal(
+      sessions.length,
+      2,
+      JSON.stringify({ result, order, work: snapshot.work }),
+    );
+    assert.equal(sessions.reduce((n, s) => n + s.steers, 0), 1);
+    assert.equal(sessions.reduce((n, s) => n + s.interrupts, 0), 1);
+    assert.equal(snapshot.reservations.length, 2);
+    assert.ok(
+      snapshot.reservations.every((r) =>
+        r.purpose === "implementation" && r.outcome === "ambiguous"
+      ),
+    );
+    assert.ok(
+      JSON.stringify(snapshot.work.find((w) => w.source.id === "1")).includes(
+        "failed_command_loop",
+      ),
+    );
+    assert.ok(order.indexOf("terminal:1") < order.indexOf("close:1"));
+    assert.ok(order.indexOf("close:1") < order.indexOf("open:2"));
+    console.log(
+      JSON.stringify({
+        result,
+        order,
+        reservations: snapshot.reservations.length,
+      }),
+    );
+  } finally {
+    await rig.ctx.cleanup();
+  }
+});

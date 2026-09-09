@@ -1,0 +1,60 @@
+{
+  "data": [
+    {
+      "incident_id": "provider-00000000-0000-4000-8000-000000000001",
+      "fingerprint": "c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00",
+      "severity": "P1",
+      "first_seen_at_ms": 1700000000000,
+      "last_seen_at_ms": 1700000003000,
+      "count": 7,
+      "failing_revision": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+      "error_type": "GatewayError",
+      "context": {
+        "message": "upstream terminated without completion",
+        "location": "src/handler.ts:104",
+        "sample": [
+          "upstream terminated without completion",
+          "request aborted after 90s"
+        ]
+      },
+      "provenance": {
+        "endpoint": "https://ai.ubq.fi",
+        "captured_at_ms": 1700000003000,
+        "captured_by": "gateway"
+      },
+      "evidence_ref": {
+        "ref": "artifact://sentinel/synth-0001/capture-1.pgp",
+        "digest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+      },
+      "evidence_expires_at_ms": 1700172803000
+    },
+    {
+      "incident_id": "provider-00000000-0000-4000-8000-000000000002",
+      "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "severity": "P2",
+      "first_seen_at_ms": 1700000000500,
+      "last_seen_at_ms": 1700000000500,
+      "count": 1,
+      "failing_revision": null,
+      "error_type": "UpstreamTimeout",
+      "context": {
+        "message": "upstream request timed out",
+        "location": "src/handler.ts:212",
+        "sample": [
+          "upstream request timed out after 90s"
+        ]
+      },
+      "provenance": {
+        "endpoint": "https://ai.ubq.fi",
+        "captured_at_ms": 1700000000500,
+        "captured_by": null
+      },
+      "evidence_ref": null,
+      "evidence_expires_at_ms": null
+    }
+  ],
+  "cursor": null,
+  "coverage": {
+    "status": "complete"
+  }
+}

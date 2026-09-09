@@ -1,0 +1,39 @@
+# Sentinel deterministic release workflow (Wave C wiring, exclusive release
+# ownership).
+#
+# Schedule: every five minutes (plan §4). Serialized one fixed non-cancelling
+# group; the release controller never races a second release writer.
+#
+# Activation boundary: this runner is inert until the trusted host wiring for
+# src/release-main.ts exists. The entrypoint receives the release-role state
+# capabilities, DenoReleasePort and — only when the m06/WaveC build-receipt
+# seam is wired and injected — the trusted BuildReceiptResolverV1. Without an
+# injected resolver the controller uses UnavailableBuildReceiptResolver and
+# waits/blocks without promotion. `deno task release:run` fails closed; no
+# Deno promotion, model call or repair-state write is possible here. No
+# credential, secret or environment surface is defined in this file; the
+# owner supplies those only at authorized activation.
+name: sentinel-release
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sentinel-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - name: Release controller run
+        run: deno task release:run

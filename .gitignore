@@ -1,6 +1,18 @@
 .codex-worktrees/
 .sentinel/
+.sentinel-artifacts/
 .env
 .env.*
 !.env.example
 .DS_Store
+
+# Hermetic test-local temp home
+/sentinel-test-local-*/
+# State suite disposable repositories and scratch dirs
+/sentinel-state-test-*/
+# Harness failure-path disposable cwd
+/sentinel-harness-failure-*/
+# Wave C integration suite disposable repositories and scratch dirs
+/sentinel-integration-test-*/
+# Read-only observer disposable test stores
+/sentinel-observe-test-*/

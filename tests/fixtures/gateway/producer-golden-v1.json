@@ -1,0 +1,55 @@
+{
+  "sourceSha": "9331946ef10d3b7259b5ca4933598dd380c1d794",
+  "syntheticKeyHex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "exported": {
+    "manifest": {
+      "version": 1,
+      "capture_id": "synthetic-capture-1",
+      "fingerprint": "436b0bb33836c211567cee87ad329785aee460fd164d08ca7fc396a233884b2e",
+      "case_group_digest": "6d9254cace6d2ed07d0b2b569a2a691c9a1540f81db89c111fa1635fe3db152d",
+      "captured_at_ms": 1788811200000,
+      "expires_at_ms": 1788984000000,
+      "algorithm": "AES-256-GCM",
+      "compression": "gzip",
+      "iv": "BwcHBwcHBwcHBwcH",
+      "chunk_count": 1,
+      "ciphertext_bytes": 435
+    },
+    "chunks": [
+      "yBsaBx-KUqMy5o_q8fCODuc7pPpRmqMLHJJ3DB1j7gqMfSP_n2v7uXRovx86YgNMWmNXefdqoiT0qYbtNKmLaVOQWw3dOnuU8R50sdb0U18fOl-qvW5nAUHpKIi7e8U3a-RfBUzlKl9_XyP4FgbyCZIu3PXOdemkd6h_iBKp5YKH5nCJs1vJ5ZJZ1yjgqssJ61a5YTX2PGX7ZgFrdgf-ahlA1fjgVCknCswlIxdi5UoOjAtezqwU77E06yl4gvTFzj8XEFLnhFdSiSNPO2J16pXgd2qEhZBERUzjCyw3FRlM5tvm99Y6PEyjxUWnNq_tv0olExYbPBdCn-kwHBM5dGiMEMxSQ8pQjfQ8UrwxkB9CoXlXGYyb9YqDZyH8cBm3l4A07dN2TwhXoJyv8NkbYdJ9GppSHS3bg4hT0I4m2GFTC1TRZBs0TtRMnxTBjGdK9t44EVZUskQ7HnAAuiax0iHsHMd8nEYsSAU69LTyRqJiamlmBY1c6Ix0y4YigVQFg8A6A1piUVnb0uDBaUBG7CtUwo931iPltSfqDt3-C46rBj_KdnJdXhY67f4Fg0EVxsJE"
+    ]
+  },
+  "expected": {
+    "version": 1,
+    "captured_at_ms": 1788811200000,
+    "endpoint": "/v1/responses",
+    "method": "POST",
+    "content_type": "application/json",
+    "compatibility_headers": {
+      "accept": "text/event-stream"
+    },
+    "failure_signature": "{\"status\":502,\"stream\":true,\"completed\":false,\"terminal_type\":null,\"failure_kind\":\"missing_sse_terminal\",\"framing_valid\":true,\"provider_route\":\"synthetic\"}",
+    "observation": {
+      "status": 502,
+      "stream": true,
+      "completed": false,
+      "terminal_type": null,
+      "failure_kind": "missing_sse_terminal",
+      "synthetic_terminal_type": null,
+      "provider_route": "synthetic"
+    },
+    "client_observation": {
+      "status": 502,
+      "stream": true,
+      "completed": false,
+      "terminal_type": null,
+      "failure_kind": "missing_sse_terminal",
+      "framing_valid": true,
+      "provider_route": "synthetic"
+    },
+    "request_id": "synthetic-request-1",
+    "git_sha": "1111111111111111111111111111111111111111",
+    "deno_revision": "synthetic-revision-1",
+    "body": "{\"model\":\"synthetic-model\",\"input\":\"public regression fixture\",\"stream\":true}"
+  }
+}

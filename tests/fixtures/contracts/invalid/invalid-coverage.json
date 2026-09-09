@@ -1,0 +1,39 @@
+{
+  "version": "v1",
+  "kind": "incident_summary",
+  "repository": {
+    "owner": "ubiquity",
+    "name": "ai.ubq.fi",
+    "installationId": 12345
+  },
+  "id": "inc-2026-09-07-0001",
+  "fingerprint": "deadbeef01020304deadbeef01020304deadbeef01020304deadbeef01020304",
+  "severity": "P1",
+  "firstSeenAt": 1785990000000,
+  "lastSeenAt": 1786000000000,
+  "count": 3,
+  "failingRevision": "aafb7ee0598699bb7fb8a72ea133693ed64462da",
+  "errorType": "GatewayError",
+  "context": {
+    "message": "integration refused upstream completion",
+    "location": "src/handler.ts:fetch",
+    "sample": [
+      "upstream terminated without completion",
+      "request aborted after 90s"
+    ]
+  },
+  "provenance": {
+    "source": "gateway",
+    "endpoint": "https://ai.ubq.fi",
+    "capturedAt": 1786000000000,
+    "capturedBy": "gateway"
+  },
+  "coverage": {
+    "status": "complete",
+    "nextCursor": "page-99"
+  },
+  "evidenceRef": {
+    "ref": "artifact://inbox/inc-2026-09-07-0001.pgp",
+    "digest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "name": "sentinel",
+  "version": "0.1.0",
+  "exports": "./src/contracts/mod.ts",
+  "tasks": {
+    "fmt": "deno fmt",
+    "lint": "deno lint",
+    "check": "deno check src/contracts/mod.ts src/state/mod.ts src/budget/mod.ts src/github/mod.ts src/adapters/gateway/mod.ts src/replay/mod.ts src/repair/mod.ts src/release/mod.ts src/host/github.ts src/host/host.ts src/host/providers.ts src/host/repair.ts src/host/release.ts src/host/run.ts src/main.ts src/release-main.ts src/observe-main.ts",
+    "test": "deno test --allow-read=. --allow-run --allow-write --allow-env=PATH,NODE_V8_COVERAGE tests/contracts/ tests/state/ tests/budget/ tests/github/ tests/adapters/gateway/ tests/replay/ tests/repair/ tests/release/ tests/integration/",
+    "test:integration": "deno test --allow-read=. --allow-run=git --allow-write --allow-env=PATH tests/integration/",
+    "test:local": "deno run --allow-env=PATH --allow-run=deno --allow-run=git --allow-write test-local.ts",
+    "repair:run": "deno run --allow-read --allow-write --allow-run=git --allow-run=deno --allow-env=PATH src/main.ts",
+    "release:run": "deno run --allow-read --allow-write --allow-run=git --allow-env=PATH src/release-main.ts",
+    "observe:run": "deno run --allow-read=. --allow-write=. --allow-net=ai.ubq.fi --allow-env=SENTINEL_GATEWAY_AUTH_JSON,SENTINEL_REPLAY_KEY_B64 src/observe-main.ts"
+  },
+  "fmt": {
+    "include": [
+      "src/",
+      "tests/",
+      "test-local.ts",
+      "docs/contracts.md",
+      "deno.json"
+    ]
+  },
+  "lint": {
+    "include": [
+      "src/",
+      "tests/",
+      "test-local.ts"
+    ]
+  },
+  "compilerOptions": {
+    "strict": true
+  }
+}

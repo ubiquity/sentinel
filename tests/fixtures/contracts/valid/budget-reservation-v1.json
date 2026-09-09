@@ -1,0 +1,18 @@
+{
+  "version": "v1",
+  "kind": "budget_reservation",
+  "repository": {
+    "owner": "ubiquity",
+    "name": "ai.ubq.fi",
+    "installationId": 12345
+  },
+  "id": "reservation-0001",
+  "taskId": "incident:deadbeef-c7b9-4e9f-9b0f-1a2b3c4d5e6f",
+  "attempt": 1,
+  "head": "6dc35d06e757107b91eb58232bd15e5f671d79b4",
+  "purpose": "implementation",
+  "createdAt": 1786000000000,
+  "outcome": "ambiguous",
+  "settledAt": 1786001000000,
+  "proofRef": null
+}

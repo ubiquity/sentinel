@@ -1,0 +1,77 @@
+{
+  "version": "v1",
+  "kind": "work",
+  "repository": {
+    "owner": "ubiquity",
+    "name": "ai.ubq.fi",
+    "installationId": 12345
+  },
+  "id": "incident:deadbeef-c7b9-4e9f-9b0f-1a2b3c4d5e6f",
+  "source": {
+    "kind": "incident",
+    "id": "inc-2026-09-07-0001",
+    "revision": "aafb7ee0598699bb7fb8a72ea133693ed64462da"
+  },
+  "related": {
+    "incidentId": "inc-2026-09-07-0001",
+    "issueNumber": null
+  },
+  "fingerprint": "deadbeef01020304deadbeef01020304deadbeef01020304deadbeef01020304",
+  "failingRevision": "aafb7ee0598699bb7fb8a72ea133693ed64462da",
+  "sourceSnapshotDigest": "cafebabe12345678cafebabe12345678cafebabe12345678cafebabe12345678",
+  "classification": {
+    "severity": "P1",
+    "priority": null
+  },
+  "controller": {
+    "sha": "1234567890abcdef1234567890abcdef12345678"
+  },
+  "target": {
+    "base": "aafb7ee0598699bb7fb8a72ea133693ed64462da",
+    "branch": "sentinel/inc-2026-09-07-0001",
+    "checkpoint": {
+      "branch": "sentinel/inc-2026-09-07-0001",
+      "sha": "1111111111111111111111111111111111111111"
+    },
+    "head": null,
+    "pr": null
+  },
+  "nextStep": "review",
+  "wait": {
+    "reason": "review_pending",
+    "since": 1786000000000,
+    "until": null
+  },
+  "blocker": null,
+  "counters": {
+    "attempts": 1,
+    "retries": 2,
+    "reviewRounds": 0
+  },
+  "evidence": [
+    {
+      "kind": "incident_evidence",
+      "ref": "artifact://inbox/inc-2026-09-07-0001.pgp",
+      "digest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    },
+    {
+      "kind": "fixture",
+      "ref": "fixture://captures/inc-2026-09-07-0001/upstream.json",
+      "digest": "f0e1d2c3b4a5968778695a4b3c2d1e0f00001111222233334444555566667777"
+    },
+    {
+      "kind": "replay_result",
+      "ref": "replay/rec-0001"
+    }
+  ],
+  "intent": null,
+  "firstSeenAt": 1785990000000,
+  "createdAt": 1785990000100,
+  "updatedAt": 1786002000000,
+  "urgency": {
+    "activeProduction": false,
+    "reproducible5xx": true,
+    "severeSecurityOrDataLoss": false
+  },
+  "dependencies": []
+}

@@ -1,0 +1,49 @@
+{
+  "version": "v1",
+  "kind": "repository_config",
+  "repository": {
+    "owner": "ubiquity",
+    "name": "ai.ubq.fi",
+    "installationId": 12345
+  },
+  "baseBranch": "development",
+  "adapter": {
+    "kind": "gateway",
+    "baseUrl": "https://ai.ubq.fi"
+  },
+  "commands": {
+    "replay": "replay_capture",
+    "test": "test_ci"
+  },
+  "commandRegistry": {
+    "version": "v1",
+    "commands": {
+      "replay_capture": {
+        "executable": "deno",
+        "args": ["task", "sentinel:replay-capture"],
+        "maxDurationMs": 600000,
+        "maxOutputBytes": 1048576
+      },
+      "test_ci": {
+        "executable": "deno",
+        "args": ["task", "sentinel:test-local"],
+        "maxDurationMs": 1800000,
+        "maxOutputBytes": 4194304
+      }
+    }
+  },
+  "protectedPaths": [
+    "src/",
+    "deno.json",
+    ".github/workflows/"
+  ],
+  "build": {
+    "projectId": null,
+    "acceptance": null
+  },
+  "secretRef": "secret://host/injected/sentinel-github-app",
+  "liveStartLimits": null,
+  "sessionBound": null,
+  "retention": null,
+  "stabilityPolicy": null
+}

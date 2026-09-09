@@ -1,0 +1,51 @@
+{
+  "version": "v1",
+  "kind": "review_receipt",
+  "id": "receipt-0001",
+  "requestId": "review-request-0001",
+  "expectedReviewer": "chatgpt-codex-connector[bot]",
+  "observedReviewer": "other-reviewer[bot]",
+  "repository": {
+    "owner": "ubiquity",
+    "name": "ai.ubq.fi",
+    "installationId": 12345
+  },
+  "pullRequest": {
+    "number": 42,
+    "head": "6dc35d06e757107b91eb58232bd15e5f671d79b4",
+    "base": "aafb7ee0598699bb7fb8a72ea133693ed64462da"
+  },
+  "outcome": "completed",
+  "resultId": "review-result-0001",
+  "summary": "One substantive P1 finding; the rest is acceptable.",
+  "findings": [
+    {
+      "id": "f-1",
+      "severity": "P1",
+      "path": "src/handler.ts",
+      "message": "Stream handling drops the SSE terminator on upstream EOF.",
+      "fingerprint": "feedface55667788feedface55667788feedface55667788feedface55667788",
+      "resolved": false,
+      "resolutionEvidence": null
+    },
+    {
+      "id": "f-2",
+      "severity": "P2",
+      "path": null,
+      "message": "Naming nit; no behavioral impact.",
+      "fingerprint": "f00dfeed00112233f00dfeed00112233f00dfeed00112233f00dfeed00112233",
+      "resolved": true,
+      "resolutionEvidence": {
+        "authorizingIdentity": "human-owner",
+        "reference": "dispute/2026-09-07-001"
+      }
+    }
+  ],
+  "unresolvedSeverities": [
+    "P1"
+  ],
+  "submittedAt": 1786000000000,
+  "completedAt": 1786003600000,
+  "observedAt": 1786003600000,
+  "findingsUncounted": 0
+}

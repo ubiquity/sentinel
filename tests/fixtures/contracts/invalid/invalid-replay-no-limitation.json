@@ -1,0 +1,45 @@
+{
+  "version": "v1",
+  "kind": "replay_result",
+  "id": "replay-0001",
+  "taskId": "incident:deadbeef-c7b9-4e9f-9b0f-1a2b3c4d5e6f",
+  "repository": {
+    "owner": "ubiquity",
+    "name": "ai.ubq.fi",
+    "installationId": 12345
+  },
+  "original": {
+    "revision": "4a21c96d46e6f98c3c04125cafce34e255e710e3",
+    "outcome": "unavailable",
+    "exitCode": null,
+    "output": null,
+    "failure": null
+  },
+  "candidate": {
+    "revision": "6dc35d06e757107b91eb58232bd15e5f671d79b4",
+    "outcome": "passed",
+    "exitCode": 0,
+    "output": {
+      "stdoutDigest": "cdcdcdcd05060708cdcdcdcd05060708cdcdcdcd05060708cdcdcdcd05060708",
+      "stderrDigest": null,
+      "truncated": false
+    },
+    "failure": null
+  },
+  "fixture": {
+    "ref": "fixture://captures/inc-2026-09-07-0001/upstream.json",
+    "digest": "f0e1d2c3b4a5968778695a4b3c2d1e0f00001111222233334444555566667777",
+    "testIds": [
+      "gateway:stream-termination"
+    ]
+  },
+  "commands": {
+    "replay": "replay_capture",
+    "test": "test_ci"
+  },
+  "expected": {
+    "beforeReason": "missing completion terminator produces 500"
+  },
+  "limitations": [],
+  "createdAt": 1786002000000
+}

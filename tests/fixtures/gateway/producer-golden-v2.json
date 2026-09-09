@@ -1,0 +1,72 @@
+{
+  "sourceSha": "df256c74fb86d3d6ef809374084a76c0d620ce31",
+  "syntheticKeyHex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "exported": {
+    "manifest": {
+      "version": 1,
+      "capture_id": "synthetic-capture-2",
+      "fingerprint": "89b6121c6d4610822c7220cd4bec79704a961a78f724fba6c190e4961237b874",
+      "case_group_digest": "6d9254cace6d2ed07d0b2b569a2a691c9a1540f81db89c111fa1635fe3db152d",
+      "captured_at_ms": 1788811200000,
+      "expires_at_ms": 1788984000000,
+      "algorithm": "AES-256-GCM",
+      "compression": "gzip",
+      "iv": "CQkJCQkJCQkJCQkJ",
+      "chunk_count": 1,
+      "ciphertext_bytes": 626
+    },
+    "chunks": [
+      "ykWWiPuh398xf3TGLvq6IVOSs-CUXUf3EpHMAUniPwW9bHRbhTDTm4vWW-d5Ek59FbqPlOHX30UcLKSLlDce5efcAGsS8sbLXLs__4RKBEvSYiR3ZzQBNWY1Gphe4Hm7Mpm0-2wgi_5fMd-3Xshwf1QUhsvMt7JFoENYDXi8svqR7iABXWtK-XdPB5ufbd0wDm27zRjYMkJNoq0_tcmg0Sxi2PjxduCuhHf-8sk2NuZnkVs-AL7sKQSnRmWYns4lHvLyYXJC2xSt1ielGXumTF_ksrlqH2ixlnONxk4B4Ied5zoUkvumWMnqxU4r14sLPwgP_Uizw_bA1giA5RapILHOnjL4tcTQmNSA1oG77a0mqpaT0AOYWJ_hk3DGN4FJZmpXZl9OqM57bRERQqTSiDv7LgAmelfUYx0W4gpAs_sFfoYjl_wJExGw7E7vKEaXlT0G_4EvWpp3vV-3ihO4zRJtE_npqj4Qo91W4_ZLEOEiGN_eJp7xshxcfl_pHGI_Qy71fswBEZuYgtUMVzWSzzIaRoXTTAUhgX002gnBPGwKVk8DxDajrGHCRWkNztoEubOKACOn6klFf5T-1n-GDju9VRAzt9FoL5nDEIsaGtqLZtV3deWRZAZ2ExA74icvmNniZC5JPgz-Yx4ywJIkwPZ0v2FkEgdq1hVa8_Bwrraki8TnqUyypUyBw3H5nczKW4Gj1cp2RPdtnxe9WSBSF_SsbtBasArxPSu3o19e37Ojv-HC6oc9Sqpm707iEjL6-fQyZhbZn5O616GzYtT2v0LRyKdWlSmluuz-F1vrLqB7qN10KKSetlRZ81FqDMZ5C_A"
+    ]
+  },
+  "expected": {
+    "version": 2,
+    "captured_at_ms": 1788811200000,
+    "endpoint": "/v1/responses",
+    "method": "POST",
+    "content_type": "application/json",
+    "compatibility_headers": {
+      "accept": "text/event-stream"
+    },
+    "failure_signature": "{\"status\":502,\"stream\":true,\"completed\":false,\"terminal_type\":null,\"failure_kind\":\"missing_sse_terminal\",\"framing_valid\":true,\"provider_route\":\"synthetic\"}",
+    "observation": {
+      "status": 502,
+      "stream": true,
+      "completed": false,
+      "terminal_type": null,
+      "failure_kind": "missing_sse_terminal",
+      "synthetic_terminal_type": null,
+      "provider_route": "synthetic"
+    },
+    "client_observation": {
+      "status": 502,
+      "stream": true,
+      "completed": false,
+      "terminal_type": null,
+      "failure_kind": "missing_sse_terminal",
+      "framing_valid": true,
+      "provider_route": "synthetic"
+    },
+    "request_id": "synthetic-request-2",
+    "git_sha": "1111111111111111111111111111111111111111",
+    "deno_revision": "synthetic-revision-2",
+    "upstream": {
+      "version": 1,
+      "attempts": [
+        {
+          "provider": "chatgpt_codex",
+          "status": 200,
+          "content_type": "text/event-stream",
+          "chunks_base64": [
+            "ZGF0YTogeyJ0eXBlIjoicmVzcG9uc2UuY3JlYXRlZCIsInJlc3BvbnNlIjp7ImlkIjoicHVibGljLXN5bnRoZXRpYy1yZXNwb25zZSJ9fQoK"
+          ],
+          "terminal": "eof"
+        }
+      ],
+      "attempts_truncated": false,
+      "bytes_truncated": false,
+      "chunks_truncated": false
+    },
+    "body": "{\"model\":\"synthetic-model\",\"input\":\"public regression fixture\",\"stream\":true}"
+  }
+}
