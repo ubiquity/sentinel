@@ -1215,3 +1215,7 @@ At the integrated canonical HEAD `e3ba05910cd34ececc116249c57913967102984a`, the
 ## Target m06 lane status correction (2026-09-09 00:59 UTC)
 
 The prior audit reconciliation recorded the target lane at `c79f7c2a` with an uncommitted test modification. A subsequent read-only check found that lane clean at `a702d4ddb6a8bcbf549653cc75596b3d74715102`, whose latest commit is `test(sentinel): skip KV-only checks without unstable API`. This supersedes the transient dirty-state observation; the target lane remains outside the Sentinel graph, with no target publication, deployment or ownership handover performed by this goal. The root and all unrelated work remain preserved.
+
+## Final exact-head audit check (2026-09-09 01:00 UTC)
+
+Before this ledger entry, canonical HEAD was `bfe9b47ef87f1d4696af2f4f425a5bb2c4a91cb2`. The registered `wave-c-audit-20260909` target ran in `fresh` mode from the exact canonical worktree; receipt `cc48556d9d6816f2605c36c352452867e2de5be694f7aa26c8a9330e9268c576/9b199e33-dae3-487f-b62d-f1e00d67704b` reports `deno task check`, executor and child exit `0`, outcome `success`, `reuse: executed`, and no external capability. This is the final source-and-audit type-surface evidence; the ledger commit itself changes documentation only.
