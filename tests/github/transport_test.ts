@@ -35,6 +35,7 @@ import {
   SHA1,
   SHA2,
   statusChecksRuleWire,
+  statusesPageWire,
   T0,
 } from "./helpers.ts";
 import type { ScriptEntry } from "./helpers.ts";
@@ -164,6 +165,12 @@ function mergeHappyScript(): ScriptEntry[] {
       `/repos/ubiquity/sentinel/commits/${SHA1}/check-runs?per_page=100&page=1`,
       200,
       { check_runs: [checkRunWire()], total_count: 1 },
+    ),
+    httpRespond(
+      "GET",
+      `/repos/ubiquity/sentinel/commits/${SHA1}/statuses?per_page=100&page=1`,
+      200,
+      statusesPageWire([]),
     ),
     // Reconcile read after the lost merge PUT: PR still open.
     pullEntry(),

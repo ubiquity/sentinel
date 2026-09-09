@@ -34,6 +34,7 @@ class FakeCodexSession implements CodexSessionV1 {
   readonly sent: { method: string; params: unknown }[] = [];
   openCalls = 0;
   closeCalls = 0;
+  closed = false;
   private notifications:
     | ((event: CodexServerNotificationV1) => void)
     | null = null;
@@ -90,7 +91,16 @@ class FakeCodexSession implements CodexSessionV1 {
 
   close(): Promise<void> {
     this.closeCalls++;
+    this.closed = true;
     return Promise.resolve();
+  }
+}
+
+class ThrowingNotificationSession extends FakeCodexSession {
+  override onNotification(
+    _handler: (event: CodexServerNotificationV1) => void,
+  ): void {
+    throw new Error("synthetic registration failure");
   }
 }
 
@@ -178,6 +188,84 @@ Deno.test("model-port: thread starts with bounded isolated-checkout write capabi
     "the trusted-host verifier observed the session evidence",
   );
 });
+
+Deno.test(
+  "model-port: candidate commit waits for model session settlement",
+  async () => {
+    const session = new FakeCodexSession();
+    let commitObservedClosed = false;
+    const port = new CodexImplementationPort({
+      openSession: () => Promise.resolve(session),
+      checkoutDir: CHECKOUT,
+      checkout: {
+        resolve: () =>
+          Promise.resolve({
+            head: SHA3,
+            checkpointSha: null,
+            changedPaths: ["src/app.ts"],
+          }),
+      },
+      commitCandidate: {
+        commit: () => {
+          commitObservedClosed = session.closed;
+          return Promise.resolve(true);
+        },
+      },
+      receiptVerifier: () => ({
+        observedModel: "gpt-5.6-luna",
+        observedReasoning: "max",
+      }),
+    });
+    const result = await port.runModel({
+      taskId: asWorkItemId("issue-commit-order"),
+      repository: { ...REPO },
+      base: SHA1,
+      issue: null,
+      evidence: [],
+      model: "gpt-5.6-luna",
+      reasoning: "max",
+      maxDurationMs: 5_000,
+      maxOutputChars: 10_000,
+    });
+    assert.ok(result.ok, JSON.stringify(result));
+    assert.equal(commitObservedClosed, true);
+    assert.equal(session.closeCalls, 1);
+  },
+);
+
+Deno.test(
+  "model-port: notification registration failure clears settlement timers",
+  async () => {
+    const session = new ThrowingNotificationSession();
+    const port = new CodexImplementationPort({
+      openSession: () => Promise.resolve(session),
+      checkoutDir: CHECKOUT,
+      receiptVerifier: () => ({
+        observedModel: "gpt-5.6-luna",
+        observedReasoning: "max",
+      }),
+    });
+    const started = performance.now();
+    const result = await port.runModel({
+      taskId: asWorkItemId("issue-notification-registration"),
+      repository: { ...REPO },
+      base: SHA1,
+      issue: null,
+      evidence: [],
+      model: "gpt-5.6-luna",
+      reasoning: "max",
+      maxDurationMs: 2_000,
+      maxOutputChars: 10_000,
+    });
+    assert.ok(result.ok, JSON.stringify(result));
+    if (result.ok) assert.equal(result.value.outcome, "failed");
+    assert.equal(session.closeCalls, 1);
+    assert.ok(
+      performance.now() - started < 500,
+      "registration failure must settle without waiting for the duration timer",
+    );
+  },
+);
 
 Deno.test(
   "model-port: unavailable verifier fails closed before any session opens",

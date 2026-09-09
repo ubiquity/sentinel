@@ -113,10 +113,7 @@ function composeCapabilityRig(): CapabilityRigV1 {
       "GET",
       "/repos/ubiquity/sentinel/issues?state=open&per_page=100&page=1",
       200,
-      {
-        total_count: 1,
-        items: [issueWire({ number: 7 })],
-      },
+      [issueWire({ number: 7 })],
     ),
     httpRespond(
       "GET",

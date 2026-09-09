@@ -87,6 +87,7 @@ const DEFAULT_CLOSE_TERM_GRACE_MS = 500;
 const DEFAULT_CLOSE_KILL_SETTLE_MS = 1_000;
 const DEFAULT_CLOSE_WRITE_DRAIN_MS = 2_000;
 const DEFAULT_CLOSE_STREAM_SETTLE_MS = 1_000;
+const PROCESS_GROUP_POLL_MS = 25;
 
 export interface CodexSessionV1 {
   /**
@@ -108,6 +109,12 @@ export interface CodexSessionV1 {
   onServerRequest(handler: (request: CodexServerRequestV1) => void): void;
   /** Tear down; resolves only after owned child/descendant settlement. */
   close(): Promise<void>;
+  /**
+   * Optional trusted-transport proof that the owned process group is empty
+   * after close. Test doubles may omit this capability; the real subprocess
+   * transport implements it and the model port fails closed when it is false.
+   */
+  isSettled?(): boolean;
 }
 
 /** One app-server session with a real subprocess. */
@@ -155,6 +162,7 @@ export class CodexSubprocessSession implements CodexSessionV1 {
    */
   private fatalError: CodexProtocolError | null = null;
   private closePromise: Promise<void> | null = null;
+  private groupSettled = true;
   /** Strictly serialized stdin writes; one frame at a time, never interleaved. */
   private writeChain: Promise<void> = Promise.resolve();
 
@@ -298,15 +306,26 @@ export class CodexSubprocessSession implements CodexSessionV1 {
     if (child === null) {
       this.releaseStdin();
       await Promise.allSettled([this.stdoutDone, this.stderrDone]);
+      this.groupSettled = true;
       return;
     }
     // Drain queued writes within a bound so no frame is half-written when the
     // child is signaled; a stuck stdin must never hang close.
     await bounded(this.writeChain, this.closeWriteDrainMs);
+    this.groupSettled = false;
     signalGroup(child, "SIGTERM");
-    await boundedChildStatus(child, this.closeTermGraceMs);
-    signalGroup(child, "SIGKILL");
-    await boundedChildStatus(child, this.closeKillSettleMs);
+    await Promise.all([
+      boundedChildStatus(child, this.closeTermGraceMs),
+      waitGroupEmpty(child.pid, this.closeTermGraceMs),
+    ]);
+    if (groupAlive(child.pid)) {
+      signalGroup(child, "SIGKILL");
+      await Promise.all([
+        boundedChildStatus(child, this.closeKillSettleMs),
+        waitGroupEmpty(child.pid, this.closeKillSettleMs),
+      ]);
+    }
+    this.groupSettled = !groupAlive(child.pid);
     // Cancel the captured pumps: after the group signals, no owned writer
     // remains, and a canceled reader cannot keep settlement (or close) pending.
     this.cancelPumps();
@@ -315,6 +334,10 @@ export class CodexSubprocessSession implements CodexSessionV1 {
       this.closeStreamSettleMs,
     );
     this.releaseStdin();
+  }
+
+  isSettled(): boolean {
+    return this.groupSettled;
   }
 
   private cancelPumps(): void {
@@ -346,6 +369,7 @@ export class CodexSubprocessSession implements CodexSessionV1 {
     const reader = stream.getReader();
     this.stdoutReader = reader;
     let buffer = "";
+    const decoder = new TextDecoder("utf-8", { fatal: true });
     try {
       for (;;) {
         let read: ReadableStreamReadResult<Uint8Array>;
@@ -355,8 +379,39 @@ export class CodexSubprocessSession implements CodexSessionV1 {
           // Canceled at close; settlement below is bounded.
           return;
         }
-        if (read.done) break;
-        buffer += new TextDecoder().decode(read.value);
+        if (read.done) {
+          try {
+            buffer += decoder.decode();
+          } catch {
+            this.fail(
+              new CodexProtocolError(
+                "malformed_line",
+                "codex stream contained invalid UTF-8",
+              ),
+            );
+            return;
+          }
+          if (buffer.trim().length > 0) {
+            this.fail(
+              new CodexProtocolError(
+                "malformed_line",
+                "codex stream ended with an unterminated frame",
+              ),
+            );
+          }
+          break;
+        }
+        try {
+          buffer += decoder.decode(read.value, { stream: true });
+        } catch {
+          this.fail(
+            new CodexProtocolError(
+              "malformed_line",
+              "codex stream contained invalid UTF-8",
+            ),
+          );
+          return;
+        }
         if (buffer.length > this.maxLineBytes * 4) {
           this.fail(
             new CodexProtocolError(
@@ -399,6 +454,7 @@ export class CodexSubprocessSession implements CodexSessionV1 {
   private async pumpStderr(stream: ReadableStream<Uint8Array>): Promise<void> {
     const reader = stream.getReader();
     this.stderrReader = reader;
+    const decoder = new TextDecoder("utf-8");
     try {
       for (;;) {
         let read: ReadableStreamReadResult<Uint8Array>;
@@ -408,8 +464,11 @@ export class CodexSubprocessSession implements CodexSessionV1 {
           // Canceled at close; settlement below is bounded.
           return;
         }
-        if (read.done) break;
-        this.appendStderr(new TextDecoder().decode(read.value));
+        if (read.done) {
+          this.appendStderr(decoder.decode());
+          break;
+        }
+        this.appendStderr(decoder.decode(read.value, { stream: true }));
       }
     } finally {
       reader.releaseLock();
@@ -599,6 +658,36 @@ async function boundedChildStatus(
   } catch {
     // Status observation failed; the group settle is still bounded.
   }
+}
+
+/** Poll until every member of the detached child process group is gone. */
+async function waitGroupEmpty(groupId: number, maxMs: number): Promise<void> {
+  const deadline = Date.now() + Math.max(0, maxMs);
+  for (;;) {
+    if (!groupAlive(groupId)) return;
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return;
+    await new Promise((resolve) =>
+      setTimeout(resolve, Math.min(PROCESS_GROUP_POLL_MS, remaining))
+    );
+  }
+}
+
+/** True while any member of the owned group exists (signal 0 is a probe). */
+function groupAlive(groupId: number): boolean {
+  try {
+    Deno.kill(-groupId, 0);
+    return true;
+  } catch (error) {
+    if (isGroupMissing(error)) return false;
+    // If the host cannot perform the probe, settlement is not provable.
+    return true;
+  }
+}
+
+function isGroupMissing(error: unknown): boolean {
+  const code = (error as { code?: unknown })?.code;
+  return code === "ESRCH" || error instanceof Deno.errors.NotFound;
 }
 
 /** Race one promise against a finite deadline; always settles by `ms`. */

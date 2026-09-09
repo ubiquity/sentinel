@@ -21,6 +21,7 @@ import type {
   GitHubIssueV1,
   GitHubPullRequestV1,
   GitHubRefV1,
+  GitHubReviewDecisionV1,
   PortErrorV1,
   PortResultV1,
 } from "../contracts/ports.ts";
@@ -42,9 +43,11 @@ import { classifyGitHubRateLimit } from "./rate-limit.ts";
 import {
   parseBranchRuleWire,
   parseCheckRunWire,
+  parseCommitStatusWire,
   parseIssueWire,
   parseMergeResponseWire,
   parseProtectionWire,
+  parsePullReviewDecisionWire,
   parsePullWire,
   parseRefWire,
   parseReviewCommentWire,
@@ -61,6 +64,16 @@ import type {
 
 export const MAX_OPEN_ISSUES = 10_000;
 export const MAX_OPEN_ISSUE_PAGES = 500;
+
+const REVIEW_DECISION_QUERY = `
+  query SentinelPullReviewDecision($owner: String!, $name: String!, $number: Int!) {
+    repository(owner: $owner, name: $name) {
+      pullRequest(number: $number) {
+        reviewDecision
+      }
+    }
+  }
+`;
 
 export interface GitHubApiClientOptionsV1 {
   repository: RepositoryIdentityV1;
@@ -133,15 +146,10 @@ export class GitHubApiClient {
     const collected = await this.collectPages(
       `/repos/${repoPath(this.repository)}/issues`,
       { state: "open", per_page: String(this.perPage) },
-      (body) => {
-        const obj = expectRecord(body, "$");
-        return expectArray(
-          obj.items,
-          "$.items",
-          this.maxItems,
-          (v) => v,
-        ) as unknown[];
-      },
+      // GitHub's REST `/issues` endpoint returns a top-level array. The
+      // object envelope used by search is a different API shape and must not
+      // be accepted here because it would hide a provider contract drift.
+      (body) => expectArray(body, "$", this.maxItems, (v) => v) as unknown[],
     );
     if (!collected.ok) return collected;
     const issues: GitHubIssueV1[] = [];
@@ -211,6 +219,37 @@ export class GitHubApiClient {
     return portOk(parsed.value);
   }
 
+  /** Read approval from GitHub's authoritative GraphQL field. */
+  async readPullRequestReviewDecision(
+    number: number,
+  ): Promise<PortResultV1<GitHubReviewDecisionV1>> {
+    const raw = await this.sendCore(
+      "POST",
+      `${this.apiBaseUrl}/graphql`,
+      {
+        query: REVIEW_DECISION_QUERY,
+        variables: {
+          owner: this.repository.owner,
+          name: this.repository.name,
+          number,
+        },
+      },
+    );
+    if (raw.status === "error") {
+      return portError(raw.error.kind, raw.error.detail, raw.error.rateLimit);
+    }
+    if (raw.status === "lost") {
+      return portError("unavailable", "GitHub API request failed");
+    }
+    if (raw.response.status !== 200) {
+      return portError(...this.mapError(raw.response));
+    }
+    return parseWire(
+      raw.response,
+      (value) => parsePullReviewDecisionWire(value, "$"),
+    );
+  }
+
   async readChecks(sha: GitSha): Promise<PortResultV1<GitHubChecksV1>> {
     const collected = await this.collectPages(
       `/repos/${repoPath(this.repository)}/commits/${sha}/check-runs`,
@@ -240,6 +279,31 @@ export class GitHubApiClient {
         );
       }
       checks.push(parsed.value);
+    }
+    const statusesCollected = await this.collectPages(
+      `/repos/${repoPath(this.repository)}/commits/${sha}/statuses`,
+      { per_page: String(this.perPage) },
+      (body) => {
+        const obj = expectRecord(body, "$");
+        return expectArray(
+          obj.statuses,
+          "$.statuses",
+          this.maxItems,
+          (v) => v,
+        ) as unknown[];
+      },
+    );
+    if (!statusesCollected.ok) return statusesCollected;
+    for (const item of statusesCollected.value) {
+      const parsed = parseWith(item, (v) => parseCommitStatusWire(v, "$", sha));
+      if (!parsed.ok) return parsed;
+      checks.push(parsed.value);
+    }
+    if (checks.length > this.maxItems) {
+      return portError(
+        "unavailable",
+        "GitHub API checks collection size bound exceeded",
+      );
     }
     return portOk({ head: sha, checks });
   }

@@ -117,7 +117,7 @@ export interface GitHubPullRequestV1 {
   state: "open" | "closed" | "merged";
   head: GitSha;
   base: GitSha;
-  /** Observed merge SHA; non-null only for a merged PR. */
+  /** Delivered merge SHA; temporary unmerged test-merge SHAs are discarded. */
   mergeSha: GitSha | null;
   headRef: string;
   baseRef: string;
@@ -125,8 +125,14 @@ export interface GitHubPullRequestV1 {
   createdAt: number;
   updatedAt: number;
   mergedAt: number | null;
-  reviewDecision: "approved" | "changes_requested" | "review_required" | "none";
+  reviewDecision: GitHubReviewDecisionV1;
 }
+
+export type GitHubReviewDecisionV1 =
+  | "approved"
+  | "changes_requested"
+  | "review_required"
+  | "none";
 
 export interface GitHubCheckV1 {
   name: string;

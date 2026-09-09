@@ -359,8 +359,18 @@ export class CodexImplementationPort implements ImplementationPort {
         turn.turnId,
         request.maxOutputChars,
       );
-      // Explicit await so the receipt is fully built before the session close
-      // in finally: runModel never resolves before close() has settled.
+      // The model must be fully closed, including its owned process group,
+      // before the trusted host inspects or commits the checkout. A direct
+      // child exit is not proof that a descendant has stopped writing files.
+      const ownedSession = session;
+      session = null;
+      await ownedSession.close();
+      if (ownedSession.isSettled !== undefined && !ownedSession.isSettled()) {
+        return portError(
+          "unavailable",
+          "model session process group did not settle",
+        );
+      }
       return await this.finishReceipt(request, invocationId, thread, awaited);
     } catch (error) {
       const failure = unavailableFor(error);
@@ -956,7 +966,14 @@ export class CodexImplementationPort implements ImplementationPort {
       settleNow();
     }, request.maxDurationMs + this.graceMs + SETTLE_GRACE_MS_EXTRA);
 
-    session.onNotification((event) => onEvent(event.method, event.params));
+    try {
+      session.onNotification((event) => onEvent(event.method, event.params));
+    } catch {
+      // Registration is part of the bounded session lifecycle. If a trusted
+      // transport rejects it synchronously, settle through the same path as
+      // every other terminal failure so both timers are cleared immediately.
+      failClosed("notification registration failed");
+    }
 
     const settled = await terminalPromise;
     clearTimeout(durationTimer);

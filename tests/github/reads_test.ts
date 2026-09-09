@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import {
   checkRunWire,
   checksPageWire,
+  commitStatusWire,
   FakeAuthProvider,
   issueWire,
   makePort,
@@ -14,11 +15,13 @@ import {
   pullRequestRuleWire,
   pullWire,
   refWire,
+  reviewDecisionGraphqlWire,
   rulesetWire,
   SHA1,
   SHA2,
   SHA3,
   statusChecksRuleWire,
+  statusesPageWire,
 } from "./helpers.ts";
 import { httpRespond } from "./helpers.ts";
 
@@ -37,19 +40,18 @@ Deno.test("listOpenIssues: exhausts pagination and distinguishes issues from PRs
       "GET",
       `${ISSUES_PATH}?state=open&per_page=100&page=1`,
       200,
-      {
-        total_count: 3,
-        items: [issueWire({ number: 1 }), {
-          ...pullWire({ number: 9 }),
-          pull_request: {},
-        }],
-      },
+      [issueWire({ number: 1 }), {
+        ...pullWire({ number: 9 }),
+        pull_request: {},
+      }],
       linkNext(page2Url),
     ),
-    httpRespond("GET", `${ISSUES_PATH}?state=open&per_page=100&page=2`, 200, {
-      total_count: 3,
-      items: [issueWire({ number: 2, state: "closed", closed_at: null })],
-    }),
+    httpRespond(
+      "GET",
+      `${ISSUES_PATH}?state=open&per_page=100&page=2`,
+      200,
+      [issueWire({ number: 2, state: "closed", closed_at: null })],
+    ),
   ];
   const { port, transport } = makePort({ script });
   const result = await port.listOpenIssues();
@@ -75,9 +77,13 @@ Deno.test("listOpenIssues: exhausts pagination and distinguishes issues from PRs
 Deno.test("listOpenIssues: pagination cycle is unavailable, never a partial list", async () => {
   const url = `${BASE_URL}?state=open&per_page=100&page=1`;
   const script = [
-    httpRespond("GET", `${ISSUES_PATH}?state=open&per_page=100&page=1`, 200, {
-      items: [issueWire({ number: 1 })],
-    }, linkNext(url)),
+    httpRespond(
+      "GET",
+      `${ISSUES_PATH}?state=open&per_page=100&page=1`,
+      200,
+      [issueWire({ number: 1 })],
+      linkNext(url),
+    ),
   ];
   const { port } = makePort({ script });
   const result = await port.listOpenIssues();
@@ -91,12 +97,20 @@ Deno.test("listOpenIssues: page bound and mid-pagination failure are unavailable
   // Page bound with a tiny maxPages.
   const page2 = `${BASE_URL}?state=open&per_page=100&page=2`;
   const boundScript = [
-    httpRespond("GET", `${ISSUES_PATH}?state=open&per_page=100&page=1`, 200, {
-      items: [issueWire({ number: 1 })],
-    }, linkNext(page2)),
-    httpRespond("GET", `${ISSUES_PATH}?state=open&per_page=100&page=2`, 200, {
-      items: [issueWire({ number: 2 })],
-    }, linkNext(`${BASE_URL}?state=open&per_page=100&page=3`)),
+    httpRespond(
+      "GET",
+      `${ISSUES_PATH}?state=open&per_page=100&page=1`,
+      200,
+      [issueWire({ number: 1 })],
+      linkNext(page2),
+    ),
+    httpRespond(
+      "GET",
+      `${ISSUES_PATH}?state=open&per_page=100&page=2`,
+      200,
+      [issueWire({ number: 2 })],
+      linkNext(`${BASE_URL}?state=open&per_page=100&page=3`),
+    ),
   ];
   const { port } = makePort({ script: boundScript, maxPages: 2 });
   const bounded = await port.listOpenIssues();
@@ -107,9 +121,13 @@ Deno.test("listOpenIssues: page bound and mid-pagination failure are unavailable
 
   // Mid-pagination 500: the partial page is not a success.
   const failScript = [
-    httpRespond("GET", `${ISSUES_PATH}?state=open&per_page=100&page=1`, 200, {
-      items: [issueWire({ number: 1 })],
-    }, linkNext(`${BASE_URL}?state=open&per_page=100&page=2`)),
+    httpRespond(
+      "GET",
+      `${ISSUES_PATH}?state=open&per_page=100&page=1`,
+      200,
+      [issueWire({ number: 1 })],
+      linkNext(`${BASE_URL}?state=open&per_page=100&page=2`),
+    ),
     httpRespond(
       "GET",
       `${ISSUES_PATH}?state=open&per_page=100&page=2`,
@@ -251,6 +269,32 @@ Deno.test("readPullRequest: missing merge sha on a merged PR is invalid", async 
   if (!result.ok) assert.equal(result.error.kind, "invalid");
 });
 
+Deno.test(
+  "readPullRequest: unmerged test merge sha is ignored as delivery identity",
+  async () => {
+    const { port } = makePort({
+      script: [
+        httpRespond(
+          "GET",
+          "/repos/ubiquity/sentinel/pulls/12",
+          200,
+          pullWire({
+            state: "open",
+            merged_at: null,
+            merge_commit_sha: SHA3,
+          }),
+        ),
+      ],
+    });
+    const result = await port.readPullRequest(12);
+    assert.ok(result.ok);
+    if (!result.ok || result.value === null) return;
+    assert.equal(result.value.state, "open");
+    assert.equal(result.value.mergedAt, null);
+    assert.equal(result.value.mergeSha, null);
+  },
+);
+
 Deno.test("readPullRequest: short SHA, bad timestamp and wrong enum fail closed", async () => {
   for (
     const override of [
@@ -274,6 +318,28 @@ Deno.test("readPullRequest: short SHA, bad timestamp and wrong enum fail closed"
     assert.equal(result.ok, false, JSON.stringify(override));
     if (!result.ok) assert.equal(result.error.kind, "invalid");
   }
+});
+
+Deno.test("readPullRequestReviewDecision: uses the authoritative GraphQL field", async () => {
+  const { client, transport } = makePort({
+    script: [
+      httpRespond(
+        "POST",
+        "/graphql",
+        200,
+        reviewDecisionGraphqlWire("APPROVED"),
+      ),
+    ],
+  });
+  const result = await client.readPullRequestReviewDecision(12);
+  assert.ok(result.ok);
+  if (result.ok) assert.equal(result.value, "approved");
+  assert.equal(transport.requests[0]?.method, "POST");
+  assert.equal(transport.requests[0]?.url, `${BASE}/graphql`);
+  const body = JSON.parse(transport.requests[0]?.body ?? "{}");
+  assert.equal(body.variables.owner, "ubiquity");
+  assert.equal(body.variables.name, "sentinel");
+  assert.equal(body.variables.number, 12);
 });
 
 Deno.test("findPullRequestByHeadRef: exact single match, multiple matches conflict", async () => {
@@ -319,6 +385,12 @@ Deno.test("readChecks: a run bound to a different head is not evidence for this 
         200,
         checksPageWire([checkRunWire({ head_sha: SHA2 })]),
       ),
+      httpRespond(
+        "GET",
+        `/repos/ubiquity/sentinel/commits/${SHA1}/statuses?per_page=100&page=1`,
+        200,
+        statusesPageWire([]),
+      ),
     ],
   });
   const result = await port.readChecks(SHA1);
@@ -336,13 +408,11 @@ Deno.test("listOpenIssues: item size bound is unavailable, never truncated", asy
         "GET",
         `${ISSUES_PATH}?state=open&per_page=100&page=1`,
         200,
-        {
-          items: [
-            issueWire({ number: 1 }),
-            issueWire({ number: 2 }),
-            issueWire({ number: 3 }),
-          ],
-        },
+        [
+          issueWire({ number: 1 }),
+          issueWire({ number: 2 }),
+          issueWire({ number: 3 }),
+        ],
       ),
     ],
     maxItems: 2,
@@ -362,7 +432,7 @@ Deno.test("listOpenIssues: a next URL outside the API origin never carries the t
         "GET",
         `${ISSUES_PATH}?state=open&per_page=100&page=1`,
         200,
-        { items: [issueWire({ number: 1 })] },
+        [issueWire({ number: 1 })],
         linkNext("https://evil.example/path?page=2"),
       ),
     ],
@@ -394,17 +464,25 @@ Deno.test("readChecks: conclusions parsed exactly; empty checks is a real value"
           }),
         ]),
       ),
+      httpRespond(
+        "GET",
+        `/repos/ubiquity/sentinel/commits/${SHA1}/statuses?per_page=100&page=1`,
+        200,
+        statusesPageWire([commitStatusWire({ context: "legacy-ci" })]),
+      ),
     ],
   });
   const result = await port.readChecks(SHA1);
   assert.ok(result.ok);
   if (!result.ok) return;
   assert.equal(result.value.head, SHA1);
-  assert.equal(result.value.checks.length, 3);
+  assert.equal(result.value.checks.length, 4);
   assert.equal(result.value.checks[0].conclusion, "success");
   assert.equal(result.value.checks[1].conclusion, null);
   assert.equal(result.value.checks[1].status, "queued");
   assert.equal(result.value.checks[2].conclusion, "failure");
+  assert.equal(result.value.checks[3].name, "legacy-ci");
+  assert.equal(result.value.checks[3].conclusion, "success");
 
   const { port: empty } = makePort({
     script: [
@@ -413,6 +491,12 @@ Deno.test("readChecks: conclusions parsed exactly; empty checks is a real value"
         `/repos/ubiquity/sentinel/commits/${SHA1}/check-runs?per_page=100&page=1`,
         200,
         checksPageWire([]),
+      ),
+      httpRespond(
+        "GET",
+        `/repos/ubiquity/sentinel/commits/${SHA1}/statuses?per_page=100&page=1`,
+        200,
+        statusesPageWire([]),
       ),
     ],
   });

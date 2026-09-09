@@ -19,6 +19,7 @@ import {
   checkRunWire,
   checksPageWire,
   commentWire,
+  commitStatusWire,
   completedServiceRead,
   FakeClock,
   FakeGitExecutor,
@@ -31,6 +32,7 @@ import {
   pullRequestRuleWire,
   pullWire,
   REPO,
+  reviewDecisionGraphqlWire,
   REVIEWER,
   reviewWire,
   RULESET_ID,
@@ -40,6 +42,7 @@ import {
   SHA3,
   SHA4,
   statusChecksRuleWire,
+  statusesPageWire,
   T0,
 } from "./helpers.ts";
 import type { ScriptEntry } from "./helpers.ts";
@@ -51,6 +54,8 @@ const RULESETS_PATH =
   "/repos/ubiquity/sentinel/rulesets?includes_parents=true&per_page=100&page=1";
 const CHECKS_PATH =
   `/repos/ubiquity/sentinel/commits/${SHA1}/check-runs?per_page=100&page=1`;
+const STATUSES_PATH =
+  `/repos/ubiquity/sentinel/commits/${SHA1}/statuses?per_page=100&page=1`;
 
 function completedCleanReceipt(
   overrides: Record<string, unknown> = {},
@@ -154,11 +159,18 @@ function rulesRead(
 function checksRead(
   runs: unknown[] = [checkRunWire()],
   repeat = false,
-): ScriptEntry {
-  return {
-    ...httpRespond("GET", CHECKS_PATH, 200, checksPageWire(runs)),
-    repeat,
-  };
+  statuses: unknown[] = [],
+): ScriptEntry[] {
+  return [
+    {
+      ...httpRespond("GET", CHECKS_PATH, 200, checksPageWire(runs)),
+      repeat,
+    },
+    {
+      ...httpRespond("GET", STATUSES_PATH, 200, statusesPageWire(statuses)),
+      repeat,
+    },
+  ];
 }
 
 interface HappyOptions {
@@ -166,6 +178,8 @@ interface HappyOptions {
   rules?: unknown[];
   rulesets?: unknown[];
   checks?: unknown[];
+  statuses?: unknown[];
+  reviewDecision?: "APPROVED" | "CHANGES_REQUESTED" | "REVIEW_REQUIRED" | null;
   extra?: ScriptEntry[];
 }
 
@@ -180,7 +194,20 @@ function happyScript(options: HappyOptions = {}): ScriptEntry[] {
       options.rules ?? defaultRules(),
       options.rulesets ?? [rulesetWire()],
     ),
-    checksRead(options.checks ?? [checkRunWire()]),
+    ...checksRead(
+      options.checks ?? [checkRunWire()],
+      false,
+      options.statuses ?? [],
+    ),
+    {
+      ...httpRespond(
+        "POST",
+        "/graphql",
+        200,
+        reviewDecisionGraphqlWire(options.reviewDecision ?? "APPROVED"),
+      ),
+      repeat: true,
+    },
     ...(options.extra ?? []),
   ];
 }
@@ -379,7 +406,7 @@ Deno.test("mergePullRequest: authoritative review must be current and match exac
       body: "![P1 Badge](https://example.invalid/P1) Fix credential exposure",
     })]),
     ...rulesRead(),
-    checksRead(),
+    ...checksRead(),
   ]);
   const unknown = await unknownPort.port.mergePullRequest(mergeRequest());
   assert.equal(blockedReason(unknown), "review_required");
@@ -397,7 +424,7 @@ Deno.test("mergePullRequest: authoritative review must be current and match exac
       commentWire({ id: 500, body: "[P1] broken error handling" }),
     ]),
     ...rulesRead(),
-    checksRead(),
+    ...checksRead(),
   ]);
   const mismatch = await mismatchPort.port.mergePullRequest(mergeRequest());
   assert.equal(blockedReason(mismatch), "review_required");
@@ -471,7 +498,7 @@ Deno.test("mergePullRequest: human resolution requires the trusted authenticated
     ]),
     commentsRead([commentWire({ id: 500, body: "[P0] data loss" })]),
     ...rulesRead([], []), // No active rules: the protection gate reads empty.
-    checksRead(),
+    ...checksRead(),
   ];
   const resolvedRequest = () =>
     mergeRequest({
@@ -838,6 +865,25 @@ Deno.test("mergePullRequest: required checks must pass on the exact head", async
   const empty = await emptyPort.port.mergePullRequest(mergeRequest());
   assert.equal(blockedReason(empty), "checks_pending");
   assert.equal(putCount(emptyPort.transport), 0);
+
+  // Legacy commit-status contexts share the required check namespace with
+  // check-runs and must satisfy a required context when the run API has no
+  // matching name.
+  const legacyPort = mergedPort(happyScript({
+    checks: [checkRunWire({ name: "other" })],
+    statuses: [commitStatusWire({ context: "ci" })],
+    extra: [
+      httpRespond(
+        "PUT",
+        "/repos/ubiquity/sentinel/pulls/1/merge",
+        200,
+        mergeResponseWire(SHA3),
+      ),
+    ],
+  }));
+  const legacy = await legacyPort.port.mergePullRequest(mergeRequest());
+  assert.ok(legacy.ok, JSON.stringify(legacy));
+  if (legacy.ok) assert.equal(legacy.value.outcome, "merged");
 });
 
 Deno.test("mergePullRequest: required approvals must be present", async () => {
@@ -853,6 +899,7 @@ Deno.test("mergePullRequest: required approvals must be present", async () => {
   });
   const unapprovedPort = mergedPort(happyScript({
     rules: [statusChecksRuleWire(), approverRule, nonFastForwardRuleWire()],
+    reviewDecision: "REVIEW_REQUIRED",
   }));
   const unapproved = await unapprovedPort.port.mergePullRequest(mergeRequest());
   assert.equal(blockedReason(unapproved), "review_required");
@@ -864,6 +911,7 @@ Deno.test("mergePullRequest: required approvals must be present", async () => {
       pullEntry({ review_decision: "approved" }),
     ],
     rules: [statusChecksRuleWire(), approverRule, nonFastForwardRuleWire()],
+    reviewDecision: "APPROVED",
     extra: [
       httpRespond(
         "PUT",
@@ -905,7 +953,7 @@ Deno.test("mergePullRequest: base movement after the last precheck is reconciled
     reviewsRead([reviewWire()]),
     commentsRead([]),
     ...rulesRead(),
-    checksRead(),
+    ...checksRead(),
     // The base moved between the precheck and the merge PUT.
     httpRespond("PUT", "/repos/ubiquity/sentinel/pulls/1/merge", 409, {}),
     pullEntry({ base: { ref: "development", sha: SHA4 } }),
@@ -968,7 +1016,7 @@ Deno.test("mergePullRequest: lost merge response reconciles exactly", async () =
     reviewsRead([reviewWire()]),
     commentsRead([]),
     ...rulesRead(),
-    checksRead(),
+    ...checksRead(),
     {
       kind: "throw",
       method: "PUT",
@@ -1009,10 +1057,10 @@ Deno.test("mergePullRequest: malformed merge response is invalid, rejected maps 
     reviewsRead([reviewWire()]),
     commentsRead([]),
     ...rulesRead(),
-    checksRead(),
+    ...checksRead(),
     httpRespond("PUT", "/repos/ubiquity/sentinel/pulls/1/merge", 405, {}),
     pullEntry(),
-    checksRead(),
+    ...checksRead(),
   ]);
   const blocked = await rejected.port.mergePullRequest(mergeRequest());
   assert.equal(blockedReason(blocked), "protection_required");
@@ -1032,7 +1080,7 @@ Deno.test("mergePullRequest: unreadable rules fail closed even when classic prot
       repeat: true,
     },
     httpRespond("GET", RULESETS_PATH, 200, [rulesetWire()]),
-    checksRead(),
+    ...checksRead(),
   ]);
   const result = await malformed.port.mergePullRequest(mergeRequest());
   assert.equal(blockedReason(result), "protection_required");
@@ -1051,7 +1099,7 @@ Deno.test("mergePullRequest: unreadable rules fail closed even when classic prot
       repeat: true,
     },
     httpRespond("GET", RULESETS_PATH, 200, [rulesetWire()]),
-    checksRead(),
+    ...checksRead(),
   ]);
   const blocked = await failed.port.mergePullRequest(mergeRequest());
   assert.equal(blockedReason(blocked), "protection_required");
@@ -1073,7 +1121,7 @@ Deno.test("mergePullRequest: unreadable rules fail closed even when classic prot
       pullRequestRuleWire(),
     ]),
     httpRespond("GET", RULESETS_PATH, 200, [rulesetWire()]),
-    checksRead(),
+    ...checksRead(),
   ]);
   const unreadable = await badParams.port.mergePullRequest(mergeRequest());
   assert.equal(blockedReason(unreadable), "protection_required");

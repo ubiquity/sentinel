@@ -11,8 +11,9 @@
  *   required field is invalid.
  * - Issue-vs-PR distinction: a `/issues` response carrying `pull_request` is
  *   a PR, not an issue; issue listings exclude those records.
- * - Merged state is derived from the exact merge identity (`merged_at` +
- *   `merge_commit_sha`): a closed PR without a merge commit is never "merged".
+ * - Merged state is derived from `merged_at` plus a required merge commit
+ *   identity. GitHub can expose a temporary `merge_commit_sha` for an
+ *   unmerged test merge; that value is not a delivery identity and is ignored.
  * - Text bound overflow is unavailable/incomplete: a body beyond the contract
  *   bound makes the whole value invalid rather than silently truncated.
  */
@@ -26,6 +27,7 @@ import type {
   GitHubIssueV1,
   GitHubPullRequestV1,
   GitHubRefV1,
+  GitHubReviewDecisionV1,
 } from "../contracts/ports.ts";
 import {
   expectBoolean,
@@ -195,27 +197,23 @@ export function parsePullWire(
     obj.merged_at,
     `${path}.merged_at`,
   );
-  const mergeSha = expectWireShaNullable(
+  const observedMergeSha = expectWireShaNullable(
     obj.merge_commit_sha,
     `${path}.merge_commit_sha`,
   );
-  // Exact issue-vs-PR identity: merged exactly when GitHub observed a merge
-  // commit identity; a closed PR without one is closed, never merged.
+  // GitHub may populate merge_commit_sha for an unmerged test merge. Only a
+  // non-null merged_at marks delivery; the merge SHA is required in that
+  // case, and an unmerged test SHA is deliberately not exposed as delivery
+  // identity to callers.
   const merged = mergedAt !== null;
-  if (merged && mergeSha === null) {
+  if (merged && observedMergeSha === null) {
     fail(
       `${path}.merge_commit_sha`,
       "invalid_value",
       "merged pull request carries no merge commit sha",
     );
   }
-  if (!merged && mergeSha !== null) {
-    fail(
-      `${path}.merge_commit_sha`,
-      "invalid_value",
-      "unmerged pull request carries a merge commit sha",
-    );
-  }
+  const mergeSha = merged ? observedMergeSha : null;
   const reviewDecision = parseReviewDecision(
     obj.review_decision,
     `${path}.review_decision`,
@@ -247,13 +245,55 @@ function expectBranchRef(value: unknown, path: string): string {
   return expectNonEmptyString(value, path, MaxText.branch);
 }
 
-function parseReviewDecision(value: unknown, path: string) {
+export function parseReviewDecision(
+  value: unknown,
+  path: string,
+): GitHubReviewDecisionV1 {
   if (value === null || value === undefined) return "none" as const;
   return expectEnum(
     value,
     ["approved", "changes_requested", "review_required", "none"],
     path,
   );
+}
+
+/** Parse the authoritative GraphQL pull-request approval response. */
+export function parsePullReviewDecisionWire(
+  input: unknown,
+  path: string,
+): GitHubReviewDecisionV1 {
+  const obj = expectRecord(input, path);
+  if (obj.errors !== undefined) {
+    const errors = expectExistingArray(obj.errors, `${path}.errors`);
+    if (errors.length > 0) {
+      fail(path, "invalid_value", "GraphQL response contains errors");
+    }
+  }
+  const data = expectRecord(obj.data, `${path}.data`);
+  const repository = expectRecord(data.repository, `${path}.data.repository`);
+  const pullRequest = repository.pullRequest;
+  if (pullRequest === null || pullRequest === undefined) {
+    fail(
+      `${path}.data.repository.pullRequest`,
+      "invalid_value",
+      "GraphQL response has no pull request",
+    );
+  }
+  const pull = expectRecord(
+    pullRequest,
+    `${path}.data.repository.pullRequest`,
+  );
+  const decisionPath = `${path}.data.repository.pullRequest.reviewDecision`;
+  const decision = pull.reviewDecision;
+  if (decision === null) return "none";
+  const normalized = decision === "APPROVED"
+    ? "approved"
+    : decision === "CHANGES_REQUESTED"
+    ? "changes_requested"
+    : decision === "REVIEW_REQUIRED"
+    ? "review_required"
+    : decision;
+  return parseReviewDecision(normalized, decisionPath);
 }
 
 // ---------------------------------------------------------------------------
@@ -288,6 +328,52 @@ export function parseCheckRunWire(input: unknown, path: string): GitHubCheckV1 {
     `${path}.completed_at`,
   );
   return { name, status, conclusion, head, startedAt, completedAt };
+}
+
+/** Normalize one commit-status context into the shared exact-head check type. */
+export function parseCommitStatusWire(
+  input: unknown,
+  path: string,
+  head: GitSha,
+): GitHubCheckV1 {
+  const obj = expectRecord(input, path);
+  const name = expectNonEmptyString(
+    obj.context,
+    `${path}.context`,
+    MaxText.label,
+  );
+  const state = expectEnum(
+    obj.state,
+    ["error", "failure", "pending", "success"],
+    `${path}.state`,
+  );
+  const createdAt = expectIsoTimestamp(obj.created_at, `${path}.created_at`);
+  const updatedAt = expectIsoTimestamp(obj.updated_at, `${path}.updated_at`);
+  if (updatedAt < createdAt) {
+    fail(
+      `${path}.updated_at`,
+      "invalid_timestamp",
+      "status update precedes creation",
+    );
+  }
+  if (state === "pending") {
+    return {
+      name,
+      status: "in_progress",
+      conclusion: null,
+      head,
+      startedAt: createdAt,
+      completedAt: null,
+    };
+  }
+  return {
+    name,
+    status: "completed",
+    conclusion: state === "success" ? "success" : "failure",
+    head,
+    startedAt: createdAt,
+    completedAt: updatedAt,
+  };
 }
 
 export function parseCheckRunsPage(

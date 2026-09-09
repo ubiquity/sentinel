@@ -27,6 +27,7 @@ import type {
 } from "../../src/github/http.ts";
 import { GitHubPortImpl } from "../../src/github/impl.ts";
 import type { GitHubPortOptionsV1 } from "../../src/github/impl.ts";
+import { GitHubApiClient } from "../../src/github/client.ts";
 import type {
   HumanResolutionVerifierV1,
   ResolutionEvidenceCheckV1,
@@ -478,6 +479,36 @@ export function checksPageWire(runs: unknown[]): Record<string, unknown> {
   return { total_count: runs.length, check_runs: runs };
 }
 
+export function statusesPageWire(statuses: unknown[]): Record<string, unknown> {
+  return { total_count: statuses.length, statuses };
+}
+
+export function commitStatusWire(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    context: "ci",
+    state: "success",
+    description: "passed",
+    target_url: null,
+    created_at: "2026-09-07T00:00:00Z",
+    updated_at: "2026-09-07T01:00:00Z",
+    ...overrides,
+  };
+}
+
+export function reviewDecisionGraphqlWire(
+  reviewDecision: "APPROVED" | "CHANGES_REQUESTED" | "REVIEW_REQUIRED" | null,
+): Record<string, unknown> {
+  return {
+    data: {
+      repository: {
+        pullRequest: { reviewDecision },
+      },
+    },
+  };
+}
+
 export function protectionWire(
   overrides: Record<string, unknown> = {},
 ): Record<string, unknown> {
@@ -669,7 +700,11 @@ export interface MakePortOptions {
 
 export function makePort(
   options: MakePortOptions = {},
-): { port: GitHubPortImpl; transport: ScriptedHttpTransport } {
+): {
+  port: GitHubPortImpl;
+  client: GitHubApiClient;
+  transport: ScriptedHttpTransport;
+} {
   const transport = new ScriptedHttpTransport(options.script ?? []);
   const portOptions: GitHubPortOptionsV1 = {
     repository: REPO,
@@ -690,5 +725,18 @@ export function makePort(
     maxItems: options.maxItems,
     requestDeadlineMs: options.requestDeadlineMs,
   };
-  return { port: new GitHubPortImpl(portOptions), transport };
+  const port = new GitHubPortImpl(portOptions);
+  const client = new GitHubApiClient({
+    repository: portOptions.repository,
+    apiBaseUrl: portOptions.apiBaseUrl ?? "https://api.github.com",
+    http: portOptions.http,
+    auth: portOptions.auth,
+    cooldownGate: portOptions.cooldownGate,
+    clock: portOptions.clock,
+    perPage: portOptions.perPage,
+    maxPages: portOptions.maxPages,
+    maxItems: portOptions.maxItems,
+    requestDeadlineMs: portOptions.requestDeadlineMs,
+  });
+  return { port, client, transport };
 }

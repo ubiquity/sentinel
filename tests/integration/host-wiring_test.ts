@@ -158,7 +158,7 @@ async function makeWiringRig(prefix: string): Promise<WiringRigV1> {
   const releaseStore = storeAt(ctx, "wiring-release", "release");
   const gate = new FakeCooldownGate();
   const githubTransport = new ScriptedHttpTransport([
-    httpRespond("GET", ISSUES_PATH, 200, { total_count: 0, items: [] }),
+    httpRespond("GET", ISSUES_PATH, 200, []),
   ]);
   const gatewayTransport = recordingTransport(
     () => jsonResponse(makeIndexPage([], null, { status: "complete" })),

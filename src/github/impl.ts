@@ -651,12 +651,16 @@ export class GitHubPortImpl implements GitHubPort {
     if (checkState === "failed") {
       return blocked("checks_failed", pull.value.head);
     }
-    // 6. Required GitHub approvals (distinct from the review receipt).
-    if (
-      protections.value.requiredApprovingReviewCount > 0 &&
-      pull.value.reviewDecision !== "approved"
-    ) {
-      return blocked("review_required", pull.value.head);
+    // 6. Required GitHub approvals (distinct from the review receipt). The
+    // REST pull response does not carry the authoritative approval state;
+    // read the exact GraphQL field only when branch policy requires it.
+    if (protections.value.requiredApprovingReviewCount > 0) {
+      const approval = await this.client.readPullRequestReviewDecision(
+        merge.pullRequestNumber,
+      );
+      if (!approval.ok || approval.value !== "approved") {
+        return blocked("review_required", pull.value.head);
+      }
     }
     // 7. Candidate ancestry: the candidate must contain the exact integrated
     // validated base as ancestor.
@@ -1198,10 +1202,12 @@ function ruleSetEvidenceMatches(
 type RequiredChecksState = "pass" | "pending" | "failed";
 
 /**
- * Exact-name required checks on the exact head: a missing or not-completed
- * required run is pending; any failed conclusion (including skipped, neutral,
- * timed_out, cancelled or action_required) is failed; only a completed
- * `success` conclusion passes.
+ * Exact-name required checks on the exact head: commit-status contexts and
+ * check runs share the same required name space. A missing or not-completed
+ * observation is pending; any failed conclusion (including skipped, neutral,
+ * timed_out, cancelled or action_required) is failed; only completed
+ * `success` observations pass. When both APIs report a context, every
+ * observation must be successful.
  */
 export function requiredChecksState(
   requiredNames: string[],
@@ -1209,16 +1215,18 @@ export function requiredChecksState(
 ): RequiredChecksState {
   let pending = false;
   for (const name of requiredNames) {
-    const run = checks.find((check) => check.name === name);
-    if (run === undefined) {
+    const runs = checks.filter((check) => check.name === name);
+    if (runs.length === 0) {
       pending = true;
       continue;
     }
-    if (run.status !== "completed" || run.conclusion === null) {
-      pending = true;
-      continue;
+    for (const run of runs) {
+      if (run.status !== "completed" || run.conclusion === null) {
+        pending = true;
+        continue;
+      }
+      if (run.conclusion !== "success") return "failed";
     }
-    if (run.conclusion !== "success") return "failed";
   }
   return pending ? "pending" : "pass";
 }

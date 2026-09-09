@@ -883,6 +883,10 @@ export class ReleaseController {
       this.policy.baselineWindowMs;
     const baseline = [...(record.acceptance?.baseline ?? [])];
     const samples: MetricsSampleV1[] = [...(record.acceptance?.samples ?? [])];
+    // The baseline cap applies to this invocation, not to the accumulated
+    // persisted baseline. A run with several overdue candidate slots must not
+    // bypass the per-run sampling bound through the outer loop.
+    let baselineCollectedThisRun = 0;
     for (let i = 0; i < dueSlots; i++) {
       const slotIndex = collected + i;
       const windowStart = startedAt + slotIndex * RELEASE_SAMPLE_INTERVAL_MS;
@@ -907,7 +911,7 @@ export class ReleaseController {
       while (
         baseline.length < this.policy.baselineWindowMs /
             RELEASE_SAMPLE_INTERVAL_MS &&
-        baseline.length < RELEASE_MAX_SLOTS_PER_RUN
+        baselineCollectedThisRun < RELEASE_MAX_SLOTS_PER_RUN
       ) {
         const slotIndexB = baseline.length;
         const windowStartB = baselineStart +
@@ -924,6 +928,7 @@ export class ReleaseController {
         });
         if (!baselineSample.ok || !completeSample(baselineSample.value)) break;
         baseline.push(baselineSample.value);
+        baselineCollectedThisRun++;
       }
     }
     if (baseline.length === 0 && samples.length >= 1) {
