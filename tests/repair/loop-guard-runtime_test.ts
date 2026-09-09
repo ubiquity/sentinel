@@ -201,9 +201,16 @@ Deno.test("loop-guard runtime: real entrypoint stops first loop and admits secon
     const model = new CodexImplementationPort({
       checkoutDir: cwd,
       interruptSettlementGraceMs: 100,
+      // Explicit provider; the custom verifier is only an additional
+      // restriction after the concrete core request/runtime checks.
+      modelProvider: "scripted",
       receiptVerifier: (e) =>
         e.threadModel === "gpt-5.6-luna" && e.threadEffort === "max"
-          ? { observedModel: "gpt-5.6-luna", observedReasoning: "max" }
+          ? {
+            provider: e.threadModelProvider ?? "scripted",
+            observedModel: "gpt-5.6-luna",
+            observedReasoning: "max",
+          }
           : null,
       openSession: () => {
         if (sessions.length > 0) {

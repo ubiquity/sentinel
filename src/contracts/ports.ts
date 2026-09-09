@@ -423,9 +423,12 @@ export interface ReplayPort {
 
 // ---------------------------------------------------------------------------
 // ImplementationPort (m04): bounded pinned model session with a secret-free
-// checkout; the receipt records what was actually observed, never the CLI
-// label alone. A model candidate is a locally validated commit; only the
-// trusted GitHub writer publishes it.
+// checkout; the receipt records trusted request/runtime evidence — the exact
+// submitted provider/model/effort configuration bound to the exact
+// invocation/thread/turn and runtime routing/terminal events — never the CLI
+// label alone and never a backend-observed provider attestation. A model
+// candidate is a locally validated commit; only the trusted GitHub writer
+// publishes it.
 // ---------------------------------------------------------------------------
 
 export type ModelIdV1 = "gpt-5.6-luna";
@@ -453,11 +456,47 @@ export interface CandidateOutcomeV1 {
   changedPaths: string[];
 }
 
+/**
+ * Receipt of ONE bounded model run. The `actual` block is explicit
+ * request/runtime evidence: `evidenceKind: "request-runtime"` labels trusted
+ * submitted provider/model/effort configuration bound to the exact
+ * invocation/thread/turn identity and runtime routing/terminal events. It is
+ * NEVER a backend-observed provider attestation. The old field names are the
+ * existing contract; `observedModel`/`observedReasoning` document the
+ * acknowledged request/runtime metadata, not backend observation.
+ */
 export interface ModelRunReceiptV1 {
   invocationId: string;
   outcome: "completed" | "failed" | "interrupted";
   actual: {
+    /** Evidence class: request/runtime evidence, never backend attestation. */
+    evidenceKind: "request-runtime";
+    /** Acknowledged provider configuration submitted with the run. */
+    provider: string;
+    /** Exact app-server thread identity acknowledged for the run. */
+    threadId: string;
+    /** Exact app-server turn identity acknowledged for the run. */
+    turnId: string;
+    /**
+     * Terminal evidence origin: `runtime` means a correlated runtime terminal
+     * event was actually observed for the exact thread/turn; `host-timeout`
+     * means the host's own bounds elapsed without any runtime terminal and the
+     * receipt is failed ACCOUNTING only — the run never claims an observed
+     * terminal.
+     */
+    terminalOrigin: "runtime" | "host-timeout";
+    /**
+     * Observed runtime terminal status: `completed`/`interrupted`/`failed`
+     * when a correlated runtime terminal event was actually observed for the
+     * exact thread/turn, and null on a host timeout. The exact runtime status
+     * is preserved even when the host's own loop stop yields `interrupted`
+     * accounting over a completed terminal; null never pretends a terminal
+     * was observed.
+     */
+    observedTerminalStatus: "completed" | "interrupted" | "failed" | null;
+    /** Acknowledged model (request/runtime metadata, not backend observation). */
     observedModel: string;
+    /** Acknowledged reasoning effort (request/runtime metadata, not observation). */
     observedReasoning: string;
     durationMs: number;
     outputChars: number;

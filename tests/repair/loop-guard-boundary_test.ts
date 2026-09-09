@@ -177,6 +177,26 @@ async function probe(mode: Mode) {
         ) {
           await interruptObserved.promise;
         }
+        // Genuine correlated schema-shaped output item for the exact
+        // thread/turn: a completed run requires nonempty output evidence (a
+        // successful file-change item with status completed and a nonempty
+        // valid changes array), never notification-byte counts. In stopped
+        // modes this event is ignored, so it never changes their early-stop
+        // contracts.
+        emit("item/completed", {
+          threadId: "t",
+          turnId: "u",
+          item: {
+            id: "ok-output",
+            type: "fileChange",
+            status: "completed",
+            changes: [{
+              path: "app.ts",
+              kind: { type: "update" },
+              diff: "@@ -1 +1 @@\n-export const a = 1;\n+export const a = 2;\n",
+            }],
+          },
+        });
         await pause(200);
         terminal();
       })().catch((error) => {
@@ -204,10 +224,10 @@ async function probe(mode: Mode) {
       checkoutDir: root,
       interruptSettlementGraceMs: mode === "wrong-terminal" ? 30 : undefined,
       openSession: () => Promise.resolve(session),
-      receiptVerifier: () => ({
-        observedModel: "gpt-5.6-luna",
-        observedReasoning: "max",
-      }),
+      // Explicit provider with the CONCRETE default request/runtime receipt
+      // producer (no injected permissive verifier): the core checks alone
+      // decide the receipt for every mode below.
+      modelProvider: "fixture",
       checkout: {
         resolve: () =>
           Promise.resolve({
@@ -246,8 +266,15 @@ async function probe(mode: Mode) {
       assert.equal(interrupts, 1);
       assert.equal(result.value.candidate, null);
       if (mode === "wrong-terminal") {
+        // The wrong identity was ignored and no runtime terminal arrived: the
+        // host timeout keeps failed ACCOUNTING with the explicit origin and
+        // never pretends an observed terminal.
         assert.equal(result.value.outcome, "failed");
-        assert.equal(result.value.error, "timeout without terminal settlement");
+        assert.equal(result.value.actual.terminalOrigin, "host-timeout");
+        assert.equal(
+          result.value.error,
+          "host timeout without terminal settlement",
+        );
       }
     } else {
       assert.equal(interrupts, 0, mode);

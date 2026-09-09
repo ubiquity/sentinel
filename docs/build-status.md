@@ -7,14 +7,14 @@ is evidence, not a second queue. Only the current GPT-6 Astra integration owner
 may edit this file. Workers return proposed updates and immutable evidence;
 READY means awaiting Astra acceptance. Do not create replacement task lists.
 
-Last reconciled: 2026-09-09 21:35 UTC by Astra session
+Last reconciled: 2026-09-09 22:58 UTC by Astra session
 `01a08416-3171-7c82-ab91-dcbab6817b89` at canonical source/ledger tip
-`acc69c94ca292496dec73d636fad1c165f5b19ec` before this documentation update. Canonical lane remains
+`c434744dcfbe5a2547719d3ecad656a38ce59206` with T02 accepted on its verified frozen bytes. Canonical lane remains
 `/Users/nv/repos/ubiquity/sentinel/.codex-worktrees/master-plan-gfa795549e5`,
 branch `codex/master-plan-gfa795549e5`. No production activation is accepted.
 The owner supervises DSH directly, per the user's 19:07 UTC instruction.
-The causal correction is accepted; current work is T02/T03 contract resolution.
-Runtime implementation remains Luna/max. No DSH implementation writer is active.
+T01 and T02 are accepted; next work is the bounded T03 journal/client checkpoint.
+Runtime implementation remains Luna/max. All T02 DSH writers are settled; no implementation writer is active.
 
 Task states: pending, in_progress, ready, accepted, blocked, rejected. Only
 accepted closes a task, and only after the acceptance evidence below exists.
@@ -24,9 +24,9 @@ to keep retrying. Scope changes require an Astra entry with the reason.
 | ID | State / owner | Required acceptance | Evidence or exact next action |
 | --- | --- | --- | --- |
 | T01 Causal capture verifier | accepted / Astra, fresh audit and canonical check below | Concrete restricted execution of original and sanitized input at the same original SHA; intended failure observed in both; identical safe fixture passes candidate through the real local loop; privacy and negative cases preserved | Worker correction `7491c68` and original `55555dc` are canonical ancestors through merge `090b8aa`. Fresh final Astra audit accepted the exact frozen candidate; canonical focused host suite passed 186/186. Local macOS slice only; T04 target consumer, T05 production isolation and T08 full aggregate acceptance remain open. No active DSH writer. |
-| T02 Runtime model receipt | in_progress / Astra, DSH implementation next | Owner-approved correlated request/runtime evidence binds configured provider, Luna/max, all routing and exact operation/thread/turn completion; unavailable evidence fails closed; no backend-attestation claim | Bounded interface investigation below found no documented provider-observed model/effort producer. Owner approved the request/runtime contract and bounded probes at 21:38 UTC; standing approval covers in-scope follow-up work. Implement a real correlated producer using the evidence below. |
-| T03 Runtime review transport | pending / Astra | Concrete completed review transport and durable receipt bind operation, PR, head, reviewer and terminal result; no silence-as-clean | Local review lifecycle is documented; concrete adapter constraints and a two-sample probe proposal are below. Actual clean/finding output and authorized GitHub publisher identity remain unverified; no coding assignment yet. |
-| T04 Gateway replay consumer | pending / Astra; depends on T01 | Actual target command consumes the safe permanent fixture, fails original, passes candidate, and runs in target validation | Target `7b93b579eecf5392730453f1407a66a552fd7c48` lacks the configured replay command; reconcile target ownership and approve the concrete command interface before writing target files. |
+| T02 Runtime model receipt | accepted / Astra | Owner-approved correlated request/runtime evidence binds configured provider, Luna/max, routing and exact invocation/thread/turn; unavailable evidence fails closed | Frozen 12-path candidate verified; fresh source audit passed behavior, 72/72 tests and format/lint passed. Real concrete Luna/max smoke settled with completed runtime receipt. Acceptance details below. No backend-attestation or production-isolation claim. |
+| T03 Runtime review transport | pending / Astra | Concrete completed review transport and durable receipt bind operation, PR, head, reviewer and terminal result; no silence-as-clean | Structured turn/start clean and P1 samples passed with exact identities. Builtin review prose is rejected as a clean interface. Fresh Astra approved the pending GitHub review journal design; implement after T02 correction. Live publisher/draft access remains a deployment check. |
+| T04 Gateway replay consumer | pending / Astra; depends on T01 | Actual target command consumes the safe permanent fixture, fails original, passes candidate, and runs in target validation | Remote target development remains `7b93b579eecf5392730453f1407a66a552fd7c48` at22:33UTC; required scripts/replay.ts is absent. Reuse clean existing m06 lane a702d4dd after reconciling writer ownership. Deliver the consumer before collecting live acceptance captures: current T01 requires it at the capture's exact original SHA. |
 | T05 Production replay isolation | pending / Astra | Real filesystem/network/credential/process restrictions tested on the execution host; arbitrary target commands cannot escape; no caller boolean as proof | Existing Deno process groups establish lifetime only. Choose and verify the host boundary; local restricted consumer proof does not close production isolation. |
 | T06 Trusted host wiring | pending / Astra; depends on T01–T05 | Real entrypoints assemble scoped authentication, durable state CAS, incident/replay/model/review and release capabilities; missing capabilities fail closed | Observer run `34389188768`: `observe_auth_missing`; repair `34388944531` and release `34388818273`: host wiring absent. Assemble existing ports with verified contracts, not another injected stub. |
 | T07 Activation decisions | pending / Astra prepares; user decides | Finite model limits/session bounds, retention duration/aggregate storage/key capability, stability baseline/thresholds, credential scopes, protected paths, isolated target and handover owner recorded | Correct report 03: retention omitted from its bundled request; 40 MiB capacity unproven; proposed #207/#208 not an eligible final capture pair. Prepare one concrete decision request after available facts are resolved. |
@@ -408,6 +408,102 @@ review starts, each ten minutes, no automatic retry, no target/GitHub writes.
 Use exact aggregate diffs and explicit clean/findings/unavailable structured
 results. This changes the approach after concrete output evidence; do not
 repeat the builtin review requests to seek more convenient prose.
+
+### Real receipt samples and T02 writer — 2026-09-09 21:51 UTC
+
+The builtin clean and finding-bearing review/start calls both completed. Clean
+returned prose; finding-bearing returned a P1 title plus a multiline explanation.
+Those outputs establish why prose-as-clean and line-only parsing are unsafe.
+The next structured probe initially received an explicit pre-inference invalid
+request: readOnly.access is no longer supported, use permissionProfile. The
+installed 0.153.4 schema and fetched docs still described that field. Both
+rejected attempts remain recorded; neither is model completion evidence.
+
+Corrected structured probes used supported readOnly sandbox with shell, apps,
+web and multi-agent tools disabled, a complete synthetic diff in input, and
+turn/start outputSchema. Both completed without tool use or rerouting, with
+unchanged clean fixture repositories and settled subprocess groups. This is
+model/review interface proof, not T05 restricted filesystem isolation.
+
+Host evidence root: /Users/nv/.local/state/sentinel-probes/t02-t03-20260909-2139.
+verified-structured-samples.json independently binds preserved request/response,
+thread/turn, exact base/head, final structured result and terminal settlement.
+
+| Sample | Thread / turn | Preserved JSONL SHA-256 | Result |
+| --- | --- | --- | --- |
+| structured-v2-clean | 01a08822-766a-7240-a329-3d3a0f5a0d5d / 01a08822-76fb-7693-9e41-cc2250c57c73 | 0e7fbad214ed269bc412b5271f72724436b8259c48a3ce77cb6e788ad1e5689d | Explicit clean, findings empty |
+| structured-v2-finding | 01a08822-b65b-7a33-9fa8-01ca813ff728 / 01a08822-b712-7372-ab0c-e9fcddc84a6d | 6283ab2ee52b8d29837a8975b50645a66ac9ebccfa9dc0c9e0d358f2c3c2b905 | Explicit findings, known account.ts P1 |
+
+Both acknowledged provider openai, model gpt-5.6-luna, effort max; turn requests
+explicitly supplied Luna/max. Four model starts completed across builtin and
+structured discovery; the two invalid restricted-read requests were rejected
+before inference. No GitHub write or shared Codex configuration change occurred.
+
+T02 serialized DSH writer launched at 21:47 UTC on canonical base c434744,
+PID 23784, stream session session-0ec98ae1-dc14-4adf-9dc1-16835050f890,
+persisted session session-ed553853-3832-4cf8-8523-2df88aed45f2. Exact cwd and
+NODE_ENV=production were independently verified. Persisted request header
+confirms deepseek-official/deepseek-v4-flash-vision-exp/max. Assignment and
+stream are t02-assignment.md and t02-dsh-stream.jsonl in the evidence root.
+Owns model-port, host repair composition, model receipt fields and named
+affected tests only; no docs, Git, worktrees or child model runs. Expected
+first edit within ten minutes, focused handback within thirty. No live print
+steering is supported; bounded task-owned cancellation after diagnosed failure
+is authorized. Registered check t02-runtime-receipt runs credential-free via
+the installed evidence tool; sandbox failure goes back to Astra once.
+
+### T02 correction checkpoint — 2026-09-09 22:04 UTC
+
+Astra stopped task-owned DSH PID 23784 after repeated raw tailed test execution
+bypassed the registered credential-free evidence target. Preserve its code;
+no completed worker result or accepted test evidence is claimed. The stop
+receipt is t02-stop.json in the probe evidence root. PID 23784 and previously
+observed children 29595/29596/29597/30242 were all verified absent afterward.
+No task-owned implementation writer is active at this checkpoint.
+
+Frozen source patch t02-candidate-before-correction.patch has SHA-256
+e0f6820c09aee6a108cc22526d67ca20b5f8499b905d0c1ebcc75afa66c8b326
+and base c434744. It preserves the receipt producer and affected tests. Root
+found fileChange items counted as successful output without required status
+validation; corresponding fakes omitted required status/changes. The installed
+ThreadItem schema requires changes/id/status/type and allows failed/declined
+statuses. Fresh read-only Astra audit /root/fresh_t02_runtime_review is checking
+this frozen candidate before one bounded DSH correction. Astra will run the
+registered checks after correction; no unchanged raw tests will be repeated
+merely to recover output.
+
+Fresh T03 design audit /root/t03_transport_design_check accepted the minimal
+GitHub pending-review journal design, with strict whole-result parsing and
+actual publisher identity distinct from Codex provenance. Detailed immutable
+next-assignment contract is t03-contract.md in the same evidence root. This is
+part of T03, not a replacement task register or an implemented transport.
+
+### T02 fresh audit correction and available host identities — 22:10 UTC
+
+Fresh Astra requested four substantive corrections: require explicit provider
+even with injected verifier; validate successful file-change/output shape;
+separate protocol/routing uncertainty and host timeouts from observed runtime
+terminal evidence; preserve concrete-verifier loop-stop race accounting.
+Correction assignment t02-correction.md is immutable in the probe evidence
+root. DSH correction PID 34240 launched at 22:07 UTC; cwd, branch c434744 and
+NODE_ENV=production were verified. Persisted session
+session-780d691c-5a58-46f4-a16b-6ffa49eeaf24 request header confirms
+deepseek-official/deepseek-v4-flash-vision-exp/max. This writer may edit and
+format owned files only; Astra owns registered test execution after handback.
+Expected first correction edit within five minutes and handback within fifteen.
+No replacement worktree or branch exists.
+
+Read-only deployment facts, not activation acceptance: gh API user returned
+0x4007 (id 4975670). The local login is not the connector bot. The checked
+open gateway PRs include both 0x4007 and github-actions[bot] authors, so
+publisher/PR-author independence cannot be assumed globally. Sentinel Actions
+secret listing was empty. Gateway secret names include CODEX_AUTH_JSON_B64,
+SENTINEL_GITHUB_APP_PRIVATE_KEY, SENTINEL_REPLAY_KEY and related existing
+artifact/Codex state secrets. No secret values were retrieved. The current
+login shell has GITHUB_TOKEN and the organization Deno admin token present,
+but the checked Sentinel gateway/App/replay capability variables are absent.
+These are source-availability facts for T06/T07, not authorization to claim
+that credentials have been installed or scopes/ownership verified.
 
 ## Historical entries — not the current task list
 
@@ -1869,3 +1965,119 @@ host wiring. Existing source merge is distinct from activation. Policy choices,
 isolated rollback, production ownership transfer, two real deliveries and the
 six-hour observation remain open. This ownership update does not authorize new
 secrets, guessed live quotas, production handover, or arbitrary agent cancellation.
+
+### T02 frozen correction verification (2026-09-09 22:26 UTC)
+
+DSH correction PID34240 completed with exit0 and terminal completed; parent and
+observed descendants are settled. Persisted session780d691c header confirms
+deepseek-official/deepseek-v4-flash-vision-exp/max. The run changed only its ten
+owned files and ran no tests, lint or type checks. Root froze the candidate in
+/Users/nv/.local/state/sentinel-probes/t02-t03-20260909-2139/t02-corrected-frozen.json;
+source patch SHA256 4a0023131721d7fbead062d62295a8ab0c0986b2fcb5ca5f7efe362648efb8dd.
+
+Fresh registered test receipt in namespace
+cc48556d9d6816f2605c36c352452867e2de5be694f7aa26c8a9330e9268c576:
+d26daa4d-268e-4cd1-8d24-24f514df950c failed at type-check in 1433ms: model-port
+test line1580 types an event as Record instead of the required method/params
+shape; no tests executed. Format18c977a9-98f8-4dca-bc0a-c5ac443757bc and
+lintef6182de-ae57-44c5-acec-5fa0e6a8faea passed. Do not rerun unchanged bytes.
+Fresh-context Astra fresh_t02_acceptance audits the exact frozen source. Root
+flagged missing observed terminal status in the returned actual receipt for
+that audit. One bounded concrete port smoke started22:25 UTC, max180s, one
+Luna/max start, synthetic existing clean fixture only; result remains pending.
+No GitHub writes or production readiness claim.
+
+### T02 final bounded correction launch (2026-09-09 22:31 UTC)
+
+Fresh Astra fresh_t02_acceptance confirmed the frozen hashes and requested:
+required command-event shape validation; concrete sticky transport failure
+visible after settlement; bounded terminal IDs; returned observed terminal
+status; corrected test event annotation. No additional confirmed P0/P1.
+The prior concrete positive smoke completed in78293ms with exact OpenAI
+Luna/max identities, settled true and clean unchanged synthetic HEAD. Receipt:
+/Users/nv/.local/state/sentinel-probes/t02-t03-20260909-2139/concrete-t02-result.json.
+
+Astra authorized extending the same T02 owned scope only to
+src/repair/codex-transport.ts and tests/repair/codex-transport_test.ts for
+the required getFailure visibility seam; no production isolation expansion.
+Registered targets now include those two files. No new task, lane or PR.
+Immutable t02-final-correction.md launched22:31UTC, PID43891, exec73671,
+persisted session84311bcb-8261-4574-8876-fd9e84b7261a. Exact canonical cwd,
+NODE_ENV=production and persisted deepseek-official/
+deepseek-v4-flash-vision-exp/max header are verified. Expected first edit3min,
+handback15min; no tests/typechecks/lint by writer, one final fmt edit allowed.
+No children/background jobs, no live print steering; task-owned stop applies
+only after diagnosed failure/unsafe scope/no useful progress. Astra runs
+registered checks after settlement and batches remaining substantive fixes.
+
+### T04 target reconciliation (read-only, 2026-09-09 22:33 UTC)
+
+GitHub API reports ai.ubq.fi development7b93b579eecf5392730453f1407a66a552fd7c48.
+Root checkout is the older ancestor9331946ef10d3b7259b5ca4933598dd380c1d794,
+with only preserved .DS_Store and provider-sentinel-redesign doc untracked.
+No root fast-forward or target change was performed. Existing m06 lane
+master-plan-m06-gateway-ad0aef5cd31 is clean at
+a702d4ddb6a8bcbf549653cc75596b3d74715102, already integrated via PR258.
+Remote deno.json has sentinel:test-local capture/export tests but no standalone
+replay task; scripts/replay.ts is absent. Current T01 checks that exact consumer
+path exists at the capture's original SHA. Therefore T04 consumer delivery
+must precede the captures used in T11 live replay acceptance; do not fabricate
+historical availability or keep retrying pre-consumer captures. Existing
+handler/provider replay fixtures offer a concrete consumer starting point.
+Open legacy PRs251/233 and old Sentinel candidates remain untouched.
+
+### T05 local execution prerequisite (read-only, 2026-09-09 22:40 UTC)
+
+Docker CLI exists at /opt/homebrew/bin/docker, but docker version cannot
+connect to the configured local daemon socket. Podman CLI exists; podman
+machine list returned an empty array. No VM, daemon, package or host service
+was started or changed. Linux production isolation remains unproved; use an
+actual intended execution-host boundary and negative probes when T05 is
+implemented. Do not substitute the accepted macOS fixed-consumer proof or
+CLI presence for a Linux runtime receipt.
+
+### T02 behavior accepted; mechanical checks pending (2026-09-09 22:50 UTC)
+
+PID43891 completed exit0 and settled at22:47UTC. Frozen12-path manifest
+t02-final-frozen.json patchSHAa22af3eccd0f3a5ded07b11bdece446391adb6aa094d9565d35b813c629155cc
+is under the existing probe evidence root. Fresh Astra fresh_t02_acceptance
+verified the hashes and all finite behavior corrections; no additional
+substantive defect. Registered test2e1611b0-c8f1-4c07-84db-3afbf82e46e4
+stopped at TS2365 before execution (unknown durationMs needs typeof number
+guard). Formata5153b68-2f66-49fa-8d68-97999e5075f1 requires formatting one
+test block; lintb1945f5d-15c8-4111-930f-52253cee29c3 requires one type import.
+
+The new concrete port smoke PASSED after the transport/status changes:
+concrete-t02-final-result.json, thread01a0885b-2e3a-76c1-8fa4-f32de3f76932,
+turn01a0885b-2f41-74c0-8552-f52b5a96f27c, OpenAI/Luna/max, completed observed
+terminal,98063ms, settled true, unchanged clean synthetic checkout. This is
+a new real execution of changed producer behavior, separate from local tests.
+No backend attestation or production isolation claim.
+
+Mechanical two-file assignment t02-build-fix.md launched22:50UTC, PID48739,
+exec40145, persisted session749b6750-e4bf-44bf-a7e9-309b1235de46. Exact cwd,
+NODE_ENV=production and required DeepSeek Vision/max header are verified.
+Only model-port.ts and its test are owned; three exact edits, no tests or
+additional investigation, first edit60s and handback2min. No children.
+Astra performs registered checks after settlement; no unchanged reruns.
+
+### T02 accepted (2026-09-09 22:58 UTC)
+
+All three correction writers completed and settled. Fresh Astra auditor
+fresh_t02_acceptance accepted behavior; the final delta contains only its
+requested numeric type guard, type-only import and formatting. Astra verified
+all 12 hashes in host manifest t02-accepted-candidate.json at base c434744;
+patch SHA-256 d57da005b669fd82b8408806d530d33533a2f889910daeebbeaf76cef11eccc3.
+Host evidence root: /Users/nv/.local/state/sentinel-probes/t02-t03-20260909-2139.
+
+Fresh canonical execution on this Mac, evidence namespace
+cc48556d9d6816f2605c36c352452867e2de5be694f7aa26c8a9330e9268c576:
+- e0a5ac75-6951-4a26-acaf-d08fd31bcef4: 72 passed, 0 failed, exit0, 305013ms.
+- 181f9611-f9fe-4e8b-a6d7-5601b0a7ed7c: format passed, exit0.
+- 035ee395-bca6-455c-826d-76717c6d4d1a: lint passed, exit0.
+These are executed checks, not cache hits. The previously recorded real
+concrete-t02-final-result.json proves the runtime interface before the final
+mechanically equivalent edit. No unchanged repeat model probe is needed.
+T02 accepted locally; aggregate review/publication remains T08. Eleven changed
+source/test files and this register are the focused commit scope; eight old
+untracked diagnostic directories remain preserved and excluded.

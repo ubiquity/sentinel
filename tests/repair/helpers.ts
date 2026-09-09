@@ -669,6 +669,16 @@ export class FakeModel implements ImplementationPort {
       invocationId: `invoke-${this.requests.length}`,
       outcome: this.options.outcome ?? "completed",
       actual: {
+        evidenceKind: "request-runtime",
+        provider: "sentinel-host",
+        threadId: "thread-1",
+        turnId: "turn-1",
+        terminalOrigin: "runtime",
+        observedTerminalStatus: this.options.outcome === "interrupted"
+          ? "interrupted"
+          : this.options.outcome === "failed"
+          ? "failed"
+          : "completed",
         observedModel: "gpt-5.6-luna",
         observedReasoning: "max",
         durationMs: 100,

@@ -51,6 +51,10 @@ import {
 } from "../../src/replay/port.ts";
 import { DurableGitHubCooldownGate } from "../../src/repair/github-cooldown.ts";
 import { CodexImplementationPort } from "../../src/repair/model-port.ts";
+import type {
+  CodexServerNotificationV1,
+  CodexSessionV1,
+} from "../../src/repair/codex-transport.ts";
 import { createRepairStateStore } from "../../src/state/mod.ts";
 import type { RepairGitStateStore } from "../../src/state/mod.ts";
 import {
@@ -62,6 +66,7 @@ import {
   repairConfigs,
   REPO,
   SHA1,
+  SHA3,
   T0,
 } from "./helpers.ts";
 import {
@@ -243,6 +248,86 @@ function unverifiedIsolation(): RepairHostOptionsV1["replay"]["isolation"] {
       attestationRef: "attestation://harness/unrestricted",
     },
   };
+}
+
+/**
+ * In-process fake Codex session that acknowledges the requested provider/
+ * model/effort exactly and emits genuine correlated output before a completed
+ * terminal (mirrors the real app-server event order).
+ */
+class HostAckSession implements CodexSessionV1 {
+  readonly sent: { method: string; params: unknown }[] = [];
+  closeCalls = 0;
+  private notifications:
+    | ((event: CodexServerNotificationV1) => void)
+    | null = null;
+  private turnStarted = false;
+
+  open(): void {}
+
+  send(method: string, params: unknown): Promise<unknown> {
+    this.sent.push({ method, params });
+    switch (method) {
+      case "initialize":
+        return Promise.resolve({ userAgent: "codex-app-server/0.153.4" });
+      case "thread/start":
+        return Promise.resolve({
+          thread: { id: "thread-1" },
+          model: "gpt-5.6-luna",
+          reasoningEffort: "max",
+          modelProvider: "sentinel-host",
+        });
+      case "turn/start":
+        this.turnStarted = true;
+        return Promise.resolve({ turn: { id: "turn-1" } });
+      case "turn/interrupt":
+        return Promise.resolve({});
+      default:
+        return Promise.resolve({});
+    }
+  }
+
+  notify(): void {}
+
+  onServerRequest(): void {}
+
+  onNotification(handler: (event: CodexServerNotificationV1) => void): void {
+    this.notifications = handler;
+    if (this.turnStarted) {
+      queueMicrotask(() => {
+        this.notifications?.({
+          method: "item/completed",
+          params: {
+            threadId: "thread-1",
+            turnId: "turn-1",
+            item: {
+              id: "ok-output",
+              type: "fileChange",
+              status: "completed",
+              changes: [{
+                path: "src/app.ts",
+                kind: { type: "update" },
+                diff:
+                  "@@ -1 +1 @@\n-export const a = 1;\n+export const a = 2;\n",
+              }],
+            },
+          },
+        });
+        this.notifications?.({
+          method: "turn/completed",
+          params: {
+            threadId: "thread-1",
+            turn: { id: "turn-1", status: "completed", durationMs: 5 },
+          },
+        });
+      });
+    }
+  }
+
+  close(): Promise<void> {
+    this.closeCalls++;
+    return Promise.resolve();
+  }
 }
 
 Deno.test(
@@ -526,6 +611,118 @@ Deno.test(
       // The fail-closed receipt check happens before any session work: the
       // poison openSession was never called and no model receipt was claimed.
       assert.equal(fixture.sessionCalls(), 0);
+    } finally {
+      await fixture.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "host factory: a custom verifier never enables a missing model provider and no session opens",
+  async () => {
+    const fixture = await makeHostFixture();
+    try {
+      const deps = composeRepairHost({
+        ...fixture.options,
+        model: {
+          ...fixture.options.model,
+          // A verifier callback is only an ADDITIONAL restriction after the
+          // concrete core request/runtime checks; without an explicit
+          // modelProvider the port stays unavailable BEFORE any session opens.
+          receiptVerifier: () => ({
+            provider: "sentinel-host",
+            observedModel: "gpt-5.6-luna",
+            observedReasoning: "max",
+          }),
+        },
+      });
+      const request: ModelRunRequestV1 = {
+        taskId: "host-repair-2" as WorkItemId,
+        repository: REPO,
+        base: SHA1,
+        issue: null,
+        evidence: [],
+        model: "gpt-5.6-luna",
+        reasoning: "max",
+        maxDurationMs: 5_000,
+        maxOutputChars: 1_000,
+      };
+      const result = await deps.model.runModel(request);
+      assert.equal(result.ok, false);
+      if (result.ok) return;
+      assert.equal(result.error.kind, "unavailable");
+      assert.equal(result.error.detail, UNVERIFIED_RECEIPT_DETAIL);
+      // The provider gate happens before any session work: the poison
+      // openSession was never called.
+      assert.equal(fixture.sessionCalls(), 0);
+    } finally {
+      await fixture.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "host factory: selected provider constructs the concrete request/runtime producer",
+  async () => {
+    const fixture = await makeHostFixture();
+    try {
+      const session = new HostAckSession();
+      const deps = composeRepairHost({
+        ...fixture.options,
+        model: {
+          ...fixture.options.model,
+          // A selected provider with NO injected verifier must construct the
+          // real request/runtime receipt producer inside the port.
+          modelProvider: "sentinel-host",
+          openSession: () => Promise.resolve(session),
+          // The in-process fake session produces no real worktree, so the
+          // deterministic candidate identity comes from the checkout resolver
+          // and the commit step is acknowledged (same seam as the composed
+          // lifecycle fixture).
+          commitCandidate: { commit: () => Promise.resolve(true) },
+          checkout: {
+            resolve: () =>
+              Promise.resolve({
+                head: SHA3,
+                checkpointSha: null,
+                changedPaths: ["src/app.ts"],
+              }),
+          },
+        },
+      });
+      const result = await deps.model.runModel({
+        taskId: "host-runtime-receipt" as WorkItemId,
+        repository: REPO,
+        base: SHA1,
+        issue: null,
+        evidence: [],
+        model: "gpt-5.6-luna",
+        reasoning: "max",
+        maxDurationMs: 5_000,
+        maxOutputChars: 10_000,
+      });
+      assert.ok(result.ok, JSON.stringify(result));
+      if (!result.ok) return;
+      assert.equal(result.value.outcome, "completed");
+      assert.equal(result.value.candidate?.head, SHA3);
+      assert.equal(result.value.actual.evidenceKind, "request-runtime");
+      assert.equal(result.value.actual.provider, "sentinel-host");
+      assert.equal(result.value.actual.threadId, "thread-1");
+      assert.equal(result.value.actual.turnId, "turn-1");
+      assert.equal(result.value.actual.terminalOrigin, "runtime");
+      assert.equal(result.value.actual.observedTerminalStatus, "completed");
+      assert.equal(result.value.actual.observedModel, "gpt-5.6-luna");
+      assert.equal(result.value.actual.observedReasoning, "max");
+      assert.equal(session.closeCalls, 1);
+      const threadStart = session.sent.find(
+        (frame) => frame.method === "thread/start",
+      );
+      assert.ok(threadStart, "thread/start was sent");
+      assert.equal(
+        (threadStart?.params as Record<string, unknown>).modelProvider,
+        "sentinel-host",
+        "the composed host submits the selected provider explicitly on thread/start",
+      );
     } finally {
       await fixture.cleanup();
     }

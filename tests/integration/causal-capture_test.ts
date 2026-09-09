@@ -813,7 +813,30 @@ class FakeCodexSession implements CodexSessionV1 {
   onNotification(handler: (event: CodexServerNotificationV1) => void): void {
     this.notifications = handler;
     if (this.turnStarted) {
+      // The real app-server emits the terminal event only after the listener
+      // is registered inside awaitSettlement; the fake mirrors that order.
+      // A completed run requires genuine correlated output evidence: one
+      // successful file-change item for the exact thread/turn, delivered
+      // before the terminal event (never notification-byte counts).
       queueMicrotask(() => {
+        this.notifications?.({
+          method: "item/completed",
+          params: {
+            threadId: "thread-1",
+            turnId: "turn-1",
+            item: {
+              id: "ok-output",
+              type: "fileChange",
+              status: "completed",
+              changes: [{
+                path: "src/app.ts",
+                kind: { type: "update" },
+                diff:
+                  "@@ -1 +1 @@\n-export const a = 1;\n+export const a = 2;\n",
+              }],
+            },
+          },
+        });
         this.notifications?.({
           method: "turn/completed",
           params: {
@@ -835,15 +858,22 @@ class FakeCodexSession implements CodexSessionV1 {
 
 function sessionVerifier(evidence: {
   threadModel: string | null;
+  threadModelProvider: string | null;
   threadEffort: string | null;
-  terminal: { status: string };
-}): { observedModel: string; observedReasoning: string } | null {
+  terminal: { status: string | null };
+}):
+  | { provider: string; observedModel: string; observedReasoning: string }
+  | null {
   if (
     evidence.threadModel === "gpt-5.6-luna" &&
     evidence.threadEffort === "max" &&
     evidence.terminal.status === "completed"
   ) {
-    return { observedModel: "gpt-5.6-luna", observedReasoning: "max" };
+    return {
+      provider: evidence.threadModelProvider ?? "sentinel-host",
+      observedModel: "gpt-5.6-luna",
+      observedReasoning: "max",
+    };
   }
   return null;
 }
@@ -1135,6 +1165,10 @@ async function makeCausalRig(
         },
       },
       commitCandidate: { commit: () => Promise.resolve(true) },
+      // Explicit selected provider: required before any session opens, and it
+      // always binds the concrete request/runtime receipt producer; the
+      // verifier below is only an additional restriction after those checks.
+      modelProvider: "sentinel-host",
       receiptVerifier: sessionVerifier,
     },
   };
