@@ -13,4 +13,5 @@
 export * from "./runtime.ts";
 export * from "./fixture.ts";
 export * from "./causal-proof.ts";
+export * from "./causal-verifier.ts";
 export * from "./port.ts";

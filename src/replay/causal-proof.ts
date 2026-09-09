@@ -8,7 +8,7 @@
  * that the original captured request and the sanitized fixture produced the
  * SAME intended failure at the same original Git SHA under the configured
  * trusted oracle. This module owns the narrow proof type, its strict
- * structural validator and the canonical failure-signature identity; it never
+ * structural validator and the canonical expected-failure identity; it never
  * accepts an unbound boolean, caller/model-supplied success, a stale proof,
  * a mismatched identity or matching nonzero exits alone.
  *
@@ -17,10 +17,28 @@
  * owner/name/installation identity; the incident id and capture id; the
  * authenticated encrypted-artifact digest; the original Git SHA; the exact
  * fixture reference and the actual bundle digest; the trusted replay command
- * id and the trusted target-test command id; the exact test-id list; the
- * exact expected-failure matcher/reason; and two non-secret failure-signature
- * digests proving both observations were intended failures of the same
- * expected failure identity.
+ * id, the trusted target-test command id and the fixed trusted-consumer
+ * command identity; the exact test-id list; the exact expected-failure
+ * matcher/reason plus its canonical identity; and, per execution, the
+ * OBSERVED execution evidence: the observed exit code 1, the observed test
+ * identity actually printed by the consumer, the observed digest of the
+ * exact fixed safe consumer output protocol (stdout only, empty stderr) and
+ * the intended-failure classification.
+ *
+ * The expected-failure identity is a canonical classification label derived
+ * from the configured reason+matcher. It is NOT an observed execution
+ * signature and it is NOT authentication of any execution: the observations
+ * carry observed-output digests of what the consumer actually printed. The
+ * consumer protocol is the EXACT fixed safe failure protocol (one
+ * `sentinel-replay-test:<id>\n` line per trusted id in order plus the single
+ * fixed `sentinel-causal-failure:stream terminated unexpectedly\n` line on
+ * stdout, empty stderr, exit code 1), so those digests are computed only
+ * over validated fixed public protocol bytes — arbitrary or private
+ * diagnostics are never accepted and never hashed. Raw private output,
+ * request or upstream bytes never enter a proof and never leave the trusted
+ * verifier boundary: only fixed safe failure identity after exact-protocol
+ * classification plus observed execution bindings (exit code, test identity,
+ * output digest) cross this boundary.
  *
  * The fixture-reference grammar is the fixed gateway replay protocol
  * (`fixture://gateway-replay/<incidentId>/<captureId>/<bundleDigest>`); the
@@ -49,8 +67,22 @@ import { expectRestrictedRef } from "../contracts/shared.ts";
 import type { RepositoryIdentityV1 } from "../contracts/shared.ts";
 import type { ExpectedFailureV1 } from "./fixture.ts";
 
-/** Fixed trusted verifier identity; the only verifier id a proof may carry. */
-export const GATEWAY_CAUSAL_VERIFIER_ID = "gateway-trusted-oracle-v1";
+/**
+ * Fixed trusted verifier identity; the only verifier id a proof may carry.
+ * The concrete verifier is the trusted local Deno consumer executor
+ * (`GatewayLocalCausalVerifier`); a proof is never produced by a caller
+ * supplied oracle or by a model.
+ */
+export const GATEWAY_CAUSAL_VERIFIER_ID = "gateway-causal-consumer-v1";
+
+/**
+ * Fixed trusted-consumer command identity executed by the trusted verifier.
+ * This is a protocol constant (like the verifier id), never caller- or
+ * model-supplied; the consumer is the committed trusted script invoked with
+ * the fixed local Deno protocol, not a target `deno task`.
+ */
+export const CAUSAL_CONSUMER_COMMAND_ID: CommandId =
+  "causal_consumer" as CommandId;
 
 const PROOF_SCHEME_PREFIX = "fixture://proof/gateway-causal/";
 const FIXTURE_SCHEME_PREFIX = "fixture://gateway-replay/";
@@ -79,21 +111,50 @@ const PROOF_KEYS = [
   "bundleDigest",
   "replayCommandId",
   "testCommandId",
+  "consumerCommandId",
   "testIds",
   "expectedFailure",
+  "expectedFailureIdentity",
   "originalObservation",
-  "fixtureObservation",
+  "sanitizedObservation",
 ] as const;
-const OBSERVATION_KEYS = ["intended", "signature"] as const;
+const OBSERVATION_KEYS = [
+  "intended",
+  "outputDigest",
+  "observedTestIds",
+  "exitCode",
+] as const;
 const EXPECTED_FAILURE_KEYS = ["reason", "match"] as const;
 const MATCH_KEYS = ["kind", "text"] as const;
 const REGEX_MATCH_KEYS = ["kind", "source"] as const;
 
-/** One trusted observation: an intended failure with its signature identity. */
-export interface CausalFailureObservationV1 {
+/**
+ * One trusted observation: the concrete consumer actually exited 1 and
+ * printed the EXACT fixed safe failure protocol (one
+ * `sentinel-replay-test:<id>\n` line per trusted id in order plus the single
+ * fixed `sentinel-causal-failure:stream terminated unexpectedly\n` line on
+ * stdout, empty stderr). Only fixed safe failure identity plus observed
+ * execution bindings cross the proof boundary — never raw output, request or
+ * upstream bytes and never a hash of the expected matcher presented as a
+ * signature.
+ */
+export interface CausalExecutionObservationV1 {
+  /** The trusted verifier classified this execution as the intended failure. */
   intended: true;
-  /** Non-secret lowercase 64-hex failure-signature identity. */
-  signature: string;
+  /**
+   * SHA-256 over the exact validated safe consumer failure protocol observed
+   * (stdout only; the protocol requires empty stderr): one
+   * `sentinel-replay-test:<id>` line per trusted id in order plus the single
+   * fixed `sentinel-causal-failure:stream terminated unexpectedly` line.
+   * Only those fixed public protocol bytes are ever hashed; arbitrary or
+   * private diagnostics are never accepted and never digested. The digest is
+   * an observed-execution binding, never a signature identity.
+   */
+  outputDigest: string;
+  /** Test identity actually observed in the consumer output (fixed protocol). */
+  observedTestIds: string[];
+  /** Observed nonzero exit code of the consumer execution. */
+  exitCode: number;
 }
 
 /**
@@ -119,10 +180,15 @@ export interface GatewayCausalProofV1 {
   bundleDigest: FixtureDigest;
   replayCommandId: CommandId;
   testCommandId: CommandId;
+  /** Fixed trusted-consumer command identity (`CAUSAL_CONSUMER_COMMAND_ID`). */
+  consumerCommandId: CommandId;
   testIds: string[];
   expectedFailure: ExpectedFailureV1;
-  originalObservation: CausalFailureObservationV1;
-  fixtureObservation: CausalFailureObservationV1;
+  /** Canonical expected-failure identity; a classification label, never an
+   * observed execution signature. */
+  expectedFailureIdentity: string;
+  originalObservation: CausalExecutionObservationV1;
+  sanitizedObservation: CausalExecutionObservationV1;
 }
 
 /** Identities the consuming boundary re-checks against the proof. */
@@ -149,14 +215,17 @@ export interface GatewayFixtureRefIdentityV1 {
 }
 
 /**
- * Canonical non-secret expected-failure identity: SHA-256 over the canonical
- * form of `{version, kind, intended: true, reason, matcher}`. Both trusted
- * observations sign the SAME identity, and the consuming boundary re-derives
- * it from the resolved fixture's expected failure and demands equality, so a
- * caller/model assertion, a stale proof or a changed matcher/reason can never
- * mask a mismatch.
+ * Canonical non-secret EXPECTED-FAILURE identity: SHA-256 over the canonical
+ * form of `{version, kind, intended: true, reason, matcher}`. This is a
+ * classification label for the intended failure configured by the trusted
+ * host policy. It is NOT an observed execution signature and it is NOT
+ * authentication of an execution: proof observations carry their own
+ * non-secret output digests and observed test identity. The consuming
+ * boundary re-derives this identity from the resolved fixture's expected
+ * failure and demands equality, so a caller/model assertion, a stale proof or
+ * a changed matcher/reason can never mask a mismatch.
  */
-export async function deriveFailureSignatureIdentity(
+export async function deriveExpectedFailureIdentity(
   expected: ExpectedFailureV1,
 ): Promise<string> {
   const matcher = expected.match.kind === "contains"
@@ -164,7 +233,7 @@ export async function deriveFailureSignatureIdentity(
     : { kind: "regex", source: expected.match.source };
   return await canonicalStringifySha256({
     version: "v1",
-    kind: "causal-failure-signature",
+    kind: "causal-expected-failure-identity",
     intended: true,
     reason: expected.reason,
     match: matcher,
@@ -208,12 +277,14 @@ export function gatewayFixtureRefIdentity(
 
 /**
  * Strict structural proof validation: exact keys, bounded shapes, the fixed
- * verifier identity, restricted refs, internal reference consistency
- * (incident/capture/digest of the fixture ref match the proof fields), the
- * expected proof reference, command/test identities, the expected-failure
- * shape and both observations as intended failures with equal 64-hex
- * signatures equal to the canonically derived identity. Returns null on any
- * violation; no proof is ever partially trusted.
+ * verifier identity, the fixed trusted-consumer command identity, restricted
+ * refs, internal reference consistency (incident/capture/digest of the
+ * fixture ref match the proof fields), the expected proof reference,
+ * command/test identities, the expected-failure shape plus its canonical
+ * expected-failure identity and both observations as intended failures with
+ * observed nonzero exit codes, non-secret output digests and the exact
+ * observed test identity. Returns null on any violation; no proof is ever
+ * partially trusted.
  */
 export async function validateGatewayCausalProof(
   input: unknown,
@@ -258,9 +329,14 @@ export async function validateGatewayCausalProof(
 
   const replayCommandId = obj.replayCommandId;
   const testCommandId = obj.testCommandId;
-  if (!isCommandId(replayCommandId) || !isCommandId(testCommandId)) {
+  const consumerCommandId = obj.consumerCommandId;
+  if (
+    !isCommandId(replayCommandId) || !isCommandId(testCommandId) ||
+    !isCommandId(consumerCommandId)
+  ) {
     return null;
   }
+  if (consumerCommandId !== CAUSAL_CONSUMER_COMMAND_ID) return null;
   const testIds = obj.testIds;
   if (
     !Array.isArray(testIds) || testIds.length === 0 ||
@@ -278,18 +354,23 @@ export async function validateGatewayCausalProof(
 
   const expectedFailure = parseExpectedFailure(obj.expectedFailure);
   if (expectedFailure === null) return null;
-
-  const originalObservation = parseObservation(obj.originalObservation);
-  if (originalObservation === null) return null;
-  const fixtureObservation = parseObservation(obj.fixtureObservation);
-  if (fixtureObservation === null) return null;
+  const expectedFailureIdentity = obj.expectedFailureIdentity;
   if (
-    originalObservation.signature !== fixtureObservation.signature ||
-    originalObservation.signature !==
-      await deriveFailureSignatureIdentity(expectedFailure)
+    typeof expectedFailureIdentity !== "string" ||
+    !LOWERCASE_HEX_64.test(expectedFailureIdentity) ||
+    expectedFailureIdentity !==
+      await deriveExpectedFailureIdentity(expectedFailure)
   ) {
     return null;
   }
+
+  const originalObservation = parseObservation(obj.originalObservation, seen);
+  if (originalObservation === null) return null;
+  const sanitizedObservation = parseObservation(
+    obj.sanitizedObservation,
+    seen,
+  );
+  if (sanitizedObservation === null) return null;
 
   return {
     version: "v1",
@@ -305,10 +386,12 @@ export async function validateGatewayCausalProof(
     bundleDigest: asFixtureDigest(bundleDigest),
     replayCommandId,
     testCommandId,
+    consumerCommandId,
     testIds: [...testIds],
     expectedFailure,
+    expectedFailureIdentity,
     originalObservation,
-    fixtureObservation,
+    sanitizedObservation,
   };
 }
 
@@ -453,16 +536,66 @@ function parseExpectedFailure(
   return null;
 }
 
-function parseObservation(value: unknown): CausalFailureObservationV1 | null {
+/**
+ * One observed execution: intended failure, exit code 1, output digest over
+ * the exact fixed safe protocol and the EXACT observed test identity (a
+ * subset of the proof test identity; the trusted verifier runs the same
+ * fixed consumer that prints them). Never a matcher hash presented as an
+ * execution signature.
+ */
+function parseObservation(
+  value: unknown,
+  proofTestIds: ReadonlySet<string>,
+): CausalExecutionObservationV1 | null {
   const obj = asRecord(value);
   if (obj === null) return null;
   if (!hasExactKeys(obj, OBSERVATION_KEYS)) return null;
   if (obj.intended !== true) return null;
-  const signature = obj.signature;
-  if (typeof signature !== "string" || !LOWERCASE_HEX_64.test(signature)) {
+  const outputDigest = obj.outputDigest;
+  if (
+    typeof outputDigest !== "string" || !LOWERCASE_HEX_64.test(outputDigest)
+  ) {
     return null;
   }
-  return { intended: true, signature };
+  const exitCode = obj.exitCode;
+  if (
+    typeof exitCode !== "number" || !Number.isSafeInteger(exitCode) ||
+    exitCode < 1 || exitCode > 255
+  ) {
+    return null;
+  }
+  const observedTestIds = obj.observedTestIds;
+  if (
+    !Array.isArray(observedTestIds) || observedTestIds.length === 0 ||
+    observedTestIds.length > MAX_TEST_IDS
+  ) {
+    return null;
+  }
+  const observed = new Set<string>();
+  for (const id of observedTestIds) {
+    if (typeof id !== "string" || !TEST_ID_RE.test(id) || observed.has(id)) {
+      return null;
+    }
+    if (!proofTestIds.has(id)) return null;
+    observed.add(id);
+  }
+  // An observation must carry the trusted test identity actually executed;
+  // an empty or partial identity can never be an intended regression run.
+  if (!setsEqual(observed, proofTestIds)) return null;
+  return {
+    intended: true,
+    outputDigest,
+    observedTestIds: [...observedTestIds],
+    exitCode,
+  };
+}
+
+function setsEqual(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
+  if (a.size !== b.size) return false;
+  for (const value of a) {
+    if (!b.has(value)) return false;
+  }
+  return true;
 }
 
 function sameRepositoryIdentity(

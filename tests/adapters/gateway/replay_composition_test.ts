@@ -49,7 +49,8 @@ import {
   isGitSha,
 } from "../../../src/contracts/brands.ts";
 import {
-  deriveFailureSignatureIdentity,
+  CAUSAL_CONSUMER_COMMAND_ID,
+  deriveExpectedFailureIdentity,
   GATEWAY_CAUSAL_VERIFIER_ID,
   gatewayCausalProofRef,
 } from "../../../src/replay/causal-proof.ts";
@@ -1582,8 +1583,11 @@ function oracleFails(
  * Trusted test verifier: consumes the private captured request (private
  * marker present), asserts the sanitized fixture never carries it, runs the
  * same local restricted oracle over the original capture and the sanitized
- * fixture and returns a fully bound proof (or a mutated proof for negative
- * cases). Returns only non-secret bound data.
+ * fixture entries and returns a fully bound proof with observed execution
+ * bindings (nonzero exit, exact observed test identity, output digest) kept
+ * SEPARATE from the canonical expected-failure identity (or a mutated proof
+ * for negative cases). Returns only observed bindings; the raw bytes stay
+ * inside the verifier.
  */
 function trustedVerifier(
   mutate: (proof: GatewayCausalProofV1) => GatewayCausalProofV1 | null = (
@@ -1594,7 +1598,9 @@ function trustedVerifier(
   return {
     async verify(input: GatewayCausalVerifierInputV1) {
       const privateText = new TextDecoder().decode(input.capture.body);
-      const fixtureText = JSON.stringify(input.fixture);
+      const fixtureText = input.fixtureEntries
+        .map((entry) => new TextDecoder().decode(entry.bytes))
+        .join("\n");
       if (
         options.requirePrivateMarker !== false &&
         !privateText.includes(PRIVATE_MARKER)
@@ -1603,10 +1609,19 @@ function trustedVerifier(
       }
       if (fixtureText.includes(PRIVATE_MARKER)) return null;
       if (!oracleFails(input.capture.upstream)) return null;
-      if (!oracleFails(input.fixture.upstream)) return null;
-      const signature = await deriveFailureSignatureIdentity(
+      const fixtureUpstream = parseFixtureUpstream(input.fixtureEntries);
+      if (fixtureUpstream === null || !oracleFails(fixtureUpstream)) {
+        return null;
+      }
+      const expectedFailureIdentity = await deriveExpectedFailureIdentity(
         input.expectedFailure,
       );
+      const observation = {
+        intended: true as const,
+        outputDigest: "b1".repeat(32),
+        observedTestIds: [...input.testIds],
+        exitCode: 1,
+      };
       const proof: GatewayCausalProofV1 = {
         version: "v1",
         kind: "gateway_causal_proof",
@@ -1625,14 +1640,31 @@ function trustedVerifier(
         bundleDigest: input.bundleDigest,
         replayCommandId: input.replayCommandId,
         testCommandId: input.testCommandId,
+        consumerCommandId: CAUSAL_CONSUMER_COMMAND_ID,
         testIds: [...input.testIds],
         expectedFailure: input.expectedFailure,
-        originalObservation: { intended: true, signature },
-        fixtureObservation: { intended: true, signature },
+        expectedFailureIdentity,
+        originalObservation: observation,
+        sanitizedObservation: { ...observation },
       };
       return mutate(proof);
     },
   };
+}
+
+/** Parse the composed upstream entry (must exist as the fixed protocol). */
+function parseFixtureUpstream(
+  entries: readonly { path: string; bytes: Uint8Array }[],
+): { attempts: readonly { chunks_base64: readonly string[] }[] } | null {
+  const entry = entries.find((candidate) =>
+    candidate.path.endsWith("/upstream.json")
+  );
+  if (entry === undefined) return null;
+  try {
+    return JSON.parse(new TextDecoder().decode(entry.bytes));
+  } catch {
+    return null;
+  }
 }
 
 /** One crafted private-marker capture served over the real producer wire. */
@@ -1771,19 +1803,33 @@ Deno.test("composition: a fully bound trusted causal proof is attached and the f
     assert.equal(proof.artifactDigest, read.value!.artifacts[0]!.digest);
     assert.equal(proof.replayCommandId, COMMAND_ID);
     assert.equal(proof.testCommandId, VERIFIER_TEST_COMMAND);
+    assert.equal(proof.consumerCommandId, CAUSAL_CONSUMER_COMMAND_ID);
     assert.deepEqual(proof.testIds, TEST_IDS);
     assert.deepEqual(proof.expectedFailure, EXPECTED_FAILURE);
+    assert.equal(
+      proof.expectedFailureIdentity,
+      await deriveExpectedFailureIdentity(EXPECTED_FAILURE),
+    );
     assert.equal(
       proof.proofRef,
       gatewayCausalProofRef(INCIDENT_A, CAPTURE_ID_V2, proof.bundleDigest),
     );
-    assert.equal(proof.originalObservation.intended, true);
-    assert.equal(proof.fixtureObservation.intended, true);
-    assert.equal(
-      proof.originalObservation.signature,
-      proof.fixtureObservation.signature,
-    );
-    assert.match(proof.originalObservation.signature, /^[0-9a-f]{64}$/);
+    // Observed execution evidence per run: intended failure, nonzero
+    // observed exit, the EXACT observed test identity and the observed
+    // output digest — never a matcher hash, and kept separate from the
+    // canonical expected-failure identity.
+    for (
+      const observation of [
+        proof.originalObservation,
+        proof.sanitizedObservation,
+      ]
+    ) {
+      assert.equal(observation.intended, true);
+      assert.equal(observation.exitCode, 1);
+      assert.deepEqual(observation.observedTestIds, TEST_IDS);
+      assert.match(observation.outputDigest, /^[0-9a-f]{64}$/);
+      assert.notEqual(observation.outputDigest, proof.expectedFailureIdentity);
+    }
     // Structural sanitization and causal verification stay separate: the
     // fixture provenance remains redacted and never carries the private
     // marker.

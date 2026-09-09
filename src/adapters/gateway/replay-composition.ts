@@ -53,13 +53,13 @@
  *    rehydrates the identical fixture.
  * 7. An optional trusted causal verifier runs ONLY after the steps above: it
  *    receives the private retained capture (trusted process memory), the
- *    sanitized fixture and every identity, and returns a fully bound
- *    `GatewayCausalProofV1` or no proof. Proofs are re-bound to the exact
- *    identities computed here (repository, incident/capture, artifact
- *    digest, original Git SHA, fixture ref/digest, command/test ids, test
- *    ids and expected failure) before they may be attached to the resolved
- *    fixture. Raw request/upstream/sentinel data is never persisted, logged,
- *    committed or returned.
+ *    EXACT composed sanitized bundle entries and every identity, and returns
+ *    a fully bound `GatewayCausalProofV1` or no proof. Proofs are re-bound to
+ *    the exact identities computed here (repository, incident/capture,
+ *    artifact digest, original Git SHA, fixture ref/digest, command/test ids,
+ *    test ids and expected failure) before they may be attached to the
+ *    resolved fixture. Raw request/upstream/sentinel data is never persisted,
+ *    logged, committed or returned.
  *
  * Private request bytes, upstream traces and the sanitizer's restricted
  * provenance never appear in public errors, evidence records or fixture
@@ -92,6 +92,7 @@ import { expectRestrictedRef } from "../../contracts/shared.ts";
 import type { RepositoryIdentityV1 } from "../../contracts/shared.ts";
 import { bindGatewayCausalProof } from "../../replay/causal-proof.ts";
 import type { GatewayCausalProofV1 } from "../../replay/causal-proof.ts";
+import type { GatewayCausalVerifierV1 } from "../../replay/causal-verifier.ts";
 import {
   computeReplayFixtureDigest,
   containsSecretShapedText,
@@ -171,36 +172,10 @@ export interface GatewayReplayCompositionOptionsV1 {
   verifier?: GatewayCausalVerifierV1;
 }
 
-/**
- * Trusted causal-proof verifier input. The private capture is consumed in
- * trusted process memory; the sanitized fixture and every proof identity are
- * the same values the trusted composition computed. Callers must never
- * persist, log or return the raw request/upstream/private sentinel data.
- */
-export interface GatewayCausalVerifierInputV1 {
-  /** Private authenticated capture (restricted; process memory only). */
-  capture: RetainedGatewayCaptureV1;
-  /** Public sanitized fixture (fixed protocol vocabulary). */
-  fixture: SanitizedGatewayFixtureV1;
-  repository: RepositoryIdentityV1;
-  incidentId: string;
-  captureId: string;
-  /** Authenticated encrypted-artifact digest of the retained artifact. */
-  artifactDigest: EncryptedArtifactDigest;
-  fixtureRef: string;
-  bundleDigest: FixtureDigest;
-  replayCommandId: CommandId;
-  testCommandId: CommandId;
-  testIds: readonly string[];
-  expectedFailure: ExpectedFailureV1;
-}
-
-/** Trusted verifier capability: a fully bound proof or no proof at all. */
-export interface GatewayCausalVerifierV1 {
-  verify(
-    input: GatewayCausalVerifierInputV1,
-  ): Promise<GatewayCausalProofV1 | null>;
-}
+export type {
+  GatewayCausalVerifierInputV1,
+  GatewayCausalVerifierV1,
+} from "../../replay/causal-verifier.ts";
 
 /**
  * Read-only trusted identity lookup paired with the concrete resolver
@@ -774,7 +749,7 @@ export class GatewayReplayComposition
     if (this.verifier !== null && this.testCommandId !== null) {
       const verified = await this.verifier.verify({
         capture,
-        fixture: sanitized.value.fixture,
+        fixtureEntries: entries,
         repository: this.repository,
         incidentId,
         captureId,

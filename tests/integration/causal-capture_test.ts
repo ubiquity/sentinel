@@ -36,8 +36,6 @@ import assert from "node:assert/strict";
 
 import { artifactRef } from "../../src/adapters/gateway/incident-adapter.ts";
 import type {
-  GatewayCausalVerifierInputV1,
-  GatewayCausalVerifierV1,
   GatewayReplayComposition,
 } from "../../src/adapters/gateway/replay-composition.ts";
 import type { GatewayAuthProviderV1 } from "../../src/adapters/gateway/http.ts";
@@ -62,11 +60,20 @@ import { parseRepositoryConfigV1 } from "../../src/contracts/repository-config.t
 import type { RepositoryIdentityV1 } from "../../src/contracts/shared.ts";
 import type { RepairStateSnapshotV1 } from "../../src/contracts/state-snapshots.ts";
 import {
-  deriveFailureSignatureIdentity,
+  CAUSAL_CONSUMER_COMMAND_ID,
+  deriveExpectedFailureIdentity,
   GATEWAY_CAUSAL_VERIFIER_ID,
   gatewayCausalProofRef,
 } from "../../src/replay/causal-proof.ts";
 import type { GatewayCausalProofV1 } from "../../src/replay/causal-proof.ts";
+import {
+  CAUSAL_SANDBOX_EXEC_PATH,
+  GatewayLocalCausalVerifier,
+} from "../../src/replay/causal-verifier.ts";
+import type {
+  GatewayCausalVerifierInputV1,
+  GatewayCausalVerifierV1,
+} from "../../src/replay/causal-verifier.ts";
 import { markerProofParser } from "../../src/replay/fixture.ts";
 import { DenoReplayRuntime } from "../../src/replay/runtime.ts";
 import type {
@@ -486,24 +493,32 @@ async function craftCapture(
 // ---------------------------------------------------------------------------
 
 function toyApp(kind: "original" | "candidate" | "unrelated"): string {
-  const original = `/** Toy gateway stream handler. */
+  const original = `/** Toy gateway stream handler (original). */
 export function handleStreamTrace(
-  _request: unknown,
+  request: unknown,
   upstream: { attempts: { terminal: string; chunks_base64: string[] }[] },
 ): { status: number; body: string; completed: boolean; payload: string } {
+  const req = request as { body?: string };
+  let input = "";
+  try {
+    const parsed = JSON.parse(req.body ?? "{}") as { input?: unknown };
+    input = typeof parsed.input === "string" ? parsed.input : "";
+  } catch {
+    // malformed request body: treated as no input
+  }
   const attempt = upstream.attempts[0];
   const chunkText = new TextDecoder().decode(
     Uint8Array.from(atob(attempt.chunks_base64[0] ?? ""), (c) => c.charCodeAt(0)),
   );
   const completed = chunkText.includes('"type":"response.completed"') ||
     chunkText.includes("[DONE]");
-  if (!completed) {
+  if (input.includes("PRIVATE-TRIGGER-4c9b1e27") || !completed) {
     return { status: 502, body: "stream terminated unexpectedly", completed: false, payload: "" };
   }
   return { status: 200, body: JSON.stringify({ payload: chunkText.slice(0, 80) }), completed: true, payload: chunkText.slice(0, 80) };
 }
 `;
-  const candidate = `/** Toy gateway stream handler. */
+  const candidate = `/** Toy gateway stream handler (candidate fix). */
 export function handleStreamTrace(
   _request: unknown,
   upstream: { attempts: { terminal: string; chunks_base64: string[] }[] },
@@ -546,6 +561,19 @@ Deno.test("gateway: stream termination honors recorded upstream", async () => {
 `;
 }
 
+/**
+ * The trusted fixed consumer committed at the original SHA as
+ * `scripts/replay.ts` — the ONLY consumer path bound to the trusted consumer
+ * command identity. It executes the actual toy target handler against fixed
+ * request/upstream fixture paths and prints the fixed test identity, then
+ * emits the EXACT supported safe failure protocol — the single fixed
+ * `sentinel-causal-failure:stream terminated unexpectedly` line on stdout,
+ * empty stderr, exit 1 — ONLY for the intended outcome (502, incomplete,
+ * exact failure body); status 200 prints only the test ids and exits 0;
+ * every other outcome emits only a fixed "unsupported causal outcome"
+ * diagnostic and exits 2. Raw request/upstream bytes and raw outcome.body
+ * are never printed.
+ */
 function toyReplayScript(): string {
   return `import { handleStreamTrace } from "../src/app.ts";
 const base = "tests/fixtures/gateway-replay/${INCIDENT_A}/${CAPTURE_ID_A}";
@@ -553,11 +581,13 @@ const request = JSON.parse(await Deno.readTextFile(base + "/request.json"));
 const upstream = JSON.parse(await Deno.readTextFile(base + "/upstream.json"));
 const outcome = handleStreamTrace(request, upstream);
 console.log("${TEST_ID_MARKER}");
-console.log("status=" + outcome.status);
-if (outcome.status !== 200) {
-  console.error(outcome.body);
+if (outcome.status === 502 && outcome.completed === false && outcome.body === "stream terminated unexpectedly") {
+  console.log("sentinel-causal-failure:stream terminated unexpectedly");
   Deno.exit(1);
 }
+if (outcome.status === 200) Deno.exit(0);
+console.error("sentinel-causal-failure:unsupported causal outcome");
+Deno.exit(2);
 `;
 }
 
@@ -683,107 +713,56 @@ async function commitAll(
 }
 
 // ---------------------------------------------------------------------------
-// Trusted causal-proof verifier (plan 01): consumes the private sentinel,
-// runs a local restricted oracle over the original capture and the sanitized
-// fixture and returns only a fully bound non-secret proof (or none).
+// Concrete trusted causal verifier (plan 01): the real local Deno consumer
+// protocol. It materializes two independent exact-original-SHA snapshots,
+// places the private original request/upstream in one disposable restricted
+// verifier scratch snapshot and the exact composed sanitized bundle in the
+// other, executes the SAME committed trusted consumer in both under the
+// confined Deno protocol, and returns only a fully bound proof carrying
+// observed execution evidence. There is no oracle and no input-string
+// predicate anywhere in the verifier or the test.
 // ---------------------------------------------------------------------------
 
-type OracleKind = "stream" | "text";
-
-/** Deterministic local restricted oracle; true when the input FAILS the
- * intended way under the oracle's failure semantics. */
-function oracleFails(
-  kind: OracleKind,
-  body: unknown,
-  upstream: { attempts: readonly { chunks_base64: readonly string[] }[] },
-): boolean {
-  const record = body as Record<string, unknown>;
-  const input = record.input;
-  const attempt = upstream.attempts[0];
-  const chunk = attempt?.chunks_base64[0];
-  const text = chunk === undefined ? "" : new TextDecoder().decode(
-    Uint8Array.from(atob(chunk), (c) => c.charCodeAt(0)),
-  );
-  const streamCompleted = text.includes('"type":"response.completed"') ||
-    text.includes("[DONE]");
-  if (kind === "text") {
-    // Text-dependent failure: only the private trigger text fails (the
-    // sanitized fixture removes it, so it cannot causally reproduce).
-    const trigger = typeof input === "string" && input.includes(TRIGGER);
-    return trigger || !streamCompleted;
-  }
-  return !streamCompleted;
+/** Fixed consumer fixtures paths of the committed toy consumer. */
+function causalConsumerFixtureBase(): string {
+  return `tests/fixtures/gateway-replay/${INCIDENT_A}/${CAPTURE_ID_A}`;
 }
 
-function makeTrustedVerifier(
-  kind: OracleKind,
-  mutate: (proof: GatewayCausalProofV1) => GatewayCausalProofV1 | null = (
-    proof,
-  ) => proof,
+function makeConcreteVerifier(
+  toy: ToyRepoV1,
+  tmp: string,
+  runtime: ReplayRuntimeV1,
+): GatewayCausalVerifierV1 {
+  const base = causalConsumerFixtureBase();
+  return new GatewayLocalCausalVerifier({
+    sourcePath: toy.root,
+    scratchDir: `${tmp}/causal-verifier-scratch`,
+    // The fixed `scripts/replay.ts` consumer bound to the trusted
+    // trusted-consumer command identity (an interchangeable consumer path is
+    // rejected by the verifier constructor).
+    consumerPath: "scripts/replay.ts",
+    consumerRequestPath: `${base}/request.json`,
+    consumerUpstreamPath: `${base}/upstream.json`,
+    denoPath: Deno.execPath(),
+    maxDurationMs: 60_000,
+    maxOutputBytes: 262_144,
+    runtime,
+  });
+}
+
+/**
+ * Negative-case mutation wrapper only: the produced proof is mutated after
+ * the concrete verifier decided it, so a bound-mismatch case stays blocked
+ * exactly like a missing proof. Never used to fabricate a proof.
+ */
+function mutateVerifier(
+  inner: GatewayCausalVerifierV1,
+  mutate: (proof: GatewayCausalProofV1) => GatewayCausalProofV1 | null,
 ): GatewayCausalVerifierV1 {
   return {
     async verify(input: GatewayCausalVerifierInputV1) {
-      // Consume the private sentinel from the authenticated capture and
-      // assert it is absent from the sanitized fixture.
-      const privateText = new TextDecoder().decode(input.capture.body);
-      const fixtureText = JSON.stringify(input.fixture);
-      // Decode the raw upstream chunk bytes: the sentinel must be present in
-      // the authenticated captured stream and absent from the sanitized one.
-      const decodeChunks = (
-        upstream: { attempts: readonly { chunks_base64: readonly string[] }[] },
-      ): string =>
-        upstream.attempts
-          .flatMap((attempt) => attempt.chunks_base64)
-          .map((chunk) =>
-            new TextDecoder().decode(
-              Uint8Array.from(atob(chunk), (c) => c.charCodeAt(0)),
-            )
-          )
-          .join("\n");
-      const privateUpstreamText = decodeChunks(input.capture.upstream);
-      const fixtureUpstreamText = decodeChunks(input.fixture.upstream);
-      if (!privateText.includes(SENTINEL)) return null;
-      if (!privateUpstreamText.includes(SENTINEL)) return null;
-      if (fixtureText.includes(SENTINEL)) return null;
-      if (fixtureUpstreamText.includes(SENTINEL)) return null;
-      const originalFailed = oracleFails(
-        kind,
-        JSON.parse(new TextDecoder().decode(input.capture.body)),
-        input.capture.upstream,
-      );
-      const fixtureFailed = oracleFails(
-        kind,
-        JSON.parse(input.fixture.request.body),
-        input.fixture.upstream,
-      );
-      if (!originalFailed || !fixtureFailed) return null;
-      const signature = await deriveFailureSignatureIdentity(
-        input.expectedFailure,
-      );
-      const proof: GatewayCausalProofV1 = {
-        version: "v1",
-        kind: "gateway_causal_proof",
-        verifier: GATEWAY_CAUSAL_VERIFIER_ID,
-        proofRef: gatewayCausalProofRef(
-          input.incidentId,
-          input.captureId,
-          input.bundleDigest,
-        ),
-        repository: input.repository,
-        incidentId: input.incidentId,
-        captureId: input.captureId,
-        artifactDigest: input.artifactDigest,
-        originalGitSha: asGitSha(input.capture.gitSha),
-        fixtureRef: input.fixtureRef,
-        bundleDigest: input.bundleDigest,
-        replayCommandId: input.replayCommandId,
-        testCommandId: input.testCommandId,
-        testIds: [...input.testIds],
-        expectedFailure: input.expectedFailure,
-        originalObservation: { intended: true, signature },
-        fixtureObservation: { intended: true, signature },
-      };
-      return mutate(proof);
+      const proof = await inner.verify(input);
+      return proof === null ? null : mutate(proof);
     },
   };
 }
@@ -1014,7 +993,13 @@ async function makeCausalRig(
   toy: ToyRepoV1,
   prefix: string,
   options: {
-    verifier?: GatewayCausalVerifierV1;
+    /**
+     * When true the rig builds the CONCRETE trusted local consumer verifier
+     * over the toy source (real executions of the committed consumer). A
+     * mutateProof wrapper is used ONLY for negative bound-mismatch cases.
+     */
+    concrete?: boolean;
+    mutateProof?: (proof: GatewayCausalProofV1) => GatewayCausalProofV1 | null;
     capture?: { bodyInput?: string; completed?: boolean };
   } = {},
 ): Promise<CausalRigV1> {
@@ -1082,6 +1067,18 @@ async function makeCausalRig(
   const replayRuntime = new RecordingReplayRuntime(
     new DenoReplayRuntime(Deno.env.get("PATH") ?? "/usr/bin:/bin"),
   );
+  // The concrete verifier shares the same recording runtime so the test can
+  // observe the actual consumer executions (boundary evidence).
+  const concrete = options.concrete === true ||
+    options.mutateProof !== undefined;
+  const inner = concrete
+    ? makeConcreteVerifier(toy, ctx.tmp, replayRuntime)
+    : null;
+  const verifier = inner === null
+    ? undefined
+    : options.mutateProof === undefined
+    ? inner
+    : mutateVerifier(inner, options.mutateProof);
   const optionsBag: RepairHostOptionsV1 = {
     configs,
     controllerSha: SHA1,
@@ -1103,7 +1100,7 @@ async function makeCausalRig(
       testCommandId: TEST_COMMAND,
       testIds: [TEST_ID],
       expectedFailure: EXPECTED_FAILURE,
-      verifier: options.verifier,
+      verifier,
     },
     replay: {
       source: { kind: "local", path: toy.root },
@@ -1216,12 +1213,17 @@ async function walkFiles(dir: string, out: string[] = []): Promise<string[]> {
 // Tests.
 // ---------------------------------------------------------------------------
 
-Deno.test(
-  "causal capture: one captured request crosses the real repair loop to PR/review intent with a bound proof and zero limitations",
-  async () => {
+Deno.test({
+  name:
+    "causal capture: one captured request crosses the real repair loop to PR/review intent with a bound proof and zero limitations",
+  // True macOS slice: the concrete verifier's embedded sandbox-exec seatbelt
+  // profile exists and is supported only on macOS (never skipped on this
+  // Mac — only explicit non-macOS CI ignores).
+  ignore: Deno.build.os !== "darwin",
+  fn: async () => {
     const toy = await makeToyRepo("positive");
     const rig = await makeCausalRig(toy, "positive", {
-      verifier: makeTrustedVerifier("stream"),
+      concrete: true,
     });
     try {
       // Resolve the composed fixture BEFORE the positive run and commit its
@@ -1230,8 +1232,37 @@ Deno.test(
       assert.notEqual(
         fixture.proof,
         undefined,
-        "the trusted verifier must bind a proof",
+        "the concrete verifier must bind a proof",
       );
+      const proof = fixture.proof;
+      if (proof !== undefined) {
+        assert.equal(proof.verifier, GATEWAY_CAUSAL_VERIFIER_ID);
+        assert.equal(proof.consumerCommandId, CAUSAL_CONSUMER_COMMAND_ID);
+        assert.equal(
+          proof.proofRef,
+          gatewayCausalProofRef(INCIDENT_A, CAPTURE_ID_A, proof.bundleDigest),
+        );
+        // Observed execution evidence, distinct from the expected-matcher
+        // identity: the concrete verifier actually executed the committed
+        // consumer twice and both runs failed for the intended specific
+        // failure. The expected-failure identity is a classification label,
+        // never an observed execution signature.
+        assert.equal(
+          proof.expectedFailureIdentity,
+          await deriveExpectedFailureIdentity(EXPECTED_FAILURE),
+        );
+        for (
+          const observation of [
+            proof.originalObservation,
+            proof.sanitizedObservation,
+          ]
+        ) {
+          assert.equal(observation.intended, true);
+          assert.match(observation.outputDigest, /^[0-9a-f]{64}$/);
+          assert.deepEqual(observation.observedTestIds, [TEST_ID]);
+          assert.equal(observation.exitCode, 1);
+        }
+      }
       const candidateSha = await commitCandidateFixture(toy, fixture.entries);
       assert.notEqual(candidateSha, toy.originalSha);
       rig.setCandidateHead(candidateSha);
@@ -1316,6 +1347,83 @@ Deno.test(
       assert.equal(afterRun.exitCode, 0, "candidate task test must pass");
       assert.ok(afterRun.outputText.includes(TEST_ID_MARKER));
 
+      // The exact composed bundle ran through the concrete verifier: the
+      // private original request/upstream and the sanitized bundle both
+      // executed the SAME committed consumer at the original SHA under the
+      // embedded fixed sandbox-exec seatbelt profile (DENO/SNAPSHOT/CACHE
+      // realpath-resolved substitution parameters, cwd = the snapshot) and
+      // both failed for the intended specific failure. Each run has its OWN
+      // home/cache and sees only its OWN snapshot.
+      const verifierRuns = rig.replayRuntime.runs.filter((run) =>
+        run.input.executable === CAUSAL_SANDBOX_EXEC_PATH
+      );
+      assert.ok(verifierRuns.length >= 2, "original + sanitized consumer runs");
+      const snapshotParams = verifierRuns.map((run) => {
+        const args = run.input.args;
+        for (let index = 0; index < args.length - 1; index += 1) {
+          if (
+            args[index] === "-D" && args[index + 1]!.startsWith("SNAPSHOT=")
+          ) {
+            return args[index + 1]!.slice("SNAPSHOT=".length);
+          }
+        }
+        return null;
+      });
+      assert.ok(
+        snapshotParams.every((value) =>
+          value !== null && value.startsWith("/")
+        ),
+        "realpath-resolved SNAPSHOT parameters",
+      );
+      assert.equal(
+        new Set(snapshotParams).size,
+        verifierRuns.length,
+        "each consumer run sees only its own snapshot",
+      );
+      for (const run of verifierRuns) {
+        const args = run.input.args;
+        assert.equal(args[0], "-p", "fixed embedded seatbelt profile");
+        assert.ok(
+          args.includes("--no-config") && args.includes("--no-remote"),
+          "fixed no-config/no-remote consumer protocol",
+        );
+        assert.equal(
+          args[args.length - 1],
+          `${run.input.cwd}/scripts/replay.ts`,
+          "the fixed bound consumer at its own snapshot path",
+        );
+        assert.ok(
+          !args.includes("task"),
+          "verifier never runs deno task",
+        );
+        assert.equal(run.exitCode, 1, "consumer must fail at original SHA");
+        assert.ok(run.outputText.includes(TEST_ID_MARKER));
+        assert.ok(
+          run.outputText.includes("stream terminated unexpectedly"),
+          "consumer failure is the intended specific failure",
+        );
+      }
+      const [firstConsumer, secondConsumer] = verifierRuns;
+      assert.notEqual(firstConsumer!.input.cwd, secondConsumer!.input.cwd);
+      assert.notEqual(
+        firstConsumer!.input.env.HOME,
+        secondConsumer!.input.env.HOME,
+        "no shared home between original and sanitized executions",
+      );
+      assert.notEqual(
+        firstConsumer!.input.env.DENO_DIR,
+        secondConsumer!.input.env.DENO_DIR,
+        "no shared cache between original and sanitized executions",
+      );
+      assert.ok(
+        firstConsumer!.input.env.HOME.includes("home-original"),
+        "original run home is its own",
+      );
+      assert.ok(
+        secondConsumer!.input.env.HOME.includes("home-sanitized"),
+        "sanitized run home is its own",
+      );
+
       // The identical permanent fixture ran through the candidate's ordinary
       // deno task test and passed: the committed bytes equal the composed
       // fixture bytes exactly.
@@ -1373,7 +1481,7 @@ Deno.test(
       await toy.cleanup();
     }
   },
-);
+});
 
 Deno.test(
   "causal capture: no verifier/proof keeps the redacted fixture blocked at missing_evidence",
@@ -1413,9 +1521,11 @@ Deno.test(
   },
 );
 
-Deno.test(
-  "causal capture: mismatched proof identities (bundle digest, original SHA) stay blocked as missing evidence",
-  async () => {
+Deno.test({
+  name:
+    "causal capture: mismatched proof identities (bundle digest, original SHA) stay blocked as missing evidence",
+  ignore: Deno.build.os !== "darwin",
+  fn: async () => {
     const variants: Array<{
       name: string;
       verifier: (m: GatewayCausalProofV1) => GatewayCausalProofV1 | null;
@@ -1439,7 +1549,8 @@ Deno.test(
       const slug = `mismatch-${variant.name.replaceAll(" ", "-")}`;
       const toy = await makeToyRepo(slug);
       const rig = await makeCausalRig(toy, slug, {
-        verifier: makeTrustedVerifier("stream", variant.verifier),
+        concrete: true,
+        mutateProof: variant.verifier,
       });
       try {
         const first = await rig.run();
@@ -1466,14 +1577,16 @@ Deno.test(
       }
     }
   },
-);
+});
 
-Deno.test(
-  "causal capture: a redaction-damaged (text-dependent) capture cannot be causally proved and stays blocked",
-  async () => {
+Deno.test({
+  name:
+    "causal capture: a redaction-damaged (text-dependent) capture cannot be causally proved and stays blocked",
+  ignore: Deno.build.os !== "darwin",
+  fn: async () => {
     const toy = await makeToyRepo("textdamage");
     const rig = await makeCausalRig(toy, "textdamage", {
-      verifier: makeTrustedVerifier("text"),
+      concrete: true,
       capture: {
         completed: true,
         bodyInput:
@@ -1508,14 +1621,16 @@ Deno.test(
       await toy.cleanup();
     }
   },
-);
+});
 
-Deno.test(
-  "causal capture: an unrelated candidate failure never publishes and never fabricates a clean replay",
-  async () => {
+Deno.test({
+  name:
+    "causal capture: an unrelated candidate failure never publishes and never fabricates a clean replay",
+  ignore: Deno.build.os !== "darwin",
+  fn: async () => {
     const toy = await makeToyRepo("unrelated");
     const rig = await makeCausalRig(toy, "unrelated", {
-      verifier: makeTrustedVerifier("stream"),
+      concrete: true,
     });
     try {
       const fixture = await resolveComposedFixture(rig);
@@ -1585,4 +1700,4 @@ Deno.test(
       await toy.cleanup();
     }
   },
-);
+});
