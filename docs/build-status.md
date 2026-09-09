@@ -1235,3 +1235,142 @@ producer/consumer receipt and the fail-closed workflow boundary. It does not
 choose credentials, model limits, retention, stability thresholds, target
 ownership, publication identity, review/build contracts or an isolated release
 environment. No workflow, target or external write was performed.
+
+## Post-merge m06 target reconciliation and health identity (2026-09-09 01:30 UTC)
+
+Read-only GitHub and endpoint checks refreshed the target state after the
+previous ledger entries. `ubiquity/ai.ubq.fi` is public and its remote
+`development` branch is now
+`7b93b579eecf5392730453f1407a66a552fd7c48`. PR #258 is merged at
+`2026-09-09T01:05:39Z`; its exact base was
+`0a1336945116cb47e2f1c62147d5d8514dd4994b` and its m06 head was
+`a702d4ddb6a8bcbf549653cc75596b3d74715102`. The m06 target worktree remains
+clean at that head and is outside the Sentinel Git graph.
+
+The existing target Deno Deploy run `34297770624`, attempt `1`, completed
+successfully at the merge SHA. Its validate, verify-artifact, configure-secrets,
+baseline, deploy and verify-deployment jobs all completed successfully. The
+uploaded artifact `sentinel-build-receipt-34297770624-1` contains this exact
+receipt:
+
+```json
+{
+  "version": 1,
+  "repository": "ubiquity/ai.ubq.fi",
+  "run_id": "34297770624",
+  "run_attempt": "1",
+  "workflow_ref": "ubiquity/ai.ubq.fi/.github/workflows/deno-deploy.yml@refs/heads/development",
+  "git_sha": "7b93b579eecf5392730453f1407a66a552fd7c48",
+  "project": "ai-ubq-fi",
+  "revision_id": "h73heqdd4js7",
+  "build_transaction_id": "github-actions:ubiquity/ai.ubq.fi:34297770624:1"
+}
+```
+
+At `2026-09-09T01:30:12Z`, read-only probes returned HTTP 200 from both
+`https://ai-ubq-fi.ubiquity-dao.deno.net/health` and `https://ai.ubq.fi/health`.
+Each body and the `x-uos-git-sha`/`x-uos-deployment-id` headers reported the
+same merge SHA and revision `h73heqdd4js7`. This is current target deployment
+evidence; it is not evidence that the standalone Sentinel release controller
+owns promotion or has completed its 30-minute acceptance window.
+
+The target `provider-sentinel.yml` workflow is absent, and the target AGENTS
+entry records owner approval for authenticated failure capture/export, bounded
+upstream replay data and exact-build receipts while keeping scheduling and
+agents standalone. The existing `deno-deploy.yml` still performs deployment
+and promotion, so its writer must be explicitly handed over before Sentinel
+release activation. Target capture and incident records still use 48-hour TTLs.
+
+PR #258's overall review decision remains `CHANGES_REQUESTED` from
+`coderabbitai[bot]` on the exact m06 head. The two actionable findings are
+checkout credential persistence and route-specific safe failure logging. The
+Codex review completed as a `COMMENTED` review on that head, without a
+machine-verifiable clean verdict. Under the standalone plan, the target review
+gate therefore remains open even though target CI and deployment succeeded.
+
+The prior m06 cross-repository receipt
+`591bceabb6cc0ae63ee09ee9914b02c17ad0b9b53f9be3f4389670cde15755a5/e8029ce4-4571-4521-8584-49f527cf5f41`
+still proves the actual producer/consumer capture, index, encrypted export and
+strict identity seam. It does not prove retention beyond 48 hours, exclusive
+release ownership, isolated rollback, two autonomous deliveries or the
+six-hour observation window.
+
+## Sentinel publication and observer candidate reconciliation (2026-09-09 01:34 UTC)
+
+Read-only GitHub checks now confirm that the new `ubiquity/sentinel` repository
+exists and is public (created at `2026-09-09T01:20:50Z`, first pushed at
+`2026-09-09T01:21:00Z`). The canonical branch
+`codex/master-plan-gfa795549e5` is published at
+`2f46e1889166c2f9c4a2a92b312cd6e28acb81a1`; the remote default
+`development` branch remains at `9da7f77b0082bd9c0453204215cf65323b2884a6`.
+There are no Sentinel pull requests or aggregate merge, and the only active
+GitHub workflow currently reported for this repository is `sentinel-ci`.
+
+The canonical worktree contains a separate, uncommitted observer candidate:
+`.github/workflows/observe.yml`, `src/observe-main.ts`,
+`tests/integration/observe-host_test.ts`, `.gitignore`, `README.md`, and the
+`deno.json`/`test-local.ts` task wiring. The candidate adds a read-only
+`observe:run` task and a scheduled workflow proposal using protected
+`SENTINEL_GATEWAY_AUTH_JSON` and `SENTINEL_REPLAY_KEY_B64` values, a private
+encrypted local store and one-day artifact upload. It has no recorded
+acceptance receipt, is not present on remote `development`, and is not an
+active workflow. It also introduces new protected environment names and a
+retention choice while the master plan still leaves those owner decisions
+unresolved. Preserve the dirty files and do not fold this candidate into the
+accepted implementation or activation gate without a separate review.
+
+The canonical worktree also contains an uncommitted observation slice
+(`src/observe-main.ts`, `tests/integration/observe-host_test.ts`, and
+`deno.json`/`test-local.ts` wiring). It has no recorded acceptance receipt,
+introduces new protected environment names, and defaults to a 24-hour local
+retention bound. Preserve it as a separate candidate until its scope, tests
+and owner choices are reviewed; it is not part of the accepted source
+candidate `dde125febf4ef31f31764804f01f2934a4a15d00`.
+
+## Divergence after target reconciliation
+
+The standalone implementation remains locally accepted, but both scheduled
+Sentinel workflows still call direct fail-closed entrypoints without the
+trusted host assembly, durable state, gateway/replay, GitHub, model/review or
+build-receipt capabilities. Sentinel now has a public repository and a
+published canonical branch, but no aggregate PR/merge to its remote
+`development`, and its current-head acceptance review is unresolved. The
+target m06 producer and build receipt are now merged and deployed, yet the
+target's existing Deno workflow remains the promotion writer. Owner-approved
+live model caps, evidence retention/storage, stability thresholds, trusted
+credential scope and the explicit promotion handover are still missing. No
+standalone repair, release, rollback, two-delivery or six-hour observation
+proof exists.
+
+## Observer candidate check and published CI blocker (2026-09-09 01:55 UTC)
+
+The task-owned evidence run
+`cc48556d9d6816f2605c36c352452867e2de5be694f7aa26c8a9330e9268c576/857ecd94-e002-46e8-9a23-8e90b4771dab`
+settled after executing `deno task test:local` at tracked revision
+`2f46e1889166c2f9c4a2a92b312cd6e28acb81a1` with the uncommitted observer slice
+present. It recorded `outcome: failure`, executor and child exit `1`, `686`
+passing tests across `68` steps, and one failure in `1186933ms` (19m46s).
+The failure is `tests/repair/loop-guard-runtime_test.ts:147`, where the real
+entrypoint test ended with `Promise resolution is still pending but the event
+loop has already resolved`. This result is evidence for the dirty observer
+candidate only; it does not invalidate the accepted source receipt bound to
+`dde125febf4ef31f31764804f01f2934a4a15d00`, and no source or external state was
+changed by the run.
+
+Read-only GitHub inspection of published Sentinel CI run `34298852376` confirms
+the same exact head `2f46e1889166c2f9c4a2a92b312cd6e28acb81a1` is currently
+failing. Its `test-local` job completed at `2026-09-09T01:25:08Z` with `682`
+passing tests and one failure in `tests/replay/runtime_test.ts:167`: the
+output-cap assertion expected a 128-byte prefix but received 1 byte
+(`1 !== 128`). The remote deterministic CI gate is therefore open. This is a
+separate failure from the local observer candidate result; do not rerun solely
+to recover or filter the existing evidence.
+
+The remaining divergence is now explicit: the accepted implementation has a
+local green receipt, the published canonical branch has no aggregate PR or
+merge to `development` and a failing CI run, and the observer candidate remains
+uncommitted and unaccepted. Target m06 is merged and deployed through the
+existing target workflow, but standalone release ownership, current-head clean
+review, trusted host credentials and live model caps, retention, stability,
+isolated rollback, two autonomous deliveries and six-hour observation are
+still unresolved.
