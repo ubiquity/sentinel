@@ -55,6 +55,11 @@ import type {
 import type { ReplayLimitationV1 } from "../contracts/replay-result.ts";
 import type { RepositoryConfigV1 } from "../contracts/repository-config.ts";
 import { expectRestrictedRef } from "../contracts/shared.ts";
+import {
+  gatewayCausalProofMatches,
+  gatewayFixtureRefIdentity,
+  validateGatewayCausalProof,
+} from "./causal-proof.ts";
 import { checkResolvedFixture, computeReplayFixtureDigest } from "./fixture.ts";
 import type {
   ExpectedFailureV1,
@@ -238,6 +243,19 @@ export class ReplayPortImpl implements ReplayPort {
       return portError("invalid", check.reason);
     }
 
+    // Trusted causal-proof boundary (BEFORE any target command runs): a
+    // fully bound proof is the ONLY condition that may suppress the
+    // `fixture_redacted` limitation. An absent, structurally invalid or
+    // identity-mismatched proof keeps the ordinary redacted fixture and its
+    // limitation; this never weakens provenance (still redacted) and never
+    // clears any other limitation (output_truncated, unrelated failure,
+    // unavailable, wrong revision/command/test identity).
+    const proofValid = await this.proofValidFor(
+      resolved,
+      request,
+      actualDigest,
+    );
+
     const startedAt = this.clock.now();
     let taskDir: string | null = null;
     let preserveScratch = false;
@@ -263,6 +281,7 @@ export class ReplayPortImpl implements ReplayPort {
         return this.unavailable(
           startedAt,
           resolved,
+          proofValid,
           `git clone could not be proved settled on the owned process group; ` +
             `scratch preserved at ${taskDir}`,
         );
@@ -271,6 +290,7 @@ export class ReplayPortImpl implements ReplayPort {
         return this.unavailable(
           startedAt,
           resolved,
+          proofValid,
           clone.detail,
         );
       }
@@ -286,6 +306,7 @@ export class ReplayPortImpl implements ReplayPort {
         return this.unavailable(
           startedAt,
           resolved,
+          proofValid,
           `git rev-parse could not be proved settled on the owned process ` +
             `group; scratch preserved at ${taskDir}`,
         );
@@ -294,6 +315,7 @@ export class ReplayPortImpl implements ReplayPort {
         return this.unavailable(
           startedAt,
           resolved,
+          proofValid,
           `requested revision ${request.revision} is not present in the source`,
         );
       }
@@ -306,6 +328,7 @@ export class ReplayPortImpl implements ReplayPort {
         return this.unavailable(
           startedAt,
           resolved,
+          proofValid,
           `git checkout could not be proved settled on the owned process ` +
             `group; scratch preserved at ${taskDir}`,
         );
@@ -314,6 +337,7 @@ export class ReplayPortImpl implements ReplayPort {
         return this.unavailable(
           startedAt,
           resolved,
+          proofValid,
           `could not check out revision ${request.revision}`,
         );
       }
@@ -326,6 +350,7 @@ export class ReplayPortImpl implements ReplayPort {
         return this.unavailable(
           startedAt,
           resolved,
+          proofValid,
           `git rev-parse HEAD could not be proved settled on the owned ` +
             `process group; scratch preserved at ${taskDir}`,
         );
@@ -337,6 +362,7 @@ export class ReplayPortImpl implements ReplayPort {
         return this.unavailable(
           startedAt,
           resolved,
+          proofValid,
           "checked out HEAD does not match the requested revision",
         );
       }
@@ -370,12 +396,13 @@ export class ReplayPortImpl implements ReplayPort {
         return this.unavailable(
           startedAt,
           resolved,
+          proofValid,
           `target command settlement could not be proven (` +
             `${runResult.detail}); scratch preserved at ${taskDir}`,
         );
       }
       const endedAt = this.clock.now();
-      return this.finish(runResult, resolved, startedAt, endedAt);
+      return this.finish(runResult, resolved, proofValid, startedAt, endedAt);
     } catch (error) {
       return portError(
         "unavailable",
@@ -491,12 +518,18 @@ export class ReplayPortImpl implements ReplayPort {
   private async finish(
     runResult: ReplayCommandResultV1,
     resolved: ResolvedFixtureV1,
+    proofValid: boolean,
     startedAt: number,
     endedAt: number,
   ): Promise<PortResultV1<IsolatedReplayResultV1>> {
     const limitations: ReplayLimitationV1[] = [];
     if (runResult.truncated) limitations.push("output_truncated");
-    if (resolved.provenance.redacted) limitations.push("fixture_redacted");
+    // `fixture_redacted` is suppressed ONLY under a fully bound trusted
+    // causal proof; provenance remains redacted and every other limitation
+    // (truncation, unavailable, unrelated failure) still fails closed.
+    if (resolved.provenance.redacted && !proofValid) {
+      limitations.push("fixture_redacted");
+    }
 
     if (
       runResult.outcome === "spawn_failed" || runResult.outcome === "timed_out"
@@ -582,6 +615,7 @@ export class ReplayPortImpl implements ReplayPort {
   private unavailable(
     startedAt: number,
     resolved: ResolvedFixtureV1,
+    proofValid: boolean,
     detail: string,
   ): PortResultV1<IsolatedReplayResultV1> {
     // The frozen port interface records an unavailable run as outcome only
@@ -590,7 +624,9 @@ export class ReplayPortImpl implements ReplayPort {
     // into a ReplayResultV1.
     this.lastUnavailableDetailText = boundedDetail(detail);
     const limitations: ReplayLimitationV1[] = [];
-    if (resolved.provenance.redacted) limitations.push("fixture_redacted");
+    if (resolved.provenance.redacted && !proofValid) {
+      limitations.push("fixture_redacted");
+    }
     return portOk({
       outcome: "unavailable",
       exitCode: null,
@@ -610,6 +646,47 @@ export class ReplayPortImpl implements ReplayPort {
    */
   lastUnavailableDetail(): string {
     return this.lastUnavailableDetailText;
+  }
+
+  /**
+   * Strict trusted causal-proof verification at the consuming boundary.
+   *
+   * A proof is accepted ONLY when: structural validation passes; the fixture
+   * reference is the fixed gateway grammar; the proof binds the exact request
+   * repository, fixture ref, actual bundle digest, exact ordered test-id
+   * list, the resolved expected-failure identity and the configured replay +
+   * target-test command identities; and both observations are intended
+   * failures with equal canonical non-secret signature identities. The
+   * proof's original Git SHA is the immutable capture identity and is never
+   * required to equal the (possibly candidate) request revision.
+   */
+  private async proofValidFor(
+    resolved: ResolvedFixtureV1,
+    request: ReplayRunRequestV1,
+    actualDigest: FixtureDigest,
+  ): Promise<boolean> {
+    if (resolved.causalProof === undefined) return false;
+    const parsed = await validateGatewayCausalProof(resolved.causalProof);
+    if (parsed === null) return false;
+    const refIdentity = gatewayFixtureRefIdentity(request.fixtureRef);
+    if (refIdentity === null) return false;
+    if (
+      request.commandId !== parsed.replayCommandId &&
+      request.commandId !== parsed.testCommandId
+    ) {
+      return false;
+    }
+    return gatewayCausalProofMatches(parsed, {
+      repository: request.repository,
+      incidentId: refIdentity.incidentId,
+      captureId: refIdentity.captureId,
+      fixtureRef: request.fixtureRef,
+      bundleDigest: actualDigest,
+      replayCommandId: this.options.config.commands.replay,
+      testCommandId: this.options.config.commands.test,
+      testIds: resolved.testIds,
+      expectedFailure: resolved.expectedFailure,
+    });
   }
 
   private validateRequest(

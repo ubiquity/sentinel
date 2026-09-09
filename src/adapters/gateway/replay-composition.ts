@@ -51,6 +51,15 @@
  *    artifacts, wrong incident identity and unsafe fixture data with static
  *    typed errors; a fresh composition instance over the same store root
  *    rehydrates the identical fixture.
+ * 7. An optional trusted causal verifier runs ONLY after the steps above: it
+ *    receives the private retained capture (trusted process memory), the
+ *    sanitized fixture and every identity, and returns a fully bound
+ *    `GatewayCausalProofV1` or no proof. Proofs are re-bound to the exact
+ *    identities computed here (repository, incident/capture, artifact
+ *    digest, original Git SHA, fixture ref/digest, command/test ids, test
+ *    ids and expected failure) before they may be attached to the resolved
+ *    fixture. Raw request/upstream/sentinel data is never persisted, logged,
+ *    committed or returned.
  *
  * Private request bytes, upstream traces and the sanitizer's restricted
  * provenance never appear in public errors, evidence records or fixture
@@ -59,10 +68,15 @@
 
 import {
   asFixtureDigest,
+  asGitSha,
   isCommandId,
   isFixtureDigest,
 } from "../../contracts/brands.ts";
-import type { CommandId, FixtureDigest } from "../../contracts/brands.ts";
+import type {
+  CommandId,
+  EncryptedArtifactDigest,
+  FixtureDigest,
+} from "../../contracts/brands.ts";
 import { canonicalStringify } from "../../contracts/canonical.ts";
 import { parseIncidentEvidenceV1 } from "../../contracts/incident.ts";
 import type { IncidentEvidenceV1 } from "../../contracts/incident.ts";
@@ -76,6 +90,8 @@ import type {
 } from "../../contracts/ports.ts";
 import { expectRestrictedRef } from "../../contracts/shared.ts";
 import type { RepositoryIdentityV1 } from "../../contracts/shared.ts";
+import { bindGatewayCausalProof } from "../../replay/causal-proof.ts";
+import type { GatewayCausalProofV1 } from "../../replay/causal-proof.ts";
 import {
   computeReplayFixtureDigest,
   containsSecretShapedText,
@@ -132,12 +148,58 @@ export interface GatewayReplayCompositionOptionsV1 {
   policy: GatewaySanitizerPolicyV1;
   /** Trusted replay command id recorded in ReplayMetadataV1. */
   commandId: CommandId;
+  /**
+   * Trusted target-test command identity bound by a causal proof. Required
+   * exactly when a trusted verifier is supplied; safely ignored by old
+   * non-proof callers.
+   */
+  testCommandId?: CommandId;
   /** Trusted replay test identity attested by the fixture. */
   testIds: readonly string[];
   /** Trusted before-failure signature attested by the fixture. */
   expectedFailure: ExpectedFailureV1;
   /** Clock for expiry checks; tests inject a fixed clock. */
   clock: Clock;
+  /**
+   * Optional trusted causal-proof verifier capability. It is called ONLY
+   * after authenticated decryption, complete truthful upstream validation,
+   * sanitization and the actual bundle digest/ref computation; its input may
+   * carry the private retained capture inside trusted process memory only.
+   * It returns a fully bound proof or no proof; raw request/upstream/sentinel
+   * data is never persisted, logged, committed or returned by this module.
+   */
+  verifier?: GatewayCausalVerifierV1;
+}
+
+/**
+ * Trusted causal-proof verifier input. The private capture is consumed in
+ * trusted process memory; the sanitized fixture and every proof identity are
+ * the same values the trusted composition computed. Callers must never
+ * persist, log or return the raw request/upstream/private sentinel data.
+ */
+export interface GatewayCausalVerifierInputV1 {
+  /** Private authenticated capture (restricted; process memory only). */
+  capture: RetainedGatewayCaptureV1;
+  /** Public sanitized fixture (fixed protocol vocabulary). */
+  fixture: SanitizedGatewayFixtureV1;
+  repository: RepositoryIdentityV1;
+  incidentId: string;
+  captureId: string;
+  /** Authenticated encrypted-artifact digest of the retained artifact. */
+  artifactDigest: EncryptedArtifactDigest;
+  fixtureRef: string;
+  bundleDigest: FixtureDigest;
+  replayCommandId: CommandId;
+  testCommandId: CommandId;
+  testIds: readonly string[];
+  expectedFailure: ExpectedFailureV1;
+}
+
+/** Trusted verifier capability: a fully bound proof or no proof at all. */
+export interface GatewayCausalVerifierV1 {
+  verify(
+    input: GatewayCausalVerifierInputV1,
+  ): Promise<GatewayCausalProofV1 | null>;
 }
 
 /**
@@ -384,9 +446,11 @@ export class GatewayReplayComposition
   private readonly policy: GatewaySanitizerPolicyV1;
   private readonly repository: RepositoryIdentityV1;
   private readonly commandId: CommandId;
+  private readonly testCommandId: CommandId | null;
   private readonly testIds: string[];
   private readonly expectedFailure: ExpectedFailureV1;
   private readonly clock: Clock;
+  private readonly verifier: GatewayCausalVerifierV1 | null;
 
   constructor(options: GatewayReplayCompositionOptionsV1) {
     const keyBytes = options.keyBytes;
@@ -398,6 +462,13 @@ export class GatewayReplayComposition
     if (!isCommandId(options.commandId)) {
       throw new TypeError(
         "GatewayReplayComposition requires a trusted replay command id",
+      );
+    }
+    const testCommandId = options.testCommandId ?? null;
+    if (options.verifier !== undefined && !isCommandId(testCommandId)) {
+      throw new TypeError(
+        "GatewayReplayComposition requires a trusted target-test command id " +
+          "when a causal verifier is supplied",
       );
     }
     const repository = options.repository;
@@ -441,9 +512,11 @@ export class GatewayReplayComposition
     this.policy = policy;
     this.repository = repository;
     this.commandId = options.commandId;
+    this.testCommandId = testCommandId;
     this.testIds = [...testIds];
     this.expectedFailure = copyExpectedFailure(options.expectedFailure);
     this.clock = options.clock;
+    this.verifier = options.verifier ?? null;
   }
 
   // -------------------------------------------------------------------------
@@ -527,6 +600,7 @@ export class GatewayReplayComposition
         evidence.incidentId,
         identity.captureId,
         capture,
+        loaded.stored.digest,
       );
       if (!composed.ok) return composed;
       const updated: IncidentEvidenceV1 = {
@@ -621,6 +695,7 @@ export class GatewayReplayComposition
       parsed.incidentId,
       parsed.captureId,
       loaded.capture,
+      loaded.stored.digest,
     );
   }
 
@@ -673,6 +748,7 @@ export class GatewayReplayComposition
     incidentId: string,
     captureId: string,
     capture: RetainedGatewayCaptureV1,
+    artifactDigest: EncryptedArtifactDigest,
   ): Promise<PortResultV1<ComposedFixtureV1>> {
     if (!isCompleteTruthfulUpstream(capture.upstream)) {
       return portError("invalid", STATIC_TRACE_INCOMPLETE);
@@ -688,6 +764,44 @@ export class GatewayReplayComposition
     if (boundsError !== null) return portError("invalid", boundsError);
     const bundleDigest = await computeReplayFixtureDigest(entries);
     const fixtureRef = composeFixtureRef(incidentId, captureId, bundleDigest);
+    let causalProof: GatewayCausalProofV1 | undefined;
+    // The trusted verifier runs ONLY after authenticated decryption, complete
+    // truthful upstream validation, sanitization and the actual bundle
+    // digest/ref computation. A returned proof is re-bound to the exact
+    // capture/fixture identities this trusted module computed; a partially
+    // bound proof is the same as no proof (the ordinary redacted fixture and
+    // its `fixture_redacted` limitation stay).
+    if (this.verifier !== null && this.testCommandId !== null) {
+      const verified = await this.verifier.verify({
+        capture,
+        fixture: sanitized.value.fixture,
+        repository: this.repository,
+        incidentId,
+        captureId,
+        artifactDigest,
+        fixtureRef,
+        bundleDigest,
+        replayCommandId: this.commandId,
+        testCommandId: this.testCommandId,
+        testIds: this.testIds,
+        expectedFailure: this.expectedFailure,
+      });
+      if (verified !== null) {
+        causalProof = await bindGatewayCausalProof(verified, {
+          repository: this.repository,
+          incidentId,
+          captureId,
+          artifactDigest,
+          originalGitSha: asGitSha(capture.gitSha),
+          fixtureRef,
+          bundleDigest,
+          replayCommandId: this.commandId,
+          testCommandId: this.testCommandId,
+          testIds: this.testIds,
+          expectedFailure: this.expectedFailure,
+        }) ?? undefined;
+      }
+    }
     const resolved: ResolvedFixtureV1 = {
       testIds: [...this.testIds],
       expectedFailure: copyExpectedFailure(this.expectedFailure),
@@ -699,6 +813,7 @@ export class GatewayReplayComposition
         redacted: true,
         note: STATIC_PROVENANCE_NOTE,
       },
+      ...(causalProof === undefined ? {} : { causalProof }),
     };
     return portOk({ resolved, bundleDigest, fixtureRef });
   }

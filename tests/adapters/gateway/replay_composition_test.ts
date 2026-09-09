@@ -28,7 +28,11 @@
 
 import assert from "node:assert/strict";
 
-import { GatewayReplayComposition } from "../../../src/adapters/gateway/replay-composition.ts";
+import {
+  type GatewayCausalVerifierInputV1,
+  type GatewayCausalVerifierV1,
+  GatewayReplayComposition,
+} from "../../../src/adapters/gateway/replay-composition.ts";
 import { GatewayIncidentAdapter } from "../../../src/adapters/gateway/incident-adapter.ts";
 import type { GatewayAuthProviderV1 } from "../../../src/adapters/gateway/http.ts";
 import {
@@ -38,7 +42,18 @@ import {
 import { decodeBase64Url } from "../../../src/adapters/gateway/wire.ts";
 import { canonicalStringifySha256 } from "../../../src/contracts/canonical.ts";
 import { parseIncidentEvidenceV1 } from "../../../src/contracts/incident.ts";
-import { isFixtureDigest, isGitSha } from "../../../src/contracts/brands.ts";
+import {
+  asFixtureDigest,
+  asGitSha,
+  isFixtureDigest,
+  isGitSha,
+} from "../../../src/contracts/brands.ts";
+import {
+  deriveFailureSignatureIdentity,
+  GATEWAY_CAUSAL_VERIFIER_ID,
+  gatewayCausalProofRef,
+} from "../../../src/replay/causal-proof.ts";
+import type { GatewayCausalProofV1 } from "../../../src/replay/causal-proof.ts";
 import type {
   CommandId,
   FixtureDigest,
@@ -539,6 +554,8 @@ async function makeRig(
     storeRoot?: string;
     repository?: { owner: string; name: string; installationId: number };
     keyBytes?: Uint8Array<ArrayBuffer>;
+    /** Optional extra constructor options (trusted verifier capability). */
+    composition?: Record<string, unknown>;
   } = {},
 ): Promise<CompositionRigV1> {
   const root = overrides.storeRoot ??
@@ -571,6 +588,7 @@ async function makeRig(
     testIds: TEST_IDS,
     expectedFailure: EXPECTED_FAILURE,
     clock,
+    ...overrides.composition,
   });
   return {
     store,
@@ -1539,4 +1557,491 @@ Deno.test("composition: refuses caller-supplied capabilities that violate the tr
       }),
     /test identity/,
   );
+});
+
+// ---------------------------------------------------------------------------
+// Trusted causal-proof verifier capability (plan 01): a fully bound proof is
+// attached to the resolved fixture (which stays redacted) and is the ONLY
+// condition that suppresses fixture_redacted at the replay boundary.
+// ---------------------------------------------------------------------------
+
+const PRIVATE_MARKER = "PRIVATE-CAPTURE-MARKER-7f3d9c1a";
+const VERIFIER_TEST_COMMAND = "test" as CommandId;
+
+/** Deterministic local restricted oracle: no completion terminator = failure. */
+function oracleFails(
+  upstream: { attempts: readonly { chunks_base64: readonly string[] }[] },
+): boolean {
+  const chunk = upstream.attempts[0]?.chunks_base64[0];
+  if (chunk === undefined) return false;
+  const text = new TextDecoder().decode(decodeStandardBase64(chunk));
+  return !(text.includes("response.completed") || text.includes("[DONE]"));
+}
+
+/**
+ * Trusted test verifier: consumes the private captured request (private
+ * marker present), asserts the sanitized fixture never carries it, runs the
+ * same local restricted oracle over the original capture and the sanitized
+ * fixture and returns a fully bound proof (or a mutated proof for negative
+ * cases). Returns only non-secret bound data.
+ */
+function trustedVerifier(
+  mutate: (proof: GatewayCausalProofV1) => GatewayCausalProofV1 | null = (
+    proof,
+  ) => proof,
+  options: { requirePrivateMarker?: boolean } = {},
+): GatewayCausalVerifierV1 {
+  return {
+    async verify(input: GatewayCausalVerifierInputV1) {
+      const privateText = new TextDecoder().decode(input.capture.body);
+      const fixtureText = JSON.stringify(input.fixture);
+      if (
+        options.requirePrivateMarker !== false &&
+        !privateText.includes(PRIVATE_MARKER)
+      ) {
+        return null;
+      }
+      if (fixtureText.includes(PRIVATE_MARKER)) return null;
+      if (!oracleFails(input.capture.upstream)) return null;
+      if (!oracleFails(input.fixture.upstream)) return null;
+      const signature = await deriveFailureSignatureIdentity(
+        input.expectedFailure,
+      );
+      const proof: GatewayCausalProofV1 = {
+        version: "v1",
+        kind: "gateway_causal_proof",
+        verifier: GATEWAY_CAUSAL_VERIFIER_ID,
+        proofRef: gatewayCausalProofRef(
+          input.incidentId,
+          input.captureId,
+          input.bundleDigest,
+        ),
+        repository: input.repository,
+        incidentId: input.incidentId,
+        captureId: input.captureId,
+        artifactDigest: input.artifactDigest,
+        originalGitSha: asGitSha(input.capture.gitSha),
+        fixtureRef: input.fixtureRef,
+        bundleDigest: input.bundleDigest,
+        replayCommandId: input.replayCommandId,
+        testCommandId: input.testCommandId,
+        testIds: [...input.testIds],
+        expectedFailure: input.expectedFailure,
+        originalObservation: { intended: true, signature },
+        fixtureObservation: { intended: true, signature },
+      };
+      return mutate(proof);
+    },
+  };
+}
+
+/** One crafted private-marker capture served over the real producer wire. */
+async function craftedCausalResponder(
+  keyBytes: Uint8Array<ArrayBuffer>,
+  bodyText: string,
+): Promise<(url: URL) => Response> {
+  const upstream = v2Upstream({
+    attempts: [v2Attempt({
+      provider: "chatgpt_codex",
+      status: 200,
+      content_type: "text/event-stream",
+      chunks_base64: [
+        standardBase64(TEXT_ENCODER.encode(
+          'data: {"type":"response.created","response":{"id":"resp_1"}}\n\n',
+        )),
+      ],
+      terminal: "eof",
+    })],
+  });
+  const crafted = await craftWireCapture(
+    keyBytes,
+    baseMetadata({ upstream }),
+    TEXT_ENCODER.encode(bodyText),
+  );
+  return (url: URL) => {
+    if (url.pathname === INDEX_PATH) {
+      return jsonResponse(makeIndexPage([
+        makeIndexRow({
+          incident_id: INCIDENT_A,
+          fingerprint: crafted.manifest.fingerprint as string,
+          failing_revision: GIT_SHA,
+          provenance: {
+            endpoint: "https://ai.ubq.fi",
+            captured_at_ms: CAPTURED_AT_V2,
+            captured_by: "gateway",
+          },
+          evidence_ref: {
+            ref: artifactRef(INCIDENT_A, CAPTURE_ID_V2),
+            digest: crafted.digest,
+          },
+          evidence_expires_at_ms: crafted.manifest.expires_at_ms as number,
+        }),
+      ]));
+    }
+    return jsonResponse(makeReplayPage({
+      manifest: crafted.manifest,
+      chunks: crafted.chunks,
+    }));
+  };
+}
+
+/** Minimal credential-free target repo with replay/test scripts over the
+ * composed gateway fixture entry paths. */
+function causalReplayConfig(): RepositoryConfigV1 {
+  return parseRepositoryConfigV1({
+    version: "v1",
+    kind: "repository_config",
+    repository: TOY_REPOSITORY,
+    baseBranch: "main",
+    adapter: { kind: "gateway", baseUrl: "https://ai.ubq.fi" },
+    commands: { replay: "replay", test: "test" },
+    commandRegistry: {
+      version: "v1",
+      commands: {
+        replay: {
+          executable: "deno",
+          args: ["task", "replay"],
+          maxDurationMs: 30000,
+          maxOutputBytes: 262144,
+        },
+        test: {
+          executable: "deno",
+          args: ["task", "test"],
+          maxDurationMs: 30000,
+          maxOutputBytes: 262144,
+        },
+      },
+    },
+    protectedPaths: ["src/"],
+    build: { projectId: null, acceptance: null },
+    secretRef: null,
+    liveStartLimits: null,
+    sessionBound: null,
+    retention: null,
+    stabilityPolicy: null,
+  });
+}
+
+function causalScript(pass: boolean): string {
+  return `const base = "tests/fixtures/gateway-replay/${INCIDENT_A}/${CAPTURE_ID_V2}";` +
+    ` const request = JSON.parse(await Deno.readTextFile(base + "/request.json"));` +
+    ` const upstream = JSON.parse(await Deno.readTextFile(base + "/upstream.json"));` +
+    ` const body = JSON.parse(request.body);` +
+    ` if (body.model !== "synthetic-model") Deno.exit(1);` +
+    ` if (!upstream.attempts.every((a) => a.terminal === "eof")) Deno.exit(1);` +
+    ` console.log("sentinel-replay-test:gateway:complete-upstream");` +
+    (pass
+      ? ""
+      : ` console.log("completed without the expected failure"); Deno.exit(1);`);
+}
+
+Deno.test("composition: a fully bound trusted causal proof is attached and the fixture stays redacted", async () => {
+  const keyBytes = hexToBytes(readGolden().syntheticKeyHex);
+  const responder = await craftedCausalResponder(
+    keyBytes,
+    `{"model":"synthetic-model","input":"${PRIVATE_MARKER}","stream":true}`,
+  );
+  const rig = await makeRig(responder, {
+    composition: {
+      testCommandId: VERIFIER_TEST_COMMAND,
+      verifier: trustedVerifier(),
+    },
+  });
+  try {
+    const read = await rig.composition.readIncident(INCIDENT_A);
+    assert.ok(read.ok && read.value !== null, JSON.stringify(read));
+    const replay = read.value!.replay!;
+    const resolvedResult = await rig.composition.resolveFixture(
+      replay.fixtureRef,
+    );
+    assert.ok(resolvedResult.ok, JSON.stringify(resolvedResult));
+    if (!resolvedResult.ok) return;
+    const resolved = resolvedResult.value;
+    const proof = resolved.causalProof;
+    assert.notEqual(proof, undefined, "fully bound proof must be attached");
+    if (proof === undefined) return;
+    assert.equal(proof.version, "v1");
+    assert.equal(proof.kind, "gateway_causal_proof");
+    assert.equal(proof.verifier, GATEWAY_CAUSAL_VERIFIER_ID);
+    assert.equal(proof.incidentId, INCIDENT_A);
+    assert.equal(proof.captureId, CAPTURE_ID_V2);
+    assert.equal(proof.originalGitSha, GIT_SHA);
+    assert.equal(proof.fixtureRef, replay.fixtureRef);
+    assert.equal(proof.bundleDigest, replay.fixtureDigest);
+    assert.equal(proof.artifactDigest, read.value!.artifacts[0]!.digest);
+    assert.equal(proof.replayCommandId, COMMAND_ID);
+    assert.equal(proof.testCommandId, VERIFIER_TEST_COMMAND);
+    assert.deepEqual(proof.testIds, TEST_IDS);
+    assert.deepEqual(proof.expectedFailure, EXPECTED_FAILURE);
+    assert.equal(
+      proof.proofRef,
+      gatewayCausalProofRef(INCIDENT_A, CAPTURE_ID_V2, proof.bundleDigest),
+    );
+    assert.equal(proof.originalObservation.intended, true);
+    assert.equal(proof.fixtureObservation.intended, true);
+    assert.equal(
+      proof.originalObservation.signature,
+      proof.fixtureObservation.signature,
+    );
+    assert.match(proof.originalObservation.signature, /^[0-9a-f]{64}$/);
+    // Structural sanitization and causal verification stay separate: the
+    // fixture provenance remains redacted and never carries the private
+    // marker.
+    assert.equal(resolved.provenance.redacted, true);
+    assertNoPrivateMarkers(resolved);
+    const fixtureJson = JSON.stringify(resolved);
+    assert.ok(
+      !fixtureJson.includes(PRIVATE_MARKER),
+      "private marker leaked into the resolved fixture",
+    );
+
+    // Rehydration from the same retained artifact reproduces the same proof
+    // identity (deterministic verifier, identical bindings).
+    const freshStore = new LocalArtifactStore({
+      root: rig.root,
+      limits: LIMITS,
+    });
+    assert.ok((await freshStore.open()).ok);
+    const fresh = new GatewayReplayComposition({
+      adapter: new GatewayIncidentAdapter({
+        config: validConfig(),
+        transport: recordingTransport(() => {
+          throw new Error("fresh composition must never refetch");
+        }),
+        auth: authProvider(),
+        clock: new FakeClock(CAPTURED_AT_V2),
+        store: freshStore,
+      }),
+      store: freshStore,
+      repository: validConfig().repository,
+      keyBytes,
+      policy: SANITIZER_POLICY,
+      commandId: COMMAND_ID,
+      testCommandId: VERIFIER_TEST_COMMAND,
+      testIds: TEST_IDS,
+      expectedFailure: EXPECTED_FAILURE,
+      clock: new FakeClock(CAPTURED_AT_V2),
+      verifier: trustedVerifier(),
+    });
+    const rehydrated = await fresh.resolveFixture(replay.fixtureRef);
+    assert.ok(rehydrated.ok, JSON.stringify(rehydrated));
+    if (rehydrated.ok) {
+      assert.deepEqual(rehydrated.value, resolved);
+    }
+  } finally {
+    await removeRoot(rig.root);
+  }
+});
+
+Deno.test("composition: absent/bound-mismatched verifier proofs are the same as no proof and the redaction limitation stays", async () => {
+  const keyBytes = hexToBytes(readGolden().syntheticKeyHex);
+  const markerBody =
+    `{"model":"synthetic-model","input":"${PRIVATE_MARKER}","stream":true}`;
+  const publicBody =
+    '{"model":"synthetic-model","input":"public text","stream":true}';
+
+  // Verifier refuses when the private marker is absent (unrelated capture).
+  const noMarkerRig = await makeRig(
+    await craftedCausalResponder(keyBytes, publicBody),
+    {
+      composition: {
+        testCommandId: VERIFIER_TEST_COMMAND,
+        verifier: trustedVerifier(),
+      },
+    },
+  );
+  try {
+    const read = await noMarkerRig.composition.readIncident(INCIDENT_A);
+    assert.ok(read.ok && read.value !== null);
+    const resolved = await noMarkerRig.composition.resolveFixture(
+      read.value!.replay!.fixtureRef,
+    );
+    assert.ok(resolved.ok);
+    if (resolved.ok) {
+      assert.equal(resolved.value.causalProof, undefined);
+      assert.equal(resolved.value.provenance.redacted, true);
+    }
+  } finally {
+    await removeRoot(noMarkerRig.root);
+  }
+
+  // Bound mismatches: the composition re-binds every identity the verifier
+  // returns; a single mismatch means no proof is attached.
+  const mismatchCases: Array<
+    [string, (proof: GatewayCausalProofV1) => GatewayCausalProofV1]
+  > = [
+    [
+      "wrong original Git SHA",
+      (proof) => ({ ...proof, originalGitSha: asGitSha("2".repeat(40)) }),
+    ],
+    [
+      "wrong bundle digest",
+      (proof) => ({ ...proof, bundleDigest: asFixtureDigest("d".repeat(64)) }),
+    ],
+    [
+      "wrong test command id",
+      (proof) => ({ ...proof, testCommandId: "other_test" as CommandId }),
+    ],
+    [
+      "wrong incident id",
+      (proof) => ({
+        ...proof,
+        incidentId: "provider-00000000-0000-4000-8000-000000000002",
+      }),
+    ],
+  ];
+  for (const [name, mutate] of mismatchCases) {
+    const rig = await makeRig(
+      await craftedCausalResponder(keyBytes, markerBody),
+      {
+        composition: {
+          testCommandId: VERIFIER_TEST_COMMAND,
+          verifier: trustedVerifier(mutate),
+        },
+      },
+    );
+    try {
+      const read = await rig.composition.readIncident(INCIDENT_A);
+      assert.ok(read.ok && read.value !== null, name);
+      const resolved = await rig.composition.resolveFixture(
+        read.value!.replay!.fixtureRef,
+      );
+      assert.ok(resolved.ok, name);
+      if (resolved.ok) {
+        assert.equal(
+          resolved.value.causalProof,
+          undefined,
+          `${name}: mismatched proof must not be attached`,
+        );
+      }
+    } finally {
+      await removeRoot(rig.root);
+    }
+  }
+
+  // A verifier without the trusted target-test command identity is refused
+  // at construction (fail fast, never a silently defaulted bind).
+  assert.throws(
+    () =>
+      new GatewayReplayComposition({
+        adapter: {} as never,
+        store: {} as never,
+        repository: { owner: "ubiquity", name: "ai.ubq.fi", installationId: 1 },
+        keyBytes: new Uint8Array(32),
+        policy: SANITIZER_POLICY,
+        commandId: COMMAND_ID,
+        testIds: TEST_IDS,
+        expectedFailure: EXPECTED_FAILURE,
+        clock: new FakeClock(0),
+        verifier: trustedVerifier(),
+      }),
+    /target-test command id/,
+  );
+});
+
+Deno.test("composition: a fully bound proof suppresses fixture_redacted through the real ReplayPort", async () => {
+  const root = await Deno.makeTempDir({
+    dir: Deno.cwd(),
+    prefix: "sentinel-wave-c-causal-port-",
+  });
+  let storeRoot: string | null = null;
+  try {
+    const repoRoot = `${root}/fixture-repo`;
+    await Deno.mkdir(repoRoot);
+    const env = testGitEnv(`${root}/home`);
+    await gitRun(repoRoot, ["init", "-q", "-b", "main"], env);
+    await commitWith(
+      repoRoot,
+      env,
+      {
+        "deno.json": JSON.stringify(
+          {
+            tasks: {
+              replay: "deno run --allow-read=tests/ scripts/replay.ts",
+              test: "deno run --allow-read=tests/ scripts/check.ts",
+            },
+          },
+          null,
+          2,
+        ) + "\n",
+        "scripts/replay.ts": causalScript(false),
+        "scripts/check.ts": causalScript(true),
+      },
+      "target: composed causal replay command",
+    );
+    const repoSha = await revParse(repoRoot, env);
+    assert.ok(isGitSha(repoSha));
+
+    const keyBytes = hexToBytes(readGolden().syntheticKeyHex);
+    const responder = await craftedCausalResponder(
+      keyBytes,
+      `{"model":"synthetic-model","input":"${PRIVATE_MARKER}","stream":true}`,
+    );
+    const rig = await makeRig(responder, {
+      composition: {
+        testCommandId: VERIFIER_TEST_COMMAND,
+        verifier: trustedVerifier(),
+      },
+    });
+    storeRoot = rig.root;
+    try {
+      const read = await rig.composition.readIncident(INCIDENT_A);
+      assert.ok(read.ok && read.value !== null);
+      const replay = read.value!.replay!;
+      const policy: ReplayPolicyV1 = {
+        bundleScopes: ["tests/"],
+        maxFixtureBytes: 512 * 1024,
+        maxEntryBytes: 256 * 1024,
+        proof: markerProofParser(),
+      };
+      const port = new ReplayPortImpl({
+        config: causalReplayConfig(),
+        source: { kind: "local", path: repoRoot },
+        scratchDir: `${root}/scratch`,
+        fixtures: rig.composition,
+        policy,
+        isolation: toyIsolation(),
+      });
+      const before = await port.runReplay({
+        taskId: "incident:gateway-causal-0001" as WorkItemId,
+        repository: TOY_REPOSITORY,
+        revision: repoSha,
+        commandId: COMMAND_ID,
+        fixtureRef: replay.fixtureRef,
+        fixtureDigest: replay.fixtureDigest!,
+        testIds: TEST_IDS,
+        outputLimitBytes: 262144,
+      });
+      assert.ok(before.ok, JSON.stringify(before));
+      if (before.ok) {
+        assert.equal(before.value.outcome, "failed");
+        assert.equal(before.value.failure?.intended, true);
+        assert.deepEqual(
+          before.value.limitations,
+          [],
+          "the bound causal proof suppresses fixture_redacted",
+        );
+      }
+      const after = await port.runReplay({
+        taskId: "incident:gateway-causal-0001" as WorkItemId,
+        repository: TOY_REPOSITORY,
+        revision: repoSha,
+        commandId: VERIFIER_TEST_COMMAND,
+        fixtureRef: replay.fixtureRef,
+        fixtureDigest: replay.fixtureDigest!,
+        testIds: TEST_IDS,
+        outputLimitBytes: 262144,
+      });
+      assert.ok(after.ok, JSON.stringify(after));
+      if (after.ok) {
+        assert.equal(after.value.outcome, "passed");
+        assert.equal(after.value.exitCode, 0);
+        assert.deepEqual(after.value.limitations, []);
+      }
+    } finally {
+      await removeRoot(storeRoot);
+    }
+  } finally {
+    await removeRoot(root);
+  }
 });

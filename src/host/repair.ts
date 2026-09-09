@@ -60,6 +60,7 @@ import type {
   GatewayTransportV1,
 } from "../adapters/gateway/http.ts";
 import {
+  type GatewayCausalVerifierV1,
   GatewayReplayComposition,
 } from "../adapters/gateway/replay-composition.ts";
 import type { GatewaySanitizerPolicyV1 } from "../adapters/gateway/sanitize.ts";
@@ -119,10 +120,23 @@ export interface RepairHostGatewayOptionsV1 {
   policy: GatewaySanitizerPolicyV1;
   /** Trusted replay command id recorded in replay metadata. */
   commandId: CommandId;
+  /**
+   * Trusted target-test command identity bound into a causal proof.
+   * Defaults to the matched repository config's configured test command
+   * when omitted (safe for non-proof callers, whose composition attaches no
+   * proof at all).
+   */
+  testCommandId?: CommandId;
   /** Trusted replay test identity attested by composed fixtures. */
   testIds: readonly string[];
   /** Trusted before-failure signature attested by composed fixtures. */
   expectedFailure: ExpectedFailureV1;
+  /**
+   * Optional trusted causal-proof verifier capability. Without it the
+   * composition attaches no proof and every redacted fixture keeps the
+   * ordinary `fixture_redacted` limitation.
+   */
+  verifier?: GatewayCausalVerifierV1;
 }
 
 /** Caller-supplied replay port inputs; the fixture resolver is the host-owned composition. */
@@ -242,9 +256,13 @@ export function composeRepairHost(
     keyBytes: options.gateway.keyBytes,
     policy: options.gateway.policy,
     commandId: options.gateway.commandId,
+    // Default the trusted target-test command identity to the matched
+    // repository config; an explicit host-supplied override is honored.
+    testCommandId: options.gateway.testCommandId ?? target.commands.test,
     testIds: options.gateway.testIds,
     expectedFailure: options.gateway.expectedFailure,
     clock: options.clock,
+    verifier: options.gateway.verifier,
   });
 
   // 5. The replay port resolver is the exact composition instance; the port
