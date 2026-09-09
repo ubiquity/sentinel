@@ -1225,3 +1225,13 @@ Before this ledger entry, canonical HEAD was `bfe9b47ef87f1d4696af2f4f425a5bb2c4
 The target m06 gateway lane remains clean at `/Users/nv/repos/ubiquity/ai.ubq.fi/.codex-worktrees/master-plan-m06-gateway-ad0aef5cd31`, branch `codex/master-plan-m06-gateway-ad0aef5cd31`, exact HEAD `a702d4ddb6a8bcbf549653cc75596b3d74715102` (`test(sentinel): skip KV-only checks without unstable API`). A fresh credential-free cross-repository probe ran from that exact target revision under registered target `m06-upstream-crossrepo-primary`; receipt `591bceabb6cc0ae63ee09ee9914b02c17ad0b9b53f9be3f4389670cde15755a5/e8029ce4-4571-4521-8584-49f527cf5f41` reports `deno run --cached-only ... /tmp/sentinel-gfa795549e5/m06-upstream-crossrepo-primary-v1.ts`, executor and child exit `0`, `outcome: success`, `reuse: executed`, and a 408 ms run. The probe observed the actual handler's 500 failure capture, authenticated incident index, actual adapter listing/evidence, retained-store decryption, exact request bytes, strict index parsing, incident-filtered export and ciphertext identity. The synthetic auth-negative stderr is expected for the read-only probe; no credential, model, GitHub, publication, deployment, target handover or activation write occurred.
 
 This receipt proves the current producer/consumer seam only. It does not publish or merge the target lane, establish target ownership, extend production retention, prove a permanent before-failure/after-pass target fixture, or close the scheduled-workflow and live-delivery gates.
+
+## Activation checklist prepared (2026-09-09 01:17 UTC)
+
+Added `docs/activation-checklist.md` to make the remaining owner decisions and
+activation sequence reviewable. The checklist records the exact local source
+candidate (`dde125febf4ef31f31764804f01f2934a4a15d00`), the fresh m06
+producer/consumer receipt and the fail-closed workflow boundary. It does not
+choose credentials, model limits, retention, stability thresholds, target
+ownership, publication identity, review/build contracts or an isolated release
+environment. No workflow, target or external write was performed.
