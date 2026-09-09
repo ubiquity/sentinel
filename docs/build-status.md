@@ -1404,3 +1404,57 @@ The replay change is limited to `tests/replay/runtime_test.ts` and replaces Bash
 Fresh exact-head receipts prove the merged worker behavior: `cc48556d9d6816f2605c36c352452867e2de5be694f7aa26c8a9330e9268c576/a95d961a-a9fc-493b-999f-9433d733761f` ran the replay target with `7 passed, 0 failed`, and `cc48556d9d6816f2605c36c352452867e2de5be694f7aa26c8a9330e9268c576/01ca4230-f9ee-4ae0-bc16-e3fcdd7f1b6a` ran the loop target with `1 passed, 0 failed`. A separate fresh focused receipt, `cc48556d9d6816f2605c36c352452867e2de5be694f7aa26c8a9330e9268c576/f500ae6e-92ad-4519-aa00-c2a9a0cf1415`, passed `51/51` across the preserved GitHub, repair transport, model-port and host-wiring candidate files.
 
 Disposition: both worker branches are `integrated`. The nine tracked source/test edits and eight untracked disposable test directories already present in the canonical worktree remain preserved and uncommitted; the focused receipt does not accept those bytes. A broader `deno task test:local` was not rerun after this short fixture integration because the canonical lane is still dirty and the prior exact-head harness requires about 23 minutes. The implementation remains locally assembled only: no current-head clean review, aggregate Sentinel merge, trusted production capability assembly, credential/limit decision, release handover, standalone deployment, rollback drill, two autonomous deliveries or six-hour observation is proven.
+
+
+## Canonical integration ownership and corrected acceptance (2026-09-09 18:43 UTC)
+
+The user assigned canonical integration ownership to the current root session
+`01a08416-3171-7c82-ab91-dcbab6817b89`. This session owns acceptance decisions,
+worker coordination, integration and final verification; Luna supervises
+DeepSeek implementation as requested. Keep the existing canonical worktree
+`/Users/nv/repos/ubiquity/sentinel/.codex-worktrees/master-plan-gfa795549e5`
+and branch `codex/master-plan-gfa795549e5`. No replacement lane is authorized
+by this transfer.
+
+Preflight found canonical HEAD `0d85c3aad210d856dd8e39db33509bc335e6fc81`, no
+tracked changes, and the eight previously recorded untracked test directories.
+They remain preserved. Prior owner session
+`01a07e70-bc67-7810-b2a0-e4c3949f0281` has a completed latest turn at
+2026-09-09 06:04 UTC; the session index also retains an older inProgress marker,
+which is not proof of a live worker. The process inventory found no local DSH
+worker. Recheck ownership before each subsequent implementation assignment.
+
+The independent acceptance review is
+`/Users/nv/.local/state/sentinel-audits/2026-09-09/agent-results-review-1841.md`.
+Its current dispositions supersede earlier READY labels and stale publication
+claims, while the original worker handbacks remain unchanged:
+
+- Plan 01: blocked, current integration owner to close concrete causal execution
+  gap before accepting tip `55555dc4d782039df0153f27f13041fd501fccd9` in its
+  existing capture-replay lane. The tip is preserved and not an ancestor of the
+  current canonical HEAD. Existing 156-test evidence does not prove the original
+  captured-input execution; the trusted verifier is implemented only as a test
+  predicate. Do not remove privacy or fail-closed checks to bypass this gap.
+- Plan 02: research complete and handback present. Correct its stale D6 item:
+  commit `f9cde17` already fixed GitHub statuses parsing/latest-context handling.
+  Five files, including source, changed since its `81b38c8` survey, not only the
+  loop boundary test. Provider-observed model receipt and real review transport
+  remain unresolved dependencies; settle those before broad host implementation.
+- Plan 03: decision draft requires revision. Include retention/storage/key policy
+  in the owner request, discover actual captured incidents before selecting the
+  final acceptance pair, and prove isolated replacement promotion and rollback
+  before production promotion ownership transfer.
+
+Sentinel PR #2 merged at 2026-09-09 05:57:55 UTC with head `0d85c3a`; observed
+remote development is `22ac38871d6261c844f8419f80fcf038ddcdf133`. Do not recreate
+that delivery. Current scheduled failures are concrete: observer run
+`34389188768` reports `observe_auth_missing`; repair run `34388944531` and
+release run `34388818273` fail because trusted host capability wiring is absent.
+No workflow or credential configuration was changed by the audit or transfer.
+
+Next acceptance milestone: real restricted original-versus-sanitized causal
+execution, followed by verified runtime receipt contracts and minimal trusted
+host wiring. Existing source merge is distinct from activation. Policy choices,
+isolated rollback, production ownership transfer, two real deliveries and the
+six-hour observation remain open. This ownership update does not authorize new
+secrets, guessed live quotas, production handover, or arbitrary agent cancellation.
