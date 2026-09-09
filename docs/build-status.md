@@ -1211,3 +1211,7 @@ The audit confirms that local contracts, deterministic modules, host composition
 ## Fresh integrated audit check (2026-09-09 00:58 UTC)
 
 At the integrated canonical HEAD `e3ba05910cd34ececc116249c57913967102984a`, the registered `wave-c-audit-20260909` target was run in `fresh` mode from the exact canonical worktree. Receipt `cc48556d9d6816f2605c36c352452867e2de5be694f7aa26c8a9330e9268c576/041617c1-e0ce-4f2e-a056-2a668cedf42a` reports `deno task check`, executor and child exit `0`, outcome `success`, `reuse: executed`, and no external capability. This confirms the integrated audit/ledger state; it does not change the source implementation or close the documented production gates.
+
+## Target m06 lane status correction (2026-09-09 00:59 UTC)
+
+The prior audit reconciliation recorded the target lane at `c79f7c2a` with an uncommitted test modification. A subsequent read-only check found that lane clean at `a702d4ddb6a8bcbf549653cc75596b3d74715102`, whose latest commit is `test(sentinel): skip KV-only checks without unstable API`. This supersedes the transient dirty-state observation; the target lane remains outside the Sentinel graph, with no target publication, deployment or ownership handover performed by this goal. The root and all unrelated work remain preserved.
