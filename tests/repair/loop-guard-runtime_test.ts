@@ -86,6 +86,12 @@ class ScriptSession implements CodexSessionV1 {
       this.interrupts++;
       this.order.push(`interrupt:${this.number}`);
       this.terminal("interrupted");
+      // Release EVERY pending producer wait: a duration-bound interrupt may
+      // arrive while the producer is still waiting for the steer. Releasing
+      // the steer wait here makes the one-steer assertion below fail
+      // explicitly instead of leaving close() pending on a never-fired
+      // signal forever.
+      this.steerObserved.fire();
       this.interruptObserved.fire();
       return Promise.resolve({});
     }
@@ -106,30 +112,50 @@ class ScriptSession implements CodexSessionV1 {
       this.terminal("failed");
       return;
     }
-    for (let i = 1; i <= 6; i++) {
-      if (i === 5) {
-        // Deterministic synchronization: wait for the guard's steer event
-        // instead of polling, so parallel scheduler load cannot expire the
-        // wait before the runtime has delivered its decision.
-        await this.steerObserved.promise;
-        assert.equal(this.steers, 1, "four failures must steer");
-      }
-      await pause(200);
-      const item = {
-        id: `c${i}`,
-        type: "commandExecution",
-        command: "deno check app.ts",
-        cwd: this.cwd,
-        status: "failed",
-        aggregatedOutput: "error: Type checking failed",
-        exitCode: 1,
-      };
-      this.emit("item/started", {
+    const item = (i: number) => ({
+      id: `c${i}`,
+      type: "commandExecution",
+      command: "deno check app.ts",
+      cwd: this.cwd,
+      status: "failed",
+      aggregatedOutput: "error: Type checking failed",
+      exitCode: 1,
+    });
+    // One start, then the four repeated failures back-to-back: every start
+    // advances the guard's progress generation, and an observation whose
+    // checkpoint/hash work is still in flight when the next start arrives is
+    // invalidated and never counted. Wall-clock pacing would therefore let
+    // scheduler load turn the repeated failures inconclusive and the steer
+    // would never be delivered. Keeping all completions in this single
+    // stable generation window makes the four failures consecutive under
+    // any load; no timing is relied on.
+    this.emit("item/started", {
+      threadId: "t1",
+      turnId: "u1",
+      item: { ...item(1), status: "inProgress" },
+    });
+    for (let i = 1; i <= 4; i++) {
+      this.emit("item/completed", {
         threadId: "t1",
         turnId: "u1",
-        item: { ...item, status: "inProgress" },
+        item: item(i),
       });
-      this.emit("item/completed", { threadId: "t1", turnId: "u1", item });
+    }
+    // Deterministic synchronization: wait for the guard's steer event. If the
+    // model duration bound fires first, the interrupt send releases this wait
+    // and the assertion below turns the early interruption into an explicit
+    // test failure instead of a false success.
+    await this.steerObserved.promise;
+    assert.equal(this.steers, 1, "four failures must steer");
+    // Two post-ack failures, still in the same stable generation: the steer
+    // notify above runs only after the port observed the acknowledgement, so
+    // these are captured as post-ack evidence and counted.
+    for (let i = 5; i <= 6; i++) {
+      this.emit("item/completed", {
+        threadId: "t1",
+        turnId: "u1",
+        item: item(i),
+      });
     }
     // Deterministic synchronization: wait for the guard's interrupt event
     // instead of polling for the post-ack settlement.
@@ -165,8 +191,12 @@ Deno.test("loop-guard runtime: real entrypoint stops first loop and admits secon
       (await checkoutContentCheckpoint(cwd)) ?? "",
       /^[a-f0-9]{64}$/,
     );
+    // Finite test-local model bound: six observations run serially through
+    // the guard pipeline, each bounded by the 5s checkout-snapshot deadline,
+    // so 120s leaves a clear margin over that 30s worst case under scheduler
+    // load while still fitting the 10-minute run deadline.
     const configs = repairConfigs({
-      sessionBound: { maxDurationMs: 30000, maxOutputChars: 200000 },
+      sessionBound: { maxDurationMs: 120000, maxOutputChars: 200000 },
     });
     const model = new CodexImplementationPort({
       checkoutDir: cwd,
