@@ -1,13 +1,21 @@
 # Sentinel activation checklist
 
-Status: the observer candidate now has a fresh green local receipt, while its
-workflow remains unpublished and inactive pending the GitHub delivery loop.
-Standalone repair and release activation remain blocked pending the owner
-decisions below. This checklist is subordinate to
+Status corrected 2026-09-09: Sentinel PR #2 is merged at head `0d85c3a` and
+scheduled workflows run, but observation fails for missing authentication and
+repair/release fail for missing trusted host wiring. No standalone live repair
+or release acceptance is proved. The authoritative task states, owners and
+next actions are in [build-status.md](build-status.md#active-task-register--astra-owned);
+only Astra may change that register. This document supplies activation details,
+not another task list. It is subordinate to
 [MASTER-PLAN.md](../MASTER-PLAN.md) and records the boundary between local
 proof and external activation.
 
-## Current verified state
+## Historical evidence before the current task register
+
+The entries in this section are older snapshots. In particular, old statements
+about unpublished workflows, absent PRs and remote heads are superseded by the
+active register. Read each receipt at its recorded revision; do not reassign
+completed work from this history.
 
 - Canonical lane: `/Users/nv/repos/ubiquity/sentinel/.codex-worktrees/master-plan-gfa795549e5`
   on `codex/master-plan-gfa795549e5`.
@@ -79,7 +87,7 @@ proof and external activation.
 
 | Decision | Required value or evidence | Current state |
 | --- | --- | --- |
-| Sentinel publication | Repository name, visibility and publication authority | Public `ubiquity/sentinel` exists and the canonical branch is pushed; remote `development` is still `9da7f77…` with no aggregate PR or merge |
+| Sentinel publication | Repository name, visibility and publication authority | Public `ubiquity/sentinel` exists; PR #2 merged at `0d85c3a`, observed remote development `22ac3887`; further changes follow integrated delivery |
 | GitHub access | Existing GitHub App installation and target-admin scope, with a trusted host source | Unresolved; do not create a new secret or environment variable |
 | Deno access | Existing Deno Deploy project and promotion-token scope | Target workflow access is evidenced by run `34297770624`; standalone trusted-host scope remains unresolved; do not copy a token into a worktree or model session |
 | Model admission | Global rolling-hour and rolling-seven-day start caps, session bounds and receipt policy | Unresolved; runtime policy remains gpt-5.6-luna with max reasoning |
@@ -93,16 +101,18 @@ proof and external activation.
 
 1. Reconcile the target owner, current leases, remote heads and existing
    promotion workflow. Record target base `0a133694…`, merge `7b93b579…`, the
-   removed embedded workflow, stale PRs #251/#233, and the explicit Deno
-   promotion handover.
+   removed embedded workflow, stale PRs #251/#233, and the proposed Deno
+   promotion handover; do not transfer production promotion yet.
 2. Supply the already-approved capabilities to one trusted host composition and
    replace the inert workflow invocation only after the capability checks pass.
 3. Publish the integrated Sentinel candidate, obtain a clean current-head
    review, and bind the merged m06 regression and build receipt to exact
    commits.
 4. Run the isolated Deno promotion, continuous acceptance and exact rollback
-   drill. Preserve the prior revision identity and prove restoration.
-5. Enable target repairs, starting with read-only discovery and retained
+   drill. Preserve the prior revision identity and prove restoration before
+   the authorized production promotion ownership transfer.
+5. Verify the authorized drain and exclusive production ownership, then enable
+   target repairs, starting with read-only discovery and retained
    evidence. Record the first and second distinct eligible deliveries in order.
 6. Start the six-hour observation window only after the live receipts are
    verified, then record continued eligible selection and any rollback result.
@@ -110,6 +120,5 @@ proof and external activation.
 Until those values and receipts are supplied, keep the direct workflow tasks
 fail-closed. Do not guess limits, retention, thresholds, credentials, revision
 selection or ownership, and do not treat local fixtures or injected transports
-as live delivery proof. The observer remains inert until it is reviewed,
-published and supplied with its protected secrets; it cannot start repair or
-release work.
+as live delivery proof. The published observer still needs its protected
+authentication/key capabilities; it cannot start repair or release work.
