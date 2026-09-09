@@ -169,9 +169,11 @@ Deno.test("output cap retains a bounded prefix and flags truncation", async () =
     const run = runtime();
     const result = await run.run(command(
       root,
-      // Keep the producer POSIX-sh compatible: ubuntu's /bin/sh is dash and
-      // does not expand bash's {1..5000} brace range.
-      ["-c", "i=0; while [ $i -lt 5000 ]; do printf x; i=$((i + 1)); done"],
+      // Keep the producer POSIX-sh compatible: Ubuntu's /bin/sh is dash and
+      // does not expand Bash's {1..5000} brace range. The loop emits exactly
+      // 5000 bytes on every supported sh, so the retained-prefix and
+      // truncation assertions hold on CI and macOS.
+      ["-c", 'i=0; while [ "$i" -lt 5000 ]; do printf x; i=$((i + 1)); done'],
       5000,
       128,
     ));
