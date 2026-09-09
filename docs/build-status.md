@@ -24,7 +24,7 @@ to keep retrying. Scope changes require an Astra entry with the reason.
 | ID | State / owner | Required acceptance | Evidence or exact next action |
 | --- | --- | --- | --- |
 | T01 Causal capture verifier | accepted / Astra, fresh audit and canonical check below | Concrete restricted execution of original and sanitized input at the same original SHA; intended failure observed in both; identical safe fixture passes candidate through the real local loop; privacy and negative cases preserved | Worker correction `7491c68` and original `55555dc` are canonical ancestors through merge `090b8aa`. Fresh final Astra audit accepted the exact frozen candidate; canonical focused host suite passed 186/186. Local macOS slice only; T04 target consumer, T05 production isolation and T08 full aggregate acceptance remain open. No active DSH writer. |
-| T02 Runtime model receipt | blocked / Astra prepares owner decision | A supported trusted source proves actual provider/model/effort and completion; unavailable evidence fails closed | Bounded interface investigation below found no documented provider-observed model/effort producer. Owner must approve an explicit request/runtime evidence contract or supply a supported stronger receipt source. No runtime probe authorized by this row. |
+| T02 Runtime model receipt | in_progress / Astra, DSH implementation next | Owner-approved correlated request/runtime evidence binds configured provider, Luna/max, all routing and exact operation/thread/turn completion; unavailable evidence fails closed; no backend-attestation claim | Bounded interface investigation below found no documented provider-observed model/effort producer. Owner approved the request/runtime contract and bounded probes at 21:38 UTC; standing approval covers in-scope follow-up work. Implement a real correlated producer using the evidence below. |
 | T03 Runtime review transport | pending / Astra | Concrete completed review transport and durable receipt bind operation, PR, head, reviewer and terminal result; no silence-as-clean | Local review lifecycle is documented; concrete adapter constraints and a two-sample probe proposal are below. Actual clean/finding output and authorized GitHub publisher identity remain unverified; no coding assignment yet. |
 | T04 Gateway replay consumer | pending / Astra; depends on T01 | Actual target command consumes the safe permanent fixture, fails original, passes candidate, and runs in target validation | Target `7b93b579eecf5392730453f1407a66a552fd7c48` lacks the configured replay command; reconcile target ownership and approve the concrete command interface before writing target files. |
 | T05 Production replay isolation | pending / Astra | Real filesystem/network/credential/process restrictions tested on the execution host; arbitrary target commands cannot escape; no caller boolean as proof | Existing Deno process groups establish lifetime only. Choose and verify the host boundary; local restricted consumer proof does not close production isolation. |
@@ -387,6 +387,27 @@ or the proposed acceptance-policy change. No tests or model probes were run.
 
 No acceptance row is closed by this investigation. T06 stays dependent on real
 T02/T03 producers; no new stub or nullable field is a completed capability.
+
+### Owner approval and active receipt work — 2026-09-09 21:38 UTC
+
+The owner approved the proposed request/runtime receipt definition and bounded
+local probes, and instructed Astra to proceed under standing approval without
+repeated confirmation. This supersedes the pending-authorization statements
+in the preceding historical proposal. Luna/max, no fallback, exact identities,
+restricted credential handling and fail-closed completion still apply. This
+receipt proves trusted submitted configuration plus runtime routing/completion;
+it does not claim backend model/effort attestation.
+
+Two builtin review samples are reserved in the immutable host-local probe
+manifest at /Users/nv/.local/state/sentinel-probes/t02-t03-20260909-2139.
+The clean sample completed with unstructured prose and no explicit empty
+finding set. Therefore builtin review text cannot safely be normalized as
+clean merely from terminal success. The supported turn/start outputSchema
+interface is the next bounded discovery surface: at most two further synthetic
+review starts, each ten minutes, no automatic retry, no target/GitHub writes.
+Use exact aggregate diffs and explicit clean/findings/unavailable structured
+results. This changes the approach after concrete output evidence; do not
+repeat the builtin review requests to seek more convenient prose.
 
 ## Historical entries — not the current task list
 
