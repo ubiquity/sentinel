@@ -7,22 +7,22 @@ is evidence, not a second queue. Only the current GPT-6 Astra integration owner
 may edit this file. Workers return proposed updates and immutable evidence;
 READY means awaiting Astra acceptance. Do not create replacement task lists.
 
-Last reconciled: 2026-09-10 18:55 UTC by the Astra integration owner at
-canonical HEAD `e08cd168858ab1c3cc3de367d207099b00d63ccd`.
-T01, T02 and T13 remain accepted. Canonical lane remains
-`/Users/nv/repos/ubiquity/sentinel/.codex-worktrees/master-plan-gfa795549e5`,
-branch `codex/master-plan-gfa795549e5`. No production activation is accepted.
-The owner supervises DSH directly, per the user's 19:07 UTC instruction.
-Runtime implementation remains Luna/max. T03 journal/client, concrete producer and durable transport are locally accepted.
-The 146 passing integrated cases are retained; the sole delayed-review fixture
-now passes separately. V8/V9 writers completed with exit 0 and settled, with
-verified deepseek-flash/max and workspace-write/ask. Final static checks pass.
-Gateway checkpointcf5af622 remains committed and clean on its existing m06 lane.
-No new worktree or branch was created. The user's updated local DSH policy is
-deepseek-official/deepseek-flash/max with enforced workspace-write and ask.
-Current session request header, permission preset, sandbox mode, approval
-policy, exact cwd and NODE_ENV=production were verified. Earlier receipts
-retain their historical model; runtime implementation remains Luna/max.
+Last reconciled: 2026-09-10 19:21 UTC by the Astra integration owner.
+Canonical source HEAD is af11a373139a3b1211d86c44e33d1d2eda713408;
+the current ledger commit follows that source without changing tested bytes.
+T01, T02, T03, T04 and T13 are locally accepted. Canonical lane remains
+/Users/nv/repos/ubiquity/sentinel/.codex-worktrees/master-plan-gfa795549e5
+on codex/master-plan-gfa795549e5. T03 commit a617c52 and T04 commit af11a37
+are integrated here. All task-owned DSH writers and test processes settled.
+Only the eight pre-existing diagnostic directories remain untracked.
+Gateway m06 remains clean at cf5af622e72486c7f898b048ecaadd778e776485.
+No new worktree or branch was created. No new push, PR, deployment, live
+capture, promotion or activation occurred in this continuation. T08 retains
+aggregate publication and exact-head review; T05 is the next implementation.
+Astra directly supervises DSH using deepseek-official/deepseek-flash/max with
+enforced workspace-write/ask. Runtime implementation remains Luna/max.
+Playbook revision2026-09-10.2 adopted19:17UTC; earlier formatting violation
+and separate launch evidence are recorded below.
 
 Task states: pending, in_progress, ready, accepted, blocked, rejected. Only
 accepted closes a task, and only after the acceptance evidence below exists.
@@ -34,7 +34,7 @@ to keep retrying. Scope changes require an Astra entry with the reason.
 | T01 Causal capture verifier | accepted / Astra, fresh audit and canonical check below | Concrete restricted execution of original and sanitized input at the same original SHA; intended failure observed in both; identical safe fixture passes candidate through the real local loop; privacy and negative cases preserved | Worker correction `7491c68` and original `55555dc` are canonical ancestors through merge `090b8aa`. Fresh final Astra audit accepted the exact frozen candidate; canonical focused host suite passed 186/186. Local macOS slice only; T04 target consumer, T05 production isolation and T08 full aggregate acceptance remain open. No active DSH writer. |
 | T02 Runtime model receipt | accepted / Astra | Owner-approved correlated request/runtime evidence binds configured provider, Luna/max, routing and exact invocation/thread/turn; unavailable evidence fails closed | Frozen 12-path candidate verified; fresh source audit passed behavior, 72/72 tests and format/lint passed. Real concrete Luna/max smoke settled with completed runtime receipt. Acceptance details below. No backend-attestation or production-isolation claim. |
 | T03 Runtime review transport | accepted / Astra integration | Concrete completed review transport and durable receipt bind operation, PR, head, reviewer and terminal result; no silence-as-clean | Audited transport hash23507800 preserved. Integrated60a66325 passed146/147; corrected sole fixture passed2a236c00 in19s. Final source/test type, format and lint pass. Concrete producer/live request evidence retained. Local integration accepted; aggregate exact-head review, publication and runtime activation remain T08–T10. |
-| T04 Gateway replay consumer | in_progress / Astra; depends on T01 | Actual target command consumes the safe permanent fixture, fails original, passes candidate, and runs in target validation | Gateway accepted local checkpointcf5af622: full sentinel:test-local77/77 (238637e9), fixed-command18/18, type/format/lint passed and fresh Astra source audit accepted. Gateway worktree clean; source checkpoint4a58cf22 and published7b93b579 are ancestors. Local only, not published. Sentinel metadata wiring still follows T03. Live captures must follow consumer delivery. |
+| T04 Gateway replay consumer | accepted locally / Astra; publication remains T08 | Actual target command consumes the safe permanent fixture, fails original, passes candidate, and runs in target validation | Gateway checkpointcf5af622 passed77/77 and fresh source audit; clean existing m06 lane. Sentinel metadata/source checkpointaf11a37 passed71/71 (3109c98f), type/format/lint; actual local causal loop and original/sanitized/candidate dispatch verified. Transient metadata stays outside fixture digest. Publication and a subsequent live capture remain T08/T11; no historical SHA proof is fabricated. |
 | T05 Production replay isolation | pending / Astra | Real filesystem/network/credential/process restrictions tested on the execution host; arbitrary target commands cannot escape; no caller boolean as proof | Existing VPS rootless Bubblewrap/Deno synthetic boundary probe passed: receipt31a5a73a-767c-4242-95ba-f7fdcfc49db4. Actual ReplayPort integration, sibling/escape/process regressions and Linux causal verifier remain required. Local macOS acceptance does not close production isolation. |
 | T06 Trusted host wiring | pending / Astra; depends on T01–T05 | Real entrypoints assemble scoped authentication, durable state CAS, incident/replay/model/review and release capabilities; missing capabilities fail closed | Observer run `34389188768`: `observe_auth_missing`; repair `34388944531` and release `34388818273`: host wiring absent. Assemble existing ports with verified contracts, not another injected stub. |
 | T07 Activation decisions | pending / Astra prepares; user decides | Finite model limits/session bounds, retention duration/aggregate storage/key capability, stability baseline/thresholds, credential scopes, protected paths, isolated target and handover owner recorded | Rolling-hour/seven-day limit question sent01:59UTC remains unanswered; do not ask again or guess live caps. Existing dedicated App4682172 installation155687488 lacks repair permissions; organization App identity needs verification and scoped token issuance. Retention/storage and stability settings remain unresolved. |
@@ -2482,3 +2482,98 @@ No live probe was repeated and no publication, deployment or activation occurred
 Only T03 owned source/tests and this Astra ledger are accepted for commit;
 pre-existing untracked diagnostic directories remain preserved. T04b metadata
 wiring is the next serial assignment; T08 owns full integrated acceptance.
+
+### T04b serial metadata assignment (2026-09-10 18:56 UTC)
+
+T03 accepted commit a617c52b3c75ad362ede78e3489116e3e8f6df26 is the exact
+T04b base on the unchanged canonical branch and worktree. One DSH writer owns
+only src/replay/causal-verifier.ts, src/replay/port.ts and their two test files
+plus tests/integration/causal-capture_test.ts. Immutable assignment
+t04b-metadata-assignment-v2.md is under the existing private probe root.
+Preflight all fixture and metadata destinations before private writes; preserve
+fixture digests and exact selection. No children or background jobs. Worker
+returns edits within20min; Astra runs registered t04-metadata-focus/check after
+settlement. No live side effects or gateway edits. Local DSH policy remains
+deepseek-official/deepseek-flash/max, workspace-write/ask.
+
+T04b live writer identity: PID74719, exec2320, persisted session
+b6f110cd-e272-4f9f-ae6b-314a606e1039; launch18:56UTC. Exact cwd,
+NODE_ENV=production, actual deepseek-official/deepseek-flash/max header and
+workspace-write/ask session records verified. First source edits arrived
+within5min. Astra draft review flags candidate exclusive-create and causal
+ancestor-path overlap for the next supported correction boundary; v2 remains
+in progress with no acceptance claim.
+
+T05 read-only source check by fresh Astra t05_boundary_design confirms the
+smallest planned cutover is a required target runner on the isolation
+capability, with trusted Git operations remaining on the existing runtime.
+Boolean metadata alone must not authorize target execution. Existing
+DenoReplayRuntime retains output/deadline/process-group handling; Linux
+Bubblewrap supplies filesystem/network/process isolation for target calls,
+also used by Linux causal verification. Preserve existing macOS causal
+acceptance. This is design input only, not an implemented or accepted T05.
+The proposed read-only /work mount needs correction or validation against
+real gateway tests that create scratch inside their disposable checkout;
+required test writes cannot be silently disabled. No new worker lane.
+
+### Orchestration rule adoption and T04 fixture correction (2026-09-10 19:18 UTC)
+
+Astra read and adopted deepseek-harness.md revision2026-09-10.2 at19:17UTC,
+SHA2567b2b79fd711a391f7d589a187be8103bb7d09b83296a11078abf5b917ca37850,
+and test-evidence.md SHA2563398f3525dc0244f7b60d5d9896ef3f2e528ab1c01ca089fafb5d7a487756ed6.
+This is adoption evidence, separate from earlier launch compliance. Subsequent
+assignments must state the revision, exact formatting pass limit and return
+after assigned edits; GPT owns all tests/checks/evidence. No active worker was
+interrupted to apply this update.
+
+Violation recorded: sessionb6f110cd-e272-4f9f-ae6b-314a606e1039 executed
+two deno fmt passes and a forbidden fmt --check, with output piped through
+tail, despite the one-pass/no-check assignment. Actual tool calls verified.
+Useful changes are preserved; this run is not labeled wholly compliant.
+Subsequent bounded corrections explicitly prohibit extra checks and repeated
+polish. Session747b5242-d13e-4bfc-938b-aa1f021dc359 completed bare gateway
+namespace rejection; session20aa4c56-0195-4b1b-b192-7efd688a5b6e completed
+two fixture corrections. Both exited0 with completed records and no descendants.
+Their headers/sandbox records match Flash/max and workspace-write/ask. The
+last fast worker exited before primary live ps/environment capture; its exact
+launch env and persisted first bash child report NODE_ENV=production, with
+exact pwd/base/branch. This differs from the primary live process checks used
+on earlier launches. Actual last-worker formatter call was one unfiltered pass;
+no test/check/lint/format-check was invoked.
+
+T04 executed focused receipt0aa8be86-9c92-4ca8-8527-11684e135b15 passed66
+and failed5 in47s: every failure was the integration fixture whose ten-minute
+allowance no longer fits T03 entrypoint/model/review bounds. V6 uses thirty
+logical minutes without changing production limits or assertions. It also
+makes the privacy preflight evidence directory execute-only and preserves a
+public canary, so cleanup cannot conceal an earlier write before inspection.
+Final source unchanged from v5. Latest type38098efc-5fd1-42ec-b358-e92ae94d1e26,
+format728a10e9-88f1-4fff-b0f8-abdc6ab6100c and lint57adf846-e6b4-4fe0-9a72-8ba9fec4a29f
+pass; corrected runtime suite exec70001 is running. All receipts use existing
+Sentinel namespace cc48556d9d6816f2605c36c352452867e2de5be694f7aa26c8a9330e9268c576.
+
+### T04 metadata integration accepted locally (2026-09-10 19:21 UTC)
+
+Accepted source commit af11a373139a3b1211d86c44e33d1d2eda713408 follows
+T03 a617c52b3c75ad362ede78e3489116e3e8f6df26 in the canonical graph.
+Final executed focused receipt
+cc48556d9d6816f2605c36c352452867e2de5be694f7aa26c8a9330e9268c576/3109c98f-8bb6-4778-9d8a-b32389054859
+passed71/71, exit0, duration116661ms on this source/test candidate. Type,
+format and lint references immediately above also passed. No source edits
+followed those checks. Primary reviewed final source and fixture corrections.
+Source hashes: port a6b64074789c03f6cac01ef90e087a146501b5b237a31f4d2f528734e0c42e0e;
+causal verifier f7edb2905343a083637cf36ee706c1f4228eae770ed2b73e92ff1bde3f4368ea.
+
+Exact metadata is host-materialized in both causal snapshots and the candidate
+checkout, outside the unchanged two-entry fixture digest. It is transient
+dispatch input, not an additional model-delivered fixture or historical capture
+identity. Missing/foreign/symlink/directory and malformed reserved references
+fail closed; existing identical bytes are untouched and missing files use
+exclusive creation. Full preflight precedes private writes. Both causal
+consumers and candidate replay/test paths actually read metadata. The toy
+proves host wiring; the separate gateway77/77 receipt proves the real converter.
+
+Disposition: no T04 source remains outside canonical state. Gateway consumer
+remains local on its existing m06 branch pending the aggregate T08 target PR.
+The eight pre-existing diagnostic directories remain preserved; the final test
+cleaned its new temporary directory. No active task-owned writer or test.
