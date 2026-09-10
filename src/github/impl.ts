@@ -44,6 +44,8 @@ import type {
   PortResultV1,
   PullRequestCreateV1,
   PullRequestPublishV1,
+  ReviewDrainReportV1,
+  ReviewDrainRequestV1,
   ReviewObservationRequestV1,
   ReviewObservationV1,
   ReviewRequestOutcomeV1,
@@ -161,6 +163,12 @@ const SUPPORTED_MERGE_RULE_TYPES = new Set([
 ]);
 
 export class GitHubPortImpl implements GitHubPort {
+  /**
+   * Exact trusted review publisher identity configured for this port. The
+   * repair loop reads this value for every review request/receipt binding;
+   * there is no hardcoded connector default.
+   */
+  readonly reviewerIdentity: string;
   private readonly repository: RepositoryIdentityV1;
   private readonly client: GitHubApiClient;
   private readonly clock: Clock;
@@ -188,6 +196,7 @@ export class GitHubPortImpl implements GitHubPort {
       "trustedReviewer",
       MaxText.login,
     );
+    this.reviewerIdentity = this.trustedReviewer;
     this.trustedResolutionAuthors = new Set(options.trustedResolutionAuthors);
     this.resolutionVerifier = options.resolutionVerifier ?? null;
     this.findingCap = options.findingCap ?? DEFAULT_FINDING_CAP;
@@ -480,6 +489,13 @@ export class GitHubPortImpl implements GitHubPort {
     if (pull.value.state !== "open") {
       return portError("conflict", "pull request is not open");
     }
+    if (
+      !Number.isSafeInteger(request.latestStartAt) ||
+      !Number.isSafeInteger(request.settleBy) ||
+      request.settleBy <= request.latestStartAt
+    ) {
+      return portError("invalid", "review deadline bounds are invalid");
+    }
     // Exactly one transport submission; a lost response stays ambiguous and is
     // reconciled later by the operation key.
     const submitted = await this.gatedRemoteCall(() =>
@@ -489,6 +505,8 @@ export class GitHubPortImpl implements GitHubPort {
         expectedHead: request.expectedHead,
         expectedBase: request.expectedBase,
         expectedReviewer: request.expectedReviewer,
+        latestStartAt: request.latestStartAt,
+        settleBy: request.settleBy,
       })
     );
     if (!submitted.ok) return submitted;
@@ -522,6 +540,7 @@ export class GitHubPortImpl implements GitHubPort {
       this.reviewService.readReview({
         operationKey: request.operationKey,
         requestId: null,
+        prNumber: request.prNumber,
       })
     );
     if (!service.ok) return service;
@@ -549,6 +568,38 @@ export class GitHubPortImpl implements GitHubPort {
       findingCap: this.findingCap,
       receivedAt: this.clock.now(),
     });
+  }
+
+  // -------------------------------------------------------------------------
+  // drainReviews
+  // -------------------------------------------------------------------------
+
+  /**
+   * Forward the bounded review-lifecycle drain to the SAME review-service
+   * transport instance this port submits through. Never starts a model,
+   * never reserves budget and never writes repair state.
+   */
+  async drainReviews(
+    request: ReviewDrainRequestV1,
+  ): Promise<PortResultV1<ReviewDrainReportV1>> {
+    if (
+      typeof request !== "object" || request === null ||
+      !Number.isSafeInteger(request.deadline) ||
+      typeof request.interrupt !== "boolean"
+    ) {
+      return portError("invalid", "review drain request is invalid");
+    }
+    try {
+      const report = await this.reviewService.drain({
+        deadline: request.deadline,
+        interrupt: request.interrupt,
+      });
+      return portOk(report);
+    } catch {
+      // A thrown drain is reported as sanitized unavailable, never as raw
+      // transport detail; the entrypoint owns the typed drain failure.
+      return portError("unavailable", "review drain failed");
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -839,6 +890,7 @@ export class GitHubPortImpl implements GitHubPort {
       this.reviewService.readReview({
         operationKey: null,
         requestId: merge.review.requestId,
+        prNumber,
       })
     );
     if (!service.ok) {

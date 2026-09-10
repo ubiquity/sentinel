@@ -26,7 +26,11 @@
  */
 
 import type { FindingFingerprint, GitSha } from "../contracts/brands.ts";
-import type { PortResultV1 } from "../contracts/ports.ts";
+import type {
+  PortResultV1,
+  ReviewDrainReportV1,
+  ReviewDrainRequestV1,
+} from "../contracts/ports.ts";
 import type { RepositoryIdentityV1 } from "../contracts/shared.ts";
 
 export interface ReviewRequestSubmitV1 {
@@ -35,6 +39,10 @@ export interface ReviewRequestSubmitV1 {
   expectedHead: GitSha;
   expectedBase: GitSha;
   expectedReviewer: string;
+  /** Absolute ms: no model start may be admitted at or after this instant. */
+  latestStartAt: number;
+  /** Absolute ms: the whole review, including close, must settle by this. */
+  settleBy: number;
 }
 
 export type ReviewSubmitOutcomeV1 =
@@ -47,6 +55,12 @@ export interface ReviewRequestReadV1 {
    * exact request id (merge re-observation); at least one is required. */
   operationKey: string | null;
   requestId: string | null;
+  /**
+   * Exact pull request number the observation is scoped to. Both the
+   * observation path and the merge re-observation path supply it so restart
+   * recovery never needs an in-memory PR index.
+   */
+  prNumber: number;
 }
 
 /**
@@ -79,6 +93,12 @@ export interface ReviewServiceReadV1 extends ReviewServiceReceiptV1 {
   resultId: string | null;
   completedAt: number | null;
   summary: string | null;
+  /**
+   * Canonical digest of the completed structured result as recorded by the
+   * service (the durable journal's `resultDigest`). `null` means the service
+   * could not produce the binding; the consumer then never completes.
+   */
+  resultDigest: string | null;
   /** Terminal turn reached a successful terminal state (machine-verifiable). */
   terminalTurnSucceeded: boolean;
   /** A completed review output/result was actually delivered. */
@@ -97,6 +117,15 @@ export interface ReviewServiceTransportV1 {
   readReview(
     request: ReviewRequestReadV1,
   ): Promise<PortResultV1<ReviewServiceReadV1>>;
+  /**
+   * Bounded lifecycle finalization: stop accepting submissions, await or
+   * interrupt every owned review operation and reconcile its journal inside
+   * the supplied absolute deadline. Never starts a model, reserves no budget
+   * and writes no repair state.
+   */
+  drain(
+    request: ReviewDrainRequestV1,
+  ): Promise<ReviewDrainReportV1>;
 }
 
 /** Sentinel marker for a request id that could not be recovered. */

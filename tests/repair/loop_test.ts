@@ -158,7 +158,12 @@ async function makeRig(
     changedPaths: ["src/app.ts"],
     ...options.model,
   });
-  const run = (deadlineMs = 600_000) =>
+  // Positive rigs need the declared review bound (10 min) plus the five-minute
+  // operation margin to fit INSIDE the loop deadline: a 10-minute caller
+  // deadline leaves no review window at all. 60 minutes stays under the fixed
+  // 120-minute ceiling and the 90-minute model cutoff; the clock is fake, so
+  // this costs no real time.
+  const run = (deadlineMs = 60 * 60_000) =>
     runRepairCycle({
       clock,
       state: store,

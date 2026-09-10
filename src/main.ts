@@ -39,14 +39,43 @@ import type {
   IncidentAdapter,
   RepairStateWriter,
   ReplayPort,
+  ReviewDrainReportV1,
   StateReadView,
 } from "./contracts/ports.ts";
 import {
+  OPERATION_MARGIN_MS,
   REPAIR_RUN_CEILING_MS,
   type RepairCycleOutcomeV1,
   type ReplayFixtureIdentitySourceV1,
   runRepairCycle,
 } from "./repair/loop.ts";
+
+/** Static sanitized message of every mandatory drain failure. */
+export const REPAIR_REVIEW_DRAIN_ERROR_MESSAGE =
+  "repair review drain failed: owned review sessions were not settled";
+
+/**
+ * Typed mandatory-drain failure. Carries the sanitized drain report (null when
+ * the transport itself failed), the original cycle outcome (null when the
+ * cycle threw before producing one) and the original cycle exception as the
+ * `cause` when there was one. The message is always the static text above;
+ * no raw transport or exception detail is ever exposed.
+ */
+export class RepairReviewDrainError extends Error {
+  readonly report: ReviewDrainReportV1 | null;
+  readonly outcome: RepairCycleOutcomeV1 | null;
+
+  constructor(input: {
+    report: ReviewDrainReportV1 | null;
+    outcome: RepairCycleOutcomeV1 | null;
+    cause?: unknown;
+  }) {
+    super(REPAIR_REVIEW_DRAIN_ERROR_MESSAGE, { cause: input.cause });
+    this.name = "RepairReviewDrainError";
+    this.report = input.report;
+    this.outcome = input.outcome;
+  }
+}
 
 /** The trusted capability set one repair entrypoint run receives. */
 export interface RepairEntrypointDepsV1 {
@@ -104,7 +133,7 @@ export interface RepairEntrypointOptionsV1 {
  *   operation, and admission remains impossible without a durable
  *   `admitted` reservation.
  */
-export function runRepairEntrypoint(
+export async function runRepairEntrypoint(
   deps: RepairEntrypointDepsV1,
   options: RepairEntrypointOptionsV1,
 ): Promise<RepairCycleOutcomeV1> {
@@ -117,33 +146,88 @@ export function runRepairEntrypoint(
     );
   }
   // Bound the caller-supplied deadline by the fixed run ceiling before the
-  // loop's run-relative bounds are applied; the cycle re-clamps with its own
-  // start time for direct consumers. A NaN caller deadline is not a bound (its
-  // comparisons are all false) and must never bypass the fixed ceiling, so it
-  // is normalized to unbounded and the ceiling governs.
+  // loop's run-relative bounds are applied. The ORIGINAL run start is captured
+  // exactly once here and passed into the cycle, so a shortened caller
+  // deadline can never shift the 90-minute model cutoff later. A NaN caller
+  // deadline is not a bound (its comparisons are all false) and must never
+  // bypass the fixed ceiling, so it is normalized to unbounded and the
+  // ceiling governs.
+  const runStartedAt = deps.clock.now();
   const callerDeadline = Number.isNaN(options.deadline)
     ? Number.POSITIVE_INFINITY
     : options.deadline;
-  const deadline = Math.min(
+  const hardDeadline = Math.min(
     callerDeadline,
-    deps.clock.now() + REPAIR_RUN_CEILING_MS,
+    runStartedAt + REPAIR_RUN_CEILING_MS,
   );
-  return runRepairCycle(
-    {
-      clock: deps.clock,
-      state: deps.state,
-      configs,
-      controllerSha: deps.controllerSha,
-      github: deps.github,
-      githubCooldown: deps.githubCooldown,
-      incidents: deps.incidents,
-      replay: deps.replay,
-      fixtureIdentities: deps.fixtureIdentities,
-      model: deps.model,
-      budget: deps.budget,
-    },
-    { deadline, stepLimit: options.stepLimit },
-  );
+
+  let outcome: RepairCycleOutcomeV1 | null = null;
+  let cycleError: unknown = null;
+  let cycleThrew = false;
+  try {
+    outcome = await runRepairCycle(
+      {
+        clock: deps.clock,
+        state: deps.state,
+        configs,
+        controllerSha: deps.controllerSha,
+        github: deps.github,
+        githubCooldown: deps.githubCooldown,
+        incidents: deps.incidents,
+        replay: deps.replay,
+        fixtureIdentities: deps.fixtureIdentities,
+        model: deps.model,
+        budget: deps.budget,
+      },
+      {
+        deadline: hardDeadline - OPERATION_MARGIN_MS,
+        stepLimit: options.stepLimit,
+        runStartedAt,
+      },
+    );
+  } catch (error) {
+    // The original outcome/error is preserved: drain runs on this path too,
+    // and on a successful drain the original error is rethrown unchanged.
+    cycleThrew = true;
+    cycleError = error;
+  }
+
+  // Mandatory bounded finalization on EVERY return and error path, including
+  // the double-failure path. Drain stops review admission, awaits or
+  // interrupts every owned producer session and reconciles its journal inside
+  // the hard deadline; it never starts a model, reserves no budget and writes
+  // no repair state.
+  let report: ReviewDrainReportV1 | null = null;
+  let drainFailed = false;
+  let drainCause: unknown = null;
+  try {
+    const drained = await deps.github.drainReviews({
+      deadline: hardDeadline,
+      interrupt: true,
+    });
+    if (drained.ok) {
+      report = drained.value;
+      drainFailed = report.ok === false;
+    } else {
+      drainFailed = true;
+      drainCause = drained.error;
+    }
+  } catch (error) {
+    drainFailed = true;
+    drainCause = error;
+  }
+  if (drainFailed) {
+    // No log-only success: a drain that could not prove settlement/durability
+    // is a typed failure carrying the sanitized report, the original outcome
+    // and (when the cycle failed) the original exception as cause.
+    throw new RepairReviewDrainError({
+      report,
+      outcome,
+      cause: cycleThrew ? cycleError : drainCause,
+    });
+  }
+  if (cycleThrew) throw cycleError;
+  return outcome!;
 }
 
 // ---------------------------------------------------------------------------

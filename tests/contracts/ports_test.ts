@@ -565,6 +565,7 @@ const _releaseFake: DenoReleasePort = {
 // Compile-time shape guard: a minimal GitHubPort fake type-checks with the
 // deterministic-head PR lookup and identity-bound review submission.
 const _githubFake: GitHubPort = {
+  reviewerIdentity: "sentinel-reviewer[bot]",
   listOpenIssues() {
     return resolved(portOk([]));
   },
@@ -629,6 +630,16 @@ const _githubFake: GitHubPort = {
   },
   closeIssue() {
     return resolved(portOk("already_closed"));
+  },
+  drainReviews() {
+    return resolved(portOk({
+      ok: true,
+      operations: [],
+      faults: [],
+      deadline: 1786000000000,
+      interrupted: true,
+      completedAt: 1786000000000,
+    }));
   },
 };
 

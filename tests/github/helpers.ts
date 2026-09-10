@@ -9,6 +9,7 @@ import type {
   GitHubCooldownGateV1,
   PortErrorV1,
   PortResultV1,
+  ReviewDrainReportV1,
 } from "../../src/contracts/ports.ts";
 import { portError, portOk } from "../../src/contracts/ports.ts";
 import type { RepositoryIdentityV1 } from "../../src/contracts/shared.ts";
@@ -28,6 +29,14 @@ import type {
 import { GitHubPortImpl } from "../../src/github/impl.ts";
 import type { GitHubPortOptionsV1 } from "../../src/github/impl.ts";
 import { GitHubApiClient } from "../../src/github/client.ts";
+import {
+  renderReviewJournalBody,
+  REVIEW_MODEL,
+  REVIEW_REASONING,
+  type ReviewJournalReadyV1,
+  reviewResultDigest,
+  type ReviewResultV1,
+} from "../../src/github/review-journal.ts";
 import type {
   HumanResolutionVerifierV1,
   ResolutionEvidenceCheckV1,
@@ -316,6 +325,7 @@ export class FakeGitExecutor implements GitExecutorV1 {
 export class FakeReviewService implements ReviewServiceTransportV1 {
   submits: ReviewRequestSubmitV1[] = [];
   reads: ReviewRequestReadV1[] = [];
+  drains: { deadline: number; interrupt: boolean }[] = [];
   submitResult: ReviewSubmitOutcomeV1 | "error" = {
     status: "submitted",
     requestId: "req-1",
@@ -327,9 +337,18 @@ export class FakeReviewService implements ReviewServiceTransportV1 {
     resultId: null,
     completedAt: null,
     summary: null,
+    resultDigest: null,
     terminalTurnSucceeded: false,
     outputPresent: false,
   });
+  drainResult: ReviewDrainReportV1 = {
+    ok: true,
+    operations: [],
+    faults: [],
+    deadline: T0,
+    interrupted: true,
+    completedAt: T0,
+  };
 
   submitReview(
     request: ReviewRequestSubmitV1,
@@ -348,6 +367,12 @@ export class FakeReviewService implements ReviewServiceTransportV1 {
     this.reads.push(request);
     return Promise.resolve(portOk(this.readResult));
   }
+  drain(
+    request: { deadline: number; interrupt: boolean },
+  ): Promise<ReviewDrainReportV1> {
+    this.drains.push(request);
+    return Promise.resolve(this.drainResult);
+  }
 }
 
 /**
@@ -365,6 +390,7 @@ export function defaultServiceReceipt(
     resultId: null,
     completedAt: null,
     summary: null,
+    resultDigest: null,
     terminalTurnSucceeded: false,
     outputPresent: false,
     operationKey: "review:work-1",
@@ -387,11 +413,111 @@ export function completedServiceRead(
     resultId: "result-9",
     completedAt: T0 + 120_000,
     summary: "completed review output",
+    // A completed read always carries the durable structured-result digest;
+    // structured completion fixtures that exercise authorization bind this to
+    // the exact journal digest they publish.
+    resultDigest: "0".repeat(64),
     terminalTurnSucceeded: true,
     outputPresent: true,
     githubReviewId: 100,
     ...overrides,
   });
+}
+
+// ---------------------------------------------------------------------------
+// Structured review completion fixture (the production completion authority)
+// ---------------------------------------------------------------------------
+
+export const STRUCTURED_CLEAN_RESULT: ReviewResultV1 = {
+  verdict: "clean",
+  summary: "no issues found",
+  findings: [],
+};
+
+export interface StructuredReviewFixtureV1 {
+  /** Exact rendered ready journal body (the standing GitHub review body). */
+  body: string;
+  /** Exact standing COMMENTED review wire for the fixture digest/id. */
+  review: Record<string, unknown>;
+  /** Service receipt bound to the same digest, result id and completion time. */
+  service: ReviewServiceReadV1;
+}
+
+export interface StructuredReviewFixtureOptionsV1 {
+  result?: ReviewResultV1;
+  reviewId?: number;
+  completedAt?: number;
+  requestedAt?: number;
+  operationKey?: string;
+  requestId?: string;
+}
+
+/**
+ * One internally consistent structured completion for the canonical suite
+ * identities (repository REPO, PR 1, head SHA1, base SHA2, publisher REVIEWER,
+ * request req-1, result id result-9, review id 100). Positive fixtures must use
+ * this shape: completion authorization only consumes the strict journal.
+ */
+export async function structuredCompletedFixture(
+  options: StructuredReviewFixtureOptionsV1 = {},
+): Promise<StructuredReviewFixtureV1> {
+  const result = options.result ?? STRUCTURED_CLEAN_RESULT;
+  const reviewId = options.reviewId ?? 100;
+  const operationKey = options.operationKey ?? "review:work-1";
+  const requestId = options.requestId ?? "req-1";
+  const journal: ReviewJournalReadyV1 = {
+    version: "v1",
+    phase: "ready",
+    repository: { owner: REPO.owner, name: REPO.name },
+    prNumber: 1,
+    expectedHead: SHA1,
+    expectedBase: SHA2,
+    operationKey,
+    publisher: REVIEWER,
+    requestId,
+    requestedAt: options.requestedAt ?? T0 + 1000,
+    reviewId,
+    completedAt: options.completedAt ?? T0 + 120_000,
+    result,
+    resultDigest: await reviewResultDigest(result),
+    execution: {
+      ownerRunId: "run-1",
+      invocationId: `review-invocation-${operationKey}`,
+      threadId: "thread-1",
+      submittedProvider: "openai",
+      model: REVIEW_MODEL,
+      reasoning: REVIEW_REASONING,
+      startMayOccur: true,
+      turnId: "turn-1",
+      resultId: "result-9",
+      actual: {
+        evidenceKind: "request-runtime",
+        provider: "openai",
+        threadId: "thread-1",
+        turnId: "turn-1",
+        terminalOrigin: "runtime",
+        observedTerminalStatus: "completed",
+        observedModel: REVIEW_MODEL,
+        observedReasoning: REVIEW_REASONING,
+        durationMs: 5,
+        outputChars: 10,
+      },
+    },
+  };
+  const body = renderReviewJournalBody(journal);
+  return {
+    body,
+    review: reviewWire({ id: reviewId, state: "COMMENTED", body }),
+    service: completedServiceRead({
+      resultDigest: journal.resultDigest,
+      completedAt: journal.completedAt,
+      summary: result.summary,
+      githubReviewId: reviewId,
+      operationKey,
+      requestId,
+      expectedBase: SHA2,
+    }),
+  };
 }
 
 // ---------------------------------------------------------------------------

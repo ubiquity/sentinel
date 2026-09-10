@@ -199,7 +199,11 @@ export interface PullRequestPublishV1 {
 /**
  * Review submission carries the exact PR/head/base identity plus a
  * deterministic operation key, so recovery works even when the request
- * response (and its request id) is lost.
+ * response (and its request id) is lost. `latestStartAt` is the last absolute
+ * instant at which the single model start may be admitted and `settleBy` the
+ * absolute instant by which the whole review (including interrupt and close)
+ * must settle; both are bounded by the original run's model cutoff and the
+ * loop deadline minus the full review bound and finalization margin.
  */
 export interface ReviewSubmissionV1 {
   prNumber: number;
@@ -207,12 +211,55 @@ export interface ReviewSubmissionV1 {
   expectedBase: GitSha;
   expectedReviewer: string;
   operationKey: string;
+  latestStartAt: number;
+  settleBy: number;
 }
 
 export interface ReviewRequestOutcomeV1 {
   outcome: WriteOutcomeV1;
   requestId: string | null;
   requestedAt: number;
+}
+
+// ---------------------------------------------------------------------------
+// Review drain: bounded lifecycle finalization of every owned review
+// operation. A `ready` durable journal awaiting publication is
+// restart-recoverable; an operation whose owned producer process was not
+// proved settled, or whose durable fault is sanitized below, is faulted.
+// ---------------------------------------------------------------------------
+
+export type ReviewDrainOutcomeV1 = "settled" | "recoverable" | "faulted";
+
+export interface ReviewDrainOperationV1 {
+  operationKey: string;
+  outcome: ReviewDrainOutcomeV1;
+  /** True when no owned producer process for this operation remains live. */
+  processSettled: boolean;
+  /** True when a durable ready journal records the operation's result. */
+  durable: boolean;
+  /** Journalled lifecycle phase observed at drain time. */
+  phase: "none" | "intent" | "running" | "ready" | "published";
+  /** Static sanitized fault code; null unless the outcome is faulted. */
+  fault: string | null;
+}
+
+export interface ReviewDrainReportV1 {
+  /** True only when no owned operation is faulted. */
+  ok: boolean;
+  operations: ReviewDrainOperationV1[];
+  /** Bounded static sanitized fault codes (never raw transport detail). */
+  faults: string[];
+  /** Absolute deadline the drain was bounded by. */
+  deadline: number;
+  interrupted: boolean;
+  completedAt: number;
+}
+
+export interface ReviewDrainRequestV1 {
+  /** Absolute deadline; the drain never exceeds it. */
+  deadline: number;
+  /** Interrupt owned producer sessions that are still running. */
+  interrupt: boolean;
 }
 
 /** Review observation is addressed by operation key + PR/head, never by id alone. */
@@ -285,6 +332,12 @@ export interface MergeRequestV1 {
 export type IssueCloseOutcomeV1 = "closed" | "already_closed";
 
 export interface GitHubPort {
+  /**
+   * Exact trusted review publisher identity configured for this port. The
+   * repair loop uses this value for every review request and receipt binding;
+   * there is no hardcoded connector default.
+   */
+  readonly reviewerIdentity: string;
   readIssue(issueNumber: number): Promise<PortResultV1<GitHubIssueV1 | null>>;
   listOpenIssues(): Promise<PortResultV1<GitHubIssueV1[]>>;
   /** Find the PR for a deterministic head branch; null when none exists. */
@@ -319,6 +372,16 @@ export interface GitHubPort {
     request: MergeRequestV1,
   ): Promise<PortResultV1<MergeOutcomeV1>>;
   closeIssue(issueNumber: number): Promise<PortResultV1<IssueCloseOutcomeV1>>;
+  /**
+   * Bounded lifecycle finalization forwarded to the SAME review-service
+   * transport instance the port submits through: admission stops, owned
+   * review operations are awaited or interrupted, and every journal is
+   * reconciled inside the supplied deadline. Never starts a model, never
+   * reserves budget and never writes repair state.
+   */
+  drainReviews(
+    request: ReviewDrainRequestV1,
+  ): Promise<PortResultV1<ReviewDrainReportV1>>;
 }
 
 // ---------------------------------------------------------------------------

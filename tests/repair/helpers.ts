@@ -25,6 +25,8 @@ import type {
   RepairStateWriter,
   ReplayPort,
   ReplayRunRequestV1,
+  ReviewDrainReportV1,
+  ReviewDrainRequestV1,
   ReviewObservationV1,
   StateReadResultV1,
   StateReadView,
@@ -190,7 +192,18 @@ export interface FakeGithubOptionsV1 {
 
 /** Recording fake GitHubPort; product logic never lives here. */
 export class FakeGithub implements GitHubPort {
+  /** Explicit trusted publisher identity; the loop must use this value. */
+  readonly reviewerIdentity = "chatgpt-codex-connector[bot]";
   readonly calls: string[] = [];
+  readonly drains: ReviewDrainRequestV1[] = [];
+  drainResult: PortResultV1<ReviewDrainReportV1> = portOk({
+    ok: true,
+    operations: [],
+    faults: [],
+    deadline: 0,
+    interrupted: true,
+    completedAt: 0,
+  });
   readonly pushes: { ref: string; sha: GitSha; expected: GitSha | null }[] = [];
   reviewObservations: ReviewObservationV1 | null = null;
   reviewStatus: "pending" | "completed" | "unavailable" = "pending";
@@ -370,6 +383,13 @@ export class FakeGithub implements GitHubPort {
       requestId: "review-req-1",
       requestedAt: this.options.reviewRequestedAt ?? T0,
     }));
+  }
+
+  drainReviews(
+    request: ReviewDrainRequestV1,
+  ): Promise<PortResultV1<ReviewDrainReportV1>> {
+    this.drains.push(request);
+    return Promise.resolve(this.drainResult);
   }
 
   observeReview(_request: unknown): Promise<PortResultV1<ReviewObservationV1>> {

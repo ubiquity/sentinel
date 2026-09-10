@@ -1126,7 +1126,11 @@ async function makeRepairRig(
     sessions,
     replayRuntime,
     options,
-    run: (deadlineMs = 600_000) =>
+    // The positive rig must admit a full declared review bound (10 minutes)
+    // plus the five-minute operation margin inside the loop deadline; 60
+    // minutes stays under the fixed 120-minute ceiling and the 90-minute model
+    // cutoff, and the clock is fake so it costs no real time.
+    run: (deadlineMs = 60 * 60_000) =>
       runComposedRepairHost(options, {
         deadline: clock.now() + deadlineMs,
         stepLimit: 32,
