@@ -29,6 +29,15 @@
  * never appears in committed fixture bytes, the candidate Git tree, fake
  * model/session input, public evidence/state or error text.
  *
+ * Dispatch metadata: the committed toy consumer and its permanent regression
+ * test select their inputs EXCLUSIVELY through the fixed root
+ * `.sentinel-replay-input.json` record written by the trusted verifier (both
+ * snapshots) and by the ReplayPort (candidate checkout). A missing dispatcher
+ * therefore cannot pass by hardcoded fixture reads, and the metadata carries
+ * only the two fixed fixture paths plus the exact ordered trusted test ids.
+ * This toy proves the dispatch/selection wiring, not the target gateway
+ * converter: the actual converter is tested separately in its own repository.
+ *
  * Public synthetic data only; no network, no model call, no credentials.
  */
 
@@ -547,9 +556,18 @@ import { handleStreamTrace } from "../src/app.ts";
 
 Deno.test("gateway: stream termination honors recorded upstream", async () => {
   console.log("${TEST_ID_MARKER}");
-  const base = "tests/fixtures/gateway-replay/${INCIDENT_A}/${CAPTURE_ID_A}";
-  const request = JSON.parse(await Deno.readTextFile(base + "/request.json"));
-  const upstream = JSON.parse(await Deno.readTextFile(base + "/upstream.json"));
+  const expectedRequest = "tests/fixtures/gateway-replay/${INCIDENT_A}/${CAPTURE_ID_A}/request.json";
+  const expectedUpstream = "tests/fixtures/gateway-replay/${INCIDENT_A}/${CAPTURE_ID_A}/upstream.json";
+  const dispatchBytes = await Deno.readFile(".sentinel-replay-input.json");
+  if (dispatchBytes.byteLength > 16 * 1024) Deno.exit(3);
+  const dispatch = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(dispatchBytes));
+  assert.equal(dispatch.version, "v1");
+  assert.deepEqual(Object.keys(dispatch).sort(), ["requestPath", "testIds", "upstreamPath", "version"]);
+  assert.equal(dispatch.requestPath, expectedRequest);
+  assert.equal(dispatch.upstreamPath, expectedUpstream);
+  assert.deepEqual(dispatch.testIds, ["${TEST_ID}"]);
+  const request = JSON.parse(await Deno.readTextFile(dispatch.requestPath));
+  const upstream = JSON.parse(await Deno.readTextFile(dispatch.upstreamPath));
   assert.equal(JSON.parse(request.body).model, "synthetic-model");
   const outcome = handleStreamTrace(request, upstream);
   assert.equal(
@@ -564,21 +582,35 @@ Deno.test("gateway: stream termination honors recorded upstream", async () => {
 /**
  * The trusted fixed consumer committed at the original SHA as
  * `scripts/replay.ts` — the ONLY consumer path bound to the trusted consumer
- * command identity. It executes the actual toy target handler against fixed
- * request/upstream fixture paths and prints the fixed test identity, then
- * emits the EXACT supported safe failure protocol — the single fixed
- * `sentinel-causal-failure:stream terminated unexpectedly` line on stdout,
- * empty stderr, exit 1 — ONLY for the intended outcome (502, incomplete,
- * exact failure body); status 200 prints only the test ids and exits 0;
- * every other outcome emits only a fixed "unsupported causal outcome"
- * diagnostic and exits 2. Raw request/upstream bytes and raw outcome.body
- * are never printed.
+ * command identity. It selects its inputs EXCLUSIVELY through the fixed root
+ * dispatch metadata (`.sentinel-replay-input.json`, exact canonical
+ * `{version,requestPath,upstreamPath,testIds}`) written by the trusted
+ * verifier into both snapshots and by the ReplayPort into the candidate
+ * checkout; a missing, malformed or differently-selected dispatcher exits 3,
+ * so hardcoded fixture reads can never pass. It executes the actual toy
+ * target handler against the selected request/upstream fixtures, prints the
+ * fixed test identity, then emits the EXACT supported safe failure protocol —
+ * the single fixed `sentinel-causal-failure:stream terminated unexpectedly`
+ * line on stdout, empty stderr, exit 1 — ONLY for the intended outcome (502,
+ * incomplete, exact failure body); status 200 prints only the test ids and
+ * exits 0; every other outcome emits only a fixed "unsupported causal
+ * outcome" diagnostic and exits 2. Raw request/upstream bytes and raw
+ * outcome.body are never printed.
  */
 function toyReplayScript(): string {
   return `import { handleStreamTrace } from "../src/app.ts";
-const base = "tests/fixtures/gateway-replay/${INCIDENT_A}/${CAPTURE_ID_A}";
-const request = JSON.parse(await Deno.readTextFile(base + "/request.json"));
-const upstream = JSON.parse(await Deno.readTextFile(base + "/upstream.json"));
+const expectedRequest = "tests/fixtures/gateway-replay/${INCIDENT_A}/${CAPTURE_ID_A}/request.json";
+const expectedUpstream = "tests/fixtures/gateway-replay/${INCIDENT_A}/${CAPTURE_ID_A}/upstream.json";
+const dispatchBytes = await Deno.readFile(".sentinel-replay-input.json");
+if (dispatchBytes.byteLength > 16 * 1024) Deno.exit(3);
+const dispatch = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(dispatchBytes));
+if (dispatch.version !== "v1") Deno.exit(3);
+if (Object.keys(dispatch).sort().join(",") !== "requestPath,testIds,upstreamPath,version") Deno.exit(3);
+if (dispatch.requestPath !== expectedRequest) Deno.exit(3);
+if (dispatch.upstreamPath !== expectedUpstream) Deno.exit(3);
+if (JSON.stringify(dispatch.testIds) !== JSON.stringify(["${TEST_ID}"])) Deno.exit(3);
+const request = JSON.parse(await Deno.readTextFile(dispatch.requestPath));
+const upstream = JSON.parse(await Deno.readTextFile(dispatch.upstreamPath));
 const outcome = handleStreamTrace(request, upstream);
 console.log("${TEST_ID_MARKER}");
 if (outcome.status === 502 && outcome.completed === false && outcome.body === "stream terminated unexpectedly") {
@@ -591,11 +623,15 @@ Deno.exit(2);
 `;
 }
 
+// The toy's own task read scope mirrors the frozen root-dispatch consumer
+// protocol (`--allow-read=.`): the committed consumer and the permanent
+// regression test read the fixed root `.sentinel-replay-input.json`
+// dispatcher, which is outside `tests/` and `src/`.
 const TOY_DENO_JSON = JSON.stringify(
   {
     tasks: {
-      replay: "deno run --allow-read=tests/,src/ scripts/replay.ts",
-      test: "deno test --allow-read=tests/,src/ tests/",
+      replay: "deno run --allow-read=. scripts/replay.ts",
+      test: "deno test --allow-read=. tests/",
     },
   },
   null,
@@ -1185,7 +1221,10 @@ async function makeCausalRig(
     setCandidateHead: (head: GitSha) => {
       candidateHead = head;
     },
-    run: (deadlineMs = 600_000) =>
+    // Default logical allowance (30 logical minutes) covers implementation,
+    // full review and entrypoint finalization bounds, still under the
+    // production 120-minute ceiling; the fake clock means no wall-clock wait.
+    run: (deadlineMs = 1_800_000) =>
       runComposedRepairHost(optionsBag, {
         deadline: clock.now() + deadlineMs,
         stepLimit: 32,

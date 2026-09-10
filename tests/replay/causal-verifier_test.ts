@@ -44,6 +44,7 @@ import type {
   FixtureDigest,
   GitSha,
 } from "../../src/contracts/brands.ts";
+import { canonicalStringify } from "../../src/contracts/canonical.ts";
 import type {
   PortResultV1,
   ReplayRunRequestV1,
@@ -61,6 +62,7 @@ import type { GatewayCausalProofV1 } from "../../src/replay/causal-proof.ts";
 import {
   CAUSAL_CONSUMER_PATH,
   GatewayLocalCausalVerifier,
+  SENTINEL_REPLAY_INPUT_PATH,
 } from "../../src/replay/causal-verifier.ts";
 import type {
   GatewayCausalVerifierInputV1,
@@ -109,6 +111,49 @@ const FIXTURE_DIR =
   `tests/fixtures/gateway-replay/${INCIDENT_ID}/${CAPTURE_ID}`;
 const REQUEST_PATH = `${FIXTURE_DIR}/request.json`;
 const UPSTREAM_PATH = `${FIXTURE_DIR}/upstream.json`;
+
+/**
+ * Exact canonical dispatch metadata bytes for the fixed consumer paths and
+ * ordered trusted test ids, written independently of the production builder
+ * (canonical key order, no private bytes).
+ */
+function expectedDispatchText(
+  testIds: readonly string[] = [TEST_ID],
+  requestPath: string = REQUEST_PATH,
+  upstreamPath: string = UPSTREAM_PATH,
+): string {
+  return canonicalStringify({
+    version: "v1",
+    requestPath,
+    upstreamPath,
+    testIds: [...testIds],
+  });
+}
+
+/**
+ * Source preamble for the committed toy consumers. The ONLY supported input
+ * selection is the fixed root dispatch metadata record: a missing, malformed,
+ * oversized or differently-selected dispatcher exits 3 (a settled failure the
+ * verifier refuses), so a hardcoded fixture read or a missing dispatcher can
+ * never satisfy the consumer protocol.
+ */
+function dispatchPreamble(expectedIds: readonly string[] = [TEST_ID]): string {
+  return `const expectedRequest = "${REQUEST_PATH}";
+const expectedUpstream = "${UPSTREAM_PATH}";
+const expectedIds = ${JSON.stringify(expectedIds)};
+const dispatchBytes = await Deno.readFile("${SENTINEL_REPLAY_INPUT_PATH}");
+if (dispatchBytes.byteLength > 16 * 1024) Deno.exit(3);
+const dispatch = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(dispatchBytes));
+if (dispatch.version !== "v1") Deno.exit(3);
+if (Object.keys(dispatch).sort().join(",") !== "requestPath,testIds,upstreamPath,version") Deno.exit(3);
+if (dispatch.requestPath !== expectedRequest) Deno.exit(3);
+if (dispatch.upstreamPath !== expectedUpstream) Deno.exit(3);
+if (JSON.stringify(dispatch.testIds) !== JSON.stringify(expectedIds)) Deno.exit(3);
+const request = JSON.parse(await Deno.readTextFile(dispatch.requestPath));
+const upstream = JSON.parse(await Deno.readTextFile(dispatch.upstreamPath));
+if (request === null || upstream === null) Deno.exit(9);
+`;
+}
 
 function encode(text: string): Uint8Array<ArrayBuffer> {
   // Copy into a fresh ArrayBuffer: RetainedGatewayCaptureV1.body demands a
@@ -337,7 +382,9 @@ function timedOutResult(settled: boolean): ReplayCommandResultV1 {
 
 async function snapshotText(cwd: string): Promise<Record<string, string>> {
   const text: Record<string, string> = {};
-  for (const path of [REQUEST_PATH, UPSTREAM_PATH]) {
+  for (
+    const path of [SENTINEL_REPLAY_INPUT_PATH, REQUEST_PATH, UPSTREAM_PATH]
+  ) {
     try {
       text[path] = decode(await Deno.readFile(`${cwd}/${path}`));
     } catch {
@@ -526,6 +573,72 @@ Deno.test("causal verifier: consumer/request/upstream paths must be three distin
         consumerRequestPath: REQUEST_PATH + "/../upstream.json",
       }),
     /fixed safe root-relative paths/,
+  );
+});
+
+Deno.test("causal verifier: neither input path may be the fixed dispatch metadata path", () => {
+  const base: GatewayLocalCausalVerifierOptionsV1 = {
+    sourcePath: "/tmp",
+    scratchDir: "/tmp",
+    consumerPath: CAUSAL_CONSUMER_PATH,
+    consumerRequestPath: REQUEST_PATH,
+    consumerUpstreamPath: UPSTREAM_PATH,
+    denoPath: "/tmp",
+    maxDurationMs: 15_000,
+    maxOutputBytes: 262_144,
+  };
+  for (
+    const key of ["consumerRequestPath", "consumerUpstreamPath"] as const
+  ) {
+    assert.throws(
+      () =>
+        new GatewayLocalCausalVerifier({
+          ...base,
+          [key]: SENTINEL_REPLAY_INPUT_PATH,
+        }),
+      /dispatch metadata path/,
+      key,
+    );
+  }
+});
+
+Deno.test("causal verifier: ancestor/descendant fixed path overlap is rejected", () => {
+  const base: GatewayLocalCausalVerifierOptionsV1 = {
+    sourcePath: "/tmp",
+    scratchDir: "/tmp",
+    consumerPath: CAUSAL_CONSUMER_PATH,
+    consumerRequestPath: REQUEST_PATH,
+    consumerUpstreamPath: UPSTREAM_PATH,
+    denoPath: "/tmp",
+    maxDurationMs: 15_000,
+    maxOutputBytes: 262_144,
+  };
+  // An input path that is an ancestor of the other input destination.
+  assert.throws(
+    () =>
+      new GatewayLocalCausalVerifier({
+        ...base,
+        consumerRequestPath: "tests",
+      }),
+    /must not overlap/,
+  );
+  // An input path nested below the other input destination.
+  assert.throws(
+    () =>
+      new GatewayLocalCausalVerifier({
+        ...base,
+        consumerUpstreamPath: `${REQUEST_PATH}/nested.json`,
+      }),
+    /must not overlap/,
+  );
+  // The bound consumer itself is protected from an ancestor input path.
+  assert.throws(
+    () =>
+      new GatewayLocalCausalVerifier({
+        ...base,
+        consumerRequestPath: "scripts",
+      }),
+    /must not overlap/,
   );
 });
 
@@ -796,6 +909,194 @@ Deno.test("causal verifier: a symlink or non-regular final input component is re
   }
 });
 
+Deno.test("causal verifier: foreign dispatch metadata bytes are rejected before any execution", async () => {
+  const onClone = async (dest: string) => {
+    await materialize(dest, consumerFiles());
+    await Deno.writeTextFile(
+      `${dest}/${SENTINEL_REPLAY_INPUT_PATH}`,
+      '{"version":"v1","requestPath":"tests/elsewhere/request.json",' +
+        '"upstreamPath":"tests/elsewhere/upstream.json","testIds":["other"]}',
+    );
+  };
+  const ctx = await scriptedContext({ onClone });
+  try {
+    assert.equal(await ctx.verify(await verifierInput()), null);
+    assert.equal(
+      ctx.runtime.runs.filter((input) => input.executable !== "git").length,
+      0,
+      "foreign dispatch metadata must reject before any consumer run",
+    );
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+Deno.test("causal verifier: a symlinked dispatch metadata target is rejected before any execution", async () => {
+  const onClone = async (dest: string) => {
+    await materialize(dest, consumerFiles());
+    await Deno.symlink(
+      "scripts/replay.ts",
+      `${dest}/${SENTINEL_REPLAY_INPUT_PATH}`,
+    );
+  };
+  const ctx = await scriptedContext({ onClone });
+  try {
+    assert.equal(await ctx.verify(await verifierInput()), null);
+    assert.equal(
+      ctx.runtime.runs.filter((input) => input.executable !== "git").length,
+      0,
+      "symlinked dispatch metadata must reject before any consumer run",
+    );
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+Deno.test("causal verifier: a directory at the dispatch metadata target is rejected before any execution", async () => {
+  const onClone = async (dest: string) => {
+    await materialize(dest, consumerFiles());
+    await Deno.mkdir(`${dest}/${SENTINEL_REPLAY_INPUT_PATH}`, {
+      recursive: true,
+    });
+  };
+  const ctx = await scriptedContext({ onClone });
+  try {
+    assert.equal(await ctx.verify(await verifierInput()), null);
+    assert.equal(
+      ctx.runtime.runs.filter((input) => input.executable !== "git").length,
+      0,
+      "directory dispatch metadata must reject before any consumer run",
+    );
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+Deno.test("causal verifier: byte-identical existing dispatch metadata is accepted untouched in both snapshots", async () => {
+  const exact = encode(expectedDispatchText());
+  const seen: string[] = [];
+  const onClone = async (dest: string) => {
+    await materialize(dest, consumerFiles());
+    await Deno.writeFile(`${dest}/${SENTINEL_REPLAY_INPUT_PATH}`, exact);
+    seen.push(await Deno.readTextFile(`${dest}/${SENTINEL_REPLAY_INPUT_PATH}`));
+  };
+  const ctx = await scriptedContext({
+    onClone,
+    consumer: () => intendedFailResult(),
+  });
+  try {
+    const proof = await ctx.verify(await verifierInput());
+    assert.notEqual(
+      proof,
+      null,
+      "identical existing metadata must be accepted",
+    );
+    assert.equal(seen.length, 2, "both snapshots carried existing metadata");
+    for (const text of seen) {
+      assert.equal(text, expectedDispatchText());
+    }
+    for (const record of ctx.runtime.consumerRecords) {
+      assert.equal(
+        record.snapshotText[SENTINEL_REPLAY_INPUT_PATH],
+        expectedDispatchText(),
+        "the identical record is never rewritten",
+      );
+    }
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+Deno.test("causal verifier: whole-snapshot preflight rejects a foreign dispatch metadata target before any private write", async () => {
+  // The sanitized snapshot's dispatch metadata target already holds FOREIGN
+  // bytes. The whole-snapshot preflight must reject BEFORE any write — no
+  // metadata and no private original bytes may be placed anywhere. The task
+  // directory is made execute-only after both snapshots are materialized so
+  // the verifier's best-effort cleanup cannot enumerate or remove the
+  // evidence; the test restores permissions and removes it in teardown.
+  const canaryPath = "public-canary.txt";
+  const canaryBytes = "synthetic-public-canary-v1\n";
+  let taskDir: string | null = null;
+  const onClone = async (dest: string) => {
+    await materialize(dest, consumerFiles());
+    if (dest.endsWith("/original")) {
+      // Public synthetic canary: cleanup must not erase original evidence.
+      await Deno.writeTextFile(`${dest}/${canaryPath}`, canaryBytes);
+      return;
+    }
+    if (!dest.endsWith("/sanitized")) return;
+    await Deno.writeTextFile(
+      `${dest}/${SENTINEL_REPLAY_INPUT_PATH}`,
+      '{"version":"v1","foreign":true}',
+    );
+    taskDir = dest.slice(0, dest.lastIndexOf("/"));
+    // Execute-only: preflight can reach known child paths, but recursive
+    // cleanup cannot enumerate (and thus cannot delete) snapshot contents.
+    await Deno.chmod(taskDir, 0o100);
+  };
+  const ctx = await scriptedContext({ onClone });
+  try {
+    assert.equal(await ctx.verify(await verifierInput()), null);
+    assert.equal(
+      ctx.runtime.runs.filter((input) => input.executable !== "git").length,
+      0,
+      "no consumer may run after a preflight rejection",
+    );
+    assert.notEqual(taskDir, null, "both snapshots must have been cloned");
+    const root = taskDir!;
+    // Execute-only taskDir blocks recursive cleanup enumeration, so this
+    // canary proves original evidence survived verify: the absence checks
+    // below cannot be cleanup artifacts.
+    assert.equal(
+      await Deno.readTextFile(`${root}/original/${canaryPath}`),
+      canaryBytes,
+      "original snapshot canary must survive verify cleanup",
+    );
+    // The original snapshot received NOTHING (no metadata, no private bytes).
+    for (
+      const path of [SENTINEL_REPLAY_INPUT_PATH, REQUEST_PATH, UPSTREAM_PATH]
+    ) {
+      let exists = true;
+      try {
+        await Deno.lstat(`${root}/original/${path}`);
+      } catch {
+        exists = false;
+      }
+      assert.equal(
+        exists,
+        false,
+        `original/${path} must not be written before the whole preflight passes`,
+      );
+    }
+    // The sanitized snapshot's input destinations are untouched too.
+    for (const path of [REQUEST_PATH, UPSTREAM_PATH]) {
+      let exists = true;
+      try {
+        await Deno.lstat(`${root}/sanitized/${path}`);
+      } catch {
+        exists = false;
+      }
+      assert.equal(
+        exists,
+        false,
+        `sanitized/${path} must not be written before the whole preflight passes`,
+      );
+    }
+    // The foreign bytes are untouched (never rewritten, never removed).
+    assert.equal(
+      await Deno.readTextFile(
+        `${root}/sanitized/${SENTINEL_REPLAY_INPUT_PATH}`,
+      ),
+      '{"version":"v1","foreign":true}',
+    );
+  } finally {
+    if (taskDir !== null) {
+      await Deno.chmod(taskDir, 0o700).catch(() => {});
+    }
+    await ctx.cleanup();
+  }
+});
+
 // ---------------------------------------------------------------------------
 // GROUP C: execution semantics (scripted consumer runs)
 // ---------------------------------------------------------------------------
@@ -901,11 +1202,22 @@ Deno.test("causal verifier: proof carries exact observed evidence, private bytes
     );
 
     // Placement: the private original bytes are ONLY in the original
-    // snapshot; the sanitized snapshot carries the exact composed bytes.
+    // snapshot; the sanitized snapshot carries the exact composed bytes. Both
+    // snapshots carry the exact canonical dispatch metadata (fixed paths,
+    // ordered trusted ids, no private bytes).
     for (const record of ctx.runtime.consumerRecords) {
       const snapshot = record.snapshotText;
       assert.ok(snapshot[REQUEST_PATH] !== undefined);
       assert.ok(snapshot[UPSTREAM_PATH] !== undefined);
+      assert.equal(
+        snapshot[SENTINEL_REPLAY_INPUT_PATH],
+        expectedDispatchText(),
+        "both snapshots carry the exact canonical dispatch metadata",
+      );
+      assert.ok(
+        !snapshot[SENTINEL_REPLAY_INPUT_PATH]!.includes(PRIVATE_MARKER),
+        "dispatch metadata never carries private bytes",
+      );
     }
     const originalSnapshot = ctx.runtime.consumerRecords[0]!.snapshotText;
     const sanitizedSnapshot = ctx.runtime.consumerRecords[1]!.snapshotText;
@@ -936,6 +1248,34 @@ function paramValue(args: string[], name: string): string | null {
   }
   return null;
 }
+
+Deno.test("causal verifier: dispatch metadata binds the exact ordered trusted test ids in both snapshots", async () => {
+  const ids = [TEST_ID, TEST_ID_B];
+  const ctx = await scriptedContext({
+    consumer: () =>
+      exitedResult(
+        1,
+        `${EXPECTED_MARKER_LINE}sentinel-replay-test:${TEST_ID_B}\n${EXPECTED_FAIL_LINE}`,
+      ),
+  });
+  try {
+    const proof = await ctx.verify(await verifierInput({ testIds: ids }));
+    assert.notEqual(proof, null, "the ordered trusted ids must be accepted");
+    if (proof === null) return;
+    assert.deepEqual(proof.originalObservation.observedTestIds, ids);
+    assert.deepEqual(proof.sanitizedObservation.observedTestIds, ids);
+    assert.equal(ctx.runtime.consumerRecords.length, 2);
+    for (const record of ctx.runtime.consumerRecords) {
+      assert.equal(
+        record.snapshotText[SENTINEL_REPLAY_INPUT_PATH],
+        expectedDispatchText(ids),
+        "metadata carries the exact ordered trusted ids in both snapshots",
+      );
+    }
+  } finally {
+    await ctx.cleanup();
+  }
+});
 
 Deno.test("causal verifier: extra observed test identities are no evidence", async () => {
   const ctx = await scriptedContext({
@@ -1452,25 +1792,47 @@ Deno.test("causal proof boundary: absent or mismatched proofs keep the ordinary 
     );
     assert.deepEqual(mismatched.limitations, ["fixture_redacted"]);
 
-    // Wrong fixture ref (a different capture identity): the port derives the
-    // incident/capture from the request ref, so the proof cannot bind.
-    const wrongRefBundle = await gatewayBundle(toy.originalSha);
+    // Wrong fixture ref (a different capture identity): the resolved bundle
+    // still has to be exactly the two gateway entries for the REF's capture
+    // (the fixed dispatch protocol), and the proof — which binds the ORIGINAL
+    // capture — cannot bind to the different ref, so the ordinary redacted
+    // limitation stays.
+    const differentCapture = "different-capture";
+    const differentDir =
+      `tests/fixtures/gateway-replay/${INCIDENT_ID}/${differentCapture}`;
+    const differentEntries = [
+      {
+        path: `${differentDir}/request.json`,
+        bytes: composedRequestBytes(),
+      },
+      {
+        path: `${differentDir}/upstream.json`,
+        bytes: composedUpstreamBytes(),
+      },
+    ];
+    const differentDigest = await composedDigest(differentEntries);
+    const wrongRefBundle: ResolvedFixtureV1 = {
+      ...(await gatewayBundle(toy.originalSha)).bundle,
+      entries: differentEntries,
+    };
     const wrongRefPort = portWith(
       toy.root,
       `${root}/scratch`,
-      wrongRefBundle.bundle,
-      { config: evalConfig(FAIL_SCRIPT) },
+      wrongRefBundle,
+      { config: evalConfig(FAIL_SCRIPT.replace(FIXTURE_DIR, differentDir)) },
     );
     const wrongRef = assertPortOk(
       await wrongRefPort.runReplay(
         runRequest(
-          wrongRefBundle.bundle,
-          `fixture://gateway-replay/${INCIDENT_ID}/different-capture/${wrongRefBundle.digest}`,
-          wrongRefBundle.digest,
+          wrongRefBundle,
+          `fixture://gateway-replay/${INCIDENT_ID}/${differentCapture}/${differentDigest}`,
+          differentDigest,
           toy.originalSha,
         ),
       ),
     );
+    assert.equal(wrongRef.outcome, "failed");
+    assert.equal(wrongRef.failure?.intended, true);
     assert.deepEqual(wrongRef.limitations, ["fixture_redacted"]);
 
     // Wrong command identity: the proof binds the configured test command.
@@ -1733,9 +2095,7 @@ const darwinOnly = Deno.build.os !== "darwin";
  */
 function causalConsumerSource(): string {
   return `import { handleStreamTrace } from "../src/app.ts";
-const base = "tests/fixtures/gateway-replay/${INCIDENT_ID}/${CAPTURE_ID}";
-const request = JSON.parse(await Deno.readTextFile(base + "/request.json"));
-const upstream = JSON.parse(await Deno.readTextFile(base + "/upstream.json"));
+${dispatchPreamble()}
 const outcome = handleStreamTrace(request, upstream);
 console.log("sentinel-replay-test:${TEST_ID}");
 if (outcome.status === 502 && outcome.completed === false && outcome.body === "stream terminated unexpectedly") {
@@ -1793,10 +2153,7 @@ export function handleStreamTrace(
  * EXACT valid safe failure protocol so the verifier would prove it and the
  * negative test fails. */
 function denialConsumerSource(operation: string): string {
-  return `const base = "tests/fixtures/gateway-replay/${INCIDENT_ID}/${CAPTURE_ID}";
-const request = JSON.parse(await Deno.readTextFile(base + "/request.json"));
-const upstream = JSON.parse(await Deno.readTextFile(base + "/upstream.json"));
-if (request === null || upstream === null) Deno.exit(9);
+  return `${dispatchPreamble()}
 ${operation}
 console.log("sentinel-replay-test:${TEST_ID}");
 console.log("sentinel-causal-failure:stream terminated unexpectedly");
@@ -1824,10 +2181,7 @@ function siblingDenialConsumerSource(
 ): string {
   const attemptGuard = attemptInOriginal ? "inOriginal" : "!inOriginal";
   return `import { handleStreamTrace } from "../src/app.ts";
-const base = "tests/fixtures/gateway-replay/${INCIDENT_ID}/${CAPTURE_ID}";
-const request = JSON.parse(await Deno.readTextFile(base + "/request.json"));
-const upstream = JSON.parse(await Deno.readTextFile(base + "/upstream.json"));
-if (request === null || upstream === null) Deno.exit(9);
+${dispatchPreamble()}
 const inOriginal = Deno.cwd().endsWith("/original");
 if (${attemptGuard}) {
   try {

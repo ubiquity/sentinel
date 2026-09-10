@@ -14,6 +14,18 @@
  * before/after pair with the same bundle and owns ReplayResultV1
  * composition.
  *
+ * Gateway dispatch: a request whose `fixtureRef` parses through the frozen
+ * gateway identity grammar additionally receives the fixed root
+ * `.sentinel-replay-input.json` record — the exact canonical
+ * `{version,requestPath,upstreamPath,testIds}` bytes derived from the parsed
+ * incident/capture paths and the trusted resolved test ids — materialized
+ * OUTSIDE the digested two-entry bundle so the committed target consumer can
+ * select the exact fixture instead of scanning or hardcoding it. The gateway
+ * bundle must be exactly the two fixed request/upstream entries; missing,
+ * ambiguous or extra entries are rejected. A reserved-but-malformed gateway
+ * reference is rejected rather than silently treated as non-gateway, and
+ * non-gateway requests are unchanged (no metadata).
+ *
  * Command authority: `request.commandId` resolves against the trusted
  * configured `RepositoryConfigV1` command registry (own-property lookup
  * only). Request/model-supplied argv, shell strings and interpolations are
@@ -60,6 +72,10 @@ import {
   gatewayFixtureRefIdentity,
   validateGatewayCausalProof,
 } from "./causal-proof.ts";
+import {
+  buildSentinelReplayInputMetadata,
+  SENTINEL_REPLAY_INPUT_PATH,
+} from "./causal-verifier.ts";
 import { checkResolvedFixture, computeReplayFixtureDigest } from "./fixture.ts";
 import type {
   ExpectedFailureV1,
@@ -134,6 +150,16 @@ const MAX_TEST_IDS = 64;
 const TEST_ID_RE = /^[A-Za-z0-9._:-]{1,64}$/;
 const LOCAL_SOURCE_RE = /^https?:\/\/[^\s/@]+(?::\d+)?(?:\/[^\s]*)?$/;
 const FILE_SOURCE_RE = /^file:\/\/[^\s/@]+(?:\/[^\s]*)?$/;
+/**
+ * Reserved gateway dispatch namespace (mirrors the frozen grammar in
+ * `causal-proof.ts`). A reference in this namespace belongs to the gateway
+ * replay protocol: it must parse through `gatewayFixtureRefIdentity`, and a
+ * malformed reserved reference is rejected here — it never silently falls
+ * back to the non-gateway fixture protocol (which has no dispatch metadata).
+ */
+const GATEWAY_FIXTURE_REF_PREFIX = "fixture://gateway-replay/";
+/** Fixed gateway fixture directory root (frozen composition layout). */
+const GATEWAY_FIXTURE_ROOT = "tests/fixtures/gateway-replay";
 
 export class ReplayPortImpl implements ReplayPort {
   private readonly runtime: ReplayRuntimeV1;
@@ -213,6 +239,24 @@ export class ReplayPortImpl implements ReplayPort {
     }
     const spec = registry[request.commandId];
 
+    // Gateway dispatch identity: ONLY a valid frozen gateway fixture reference
+    // selects the dispatch-metadata protocol. A reference in the reserved
+    // gateway namespace that does not parse is rejected here instead of
+    // silently falling back to the non-gateway fixture path (which would run
+    // the target command without the fixed root dispatcher).
+    const gatewayRef = gatewayFixtureRefIdentity(request.fixtureRef);
+    if (
+      gatewayRef === null &&
+      (request.fixtureRef.startsWith(GATEWAY_FIXTURE_REF_PREFIX) ||
+        request.fixtureRef === GATEWAY_FIXTURE_REF_PREFIX.slice(0, -1))
+    ) {
+      return portError(
+        "invalid",
+        "malformed gateway fixture reference is never treated as a " +
+          "non-gateway fixture",
+      );
+    }
+
     const resolvedResult = await this.options.fixtures.resolveFixture(
       request.fixtureRef,
     );
@@ -241,6 +285,44 @@ export class ReplayPortImpl implements ReplayPort {
     );
     if (!check.ok) {
       return portError("invalid", check.reason);
+    }
+
+    // Gateway dispatch metadata (OUTSIDE the digested two-entry bundle). It is
+    // derived ONLY from the already parsed frozen gateway fixture identity and
+    // the trusted resolved test identity — never from a scan or a model path.
+    // The expected gateway bundle is EXACTLY the two fixed request/upstream
+    // entries at the resolved incident/capture paths: a missing, ambiguous or
+    // extra entry is rejected before any target command runs. A non-gateway
+    // request keeps the unchanged protocol (no dispatch metadata).
+    let dispatchEntry: ReplayFixtureEntryV1 | null = null;
+    if (gatewayRef !== null) {
+      const base =
+        `${GATEWAY_FIXTURE_ROOT}/${gatewayRef.incidentId}/${gatewayRef.captureId}`;
+      const requestPath = `${base}/request.json`;
+      const upstreamPath = `${base}/upstream.json`;
+      const paths = new Set(resolved.entries.map((entry) => entry.path));
+      if (
+        resolved.entries.length !== 2 || paths.size !== 2 ||
+        !paths.has(requestPath) || !paths.has(upstreamPath)
+      ) {
+        return portError(
+          "invalid",
+          "gateway fixture bundle must contain exactly the fixed request and " +
+            "upstream entries",
+        );
+      }
+      const metadata = buildSentinelReplayInputMetadata(
+        requestPath,
+        upstreamPath,
+        resolved.testIds,
+      );
+      if (metadata === null) {
+        return portError(
+          "invalid",
+          "gateway dispatch metadata is outside its fixed bounds",
+        );
+      }
+      dispatchEntry = { path: SENTINEL_REPLAY_INPUT_PATH, bytes: metadata };
     }
 
     // Trusted causal-proof boundary (BEFORE any target command runs): a
@@ -370,6 +452,7 @@ export class ReplayPortImpl implements ReplayPort {
       const materialized = await this.materializeBundle(
         checkoutDir,
         resolved.entries,
+        dispatchEntry,
       );
       if (!materialized.ok) {
         return portError("invalid", materialized.reason);
@@ -476,41 +559,55 @@ export class ReplayPortImpl implements ReplayPort {
   }
 
   /**
-   * Materialize the trusted bundle at its fixed safe paths.
+   * Materialize the trusted bundle at its fixed safe paths, plus the optional
+   * gateway dispatch metadata OUTSIDE the digested bundle.
    *
-   * Missing entries are written only. A safe existing target is accepted
-   * ONLY when its bytes are byte-identical to the trusted attested bundle —
-   * an actual candidate that already contains the permanent regression
-   * and recorded fixture must replay without rewriting them. Different
+   * ALL destinations (dispatch metadata and every bundle entry) are
+   * preflighted BEFORE anything is written; missing entries are written only.
+   * A safe existing target is accepted ONLY when its bytes are
+   * byte-identical to the trusted attested bytes — an actual candidate that
+   * already contains the permanent regression, the recorded fixture and the
+   * fixed dispatch metadata must replay without rewriting them. Different
    * bytes, directories, symlinks and unsafe (symlink/non-directory)
-   * ancestors are rejected before any target command runs.
+   * ancestors are rejected before any target command runs and before any
+   * other destination is written.
    */
   private async materializeBundle(
     checkoutDir: string,
     entries: readonly ReplayFixtureEntryV1[],
+    dispatchEntry: ReplayFixtureEntryV1 | null = null,
   ): Promise<{ ok: true } | { ok: false; reason: string }> {
     const sorted = [...entries].sort((a, b) =>
       a.path < b.path ? -1 : a.path > b.path ? 1 : 0
     );
-    const existing: string[] = [];
-    for (const entry of sorted) {
+    // The dispatch metadata is planned first but never enters the bundle
+    // digest, the scope/protected-path checks or the request fixture digest.
+    const planned = dispatchEntry === null
+      ? sorted
+      : [dispatchEntry, ...sorted];
+    const missing: string[] = [];
+    for (const entry of planned) {
       const conflict = await bundleTargetConflict(
         checkoutDir,
         entry.path,
         entry.bytes,
       );
       if (conflict !== null) return { ok: false, reason: conflict };
-      const target = `${checkoutDir}/${entry.path}`;
-      if (await targetExists(target)) existing.push(entry.path);
+      if (!(await targetExists(`${checkoutDir}/${entry.path}`))) {
+        missing.push(entry.path);
+      }
     }
     // Materialize ONLY the missing safe entries; already-present entries are
     // byte-identical (verified above) and are deliberately NOT rewritten.
-    for (const entry of sorted) {
-      if (existing.includes(entry.path)) continue;
+    // Every missing destination is created EXCLUSIVELY (createNew): a raced
+    // symlink or foreign file makes the create fail instead of being
+    // followed or overwritten.
+    for (const entry of planned) {
+      if (!missing.includes(entry.path)) continue;
       const target = `${checkoutDir}/${entry.path}`;
       const parent = target.slice(0, target.lastIndexOf("/"));
       await Deno.mkdir(parent, { recursive: true });
-      await Deno.writeFile(target, entry.bytes);
+      await Deno.writeFile(target, entry.bytes, { createNew: true });
     }
     return { ok: true };
   }

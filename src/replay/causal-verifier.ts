@@ -36,6 +36,19 @@
  * protocol bytes — arbitrary or private diagnostics are never accepted and
  * never hashed.
  *
+ * Dispatch metadata: both snapshots also receive the fixed root
+ * `.sentinel-replay-input.json` record — the exact canonical
+ * `{version:'v1',requestPath,upstreamPath,testIds}` bytes derived from the
+ * already validated fixed consumer paths and the ordered validated trusted
+ * test ids (<=16 KiB, no private bytes). The committed consumer reads ONLY
+ * this record plus the two paths it names, so a missing dispatcher can never
+ * be satisfied by hardcoded fixture reads. The metadata is NOT part of the
+ * digested two-entry sanitized bundle: the bundle bytes and digest are
+ * unchanged. Both snapshots are preflighted in full (all three destinations,
+ * every component) BEFORE any byte is placed; metadata is placed before the
+ * private original bytes, and an existing target is accepted only when it is
+ * byte-identical and is never rewritten.
+ *
  * The OS boundary profile is the FIXED deny-by-default seatbelt profile that
  * the host acceptance receipts validated (byte-copy of the immutable
  * /tmp/sentinel-deno-import-boundary-profile-v3-20260909.sb): it allows the
@@ -176,6 +189,58 @@ export const CAUSAL_CONSUMER_PATH = "scripts/replay.ts";
 export const CAUSAL_SANDBOX_EXEC_PATH = "/usr/bin/sandbox-exec";
 
 /**
+ * Fixed root-relative dispatch metadata path. The committed consumer reads
+ * this ONE record at the snapshot/checkout root and then only the two
+ * relative paths it names; it never scans fixtures or picks an entry by
+ * order. The file is public protocol data (fixed paths plus public test ids)
+ * and is written into both verifier snapshots and the candidate checkout.
+ */
+export const SENTINEL_REPLAY_INPUT_PATH = ".sentinel-replay-input.json";
+
+/** Fixed byte bound for the dispatch metadata record (consumer-enforced). */
+export const MAX_SENTINEL_REPLAY_INPUT_BYTES = 16 * 1024;
+
+/**
+ * Exact canonical dispatch metadata record:
+ * `{version:'v1',requestPath,upstreamPath,testIds}`. `requestPath` and
+ * `upstreamPath` are already validated fixed consumer paths and `testIds` is
+ * the ordered validated trusted id list; the record carries no private bytes.
+ */
+export interface SentinelReplayInputV1 {
+  version: "v1";
+  requestPath: string;
+  upstreamPath: string;
+  testIds: string[];
+}
+
+/**
+ * Canonical dispatch metadata bytes for already validated trusted inputs:
+ * canonical JSON (`canonicalStringify` key order), two distinct safe
+ * root-relative paths and 1..64 ordered valid test ids, bounded to 16 KiB.
+ * Returns null (never a partial record) when any bound is violated.
+ */
+export function buildSentinelReplayInputMetadata(
+  requestPath: string,
+  upstreamPath: string,
+  testIds: readonly string[],
+): Uint8Array | null {
+  if (!isSafeBundlePath(requestPath) || !isSafeBundlePath(upstreamPath)) {
+    return null;
+  }
+  if (requestPath === upstreamPath) return null;
+  if (!validTestIds(testIds)) return null;
+  const record: SentinelReplayInputV1 = {
+    version: "v1",
+    requestPath,
+    upstreamPath,
+    testIds: [...testIds],
+  };
+  const bytes = encode(canonicalStringify(record));
+  if (bytes.byteLength > MAX_SENTINEL_REPLAY_INPUT_BYTES) return null;
+  return bytes;
+}
+
+/**
  * Fixed deny-by-default seatbelt profile. Byte-copy of the immutable
  * /tmp/sentinel-deno-import-boundary-profile-v3-20260909.sb (host acceptance
  * receipt cc48556d…): the only reads are the installed Deno binary, the
@@ -268,6 +333,20 @@ export class GatewayLocalCausalVerifier implements GatewayCausalVerifierV1 {
         "GatewayLocalCausalVerifier requires an absolute installed Deno binary",
       );
     }
+    // Neither input may ever be the fixed dispatch metadata path (checked
+    // before the generic safe-path validation so the specific rejection is
+    // observable): the metadata record is written by this verifier and is
+    // never an input destination.
+    if (
+      options.consumerRequestPath === SENTINEL_REPLAY_INPUT_PATH ||
+      options.consumerUpstreamPath === SENTINEL_REPLAY_INPUT_PATH
+    ) {
+      throw new TypeError(
+        "GatewayLocalCausalVerifier input paths must differ from the fixed " +
+          "dispatch metadata path " + SENTINEL_REPLAY_INPUT_PATH,
+      );
+    }
+    // Fixed safe root-relative destinations only.
     for (
       const path of [
         options.consumerPath,
@@ -279,6 +358,26 @@ export class GatewayLocalCausalVerifier implements GatewayCausalVerifierV1 {
         throw new TypeError(
           "GatewayLocalCausalVerifier requires fixed safe root-relative paths",
         );
+      }
+    }
+    // The three fixed destinations must never overlap as ancestor/descendant
+    // paths: placing a file at one destination would make another destination
+    // unplaceable after the whole preflight (a partial placement). Rejected
+    // before any filesystem work.
+    const fixedPaths = [
+      options.consumerPath,
+      options.consumerRequestPath,
+      options.consumerUpstreamPath,
+    ];
+    for (let i = 0; i < fixedPaths.length; i += 1) {
+      for (let j = 0; j < fixedPaths.length; j += 1) {
+        if (i === j) continue;
+        if (fixedPaths[j]!.startsWith(`${fixedPaths[i]!}/`)) {
+          throw new TypeError(
+            "GatewayLocalCausalVerifier paths must not overlap as ancestor " +
+              "and descendant",
+          );
+        }
       }
     }
     // The consumer path is BOUND to the fixed trusted-consumer command
@@ -377,6 +476,27 @@ export class GatewayLocalCausalVerifier implements GatewayCausalVerifierV1 {
     const privateText = decodeFatal(body);
     if (privateText === null) return null;
 
+    // Fixed root dispatch metadata over the already validated fixed paths and
+    // the ordered validated trusted test ids. Public bytes only; never part
+    // of the digested two-entry fixture bundle.
+    const metadataBytes = buildSentinelReplayInputMetadata(
+      this.options.consumerRequestPath,
+      this.options.consumerUpstreamPath,
+      input.testIds,
+    );
+    if (metadataBytes === null) return null;
+
+    // Private original request/upstream bytes: ONLY under the disposable
+    // restricted task directory, removed in finally. The consumer protocol
+    // is fixed: request.json carries the raw body string; upstream.json
+    // carries the raw authenticated upstream trace.
+    const originalRequestBytes = encode(
+      canonicalStringify({ body: privateText }),
+    );
+    const originalUpstreamBytes = encode(
+      canonicalStringify(plainUpstream(upstream)),
+    );
+
     // ---- platform/boundary preflight: the narrow macOS slice ----
     // No Deno-only or import-scanner fallback: without the real OS boundary
     // this verifier returns NO proof.
@@ -414,35 +534,56 @@ export class GatewayLocalCausalVerifier implements GatewayCausalVerifierV1 {
       await this.cloneAt(taskDir, sanitizedDir, originalSha);
 
       // The trusted consumer must exist at the exact original SHA as a regular
-      // file (never a symlink), and BOTH input paths — every component of
-      // each — must be symlink-free with only regular-file endings before
-      // any private bytes are placed.
+      // file (never a symlink), and the WHOLE snapshot preflight — the fixed
+      // dispatch metadata plus BOTH input paths, every destination of both
+      // snapshots, every component of every path — must pass before ANY byte
+      // is placed. An existing regular destination is accepted only when it
+      // is byte-identical to the exact bytes that would be placed (never
+      // rewritten); symlinks, directories, non-regular entries and foreign
+      // bytes reject with nothing written.
+      const originalFiles: ReplayFixtureEntryV1[] = [
+        { path: SENTINEL_REPLAY_INPUT_PATH, bytes: metadataBytes },
+        {
+          path: this.options.consumerRequestPath,
+          bytes: originalRequestBytes,
+        },
+        {
+          path: this.options.consumerUpstreamPath,
+          bytes: originalUpstreamBytes,
+        },
+      ];
+      const sanitizedFiles: ReplayFixtureEntryV1[] = [
+        { path: SENTINEL_REPLAY_INPUT_PATH, bytes: metadataBytes },
+        { path: this.options.consumerRequestPath, bytes: requestBytes },
+        { path: this.options.consumerUpstreamPath, bytes: upstreamBytes },
+      ];
       for (const dir of [originalDir, sanitizedDir]) {
         if (!(await regularFileAt(dir, this.options.consumerPath))) return null;
-        if (
-          !(await canPlaceInput(
-            dir,
-            this.options.consumerRequestPath,
-            this.options.consumerUpstreamPath,
-          ))
-        ) {
-          return null;
-        }
+      }
+      if (!(await preflightDestinations(originalDir, originalFiles))) {
+        return null;
+      }
+      if (!(await preflightDestinations(sanitizedDir, sanitizedFiles))) {
+        return null;
       }
 
-      // Private original request/upstream: ONLY under the disposable
-      // restricted task directory, removed in finally. The consumer protocol
-      // is fixed: request.json carries the raw body string; upstream.json
-      // carries the raw authenticated upstream trace.
+      // Metadata first in BOTH snapshots (public, deterministic), then the
+      // private original bytes, then the exact sanitized bundle bytes.
+      await writeInput(originalDir, SENTINEL_REPLAY_INPUT_PATH, metadataBytes);
+      await writeInput(
+        sanitizedDir,
+        SENTINEL_REPLAY_INPUT_PATH,
+        metadataBytes,
+      );
       await writeInput(
         originalDir,
         this.options.consumerRequestPath,
-        encode(canonicalStringify({ body: privateText })),
+        originalRequestBytes,
       );
       await writeInput(
         originalDir,
         this.options.consumerUpstreamPath,
-        encode(canonicalStringify(plainUpstream(upstream))),
+        originalUpstreamBytes,
       );
 
       // Sanitized snapshot uses the EXACT composed bundle bytes verbatim.
@@ -811,19 +952,23 @@ function plainUpstream(upstream: RetainedGatewayCaptureV1["upstream"]): Record<
 }
 
 /**
- * Validate EVERY component of BOTH paths with lstat before any private write:
- * a symlink anywhere (ancestor or final component), a non-directory ancestor
- * or an existing non-regular final component rejects the target. Every path
- * is validated independently — a clean first path never short-circuits the
- * second path, and a missing component is placeable only when the rest of
- * that chain is absent too.
+ * Whole-snapshot preflight over ALL planned destinations BEFORE any write:
+ * every component of every path is lstat-checked — a symlink anywhere
+ * (ancestor or final component), a non-directory ancestor, a directory or any
+ * other non-regular final component rejects the snapshot — and an existing
+ * regular final file is accepted ONLY when its bytes are IDENTICAL to the
+ * exact planned bytes (external fixture/input collision, including the
+ * dispatch metadata). Nothing is placed by this function, and every planned
+ * destination is checked even when an earlier one is clean.
  */
-async function canPlaceInput(
+async function preflightDestinations(
   checkoutRoot: string,
-  ...relativePaths: string[]
+  planned: readonly ReplayFixtureEntryV1[],
 ): Promise<boolean> {
-  for (const relativePath of relativePaths) {
-    if (!(await canPlacePath(checkoutRoot, relativePath))) return false;
+  for (const item of planned) {
+    if (!(await canPlacePath(checkoutRoot, item.path, item.bytes))) {
+      return false;
+    }
   }
   return true;
 }
@@ -831,6 +976,7 @@ async function canPlaceInput(
 async function canPlacePath(
   checkoutRoot: string,
   relativePath: string,
+  expectedBytes: Uint8Array,
 ): Promise<boolean> {
   const segments = relativePath.split("/");
   let current = checkoutRoot;
@@ -840,17 +986,24 @@ async function canPlacePath(
     try {
       info = await Deno.lstat(candidate);
     } catch (error) {
-      // The chain from here on is absent: the input can be created fresh
-      // (no symlink is followed, the write is exclusive).
+      // The chain from here on is absent: the destination can be created
+      // fresh (no symlink is followed, the write is exclusive).
       if (error instanceof Deno.errors.NotFound) return true;
       return false;
     }
     if (info.isSymlink) return false;
     if (i === segments.length - 1) {
-      // The final component must be missing or an already-regular file (the
-      // write is byte-identical-or-exclusive); directories and other
-      // non-regular entries are rejected.
-      return info.isFile;
+      // The final component must be missing (exclusive create) or an
+      // already-regular file whose bytes are IDENTICAL (accepted untouched).
+      // Directories, other non-regular entries and foreign bytes reject.
+      if (!info.isFile) return false;
+      let existing: Uint8Array;
+      try {
+        existing = await Deno.readFile(candidate);
+      } catch {
+        return false;
+      }
+      return bytesEqual(existing, expectedBytes);
     }
     if (!info.isDirectory) return false;
     current = candidate;
