@@ -7,14 +7,14 @@ is evidence, not a second queue. Only the current GPT-6 Astra integration owner
 may edit this file. Workers return proposed updates and immutable evidence;
 READY means awaiting Astra acceptance. Do not create replacement task lists.
 
-Last reconciled: 2026-09-09 22:58 UTC by Astra session
+Last reconciled: 2026-09-10 00:47 UTC by Astra session
 `01a08416-3171-7c82-ab91-dcbab6817b89` at canonical source/ledger tip
 `c434744dcfbe5a2547719d3ecad656a38ce59206` with T02 accepted on its verified frozen bytes. Canonical lane remains
 `/Users/nv/repos/ubiquity/sentinel/.codex-worktrees/master-plan-gfa795549e5`,
 branch `codex/master-plan-gfa795549e5`. No production activation is accepted.
 The owner supervises DSH directly, per the user's 19:07 UTC instruction.
 T01 and T02 are accepted; next work is the bounded T03 journal/client checkpoint.
-Runtime implementation remains Luna/max. T02 is committed as 6b4e660732765f064f6271eaa8147b01f2801eca. T03 journal/client writer PID66630 completed; T03 journal/client checkpoint accepted; all DSH writers settled; producer checkpoint next.
+Runtime implementation remains Luna/max. T02 is committed as 6b4e660732765f064f6271eaa8147b01f2801eca. T03 journal/client writer PID66630 completed; T03 journal/client committed35b3313; producer writer PID5404 active.
 
 Task states: pending, in_progress, ready, accepted, blocked, rejected. Only
 accepted closes a task, and only after the acceptance evidence below exists.
@@ -25,7 +25,7 @@ to keep retrying. Scope changes require an Astra entry with the reason.
 | --- | --- | --- | --- |
 | T01 Causal capture verifier | accepted / Astra, fresh audit and canonical check below | Concrete restricted execution of original and sanitized input at the same original SHA; intended failure observed in both; identical safe fixture passes candidate through the real local loop; privacy and negative cases preserved | Worker correction `7491c68` and original `55555dc` are canonical ancestors through merge `090b8aa`. Fresh final Astra audit accepted the exact frozen candidate; canonical focused host suite passed 186/186. Local macOS slice only; T04 target consumer, T05 production isolation and T08 full aggregate acceptance remain open. No active DSH writer. |
 | T02 Runtime model receipt | accepted / Astra | Owner-approved correlated request/runtime evidence binds configured provider, Luna/max, routing and exact invocation/thread/turn; unavailable evidence fails closed | Frozen 12-path candidate verified; fresh source audit passed behavior, 72/72 tests and format/lint passed. Real concrete Luna/max smoke settled with completed runtime receipt. Acceptance details below. No backend-attestation or production-isolation claim. |
-| T03 Runtime review transport | in_progress / DSH, Astra acceptance | Concrete completed review transport and durable receipt bind operation, PR, head, reviewer and terminal result; no silence-as-clean | Structured turn/start clean and P1 samples passed with exact identities. Builtin review prose is rejected as a clean interface. Fresh Astra approved the pending GitHub review journal design; journal/client checkpoint accepted after finite audit corrections; concrete snapshot/producer next. Live publisher/draft access remains a deployment check. |
+| T03 Runtime review transport | in_progress / Astra integration | Concrete completed review transport and durable receipt bind operation, PR, head, reviewer and terminal result; no silence-as-clean | Journal/client accepted at35b3313. Concrete snapshot/producer accepted01:16UTC:38/38 registered tests, format/lint and real clean/P1 Luna/max probes passed with settled sessions. Next: durable GitHub transport, strict consumers, publisher identity and entrypoint drain. Live publisher/draft access remains a deployment check. |
 | T04 Gateway replay consumer | pending / Astra; depends on T01 | Actual target command consumes the safe permanent fixture, fails original, passes candidate, and runs in target validation | Remote target development remains `7b93b579eecf5392730453f1407a66a552fd7c48` at22:33UTC; required scripts/replay.ts is absent. Reuse clean existing m06 lane a702d4dd after reconciling writer ownership. Deliver the consumer before collecting live acceptance captures: current T01 requires it at the capture's exact original SHA. |
 | T05 Production replay isolation | pending / Astra | Real filesystem/network/credential/process restrictions tested on the execution host; arbitrary target commands cannot escape; no caller boolean as proof | Existing Deno process groups establish lifetime only. Choose and verify the host boundary; local restricted consumer proof does not close production isolation. |
 | T06 Trusted host wiring | pending / Astra; depends on T01–T05 | Real entrypoints assemble scoped authentication, durable state CAS, incident/replay/model/review and release capabilities; missing capabilities fail closed | Observer run `34389188768`: `observe_auth_missing`; repair `34388944531` and release `34388818273`: host wiring absent. Assemble existing ports with verified contracts, not another injected stub. |
@@ -2213,3 +2213,100 @@ No cached results. Codec/client locally accepted; T03 itself remains
 in_progress until concrete reviewer, durable transport and actual consumers
 are connected. No model probe, public review, push, deployment or activation
 was performed by this checkpoint. Eight old diagnostic directories preserved.
+
+### T03 concrete producer launch (2026-09-10 00:47 UTC)
+
+Accepted journal/client commit35b33138b60c512912da8fd787f6c153043a8a78.
+Same canonical path and branch; only eight preserved untracked diagnostics
+remain before writer launch. Immutable t03b-producer-assignment-v1.md owns
+new review-snapshot.ts/codex-reviewer.ts under src/github and their two
+tests only. Explicit absolute reference root prevents prior lookup detour.
+PID5404, exec55610, persisted session5c948910-52c6-4895-a6db-5a5442376bf0;
+exact cwd, production NODE_ENV and required DeepSeek Vision/max verified.
+Registered t03-snapshot-producer/producer-format/producer-lint are root-owned.
+No tests, models, GitHub, subagents, background jobs or Git mutations assigned
+to DSH. First edit5min, bounded handback20min; prepare/start split and exact
+Git snapshot acceptance required. T03 remains incomplete until next durable
+transport/consumer/host integration. No activation or publication.
+
+T06/T07 read-only refresh00:49UTC: Sentinel root .env is absent, while current
+login shell has existing DEEPSEEK_API_KEY, GITHUB_TOKEN and organization
+DENO_DEPLOY_TOKEN_UBIQUITY_DAO. All DSH launches used that nonempty inherited
+key (the fallback root file was not loaded); no worktree secret copies exist.
+GitHub sentinel secret/variable lists are both empty. A bounded authenticated
+GET https://ai.ubq.fi/admin/sentinel/incidents?limit=1 with the existing
+organization Deno credential returned200 JSON. Body canceled without printing
+or retaining incident payloads; sanitized receipt t07-existing-auth-read.json
+is under existing probe root. This proves local incident read capability only,
+not scheduled-host scoped auth, decryption key availability or retention.
+Previously inventoried gateway GitHub secrets include existing App private key
+and replay key; their values were not retrieved or copied. No new secret,
+credential setting or production activation occurred.
+
+### T03 producer correction checkpoint (2026-09-10 01:00 UTC)
+
+The initial producer writer PID5404 completed with an edit receipt, terminal
+completed record and exit0; no children remained. Four new owned files remain
+unaccepted. First registered t03-snapshot-producer run failed type-checking
+with37 fixture string/GitSha errors (no test execution): result
+22445bab-c59f-4c5a-bcda-3af6b4513817. Registered lint passed at
+1ba3877d-fefa-4e29-91fc-a22a73c23252. Both are Mac executed receipts under
+repository evidence namespace cc48556d9d6816f2605c36c352452867e2de5be694f7aa26c8a9330e9268c576,
+base35b33138b60c512912da8fd787f6c153043a8a78.
+
+Astra review found unbounded initialize/thread preparation, ignored evidence
+after the first terminal, turn submission after handler-registration failure,
+and raw close-error text. Independent snapshot audit found hidden gitlink
+changes, possible lazy object fetching and unchecked deleted/replaced old
+binary blobs. These are one finite correction batch, not new scope or tasks.
+Assignment t03b-correction-assignment-v1.md is under existing private probe
+root /Users/nv/.local/state/sentinel-probes/t02-t03-20260909-2139.
+PID11290, exec55639, persisted DSH session2b8c8360-d42b-4cb2-9f85-b0cd0a99a073
+started01:00UTC. Exact canonical cwd, production NODE_ENV and actual
+deepseek-official/deepseek-v4-flash-vision-exp/max header verified. Owns only
+the same four producer files. First edit occurred inside3min; handback bound12min.
+Two unmanaged synthetic Git fixture probes were observed; neither is accepted
+test evidence. Registered acceptance stays with Astra. Concrete model probe
+script is prepared but not executed; no GitHub writes, push or activation.
+
+### T03 concrete producer accepted (2026-09-10 01:16 UTC)
+
+Accepted four-file manifest: t03b-accepted-candidate.json under the same private
+probe root. Correction writer2b8c8360 completed/exit0; it also ran unmanaged
+check/lint commands despite edit-only instructions. Those were not accepted as
+verification. Subsequent exact two-fixture writer3e7a2906 and actual user-echo
+correction writerdf22e2ed both completed/exit0 within owned scope. Required
+DeepSeek Vision/max headers verified; no child/background ownership remains.
+
+First corrected run2d268e27 had32pass2fixture failures (Git path order and
+symlink deletion masking the submodule error). Exact fixture corrections passed
+34/34 at8a1ea894. Initial concrete probe v1 failed before session creation due
+to an omitted existing NODE_V8_COVERAGE permission; reservations confirmed not
+submitted. v2 submitted one clean request, rejected the normal userMessage
+echo, settled, and did not start the finding request. Saved earlier actual
+event evidence proved exact input echo shape; the narrow producer correction
+accepts the exact echoed input as input evidence only. No tool or result gate
+was weakened. Final registered Mac execution on frozen base35b3313:
+
+- dad4c9a5-2c2e-4a70-a94c-943f6b004704:38/38 snapshot/producer tests,10s.
+- eed1727a-476d-43fa-bc76-37cc7d1f755d:format passed.
+- 09bf88c4-37c1-47d7-ae38-b44ff4480a8e:lint passed.
+
+Independent snapshot source audit cleared all three original findings.
+Concrete reviewer v3 then accepted both exact synthetic repositories. Clean
+thread01a088e2-675b-7fd1-a61b-6dee3afe02f1 / turn01a088e2-684d-7be2-a52e-e874c9cb5442
+completed in17.7s. Finding thread01a088e2-af3a-7531-8ae1-77b7c922bba8 /
+turn01a088e2-afd2-7c90-9475-8c60b166ecb0 completed in11.6s and reported the
+expected P1 deposit subtraction defect at account.ts:8. Both actual receipts
+bind openai/gpt-5.6-luna/max and runtime completed; both close settled without
+failure. Evidence is request/runtime correlation, not backend attestation.
+Receipts: concrete-reviewer-v3-receipts.json; no synthetic source mutation.
+All probe reservations and failed attempts are retained and charged accurately.
+No live GitHub publication, push, deployment or activation. T03 overall stays
+in_progress pending durable transport/consumer/lifecycle integration.
+
+T04 read-only feasibility refinement: paid-provider exports support injected
+recorded fetch; fetchCodexResponses still needs a narrow injection to avoid
+global fetch/auth pool/KV. The fixed two input files lack T01 test IDs, so the
+trusted composition needs a bounded identity input for marker matching. These
+are required T04 seams, not another task register or embedded automation.
