@@ -14,7 +14,7 @@ Last reconciled: 2026-09-09 22:58 UTC by Astra session
 branch `codex/master-plan-gfa795549e5`. No production activation is accepted.
 The owner supervises DSH directly, per the user's 19:07 UTC instruction.
 T01 and T02 are accepted; next work is the bounded T03 journal/client checkpoint.
-Runtime implementation remains Luna/max. All T02 DSH writers are settled; no implementation writer is active.
+Runtime implementation remains Luna/max. T02 is committed as 6b4e660732765f064f6271eaa8147b01f2801eca. T03 journal/client writer PID66630 completed; T03 journal/client checkpoint accepted; all DSH writers settled; producer checkpoint next.
 
 Task states: pending, in_progress, ready, accepted, blocked, rejected. Only
 accepted closes a task, and only after the acceptance evidence below exists.
@@ -25,7 +25,7 @@ to keep retrying. Scope changes require an Astra entry with the reason.
 | --- | --- | --- | --- |
 | T01 Causal capture verifier | accepted / Astra, fresh audit and canonical check below | Concrete restricted execution of original and sanitized input at the same original SHA; intended failure observed in both; identical safe fixture passes candidate through the real local loop; privacy and negative cases preserved | Worker correction `7491c68` and original `55555dc` are canonical ancestors through merge `090b8aa`. Fresh final Astra audit accepted the exact frozen candidate; canonical focused host suite passed 186/186. Local macOS slice only; T04 target consumer, T05 production isolation and T08 full aggregate acceptance remain open. No active DSH writer. |
 | T02 Runtime model receipt | accepted / Astra | Owner-approved correlated request/runtime evidence binds configured provider, Luna/max, routing and exact invocation/thread/turn; unavailable evidence fails closed | Frozen 12-path candidate verified; fresh source audit passed behavior, 72/72 tests and format/lint passed. Real concrete Luna/max smoke settled with completed runtime receipt. Acceptance details below. No backend-attestation or production-isolation claim. |
-| T03 Runtime review transport | pending / Astra | Concrete completed review transport and durable receipt bind operation, PR, head, reviewer and terminal result; no silence-as-clean | Structured turn/start clean and P1 samples passed with exact identities. Builtin review prose is rejected as a clean interface. Fresh Astra approved the pending GitHub review journal design; implement after T02 correction. Live publisher/draft access remains a deployment check. |
+| T03 Runtime review transport | in_progress / DSH, Astra acceptance | Concrete completed review transport and durable receipt bind operation, PR, head, reviewer and terminal result; no silence-as-clean | Structured turn/start clean and P1 samples passed with exact identities. Builtin review prose is rejected as a clean interface. Fresh Astra approved the pending GitHub review journal design; journal/client checkpoint accepted after finite audit corrections; concrete snapshot/producer next. Live publisher/draft access remains a deployment check. |
 | T04 Gateway replay consumer | pending / Astra; depends on T01 | Actual target command consumes the safe permanent fixture, fails original, passes candidate, and runs in target validation | Remote target development remains `7b93b579eecf5392730453f1407a66a552fd7c48` at22:33UTC; required scripts/replay.ts is absent. Reuse clean existing m06 lane a702d4dd after reconciling writer ownership. Deliver the consumer before collecting live acceptance captures: current T01 requires it at the capture's exact original SHA. |
 | T05 Production replay isolation | pending / Astra | Real filesystem/network/credential/process restrictions tested on the execution host; arbitrary target commands cannot escape; no caller boolean as proof | Existing Deno process groups establish lifetime only. Choose and verify the host boundary; local restricted consumer proof does not close production isolation. |
 | T06 Trusted host wiring | pending / Astra; depends on T01–T05 | Real entrypoints assemble scoped authentication, durable state CAS, incident/replay/model/review and release capabilities; missing capabilities fail closed | Observer run `34389188768`: `observe_auth_missing`; repair `34388944531` and release `34388818273`: host wiring absent. Assemble existing ports with verified contracts, not another injected stub. |
@@ -2081,3 +2081,135 @@ mechanically equivalent edit. No unchanged repeat model probe is needed.
 T02 accepted locally; aggregate review/publication remains T08. Eleven changed
 source/test files and this register are the focused commit scope; eight old
 untracked diagnostic directories remain preserved and excluded.
+
+### T03 journal/client launch (2026-09-09 22:59 UTC)
+
+Accepted T02 commit: 6b4e660732765f064f6271eaa8147b01f2801eca.
+T03 uses the same canonical lane and one writer, PID66630, exec95102;
+immutable assignment t03a-assignment-v1.md and stream t03a-stream.jsonl
+are in the existing t02-t03-20260909-2139 evidence root. Owned files are
+src/github/review-journal.ts, src/github/client.ts and their two new tests.
+No commits/push/worktrees/children/background work or tests assigned to DSH.
+First edit expected within5min; bounded handback20min. Print mode has no
+live steering; diagnosed failures use verified task-owned stop authority.
+Astra runs registered t03-journal-client/format/lint after settlement.
+This checkpoint does not accept T03 until concrete transport and consumers
+are connected. No production activation.
+
+T03 launch verified: exact cwd and NODE_ENV=production on PID66630; persisted
+request session d030b71c-ca35-4535-8994-88e6ca30d996 confirms
+deepseek-official / deepseek-v4-flash-vision-exp / max. The stream uses
+e5ef2b49-5c19-4c3c-acd0-5933eff6d7de as its separate session identifier.
+
+### T03 lifecycle check and T05 prerequisite (2026-09-09 23:05 UTC)
+
+Existing fresh-context Astra t03_transport_design_check confirmed that the
+actual runRepairEntrypoint must await drain through the SAME GitHub review
+transport on every exit path. Review admission currently checks only that
+the deadline has not passed; the full review/settlement must fit. Accepted
+minimal correction and exact scopes are frozen in t03-lifecycle-boundaries.md
+under the existing probe root. After journal/client acceptance, use serialized
+producer then transport/consumer checkpoints, with T03 still incomplete.
+
+T05 read-only VPS inventory as codex: Linux, Deno, Docker and Bubblewrap0.12.0
+are installed. Docker socket access is denied; no service or permissions changed.
+Registered rootless Bubblewrap namespace feasibility PASSED on
+codex@vps.pavlovcik.com, 431ms, child exit0, host-local evidence reference
+cc48556d9d6816f2605c36c352452867e2de5be694f7aa26c8a9330e9268c576/e3a0316a-2655-423a-9117-0bf9d5d708be.
+The command ran only /usr/bin/true with isolated namespaces and minimal mounts.
+This is a concrete available Linux prerequisite, not production isolation proof.
+No target code, credentials, model or network request ran in that namespace.
+
+### T03 journal/client handback and correction (2026-09-10 00:12 UTC)
+
+Original writer PID66630 is absent; stream has terminal completed and all
+four owned files are present. Its exec handle no longer exists after session
+resume, so wrapper exit status is unavailable; no acceptance inferred from it.
+No children or background work were reported and no descendant is present.
+Fresh registered check184f4b42-16ec-4d30-b7cc-2bf4c771e6e6 stopped before
+tests on four TypeScript errors: incompatible phase inheritance and two test
+types. Formata01d0603-a6b3-4d84-bd22-34ca03990da7 and
+lintcb7cff51-619d-4f78-aeb3-8100cf04fcad passed. Same evidence namespace.
+Root source review also found missing version validation in exported metadata
+parser. Finite correction t03a-correction-v1.md owns only journal source/test.
+Launched00:12UTC, PID94596, exec28326, persisted session
+37ecf0ea-57c0-4dc7-a7e2-b3adfe1ffce8. Exact cwd, NODE_ENV=production and
+deepseek-official/deepseek-v4-flash-vision-exp/max request are verified.
+No tests/children/background work; first edit60s, handback3min. Root runs the
+registered acceptance after settlement; do not repeat unchanged failed bytes.
+
+T03 correction PID94596 completed exit0 and settled00:15UTC. Next executed
+receipt fc98baac-31a2-4339-8e3d-080066e7ab88 compiled and ran:27 pass,3 fail,
+908ms. All12 HTTP tests passed. Three failures are test expectations: summary
+tamper hits digest validation first; noncanonical full body must reject despite
+metadata key-order tolerance; wrong model hits enum validation first. Source
+checks remain strict. Test-only t03a-test-fix.md launched00:16UTC, PID95484,
+exec91167, session5a30b12d-6742-48c8-9493-0bba283e8e7b; exact cwd, production
+NODE_ENV and required Vision/max verified. Sole owned file is journal test,
+handback2min, no tests/children/background jobs. Existing read-only Astra
+t03_transport_design_check audits the two frozen source files independently;
+manifest t03a-source-audit.json. No production behavior is changed to fit tests.
+
+### T03 intervention and finite source audit (2026-09-10 00:20 UTC)
+
+Astra stopped exact PID95484 at00:19UTC after source inspection proved no
+edits and persisted tools showed repeated evidence-storage/tooling/ledger
+exploration instead of the assigned three assertions. Exact cwd and no
+descendants verified before SIGTERM; process absence/exec settlement verified
+after. Wrapper exit0 has no completed model result; this run is interrupted,
+unaccepted. No unrelated process stopped or changes discarded.
+
+Fresh read-only source audit found three finite defects: required undefined
+client inputs skip optional checks (including omitted commit_id); unknown
+JSON keys leak through error paths; valid GitHub pending responses can omit
+submitted_at but wire parser rejects them. Local source confirms each.
+Scope expanded only to src/github/wire.ts for PENDING omission handling.
+The three assertion fixes join this one correction batch.
+
+Immutable t03a-audit-correction-v2.md launched00:19UTC, PID99134, exec54665,
+session102c80e9-f20b-434a-9ac5-2db6c6101dd6. Exact canonical cwd, production
+NODE_ENV and required DeepSeek Vision/max request verified. Five owned files,
+no tests/children/background jobs; evidence/tooling exploration prohibited.
+First edit3min, handback10min. Static registered targets now include wire.ts.
+Source audit report is by existing fresh-context t03_transport_design_check;
+no other producer-blocking defect found. Root validates settled candidate.
+
+T05 additional actual Deno namespace proof passed00:21UTC on existing codex
+VPS,787ms, exit0: allowed synthetic file read; read-only source write denied;
+host home files absent; synthetic inherited variable absent; outbound numeric
+IP connection denied; private tmp writable; spawned cat cannot read host file.
+Evidence reference cc48556d9d6816f2605c36c352452867e2de5be694f7aa26c8a9330e9268c576/31a5a73a-767c-4242-95ba-f7fdcfc49db4,
+immutable t05-linux-deno-probe.ts under existing probe root. Only task-owned
+synthetic scratch was mounted and removed. No credentials or project target
+code mounted; no host service/permissions changed. This proves the selected
+Linux primitive with Deno; T05 still needs actual replay integration, sibling
+private-input and escape/process cases before acceptance.
+
+T03 prompt correction00:23UTC: PID99134 searched other lanes for a bare
+t03a-test-fix.md reference omitted by Astra. No source edits were made;
+Astra diagnosed its own incomplete assignment, verified exact cwd/no children,
+SIGTERM and exit before replacement. No unchanged retry: v3 inlines all three
+assertion fixes and explicitly prohibits evidence/tooling/other-lane searches.
+New immutable t03a-audit-correction-v3.md launched00:23UTC, PID1395, exec42070,
+sessionb743360b-6c92-4337-a13c-078ddf1a20be; exact cwd, production NODE_ENV and
+required DeepSeek Vision/max request verified. Same five files and finite
+three source fixes plus assertions; source audit findings unchanged.
+
+### T03 journal/client checkpoint accepted (2026-09-10 00:30 UTC)
+
+PID1395 completed exit0 and settled00:28UTC; stream has mutations and final
+completed record. Frozen five-file manifest t03a-final-candidate.json at
+base6b4e660 is under existing probe root. Fresh-context Astra
+t03_transport_design_check inspected the finite delta and confirmed all
+three source findings resolved. Root inspected diff and git diff --check.
+
+Fresh executed Mac/canonical evidence in namespace
+cc48556d9d6816f2605c36c352452867e2de5be694f7aa26c8a9330e9268c576:
+- cd181697-fafe-4b2a-a547-fae5c9cef8c6:34/34 journal/client tests,2715ms,exit0.
+- fa3f516a-4cf0-4fcd-a3a4-7625d1bd92e5:22/22 existing reads,2164ms,exit0.
+- 3ddc6c89-38fe-44b1-92a3-2c7b5b26f33d:format pass.
+- 84791335-0f2a-4355-aa57-b7dcd3447cc3:lint pass.
+No cached results. Codec/client locally accepted; T03 itself remains
+in_progress until concrete reviewer, durable transport and actual consumers
+are connected. No model probe, public review, push, deployment or activation
+was performed by this checkpoint. Eight old diagnostic directories preserved.

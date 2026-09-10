@@ -12,6 +12,7 @@
  */
 
 import type { GitSha } from "../contracts/brands.ts";
+import { isGitSha } from "../contracts/brands.ts";
 import type { GitHubRateLimitV1 } from "../contracts/github-cooldown.ts";
 import type {
   Clock,
@@ -40,6 +41,7 @@ import {
 } from "./http.ts";
 import type { HttpRequestV1, HttpResponseV1, HttpTransportV1 } from "./http.ts";
 import { classifyGitHubRateLimit } from "./rate-limit.ts";
+import { MAX_JOURNAL_BYTES } from "./review-journal.ts";
 import {
   parseBranchRuleWire,
   parseCheckRunWire,
@@ -107,6 +109,16 @@ export type CreatePullWireV1 =
 export type MergePutWireV1 =
   | { status: "merged"; mergeSha: GitSha }
   | { status: "rejected" }
+  | { status: "ambiguous" };
+
+/**
+ * Mutating review-operation outcome. `ambiguous` means the request was
+ * submitted but its response was lost — the write may have applied and the
+ * caller must reconcile against exact authoritative state; it never retries
+ * and never creates a second object.
+ */
+export type ReviewMutationOutcomeV1 =
+  | { status: "applied"; review: GitHubReviewWireV1 }
   | { status: "ambiguous" };
 
 /**
@@ -544,6 +556,123 @@ export class GitHubApiClient {
   }
 
   // -------------------------------------------------------------------------
+  // Review journal operations (pending-draft lifecycle)
+  // -------------------------------------------------------------------------
+  // The review body is the durable operation journal; all four operations go
+  // through the same authenticated gate/deadline/cooldown path as every other
+  // client call. There is no automatic retry of a mutating call and no create
+  // on ambiguity: the caller reconciles the exact review id first.
+
+  /** Read the exact review for the PR (404 is a real observed null). */
+  async readPullReview(
+    number: number,
+    reviewId: number,
+  ): Promise<PortResultV1<GitHubReviewWireV1 | null>> {
+    const invalid = validateReviewOperationInput(
+      { prNumber: number, reviewId },
+      ["reviewId"],
+    );
+    if (invalid !== null) return portError(invalid.kind, invalid.detail);
+    const response = await this.request(
+      "GET",
+      `/repos/${repoPath(this.repository)}/pulls/${number}/reviews/${reviewId}`,
+    );
+    if (!response.ok) return response;
+    if (response.value.status === 404) return portOk(null);
+    return parseWire(response.value, (v) => parseReviewWire(v, "$"));
+  }
+
+  /** Create a PENDING review on the exact head (no event is ever sent). */
+  async createPendingReview(
+    number: number,
+    head: GitSha,
+    body: string,
+  ): Promise<PortResultV1<ReviewMutationOutcomeV1>> {
+    const invalid = validateReviewOperationInput(
+      { prNumber: number, head, body },
+      ["head", "body"],
+    );
+    if (invalid !== null) return portError(invalid.kind, invalid.detail);
+    const raw = await this.sendCore(
+      "POST",
+      `${this.apiBaseUrl}/repos/${
+        repoPath(this.repository)
+      }/pulls/${number}/reviews`,
+      { commit_id: head, body },
+    );
+    return this.reviewMutationOutcome(raw, "pending");
+  }
+
+  /** Replace the body of the exact pending review (no event is ever sent). */
+  async updatePendingReview(
+    number: number,
+    reviewId: number,
+    body: string,
+  ): Promise<PortResultV1<ReviewMutationOutcomeV1>> {
+    const invalid = validateReviewOperationInput(
+      { prNumber: number, reviewId, body },
+      ["reviewId", "body"],
+    );
+    if (invalid !== null) return portError(invalid.kind, invalid.detail);
+    const raw = await this.sendCore(
+      "PUT",
+      `${this.apiBaseUrl}/repos/${
+        repoPath(this.repository)
+      }/pulls/${number}/reviews/${reviewId}`,
+      { body },
+    );
+    return this.reviewMutationOutcome(raw, "pending");
+  }
+
+  /**
+   * Submit the exact review with event COMMENT. APPROVE is never sent: the
+   * publisher is the PR author identity and must not approve its own work.
+   */
+  async submitReview(
+    number: number,
+    reviewId: number,
+    body: string,
+  ): Promise<PortResultV1<ReviewMutationOutcomeV1>> {
+    const invalid = validateReviewOperationInput(
+      { prNumber: number, reviewId, body },
+      ["reviewId", "body"],
+    );
+    if (invalid !== null) return portError(invalid.kind, invalid.detail);
+    const raw = await this.sendCore(
+      "POST",
+      `${this.apiBaseUrl}/repos/${
+        repoPath(this.repository)
+      }/pulls/${number}/reviews/${reviewId}/events`,
+      { event: "COMMENT", body },
+    );
+    return this.reviewMutationOutcome(raw, "commented");
+  }
+
+  private reviewMutationOutcome(
+    raw: RawSendResult,
+    expectedState: "pending" | "commented",
+  ): PortResultV1<ReviewMutationOutcomeV1> {
+    if (raw.status === "error") {
+      // Typed auth/rate-limit errors (including metadata) are preserved.
+      return portError(raw.error.kind, raw.error.detail, raw.error.rateLimit);
+    }
+    if (raw.status === "lost") {
+      // The request may have applied; reconciliation is the caller's job. No
+      // second request is issued by this method.
+      return portOk({ status: "ambiguous" });
+    }
+    if (raw.response.status !== 200 && raw.response.status !== 201) {
+      return portError(...this.mapError(raw.response));
+    }
+    const parsed = parseWire(raw.response, (v) => parseReviewWire(v, "$"));
+    if (!parsed.ok) return parsed;
+    if (parsed.value.state !== expectedState) {
+      return portError("invalid", "GitHub API response is malformed");
+    }
+    return portOk({ status: "applied", review: parsed.value });
+  }
+
+  // -------------------------------------------------------------------------
   // Transport plumbing
   // -------------------------------------------------------------------------
 
@@ -826,6 +955,61 @@ export class GitHubApiClient {
 
 function repoPath(repository: RepositoryIdentityV1): string {
   return `${repository.owner}/${repository.name}`;
+}
+
+type RequiredReviewOperationSlotV1 = "reviewId" | "head" | "body";
+
+const REQUIRED_REVIEW_DETAILS: Record<RequiredReviewOperationSlotV1, string> = {
+  reviewId: "invalid review id",
+  head: "invalid review head",
+  body: "invalid review body",
+};
+
+interface ReviewOperationInputV1 {
+  prNumber: number;
+  reviewId?: number;
+  head?: GitSha;
+  body?: string;
+}
+
+/**
+ * Input validation before any review request: positive safe-integer ids,
+ * exact 40-hex head and a finite non-empty body within the journal byte
+ * bound. The slots the operation requires are mandatory even when a runtime
+ * caller violates TypeScript: an absent/undefined required value is the same
+ * static invalid as a wrong-type one, and no request is ever issued.
+ * Failures are static sanitized caller errors; nothing is echoed.
+ */
+function validateReviewOperationInput(
+  input: ReviewOperationInputV1,
+  required: readonly RequiredReviewOperationSlotV1[],
+): PortErrorV1 | null {
+  if (!Number.isSafeInteger(input.prNumber) || input.prNumber < 1) {
+    return { kind: "invalid", detail: "invalid pull request number" };
+  }
+  for (const slot of required) {
+    if (input[slot] === undefined) {
+      return { kind: "invalid", detail: REQUIRED_REVIEW_DETAILS[slot] };
+    }
+  }
+  if (
+    input.reviewId !== undefined &&
+    (!Number.isSafeInteger(input.reviewId) || input.reviewId < 1)
+  ) {
+    return { kind: "invalid", detail: "invalid review id" };
+  }
+  if (input.head !== undefined && !isGitSha(input.head)) {
+    return { kind: "invalid", detail: "invalid review head" };
+  }
+  if (input.body !== undefined) {
+    if (
+      typeof input.body !== "string" || input.body.length === 0 ||
+      new TextEncoder().encode(input.body).length > MAX_JOURNAL_BYTES
+    ) {
+      return { kind: "invalid", detail: "invalid review body" };
+    }
+  }
+  return null;
 }
 
 /** Sanitized static transport-boundary failure (no status/body/URL echoed). */
