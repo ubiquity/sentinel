@@ -9,6 +9,49 @@ import { asWorkItemId } from "../../src/contracts/brands.ts";
 import { checkoutContentCheckpoint } from "../../src/repair/checkout-content.ts";
 const pause = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
+/**
+ * Bounded observation waits, kept well below runModel's 5000 ms ceiling with
+ * load headroom. The intentional-fault negative cases use the shorter
+ * explicitly test-local bound so they fail fast.
+ */
+const OBSERVATION_TIMEOUT_MS = 2000;
+const FAULT_OBSERVATION_TIMEOUT_MS = 300;
+
+/** Fault injection for the bounded-observation negative cases. */
+type Fault =
+  | "missing-observation"
+  | "rejected-interrupt"
+  | "throwing-interrupt";
+
+/**
+ * Bounded fixture observation: resolves when `signal` fires and otherwise
+ * rejects with a clear fixture message naming the event that was never
+ * observed. A missing, rejected or throwing interrupt must not leave the
+ * fixture script awaiting a signal forever, because `close()` awaits that
+ * script and would stall the probe far past runModel's ceiling.
+ */
+function observe(
+  label: string,
+  signal: Promise<void>,
+  timeoutMs: number,
+): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(
+      () =>
+        reject(
+          new Error(
+            `loop-guard fixture: ${label} was not observed within ${timeoutMs}ms`,
+          ),
+        ),
+      timeoutMs,
+    );
+  });
+  return Promise.race([signal, timeout]).finally(() => {
+    if (timer !== undefined) clearTimeout(timer);
+  });
+}
+
 /** One-shot event signal that also works when fired before a waiter starts. */
 function signal(): { promise: Promise<void>; fire: () => void } {
   let fire: () => void = () => {};
@@ -35,7 +78,7 @@ type Mode =
   | "stop-race"
   | "wrong-terminal";
 
-async function probe(mode: Mode) {
+async function probe(mode: Mode, fault: Fault | null = null) {
   const root = await Deno.realPath(
     await Deno.makeTempDir({ dir: ".", prefix: "reuse-boundary-" }),
   );
@@ -44,6 +87,9 @@ async function probe(mode: Mode) {
   let callback: ((e: CodexServerNotificationV1) => void) | null = null;
   let scriptError: unknown = null;
   let steers = 0, interrupts = 0, closes = 0;
+  const observationTimeoutMs = fault === null
+    ? OBSERVATION_TIMEOUT_MS
+    : FAULT_OBSERVATION_TIMEOUT_MS;
   const steerObserved = signal();
   const interruptObserved = signal();
   const emit = (method: string, params: unknown) =>
@@ -100,6 +146,18 @@ async function probe(mode: Mode) {
       }
       if (method === "turn/interrupt") {
         interrupts++;
+        // Negative-case fault injection: the observation is deliberately never
+        // signalled (and the request itself may reject or throw), so only the
+        // bounded observation keeps the script, close() and the probe finite.
+        if (fault === "throwing-interrupt") {
+          throw new Error("fixture fault: turn/interrupt threw");
+        }
+        if (fault === "rejected-interrupt") {
+          return Promise.reject(
+            new Error("fixture fault: turn/interrupt rejected"),
+          );
+        }
+        if (fault === "missing-observation") return Promise.resolve({});
         if (mode === "wrong-terminal") {
           emit("turn/completed", {
             threadId: "t",
@@ -160,10 +218,14 @@ async function probe(mode: Mode) {
             });
           }
           if (mode === "hung-steer" && i === 4) {
-            await Promise.race([
-              steerObserved.promise,
-              interruptObserved.promise,
-            ]);
+            await observe(
+              `hung-steer steer or interrupt (mode ${mode})`,
+              Promise.race([
+                steerObserved.promise,
+                interruptObserved.promise,
+              ]),
+              observationTimeoutMs,
+            );
             break;
           }
         }
@@ -175,12 +237,17 @@ async function probe(mode: Mode) {
           mode === "unsupported" || mode === "late-start" ||
           mode === "stop-race" || mode === "output" || mode === "wrong-terminal"
         ) {
-          await interruptObserved.promise;
+          await observe(
+            `early-stop interrupt (mode ${mode}` +
+              (fault === null ? ")" : `, fault ${fault})`),
+            interruptObserved.promise,
+            observationTimeoutMs,
+          );
         }
         await pause(200);
         terminal();
       })().catch((error) => {
-        scriptError = error;
+        scriptError = error instanceof Error ? error : new Error(String(error));
         terminal("failed");
       });
     },
@@ -231,6 +298,36 @@ async function probe(mode: Mode) {
         ? 1000
         : 200000,
     });
+    if (fault !== null) {
+      // Intentional interrupt fault: the bounded observation fails loudly
+      // instead of hanging, the fixture records that failure, emits a failed
+      // terminal and lets close()/runModel settle. The missing interrupt is
+      // asserted, never replaced by a fabricated observation or a swallowed
+      // error whose only purpose would be to pass.
+      assert.equal(steers, 0, fault);
+      assert.equal(interrupts, 1, fault);
+      assert.equal(closes, 1, `${fault}: session close must settle`);
+      assert.ok(
+        scriptError instanceof Error,
+        `${fault}: fixture script failure must be recorded`,
+      );
+      assert.match(
+        (scriptError as Error).message,
+        /interrupt.*was not observed within \d+ms/,
+        fault,
+      );
+      assert.ok(result.ok, fault);
+      if (result.ok) {
+        assert.equal(result.value.outcome, "failed", fault);
+        assert.equal(result.value.candidate, null, fault);
+        assert.equal(result.value.error, null, fault);
+      }
+      assert.ok(
+        performance.now() - started < 4000,
+        `${fault}: bounded fixture failure must not await the default grace`,
+      );
+      return root;
+    }
     assert.equal(scriptError, null);
     assert.equal(closes, 1);
     assert.ok(result.ok);
@@ -283,5 +380,31 @@ for (
     "wrong-terminal",
   ] as Mode[]
 ) {
-  Deno.test(`loop-guard boundary: ${mode}`, () => probe(mode));
+  Deno.test(`loop-guard boundary: ${mode}`, async () => {
+    await probe(mode);
+  });
+}
+
+for (
+  const fault of [
+    "missing-observation",
+    "rejected-interrupt",
+    "throwing-interrupt",
+  ] as Fault[]
+) {
+  Deno.test(
+    `loop-guard boundary: bounded interrupt observation ${fault}`,
+    async () => {
+      const root = await probe("output", fault);
+      if (typeof root !== "string") {
+        throw new Error("fault probe did not expose its temp checkout root");
+      }
+      // The script and close() settled, so probe() already removed the temp
+      // checkout; a lingering directory would mean cleanup never ran.
+      await assert.rejects(
+        () => Deno.stat(root),
+        (error: unknown) => error instanceof Deno.errors.NotFound,
+      );
+    },
+  );
 }
