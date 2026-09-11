@@ -2921,3 +2921,14 @@ as exact fixture corrections, prior stopped patch retained and independently
 checked. GPT types add342a3-32f9-48a0-9cd9-292ea7f45fbf passed6.7s;
 admission77d10cec-42b8-4ac7-9563-2535b850c900 passed5.0s with negative assertions
 preserved. Both executed under the existing repository evidence namespace.
+
+16:07UTC: exact-identity suite70e13c87-0026-4e0a-98d9-96099a86b8b8 passed7/8;
+the saved-candidate publication helper still had the same review deadline
+arithmetic defect. Sole DSH PID75711/stream4ababe65/persistedf8fc03f5 completed
+exit0 in5calls, actual Flash/max/workspace-write/ask and live cwd/NODE_ENV
+verified, no descendants. Only makeEvidenceRig deadline changed1200000->1800000,
+no assertions or runtime policy changed. Focused saved-bundle receipt
+b2eb7498-847d-4294-b356-9f7bb1ac432c passed44.2s, executed. Full CI34619762334
+is still running on8c0626d; its Linux dependency installation passed. Next push
+includes this one-line correction and register. No runtime start or new budget
+reservation has occurred. Staged runtime9e485eb remains unactivated and superseded.
