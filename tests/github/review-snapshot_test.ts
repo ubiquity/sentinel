@@ -267,7 +267,17 @@ Deno.test("snapshot: symlinks and submodules are unsupported", async () => {
   await withRepo(async (repo) => {
     await Deno.writeTextFile(`${repo}/account.ts`, "export const a = 1;\n");
     const base = await commitAll(repo, "base");
-    await Deno.symlink("account.ts", `${repo}/link.ts`);
+    // Deno.symlink is outside the scoped read grants, so create the link with
+    // a credential-free `ln` child inside the repository.
+    const linked = await new Deno.Command("ln", {
+      args: ["-s", "account.ts", `${repo}/link.ts`],
+      cwd: repo,
+      clearEnv: true,
+      env: { PATH },
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    assert.equal(linked.code, 0, "ln -s must create the symlink");
     const symlinkHead = await commitAll(repo, "symlink");
     const symlink = await producer(repo).capture({ base, head: symlinkHead });
     assert.ok(!symlink.ok, "symlink changes must be unavailable");

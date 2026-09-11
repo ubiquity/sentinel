@@ -1946,7 +1946,7 @@ Deno.test(
     // evidence, no successful output exists, and only interrupted/
     // no-candidate accounting with the sanitized loop-stop marker is allowed.
     const root = await Deno.realPath(
-      await Deno.makeTempDir({ prefix: "model-port-race-" }),
+      await Deno.makeTempDir({ prefix: "model-port-race-", dir: Deno.cwd() }),
     );
     const home = `${root}/home`;
     await Deno.mkdir(home);

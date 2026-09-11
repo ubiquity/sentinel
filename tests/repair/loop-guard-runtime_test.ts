@@ -194,7 +194,7 @@ Deno.test("loop-guard runtime: real entrypoint stops first loop and admits secon
     // Finite test-local model bound: six observations run serially through
     // the guard pipeline, each bounded by the 5s checkout-snapshot deadline,
     // so 120s leaves a clear margin over that 30s worst case under scheduler
-    // load while still fitting the 10-minute run deadline.
+    // load while still fitting the positive fixture run deadline.
     const configs = repairConfigs({
       sessionBound: { maxDurationMs: 120000, maxOutputChars: 200000 },
     });
@@ -237,7 +237,7 @@ Deno.test("loop-guard runtime: real entrypoint stops first loop and admits secon
         state: rig.store,
         configs,
       }),
-    }, { deadline: rig.clock.now() + 600000, stepLimit: 16 });
+    }, { deadline: rig.clock.now() + 1200000, stepLimit: 16 });
     const snapshot = await rig.snapshot();
     for (const session of sessions) assert.equal(session.failure, null);
     assert.equal(

@@ -209,7 +209,10 @@ Deno.test(
         clock: loopClock,
       });
       const configs = repairConfigs({
-        // A bounded session fits the synthetic 10-minute run deadline; the
+        // The real gateway adapter is bound to its own exact repository
+        // identity, so the trusted config must match it for evidence lookup.
+        repository: REPOSITORY,
+        // A bounded session fits the positive fixture run deadline; the
         // declared operation margin must not stop the evidence stage.
         sessionBound: { maxDurationMs: 240_000, maxOutputChars: 200_000 },
       });
@@ -234,7 +237,7 @@ Deno.test(
           model,
           budget,
         }, {
-          deadline: loopClock.now() + 600_000,
+          deadline: loopClock.now() + 1_200_000,
           stepLimit,
         });
       const snapshot = async () => {
@@ -387,6 +390,9 @@ Deno.test(
         clock: loopClock,
       });
       const configs = repairConfigs({
+        // Same exact repository identity as the real gateway adapter under
+        // test; identity remains part of the evidence lookup key.
+        repository: REPOSITORY,
         sessionBound: { maxDurationMs: 240_000, maxOutputChars: 200_000 },
       });
       const budget = new RollingStartBudget({
@@ -443,7 +449,7 @@ Deno.test(
           model,
           budget,
         }, {
-          deadline: loopClock.now() + 600_000,
+          deadline: loopClock.now() + 1_200_000,
           stepLimit,
         });
       const snapshot = async () => {
@@ -736,6 +742,9 @@ async function makeIntakeGatewayRig(
   });
   const githubCooldown = new DurableGitHubCooldownGate({ state: store, clock });
   const configs = repairConfigs({
+    // The real gateway adapter under test is bound to its own exact
+    // repository identity, so the trusted config must match it.
+    repository: REPOSITORY,
     sessionBound: { maxDurationMs: 240_000, maxOutputChars: 200_000 },
   });
   const budget = new RollingStartBudget({ clock, state: store, configs });
@@ -755,7 +764,7 @@ async function makeIntakeGatewayRig(
       model,
       budget,
     }, {
-      deadline: clock.now() + 600_000,
+      deadline: clock.now() + 1_200_000,
       stepLimit: 16,
     });
   const snapshot = async () => {
@@ -1058,7 +1067,7 @@ async function makeEvidenceRig(
       model,
       budget,
     }, {
-      deadline: clock.now() + 600_000,
+      deadline: clock.now() + 1_200_000,
       stepLimit,
     });
   const snapshot = async () => {

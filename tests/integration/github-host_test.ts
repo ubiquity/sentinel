@@ -326,8 +326,8 @@ Deno.test(
   "composeGitHubHost: invalid repository identity fails closed before any construction",
   () => {
     const cases: RepositoryIdentityV1[] = [
-      // Zero is not a valid installation id.
-      { owner: "ubiquity", name: "sentinel", installationId: 0 },
+      // Zero is the explicit no-App scope, but negative ids are not valid.
+      { owner: "ubiquity", name: "sentinel", installationId: -2 },
       // Exact frozen pattern: an owner cannot contain a slash.
       { owner: "ubiquity!", name: "sentinel", installationId: 42 },
       { owner: "ubiquity", name: "sentinel", installationId: -1 },

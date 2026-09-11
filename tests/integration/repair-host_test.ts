@@ -403,7 +403,8 @@ Deno.test(
             "repair host configuration rejected: a repository configuration is invalid",
         },
       );
-      // 2. An invalid gateway repository identity is rejected statically.
+      // 2. An invalid gateway repository identity (negative installation id)
+      //    is rejected statically.
       assert.throws(
         () =>
           composeRepairHost({
@@ -413,7 +414,7 @@ Deno.test(
               repository: {
                 owner: "ubiquity",
                 name: "ai.ubq.fi",
-                installationId: 0,
+                installationId: -1,
               },
             },
             replay: {

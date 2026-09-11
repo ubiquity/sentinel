@@ -27,5 +27,15 @@ jobs:
       - uses: denoland/setup-deno@v2
         with:
           deno-version: v2.x
+      - name: Install hermetic harness system dependencies
+        run: |
+          # The replay isolation policy resolves fixed system tools, so the
+          # runner needs bwrap and a real (non-symlink) /usr/local/bin/deno.
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          sudo install -m755 "$(command -v deno)" /usr/local/bin/deno
+          # CI-only: this disposable Ubuntu runner must allow unprivileged
+          # user namespaces for bwrap. Never change this on a shared host.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Credential-free local harness
         run: deno task test:local

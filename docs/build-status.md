@@ -2,6 +2,8 @@
 
 ## Active task register — Astra owned
 
+Current checkpoint, 2026-09-11 15:57 UTC: canonical HEAD 9e485ebf76646669d88c0c94d0310230967f00f7 is pushed. The local host and first-run state bootstrap exist, but Sentinel has NOT started. Full CI34618388548 passed893 tests and failed24. One DSH writer PID71988 is correcting the identified fixture/CI prerequisite failures. Next: verify that batch, rerun full CI, review the exact aggregate candidate, merge, activate the hourly local runner and inspect its first durable model receipt. The deterministic local self-update supervisor remains unfinished. No scheduler, runtime PR or live delivery is claimed. Historical receipts below do not override this checkpoint.
+
 Current owner instruction, 2026-09-11 14:34 UTC: make Sentinel autonomously fix
 itself, launch locally and monitor it. Astra owns integration. Hourly Luna/max
 is approved: one shared model start per rolling hour, 168 per rolling seven
@@ -2889,3 +2891,33 @@ live cwd/NODE_ENV and no descendants. GPT exact-entrypoint receipt
 removes the top-level-await cycle while import.meta.main retains activation
 ownership. Only main.ts, the two affected tests and this register are accepted.
 Full Linux CI is the next aggregate gate; no local runner activation yet.
+
+15:55UTC: full CI34618388548 completed 893passed/24failed/7ignored in3m39s.
+Failures grouped into missing Linux bwrap/fixed-path Deno, two fixture filesystem
+permission mismatches, old malformed-zero identity cases, exact installation
+fixture mismatch, and short positive deadlines after review-drain reservation.
+Single DSH ci-batch-v1 owns the named integration/test fixtures and CI setup only,
+no product source/policy changes.90calls/6min, first edit2min, one formatter,
+no checks/Git/children. Same verified playbook/hash. GPT owns self-ci-fixture-batch
+and relevant behavioral checks, then next full Linux CI. No runtime activation.
+
+16:00UTC: ci-batch-v1 PID71988/stream191436a4/persistedbd7185ff was stopped by
+Astra after92calls: edits were complete but the worker repeated broad source and
+history inspection instead of returning the known deadline discrepancy. Exact
+cwd and no descendants verified before TERM, shell settled, process gone.
+No completed handback is claimed. Flash/max, workspace-write/ask and live
+NODE_ENV/cwd were verified. Patch preserved for independent acceptance.
+The primary's1200000ms fixture bound exactly equals review600000ms plus two
+300000ms margins, so latestStartAt is now and review cannot start. Correct
+positive helper/ambiguity bounds to1800000ms; keep admission-negative900000ms.
+Next tiny bounded writer only those two files plus one final formatter on the
+prior changed TS files; four calls/45sec, no checks/Git/children. No new worktree.
+
+16:02UTC: ci-batch-v2 PID72941/stream34722155/persisted90000141 completed exit0,
+required actual model/preset and live cwd/NODE_ENV verified, no descendants.
+It used14calls despite four-call instruction (including an ambiguous edit and
+extra checks); one formatter on11TS files, no tests/Git writes. Changes reviewed
+as exact fixture corrections, prior stopped patch retained and independently
+checked. GPT types add342a3-32f9-48a0-9cd9-292ea7f45fbf passed6.7s;
+admission77d10cec-42b8-4ac7-9563-2535b850c900 passed5.0s with negative assertions
+preserved. Both executed under the existing repository evidence namespace.

@@ -635,11 +635,11 @@ Deno.test("factory rejects a malformed explicit repository before any capability
       installationId: 7,
     }, "u biquity"],
     ["empty name", { owner: "ubiquity", name: "", installationId: 7 }, ""],
-    ["zero installation id", {
+    ["negative installation id", {
       owner: "ubiquity",
       name: "ai.ubq.fi",
-      installationId: 0,
-    }, "0"],
+      installationId: -1,
+    }, "-1"],
     ["extra key", {
       owner: "ubiquity",
       name: "ai.ubq.fi",

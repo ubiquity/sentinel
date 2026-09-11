@@ -36,6 +36,7 @@ import {
   makeIndexPage,
   makeIndexRow,
   makeReplayPage,
+  REPOSITORY,
   sha256hex,
   SOURCE_TTL_MS,
   syntheticBytes,
@@ -418,6 +419,9 @@ Deno.test(
         clock: loopClock,
       });
       const configs = repairConfigs({
+        // The real gateway adapter is bound to its own exact repository
+        // identity, so the trusted config must match it for evidence lookup.
+        repository: REPOSITORY,
         // A bounded session fits the positive 60-minute run deadline; the
         // declared operation margin check must not stop the evidence stage.
         sessionBound: { maxDurationMs: 240_000, maxOutputChars: 200_000 },
@@ -559,7 +563,9 @@ Deno.test(
         clock: loopClock,
       });
       const configs = repairConfigs({
-        // See the discovery test above for the bounded session rationale.
+        // See the discovery test above for the repository-identity and
+        // bounded-session rationale.
+        repository: REPOSITORY,
         sessionBound: { maxDurationMs: 240_000, maxOutputChars: 200_000 },
       });
       const budget = new RollingStartBudget({

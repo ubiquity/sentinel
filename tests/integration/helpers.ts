@@ -217,7 +217,7 @@ export async function makeRepairRig(
     changedPaths: ["src/app.ts"],
     ...options.model,
   });
-  const run = (deadlineMs = 600_000) =>
+  const run = (deadlineMs = 1_800_000) =>
     runRepairEntrypoint({
       clock,
       state: store,

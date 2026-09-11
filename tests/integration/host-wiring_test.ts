@@ -763,7 +763,7 @@ Deno.test(
         "trusted host assembly rejected: controller SHA is not an exact lowercase 40-hex commit SHA",
       );
 
-      // Malformed repository identity (installation id 0): static, no echo.
+      // Malformed repository identity (installation id -1): static, no echo.
       expectRejection(
         {
           ...rig.options,
@@ -772,7 +772,7 @@ Deno.test(
             repository: {
               owner: "ubiquity",
               name: "ai.ubq.fi",
-              installationId: 0,
+              installationId: -1,
             },
           },
         },
