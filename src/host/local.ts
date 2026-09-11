@@ -45,6 +45,7 @@ import type { GitHubAuthProviderV1 } from "../github/auth.ts";
 import { GitHubApiClient } from "../github/client.ts";
 import { fetchHttpTransport, headerMap } from "../github/http.ts";
 import type { HttpTransportV1 } from "../github/http.ts";
+import { classifyGitHubRateLimit } from "../github/rate-limit.ts";
 import { GitReviewSnapshot } from "../github/review-snapshot.ts";
 import { CodexStructuredReviewer } from "../github/codex-reviewer.ts";
 import { GitHubCodexReviewTransport } from "../github/codex-review-transport.ts";
@@ -364,16 +365,19 @@ export async function runLocalRepairHost(
     await ensureBareStateRepository(stateGitPath, input, scratch);
     const sourcePath = joinPath(input.stateRoot, "source");
     await prepareSourceRepository(sourcePath, input, scratch);
-    targetBaseSha = await refreshDevelopment(sourcePath, input, scratch);
 
     state = createRepairStateStore({
       scratchDir: scratch,
       remoteUrl: stateGitPath,
     });
 
-    // One durable gate for the login read, the API client and the port.
+    // One durable gate for the remote refresh, the login read, the API client
+    // and the port. It is constructed BEFORE the first remote Git fetch, so a
+    // live durable cooldown refuses before any Git runs.
     const gate = new DurableGitHubCooldownGate({ state, clock });
-    login = await readAuthenticatedLogin(input.githubToken, http, gate);
+    targetBaseSha = await refreshDevelopment(sourcePath, input, scratch, gate);
+
+    login = await readAuthenticatedLogin(input.githubToken, http, gate, clock);
 
     // Marker BEFORE any model session or subprocess can start.
     await writePrivateFile(
@@ -663,10 +667,11 @@ function githubGitAuthEnv(token: string): Record<string, string> {
 }
 
 /** Authenticate the current owner login; strict nonempty bounded login. */
-async function readAuthenticatedLogin(
+export async function readAuthenticatedLogin(
   token: string,
   http: HttpTransportV1,
   gate: GitHubCooldownGateV1,
+  clock: Clock,
 ): Promise<string> {
   const admission = await gate.beforeRequest(LOCAL_REPOSITORY.installationId);
   if (!admission.ok) throw new Error(STATIC_GITHUB_LOGIN);
@@ -681,7 +686,23 @@ async function readAuthenticatedLogin(
     }),
     body: null,
   });
-  if (response.status !== 200) throw new Error(STATIC_GITHUB_LOGIN);
+  if (response.status !== 200) {
+    // Classify through the shared rate-limit classifier only: a generic 403
+    // (or any non-200 without a confirmed limit) yields null and never
+    // invents a throttle. A confirmed 403/429 observation is persisted to the
+    // same durable gate BEFORE the static startup failure is thrown; failed or
+    // throwing persistence is itself a static failure with no follow-on
+    // request.
+    const observation = await classifyGitHubRateLimit(response, clock.now());
+    if (observation !== null) {
+      const persisted = await gate.recordRateLimit(
+        LOCAL_REPOSITORY.installationId,
+        observation,
+      );
+      if (!persisted.ok) throw new Error(STATIC_GITHUB_LOGIN);
+    }
+    throw new Error(STATIC_GITHUB_LOGIN);
+  }
   let login: unknown = null;
   try {
     login = (JSON.parse(response.bodyText) as { login?: unknown } | null)
@@ -1086,11 +1107,17 @@ async function prepareSourceRepository(
 }
 
 /** Refresh the exact remote development ref through trusted authenticated git. */
-async function refreshDevelopment(
+export async function refreshDevelopment(
   sourcePath: string,
   input: LocalRepairHostOptionsV1,
   scratch: string,
+  gate: GitHubCooldownGateV1,
 ): Promise<string> {
+  // Durable admission is the FIRST operation: a refused or faulted gate stops
+  // here, before any Git command or external fetch runs. There is no
+  // success-empty fallback.
+  const admission = await gate.beforeRequest(LOCAL_REPOSITORY.installationId);
+  if (!admission.ok) throw new Error(STATIC_GIT_FAILED);
   const fetched = await runTrustedGitResult({
     args: [
       "-C",

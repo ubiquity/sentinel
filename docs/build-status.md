@@ -2,7 +2,7 @@
 
 ## Active task register — Astra owned
 
-Current checkpoint, 2026-09-11 15:57 UTC: canonical HEAD 9e485ebf76646669d88c0c94d0310230967f00f7 is pushed. The local host and first-run state bootstrap exist, but Sentinel has NOT started. Full CI34618388548 passed893 tests and failed24. One DSH writer PID71988 is correcting the identified fixture/CI prerequisite failures. Next: verify that batch, rerun full CI, review the exact aggregate candidate, merge, activate the hourly local runner and inspect its first durable model receipt. The deterministic local self-update supervisor remains unfinished. No scheduler, runtime PR or live delivery is claimed. Historical receipts below do not override this checkpoint.
+Current checkpoint, 2026-09-11 16:26 UTC: canonical HEAD1b4907a passed the full Linux harness (917 tests, zero failures). Local Codex review round1 found one P1 late-routing defect and two P2 startup cooldown defects. One bounded DSH writer is correcting these findings before exact-candidate acceptance round2. Sentinel has NOT started. The local hourly policy and persistent state bootstrap exist; the scheduler, first live receipt and deterministic local self-update remain pending. Later dated entries in this register supersede this checkpoint; older receipts are historical evidence, not current status.
 
 Current owner instruction, 2026-09-11 14:34 UTC: make Sentinel autonomously fix
 itself, launch locally and monitor it. Astra owns integration. Hourly Luna/max
@@ -2950,3 +2950,36 @@ argv expectation/header, and CI fixed-Deno PATH selection changed. Read-only
 /usr, checkout grants, namespace/network and teardown rules are unchanged.
 GPT type receipt0552676f-d21d-4007-a7f8-f400b9f55a57 passed3.3s, executed.
 Next exact-head CI must prove real Linux execution; types are not that proof.
+
+16:26UTC: full CI34620579963 passed917tests/84steps/0failed/7ignored at1b4907a,
+including real Linux isolation. Local acceptance review round1 session
+01a09142-27b7-7232-96eb-3b3b3a57bdb3 completed exit0, found P1 late routing after
+turn completion/close and P2 pre-cooldown Git fetch plus unpersisted login rate
+limit. Reproductionf2d6b254-a26f-493f-89cc-4597e90bc73e proves P1 (candidate
+committer called after off-policy close event). All three substantiated; one
+DSH batch owns model-port/local host and their two test files, no other scope.
+Same verified playbook;90calls/6min, first edit2min, one formatter, no checks/Git/
+children. GPT owns registered review-r1 checks and exact changed-candidate round2.
+No approval/merge/activation claimed. User's local hourly authorization persists.
+
+16:32UTC: review-r1-fixes-v1 PID82516/streamefae62d3/persisted811a64b7 completed
+exit0,70calls, verified actual model/preset and live cwd/NODE_ENV, no descendants.
+It piped its single formatter through tail despite complete-output rule; record
+that violation, do not rerun to recover output. GPT typesd6d2439d passed5.2s,
+shutdown-routing16cb939b passed3.2s, original reviewer reproductionb3cebac4 passed
+0.18s withzero candidate commits. Host6f602293 passed8/9; last test omitted its
+own HTTP log events. Before next acceptance, tiny v2 fixes both omitted fixture
+logs and preserves output cap in the newly live post-terminal routing branch,
+with one finite regression.20calls/2min/first edit30sec, one unpiped formatter,
+no checks/Git/children. No new review round until integrated candidate is ready.
+
+16:36 UTC: final correction PID 83747 completed exit 0, 19 calls, terminal
+completed, no descendants. Actual persisted session af8248b0 confirms
+ deepseek-official/deepseek-flash/max and workspace-write/ask; launch receipt
+preserves cwd/NODE_ENV proof. Four owned edits and one unpiped formatter only.
+GPT fresh checks all passed: types d0409748-d4c8-489d-b94f-8e26ac8429a7,
+shutdown routing c1ee5170-7a2e-4a8f-85fd-01269123225d, local host
+d9a5b316-fef9-4099-95cb-1bc3d6816615 (same evidence namespace above).
+The original reviewer reproduction already passed b3cebac4 with zero commits.
+Review batch accepted for commit; round 2 and full CI must inspect the new
+candidate. Local scheduler remains uninstalled and no live model start occurred.

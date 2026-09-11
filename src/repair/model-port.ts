@@ -813,7 +813,7 @@ export class CodexImplementationPort implements ImplementationPort {
         prompt,
         thread.threadId,
       );
-      const awaited = await this.awaitSettlement(
+      const captureSettlement = await this.awaitSettlement(
         session,
         request,
         thread.threadId,
@@ -842,12 +842,17 @@ export class CodexImplementationPort implements ImplementationPort {
           return portError("unavailable", failure.detail);
         }
       }
+      // Final evidence capture happens ONLY after the session is fully closed
+      // and its settlement/transport state is verified: bounded correlated
+      // routing notifications delivered during close are still validated into
+      // this snapshot, and a later notification can never change the receipt.
+      const settled = captureSettlement();
       return await this.finishReceipt(
         request,
         invocationId,
         thread,
         turn.turnId,
-        awaited,
+        settled,
       );
     } catch (error) {
       const failure = unavailableFor(error);
@@ -994,13 +999,21 @@ export class CodexImplementationPort implements ImplementationPort {
     return { turnId };
   }
 
+  /**
+   * Bounded settlement wait. Returns a PRIVATE final-snapshot getter: the
+   * settlement promise only signals that the loop guard/turn work has stopped
+   * and the bounded drain finished, while the returned getter captures the
+   * final routing/terminal evidence at the exact moment the caller has also
+   * completed its close/settlement/transport checks. A routing notification
+   * delivered during close is therefore still validated into the receipt.
+   */
   private async awaitSettlement(
     session: CodexSessionV1,
     request: ModelRunRequestV1,
     threadId: string,
     turnId: string,
     maxOutputChars: number,
-  ): Promise<AwaitedSettlementV1> {
+  ): Promise<() => AwaitedSettlementV1> {
     let outputChars = 0;
     // Bounded COMPLETE correlated routing events for this exact thread/turn
     // (well-formed events for other threads/turns are ignored at receipt);
@@ -1019,12 +1032,16 @@ export class CodexImplementationPort implements ImplementationPort {
     // failure) makes the receipt `unavailable` before ANY verifier/candidate
     // action — it is never certified as a valid failed runtime receipt.
     let unavailable: AwaitedSettlementV1["unavailable"] = null;
-    let resolver: ((value: AwaitedSettlementV1) => void) | null = null;
-    const terminalPromise = new Promise<AwaitedSettlementV1>((resolve) => {
+    // Evidence-capture finalization: set by the returned getter. Once set, no
+    // later notification — including a late correlated reroute — can mutate
+    // the captured receipt evidence.
+    let evidenceFinalized = false;
+    let resolver: (() => void) | null = null;
+    const terminalPromise = new Promise<void>((resolve) => {
       resolver = resolve;
     });
-    const resolveSettlement = (value: AwaitedSettlementV1) => {
-      resolver?.(value);
+    const resolveSettlement = () => {
+      resolver?.();
     };
 
     // --- loop-guard observability state. Every field below is initialized
@@ -1067,17 +1084,12 @@ export class CodexImplementationPort implements ImplementationPort {
       // terminal stop has happened; the race loses to this resolution and the
       // sendSteer continuation observes `stopped` and returns without sending.
       cancelSettlement?.();
-      const value: AwaitedSettlementV1 = {
-        terminal,
-        terminalOrigin,
-        unavailable,
-        outputChars,
-        reroutes: [...reroutes],
-        resultItems: [...resultItems],
-        loopStopped,
-      };
+      // The settlement signal carries no evidence snapshot: the final
+      // snapshot is captured separately by the returned getter AFTER the
+      // caller's close/settlement/transport checks, so a routing event
+      // delivered during close is still validated and counted.
       if (draining === null) {
-        resolveSettlement(value);
+        resolveSettlement();
         return;
       }
       // Await the bounded drain after canceling the steer: queued jobs were
@@ -1086,7 +1098,7 @@ export class CodexImplementationPort implements ImplementationPort {
       // wait is finite and no separate cleanup timer can outlive settlement.
       // A rejection never escapes as a dangling rejecting finally chain.
       void draining.catch(() => {}).finally(() => {
-        resolveSettlement(value);
+        resolveSettlement();
       });
     };
 
@@ -1128,10 +1140,16 @@ export class CodexImplementationPort implements ImplementationPort {
       requestInterrupt();
     };
 
-    /** Sticky unavailable-evidence disposition: protocol/routing uncertainty. */
+    /**
+     * Sticky unavailable-evidence disposition: protocol/routing uncertainty.
+     * It latches even AFTER the loop guard stopped (a correlated routing
+     * event can arrive during close), preserving the FIRST failure, and only
+     * drives the stop path when the run has not stopped yet.
+     */
     const failEvidence = (detail: string) => {
+      if (evidenceFinalized) return;
+      if (unavailable === null) unavailable = { detail };
       if (stopped) return;
-      unavailable = { detail };
       settleNow();
     };
 
@@ -1554,7 +1572,24 @@ export class CodexImplementationPort implements ImplementationPort {
     };
 
     const onEvent = (method: string, params: unknown) => {
-      if (stopped) return;
+      // Once the final evidence is captured nothing can change the receipt.
+      if (evidenceFinalized) return;
+      if (stopped) {
+        // Post-terminal/stop: the loop guard and every turn/output/job path
+        // stay stopped. ONLY bounded correlated routing evidence remains
+        // live, because a reroute can be emitted during close after the
+        // terminal; it uses the same identity/bound/off-policy validation and
+        // still counts toward routing output.
+        if (method === "model/rerouted") {
+          outputChars += JSON.stringify(params ?? {}).length;
+          if (outputChars > maxOutputChars) {
+            failEvidence("routing evidence exceeded output bound");
+            return;
+          }
+          collectReroute(params);
+        }
+        return;
+      }
       // Bounded output accounting FIRST: every nonterminal event contributes
       // to the total (malformed, over-bound and unknown events included) and
       // crossing the bound interrupts the turn — no event bypasses the total
@@ -1609,10 +1644,25 @@ export class CodexImplementationPort implements ImplementationPort {
       failEvidence("notification registration failed");
     }
 
-    const settled = await terminalPromise;
+    await terminalPromise;
     clearTimeout(durationTimer);
     clearTimeout(settleTimer);
-    return settled;
+    // Private final-snapshot getter: cloned arrays plus the CURRENT terminal
+    // and sticky unavailable values, captured only after the caller closed
+    // and verified the session. It finalizes evidence capture so a later
+    // notification can never change the returned receipt.
+    return () => {
+      evidenceFinalized = true;
+      return {
+        terminal,
+        terminalOrigin,
+        unavailable,
+        outputChars,
+        reroutes: [...reroutes],
+        resultItems: [...resultItems],
+        loopStopped,
+      };
+    };
   }
 
   private async finishReceipt(
