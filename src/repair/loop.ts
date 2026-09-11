@@ -693,7 +693,18 @@ async function pollIntake(
   const seenCursors = new Set<string>();
   let pages = 0;
 
+  // Issue-only intake: a host with exactly one configured repository whose
+  // adapter is the GitHub variant reads issues only. Every gateway
+  // configuration, and every multi-repository or otherwise ambiguous
+  // configuration, keeps the existing incident scan and its source-error
+  // behavior.
+  const issueOnlyIntake = deps.configs.length === 1 &&
+    deps.configs[0].adapter.kind === "github";
+
   for (;;) {
+    // A GitHub issue-only host never scans incidents; the issue listing below
+    // is its only intake source.
+    if (issueOnlyIntake) break;
     // No new intake read may start at/after the total run deadline: every
     // page read is awaited wall-clock time, so the bounds are rechecked
     // between pages. A stop preserves whatever was already collected; the

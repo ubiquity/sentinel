@@ -4,6 +4,20 @@ Owner planning session: 2026-09-06 America/New_York; created across 2026-09-07 0
 
 ## 1. Outcome and scope
 
+Owner scope update, 2026-09-11: the immediate authorized outcome is to make
+Sentinel repair its own GitHub backlog, launch it locally, and monitor real
+autonomous work. This supersedes the first-version exclusions on self-repair
+and initial activation for this local Sentinel target. Use reviewed PRs and a
+trusted supervisor outside the model checkout; model workers cannot change live
+admission policy, credentials, state or promotion authority. Use gpt-5.6-luna
+with max reasoning, at most one model start per rolling hour (168 per rolling
+seven days), shared by implementation, review, retry and continuation starts.
+Run hourly with one exclusive writer; deterministic bookkeeping can continue
+without a model start. A local runtime release requires exact source identity,
+supervised restart and rollback; do not fabricate Deno deployment receipts for
+Sentinel. Existing gateway release work remains distinct. Canonical lane and
+Astra-owned task register stay unchanged.
+
 Build a standalone Deno/TypeScript Sentinel at `/Users/nv/repos/ubiquity/sentinel` that polls configured repositories and incident adapters, captures sufficient failure evidence, produces permanent sanitized regression tests and bounded application fixes, waits for Codex review without holding an agent, merges accepted exact-head work, and directly promotes/monitors/rolls back exact Deno revisions through a separate deterministic release controller.
 
 Initial target: `ubiquity/ai.ubq.fi`. No webhook ingress, event bus, queue database, runtime matrix, agent fleet, generalized plugin framework, dashboard, autonomous self-modification, or automated bootstrap activation. One production implementation writer globally; at most three unfinished target PRs. A separate deterministic release writer exclusively owns Deno promotion and its release state. Multiple isolated development workers are permitted; this is not permission for multiple runtime code writers.

@@ -2,6 +2,50 @@
 
 ## Active task register — Astra owned
 
+Current owner instruction, 2026-09-11 14:34 UTC: make Sentinel autonomously fix
+itself, launch locally and monitor it. Astra owns integration. Hourly Luna/max
+is approved: one shared model start per rolling hour, 168 per rolling seven
+days, including reviews/retries/continuations. Prior unanswered-cap notes are
+superseded. T06 is in progress for explicit GitHub issue intake and a real local
+host; local runtime delivery must use supervised exact-source restart/rollback,
+not Deno receipts. No live run is claimed: Actions34610680968 failed because
+host assembly is absent. HEAD84fe7ab and eight diagnostic dirs preserved.
+
+First bounded DSH assignment: issue-only intake shared foundation in canonical
+Wave C lane, one writer, base84fe7ab7971fb99d7dbfb59795de8dc7eb9b91cd.
+Playbook2026-09-10.2 re-read; Flash/max workspace-write/ask required. Own config
+adapter union, incident scan guard, gateway narrowing and focused affected
+tests only. First edit within2min, handback5min/35calls; no children/checks/Git.
+Feedback is next settled assignment; task-owned stop permitted for confirmed
+failure or diagnosed lack of progress. GPT owns registered self-issue-intake
+acceptance after settlement. No other DSH implementation writer is live.
+
+Issue-only intake accepted locally14:53UTC: explicit github adapter skips only
+the incident scan for a sole configured issue target; gateway failures remain
+source failures. Strict variant parser and safe gateway URL capture retained.
+DSH V1 persisted9baa7453/streamcd5ba1c3/PID38082 completed; live cwd/NODE_ENV
+and Flash/max/workspace-write/ask verified.36calls exceeded35call assignment by1;
+no tests or child/Git writes. V2 persisted28f30d3c restored a runtime typeof guard
+removed by V1. Completed cleanly with required request/preset; live environment
+inspection missed its short lifetime, so do not claim full V2 launch attestation.
+No owned DSH writer remains.
+
+GPT receipts in namespace cc48556d9d6816f2605c36c352452867e2de5be694f7aa26c8a9330e9268c576:
+intakec72d3a28-fdbb-4d37-b260-cc2db85ed16d passed exact parser/intake cases;
+source types4a68fb2d-3d5e-4702-b62c-7b9e697a5e7b passed;
+format08b43de7-fb50-469f-9fc7-ebcc0b8d159a passed. Prior overbroad loop run
+1a337dca-1476-4766-8a8a-8cbca5c9109a interrupted after9min in unchanged
+review-recovery scenarios; exact owned evidence process40520/group40524 settled.
+Its new reviewseverity diagnostic is preserved, separate from8pre-existing dirs.
+
+No-model local permission proof684f97e4-26f0-49d4-9d0b-4dd82feba8c3 passed:
+installed Codex0.154.0 named profile acknowledged, checkout read/write allowed,
+outside read/write denied, session settled. Immutable probe V4 in
+/tmp/sentinel-self-20260911/permission-probe-v4.ts. Exact-executable-only V1–V3
+failed helper execution; installed standalone runtime directory read access
+resolves traversal without granting unrelated host access. No model turn or
+credential in probe. Runtime profile wiring remains next; no live activation.
+
 This section is the current authoritative task list. The dated history below
 is evidence, not a second queue. Only the current GPT-6 Astra integration owner
 may edit this file. Workers return proposed updates and immutable evidence;
@@ -23,8 +67,8 @@ to keep retrying. Scope changes require an Astra entry with the reason.
 | T03 Runtime review transport | accepted / Astra integration | Concrete completed review transport and durable receipt bind operation, PR, head, reviewer and terminal result; no silence-as-clean | Audited transport hash23507800 preserved. Integrated60a66325 passed146/147; corrected sole fixture passed2a236c00 in19s. Final source/test type, format and lint pass. Concrete producer/live request evidence retained. Local integration accepted; aggregate exact-head review, publication and runtime activation remain T08–T10. |
 | T04 Gateway replay consumer | accepted and published / Astra; issue11 closed | Actual target command consumes the safe permanent fixture, fails original, passes candidate, and runs in target validation | Gateway checkpointcf5af622 passed77/77 and fresh source audit; clean existing m06 lane. Sentinel metadata/source checkpointaf11a37 passed71/71 (3109c98f), type/format/lint; actual local causal loop and original/sanitized/candidate dispatch verified. Transient metadata stays outside fixture digest. Publication accepted through gateway PR279 at7a6a15c3 with deployed identity and authenticated inference; a subsequent causal live capture remains T11. No historical SHA proof is fabricated. |
 | T05 Production replay isolation | accepted locally / Astra; issue #4 | Captured callable isolation, real Linux configured target commands and read-only causal execution, malformed capability refusal and cleanup; preserved Mac behavior | Linux4/4, Mac98/98, types/format/lint and independent Astra audit passed on identical manifest-bound bytes; see issue4 acceptance below. Eight prior diagnostics preserved. Full aggregate review/merge remains issue12. |
-| T06 Trusted host wiring | pending / Astra; depends on T01–T05 | Real entrypoints assemble scoped authentication, durable state CAS, incident/replay/model/review and release capabilities; missing capabilities fail closed | Observer run `34389188768`: `observe_auth_missing`; repair `34388944531` and release `34388818273`: host wiring absent. Assemble existing ports with verified contracts, not another injected stub. |
-| T07 Activation decisions | pending / Astra prepares; user decides | Finite model limits/session bounds, retention duration/aggregate storage/key capability, stability baseline/thresholds, credential scopes, protected paths, isolated target and handover owner recorded | Rolling-hour/seven-day limit question sent01:59UTC remains unanswered; do not ask again or guess live caps. Existing dedicated App4682172 installation155687488 lacks repair permissions; organization App identity needs verification and scoped token issuance. Retention/storage and stability settings remain unresolved. |
+| T06 Trusted host wiring | in progress / Astra with serialized DSH | Real local issue intake, scoped authentication, durable state CAS, isolated model/review and supervised runtime delivery; missing capabilities fail closed | Issue-only adapter draft ready; focused acceptance running. Local host, dependency intake and delivery still required. Actions34610680968 confirms missing host assembly. |
+| T07 Activation decisions | hourly policy approved / Astra implements | Record local cadence/session bound, credential scope, protected paths and supervisor ownership; gateway retention/stability remains separate | Owner approved local self-repair, hourly Luna/max and monitoring: one shared start per rolling hour,168 per seven days. Existing local gh identity0x4007 has Sentinel access; no local App key verified. Do not mislabel personal auth as App authentication. |
 | T08 Integrated delivery | pending / Astra; depends on T01–T06 | Accepted worker tips are canonical ancestors; exact candidate passes integrated harness, current-head Codex review and required CI; resulting PR merged | Earlier source PR #2 is already merged; do not recreate it or redo fixed D6. New accepted changes require a new integrated candidate and evidence. |
 | T09 Isolated release and rollback | pending / Astra; depends on T07–T08 | Exact candidate/prior revisions, real promotion, continuous acceptance and exact restoration proved in isolated environment | Perform before production promotion ownership transfer. Health alone is insufficient. |
 | T10 Production ownership and activation | pending / Astra; depends on T09 | Authorized drain and exclusive release ownership verified; trusted runtime deployed with approved capabilities | Existing gateway workflow retains promotion. Do not remove it before replacement proof or run two production writers. |

@@ -17,8 +17,10 @@ identity and isolated worker lanes are invariants. Preserve unrelated work.
 - Keep credentials, state writes and promotion authority out of model workers.
 - Commit only sanitized minimal regression fixtures; original payloads and raw
   diagnostic evidence remain restricted artifacts.
-- Do not implement recursive controller modification or autonomous bootstrap
-  activation in the first version.
+- The owner authorized local Sentinel self-repair and initial activation on
+  2026-09-11. Require reviewed PRs and an external trusted supervisor; model
+  workers cannot modify live admission policy, credentials, state or promotion
+  authority. See the scope update in MASTER-PLAN.md.
 
 ## Development and review
 

@@ -18,7 +18,13 @@ Deno.test("observe config is pinned to the ai.ubq.fi gateway", async () => {
   assert.equal(config.repository.owner, "ubiquity");
   assert.equal(config.repository.name, "ai.ubq.fi");
   assert.equal(config.adapter.kind, "gateway");
-  assert.equal(config.adapter.baseUrl, "https://ai.ubq.fi");
+  // The adapter is a discriminated variant: narrow before reading the
+  // gateway-only base address.
+  const adapter = config.adapter;
+  if (adapter.kind !== "gateway") {
+    throw new Error("observe config must name the gateway adapter");
+  }
+  assert.equal(adapter.baseUrl, "https://ai.ubq.fi");
 });
 
 Deno.test("observe replay key accepts exactly 32 bytes", () => {

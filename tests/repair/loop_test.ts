@@ -128,6 +128,7 @@ async function makeRig(
     github?: ConstructorParameters<typeof FakeGithub>[0];
     model?: ConstructorParameters<typeof FakeModel>[0];
     replay?: ConstructorParameters<typeof FakeReplay>[0];
+    incidents?: ConstructorParameters<typeof FakeIncidents>[0];
     configOverrides?: Record<string, unknown>;
   } = {},
 ): Promise<RigV1> {
@@ -151,6 +152,7 @@ async function makeRig(
   const incidents = new FakeIncidents({
     summaries: options.summaries === false ? [] : [summaryFixture()],
     evidence: options.summaries === false ? null : evidenceFixture(),
+    ...options.incidents,
   });
   const replay = new FakeReplay(options.replay);
   const model = new FakeModel({
@@ -1127,6 +1129,69 @@ Deno.test(
         rig.github.calls.filter((call) => call === "listOpenIssues").length,
         2,
       );
+    } finally {
+      await rig.ctx.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "github adapter intake skips incident scans and admits a real seeded issue",
+  async () => {
+    // The fake incident source throws if touched at all: a github-only host
+    // must advance the real seeded issue without any incident read.
+    const rig = await makeRig("githubintake", {
+      summaries: false,
+      configOverrides: { adapter: { kind: "github" } },
+      incidents: { throwOnList: true },
+      github: {
+        openIssues: [{
+          number: 7,
+          title: "repair the failing request",
+          labels: ["P1", "priority:9"],
+          createdAt: T0 - 300,
+        }],
+      },
+    });
+    try {
+      const first = await rig.run(1);
+      assert.equal(first.status, "margin", JSON.stringify(first));
+      const state = await rig.snapshot();
+      assert.equal(state.incidents.length, 0);
+      assert.equal(state.work.length, 1);
+      const issue = state.work[0];
+      assert.equal(issue.source.kind, "issue");
+      assert.equal(issue.source.id, "7");
+      assert.equal(issue.related.issueNumber, 7);
+      assert.equal(issue.source.revision, SHA1);
+      assert.equal(issue.target.base, SHA1);
+      assert.deepEqual(issue.classification, { severity: "P1", priority: 9 });
+      assert.equal(rig.model.requests.length, 0);
+      assert.equal(
+        rig.github.calls.filter((call) => call === "listOpenIssues").length,
+        1,
+      );
+    } finally {
+      await rig.ctx.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "gateway intake keeps an incident source failure as a failure",
+  async () => {
+    // A single gateway configuration (and any ambiguous host) keeps the
+    // existing incident read and its source-error outcome.
+    const rig = await makeRig("gatewaysourcefail", {
+      summaries: false,
+      incidents: { failListNext: true },
+    });
+    try {
+      const result = await rig.run(1);
+      assert.equal(result.status, "source_error", JSON.stringify(result));
+      const state = await rig.snapshot();
+      assert.equal(state.work.length, 0);
+      assert.equal(rig.model.requests.length, 0);
     } finally {
       await rig.ctx.cleanup();
     }

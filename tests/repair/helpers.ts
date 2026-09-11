@@ -505,6 +505,8 @@ export interface FakeIncidentOptionsV1 {
   evidence?: IncidentEvidenceV1 | null;
   failListNext?: boolean;
   coverageIncomplete?: boolean;
+  /** Fail loudly when an issue-only host touches the incident source. */
+  throwOnList?: boolean;
 }
 
 /** Recording fake IncidentAdapter. */
@@ -538,6 +540,9 @@ export class FakeIncidents implements IncidentAdapter {
     cursor: string | null,
     _limit: number,
   ): Promise<PortResultV1<IncidentPageV1>> {
+    if (this.options.throwOnList) {
+      throw new Error("incident listing called for an issue-only host");
+    }
     if (this.options.failListNext) {
       return Promise.resolve(
         portError("unavailable", "listing transport failure"),

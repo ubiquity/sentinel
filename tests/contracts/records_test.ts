@@ -412,6 +412,56 @@ Deno.test("semantics surface exactly as documented", async () => {
   assert.equal(record.observed.identity?.revisionId, "dep-0001");
 });
 
+Deno.test("repository adapter is a discriminated union with exact variant keys", async () => {
+  const gateway = structuredClone(
+    await readFixture("valid", "repository-config-v1.json"),
+  ) as Record<string, unknown>;
+  const parsedGateway = parseRepositoryConfigV1(structuredClone(gateway));
+  assert.deepEqual(parsedGateway.adapter, {
+    kind: "gateway",
+    baseUrl: "https://ai.ubq.fi",
+  });
+
+  // The GitHub variant is valid without any base address.
+  const github = structuredClone(gateway);
+  github.adapter = { kind: "github" };
+  const parsedGithub = tryParse(parseRepositoryConfigV1, github);
+  assert.equal(parsedGithub.ok, true);
+  if (parsedGithub.ok) {
+    assert.deepEqual(parsedGithub.value.adapter, { kind: "github" });
+  }
+
+  // A base address on the GitHub variant is an unknown key, never ignored.
+  const withBaseUrl = structuredClone(gateway);
+  withBaseUrl.adapter = { kind: "github", baseUrl: "https://ai.ubq.fi" };
+  const rejectedBase = tryParse(parseRepositoryConfigV1, withBaseUrl);
+  assert.equal(rejectedBase.ok, false);
+  if (!rejectedBase.ok) {
+    assert.equal(rejectedBase.issues[0]?.code, "unknown_key");
+    assert.equal(rejectedBase.issues[0]?.path, "$.adapter.baseUrl");
+  }
+
+  // Unknown kinds are refused.
+  const unknownKind = structuredClone(gateway);
+  unknownKind.adapter = { kind: "bitbucket", baseUrl: "https://ai.ubq.fi" };
+  const rejectedKind = tryParse(parseRepositoryConfigV1, unknownKind);
+  assert.equal(rejectedKind.ok, false);
+  if (!rejectedKind.ok) {
+    assert.equal(rejectedKind.issues[0]?.code, "invalid_enum");
+    assert.equal(rejectedKind.issues[0]?.path, "$.adapter.kind");
+  }
+
+  // The gateway variant still requires its base address.
+  const missingBase = structuredClone(gateway);
+  missingBase.adapter = { kind: "gateway" };
+  const rejectedMissing = tryParse(parseRepositoryConfigV1, missingBase);
+  assert.equal(rejectedMissing.ok, false);
+  if (!rejectedMissing.ok) {
+    assert.equal(rejectedMissing.issues[0]?.code, "missing_field");
+    assert.equal(rejectedMissing.issues[0]?.path, "$.adapter.baseUrl");
+  }
+});
+
 Deno.test("command registry binds argv arrays with bounded runtime, never shell text", () => {
   const registry = parseCommandRegistryV1({
     version: "v1",
