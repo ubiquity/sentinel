@@ -814,16 +814,25 @@ function composeLocalGitHub(input: LocalGitHubInputV1): GitHubPort {
 }
 
 /**
+ * Exact local coding-task opt-in. GitHub's repository bot removes the old
+ * admission labels within seconds, so labels have no role: eligibility is this
+ * exact standalone first line of the issue body, terminated by LF, CRLF, or
+ * the end of the body.
+ */
+const LOCAL_REPAIR_MARKER = "<!-- sentinel:repair -->";
+
+/**
  * Restrict the privately-owned concrete local port to actual coding tasks.
  *
  * Only `listOpenIssues` and `readIssue` are replaced, and both originals are
  * bound to this exact port before replacement, so every other method keeps
  * the class instance and its `this` binding. An issue is in scope only when
- * it carries the exact `bug` or `enhancement` label and does not carry the
- * owner-decision `question` label. Errors pass through unchanged; an
- * ineligible or absent read passes through as `null`, preserving the existing
- * pre-admission wait gate. The loop re-reads the issue before every
- * admission, so a queued issue that loses eligibility cannot consume budget.
+ * its body opts in with the exact standalone first line
+ * `<!-- sentinel:repair -->`; labels play no part because the repository bot
+ * removes them. Errors pass through unchanged; an ineligible or absent read
+ * passes through as `null`, preserving the existing pre-admission wait gate.
+ * The loop re-reads the source issue before every admission, so a queued
+ * issue that loses eligibility cannot consume budget.
  */
 export function scopeLocalRepairIssues(port: GitHubPort): GitHubPort {
   const listOpenIssues = port.listOpenIssues.bind(port);
@@ -842,10 +851,16 @@ export function scopeLocalRepairIssues(port: GitHubPort): GitHubPort {
   return port;
 }
 
-/** Exact-label admission: `bug` or `enhancement`, never `question`. */
+/**
+ * Exact first-line opt-in admission. The marker must be the whole first line
+ * with no leading whitespace, quoting or fencing, followed by LF, CRLF or the
+ * end of the body. A marker later in prose, a longer suffix and a partial
+ * match are refused; labels never admit or refuse.
+ */
 function isLocalRepairIssue(issue: GitHubIssueV1): boolean {
-  if (issue.labels.includes("question")) return false;
-  return issue.labels.includes("bug") || issue.labels.includes("enhancement");
+  if (!issue.body.startsWith(LOCAL_REPAIR_MARKER)) return false;
+  const rest = issue.body.slice(LOCAL_REPAIR_MARKER.length);
+  return rest === "" || rest.startsWith("\n") || rest.startsWith("\r\n");
 }
 
 /** Scoped Basic auth for trusted git only; never in a URL or config file. */

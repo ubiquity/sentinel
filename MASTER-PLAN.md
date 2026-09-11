@@ -35,6 +35,29 @@ Initial target: `ubiquity/ai.ubq.fi`. No webhook ingress, event bus, queue datab
 
 Delivery success: two distinct previously undelivered eligible tasks advance autonomously in priority order through accepted PRs and verified production delivery, at least one driven by a captured offending request and permanent regression fixture; subsequent eligible selection is observed. The first task's review wait must overlap useful progress on the second without parallel code writers. Demonstrate interruption recovery and exact rollback in an isolated release environment before live target activation. Do not manufacture success by hand-implementing the application issues. Existing #136 is excluded.
 
+### Local self-update contract, 2026-09-11
+
+A fixed trusted supervisor outside mutable runtime checkouts owns a private
+active-runtime pointer and local release receipts; it never replaces itself.
+It accepts only an exact local scope-0 production ReleaseRequestV1 with a
+matching completed review and a merged revision in development ancestry. It
+stages that exact clean revision, saves the prior healthy runtime and intent
+before switching, and verifies a fresh real child run at the exact candidate
+SHA before acceptance. Model admission remains in the existing repair host.
+A candidate failure permits only restoration of the recorded prior revision,
+followed by a fresh prior run; missing settlement or identity proof stays
+pending. Never overwrite an unrelated newer active pointer. Persist local
+receipts atomically under the private state root with exclusive supervisor
+ownership. The repair loop receives only an optional readonly local receipt
+capability; it validates exact request identity before closure. Local scope
+cannot consume Deno release receipts. Gateway release behavior is unchanged.
+Astra bootstraps the reviewed supervisor and initial pointer; runtime agents
+cannot modify supervisor or receipt authority files, credentials or state.
+Local coding tasks opt in with the exact standalone first-line HTML comment
+`<!-- sentinel:repair -->` in the issue body; source is re-read before admission.
+Do not use labels for admission: ubiquity-os[bot] removes the default labels.
+
+
 ## 2. Canonical goal identity
 
 | Identity | Value |
