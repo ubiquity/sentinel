@@ -93,6 +93,8 @@ const FINAL_PHASES = new Set(["final_answer", "final", "answer"]);
 
 const PROVIDER_DETAIL =
   "structured review unavailable: the configured provider is not a nonempty finite string";
+const PERMISSION_PROFILE_DETAIL =
+  "structured review unavailable: the configured permission profile is not a valid named profile";
 const DEADLINE_DETAIL =
   "structured review unavailable: the supplied absolute deadlines do not admit a bounded start";
 const REQUEST_DETAIL =
@@ -261,6 +263,18 @@ export interface CodexStructuredReviewerOptionsV1 {
   sessionCwd: string;
   /** Testable clock; defaults to `Date.now`. */
   now?: () => number;
+  /**
+   * Optional trusted host-defined named permission profile. When present it
+   * must match /^[A-Za-z][A-Za-z0-9_-]{0,63}$/ and is never a built-in
+   * full-access id; an invalid value returns static unavailable before any
+   * session opens. With a configured profile the reviewer enables the
+   * app-server experimental capabilities, submits `permissions` INSTEAD of the
+   * legacy `sandbox` on thread/start, requires the exact
+   * `activePermissionProfile.id` acknowledgement before any turn, and carries
+   * the profile into the single turn/start (never sandboxPolicy readOnly).
+   * When omitted the legacy read-only review behavior is unchanged.
+   */
+  permissionProfile?: string;
 }
 
 function isBoundedId(value: unknown): value is string {
@@ -276,6 +290,22 @@ function isValidProvider(value: string): boolean {
     if (code <= 0x1f || code === 0x7f) return false;
   }
   return true;
+}
+
+/**
+ * Trusted named permission profile: a host-defined name only. Built-in
+ * full-access mode identifiers are never accepted as a named profile binding.
+ */
+const PERMISSION_PROFILE_PATTERN = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
+const BUILTIN_FULL_ACCESS_PERMISSION_PROFILE_IDS = new Set([
+  "full-access",
+  "danger-full-access",
+]);
+
+function isValidPermissionProfile(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  if (!PERMISSION_PROFILE_PATTERN.test(value)) return false;
+  return !BUILTIN_FULL_ACCESS_PERMISSION_PROFILE_IDS.has(value.toLowerCase());
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -426,6 +456,8 @@ class PreparedStructuredReview implements PreparedStructuredReviewV1 {
   private readonly threadModel: string;
   private readonly threadModelProvider: string;
   private readonly threadEffort: string;
+  /** Trusted configured named permission profile; null when omitted. */
+  private readonly permissionProfile: string | null;
 
   private phase: "prepared" | "started" | "closed" = "prepared";
   private attempted = false;
@@ -461,6 +493,7 @@ class PreparedStructuredReview implements PreparedStructuredReviewV1 {
     thread: ThreadAckV1;
     hardSettleBy: number;
     turnDeadline: number;
+    permissionProfile: string | null;
   }) {
     this.session = input.session;
     this.provider = input.provider;
@@ -478,6 +511,7 @@ class PreparedStructuredReview implements PreparedStructuredReviewV1 {
     this.threadModel = input.thread.model;
     this.threadModelProvider = input.thread.modelProvider;
     this.threadEffort = input.thread.reasoningEffort;
+    this.permissionProfile = input.permissionProfile;
     this.execution = {
       ownerRunId: this.ownerRunId,
       invocationId: this.invocationId,
@@ -551,16 +585,25 @@ class PreparedStructuredReview implements PreparedStructuredReviewV1 {
     }
 
     let sendPromise: Promise<unknown>;
+    const turnParams: Record<string, unknown> = {
+      threadId: this.threadId,
+      model: REVIEW_MODEL,
+      effort: REVIEW_REASONING,
+      input: [{ type: "text", text: this.prompt, text_elements: [] }],
+      outputSchema: REVIEW_RESULT_OUTPUT_SCHEMA,
+      approvalPolicy: "never",
+    };
+    if (this.permissionProfile !== null) {
+      // Trusted named profile carried from the acknowledged thread: the
+      // installed schema forbids combining `permissions` with
+      // `sandboxPolicy`, so the profile replaces the read-only override
+      // instead of being overridden by it.
+      turnParams.permissions = this.permissionProfile;
+    } else {
+      turnParams.sandboxPolicy = { type: "readOnly" };
+    }
     try {
-      sendPromise = this.session.send("turn/start", {
-        threadId: this.threadId,
-        model: REVIEW_MODEL,
-        effort: REVIEW_REASONING,
-        input: [{ type: "text", text: this.prompt, text_elements: [] }],
-        outputSchema: REVIEW_RESULT_OUTPUT_SCHEMA,
-        approvalPolicy: "never",
-        sandboxPolicy: { type: "readOnly" },
-      });
+      sendPromise = this.session.send("turn/start", turnParams);
     } catch {
       this.clearTimers();
       this.settleNow();
@@ -1134,12 +1177,15 @@ export class CodexStructuredReviewer {
   private readonly sessionCwd: string;
   private readonly openSession: (input: { cwd: string }) => CodexSessionV1;
   private readonly now: () => number;
+  /** Trusted configured named permission profile; null when omitted. */
+  private readonly permissionProfile: string | null;
 
   constructor(options: CodexStructuredReviewerOptionsV1) {
     this.provider = options.provider;
     this.sessionCwd = options.sessionCwd;
     this.openSession = options.openSession;
     this.now = options.now ?? (() => Date.now());
+    this.permissionProfile = options.permissionProfile ?? null;
   }
 
   /**
@@ -1152,6 +1198,14 @@ export class CodexStructuredReviewer {
   ): Promise<PortResultV1<PreparedStructuredReviewV1>> {
     if (!isValidProvider(this.provider)) {
       return portError("unavailable", PROVIDER_DETAIL);
+    }
+    // A configured named permission profile must be a valid host-defined name
+    // BEFORE any session opens; built-in full-access ids are never permitted.
+    if (
+      this.permissionProfile !== null &&
+      !isValidPermissionProfile(this.permissionProfile)
+    ) {
+      return portError("unavailable", PERMISSION_PROFILE_DETAIL);
     }
     const input = asRecord(request);
     if (input === null) return portError("unavailable", REQUEST_DETAIL);
@@ -1256,6 +1310,7 @@ export class CodexStructuredReviewer {
         thread: threaded.value,
         hardSettleBy,
         turnDeadline,
+        permissionProfile: this.permissionProfile,
       });
       session = null;
       return portOk(prepared);
@@ -1270,7 +1325,11 @@ export class CodexStructuredReviewer {
   private async initialize(session: CodexSessionV1): Promise<void> {
     const response = await session.send("initialize", {
       clientInfo: { name: "sentinel-structured-review", version: "0.1.0" },
-      capabilities: { experimentalApi: false },
+      capabilities: {
+        // Experimental app-server capabilities are enabled ONLY for a trusted
+        // configured named permission profile; the legacy path stays as is.
+        experimentalApi: this.permissionProfile !== null,
+      },
     });
     const record = asRecord(response);
     if (record === null || typeof record.userAgent !== "string") {
@@ -1285,12 +1344,11 @@ export class CodexStructuredReviewer {
   private async startThread(
     session: CodexSessionV1,
   ): Promise<ThreadAckV1> {
-    const response = await session.send("thread/start", {
+    const threadParams: Record<string, unknown> = {
       model: REVIEW_MODEL,
       modelProvider: this.provider,
       cwd: this.sessionCwd,
       approvalPolicy: "never",
-      sandbox: "read-only",
       ephemeral: true,
       config: {
         model_reasoning_effort: REVIEW_REASONING,
@@ -1303,7 +1361,16 @@ export class CodexStructuredReviewer {
       },
       baseInstructions: BASE_INSTRUCTIONS,
       developerInstructions: DEVELOPER_INSTRUCTIONS,
-    });
+    };
+    if (this.permissionProfile !== null) {
+      // Trusted named profile: the installed schema forbids combining
+      // `permissions` with the legacy `sandbox` field, so the configured
+      // profile replaces the read-only sandbox entirely for this thread.
+      threadParams.permissions = this.permissionProfile;
+    } else {
+      threadParams.sandbox = "read-only";
+    }
+    const response = await session.send("thread/start", threadParams);
     const record = asRecord(response);
     const thread = asRecord(record?.thread);
     const threadId = thread?.id;
@@ -1324,6 +1391,19 @@ export class CodexStructuredReviewer {
         "malformed_line",
         "thread/start response does not acknowledge the requested provider/model/effort",
       );
+    }
+    // A configured named profile must be acknowledged exactly BEFORE any turn
+    // starts; a missing or wrong acknowledgement fails preparation (the owned
+    // session is settled by the caller's bounded close path) and no turn is
+    // ever submitted.
+    if (this.permissionProfile !== null) {
+      const active = asRecord(record?.activePermissionProfile);
+      if (active === null || active.id !== this.permissionProfile) {
+        throw new CodexProtocolError(
+          "malformed_line",
+          "thread/start response does not acknowledge the configured permission profile",
+        );
+      }
     }
     return { threadId, model, modelProvider, reasoningEffort };
   }

@@ -41,7 +41,11 @@ export type RecordKindV1 =
   | "repair_state_snapshot"
   | "release_state_snapshot";
 
-/** Repository identity plus the GitHub App installation reference. */
+/**
+ * Repository identity plus the GitHub installation/scope reference. Positive
+ * ids are real GitHub App installations; 0 is reserved for the explicit no-App
+ * local owner credential scope.
+ */
 export interface RepositoryIdentityV1 {
   owner: string;
   name: string;
@@ -72,20 +76,23 @@ export function parseRepositoryIdentity(
     "expected GitHub repository name",
     MaxText.name,
   );
-  const installationId = expectPositiveInstallationId(
+  const installationId = expectInstallationId(
     obj.installationId,
     `${path}.installationId`,
   );
   return { owner, name, installationId };
 }
 
-/** GitHub App installation ids are positive integers; 0 is not a valid id. */
-function expectPositiveInstallationId(value: unknown, path: string): number {
-  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) {
+/**
+ * Installation scope: 0 is the explicit no-App local owner credential scope;
+ * positive safe integers are GitHub App installation ids.
+ */
+function expectInstallationId(value: unknown, path: string): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
     fail(
       path,
       "invalid_count",
-      `expected positive installation id, got ${describeValue(value)}`,
+      `expected nonnegative safe installation id, got ${describeValue(value)}`,
     );
   }
   return value;

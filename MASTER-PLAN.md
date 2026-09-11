@@ -18,6 +18,17 @@ supervised restart and rollback; do not fabricate Deno deployment receipts for
 Sentinel. Existing gateway release work remains distinct. Canonical lane and
 Astra-owned task register stay unchanged.
 
+For the authorized local Sentinel host, use the existing owner's GitHub login
+through trusted code restricted to ubiquity/sentinel. Record the actual login;
+do not represent it as GitHub App authentication. Reserve installationId 0
+for this explicit no-App local credential scope; positive IDs retain their
+App meaning. The github adapter permits that scope, gateway configuration
+still requires a positive App installation, and every scope must match a
+configured repository. Preserve shared durable cooldown and model admission
+for scope 0. Local Git state may use a private persistent bare repository with
+the same repair/release refs and expected-head writes. Model workers receive
+neither GitHub credentials nor that state repository.
+
 Build a standalone Deno/TypeScript Sentinel at `/Users/nv/repos/ubiquity/sentinel` that polls configured repositories and incident adapters, captures sufficient failure evidence, produces permanent sanitized regression tests and bounded application fixes, waits for Codex review without holding an agent, merges accepted exact-head work, and directly promotes/monitors/rolls back exact Deno revisions through a separate deterministic release controller.
 
 Initial target: `ubiquity/ai.ubq.fi`. No webhook ingress, event bus, queue database, runtime matrix, agent fleet, generalized plugin framework, dashboard, autonomous self-modification, or automated bootstrap activation. One production implementation writer globally; at most three unfinished target PRs. A separate deterministic release writer exclusively owns Deno promotion and its release state. Multiple isolated development workers are permitted; this is not permission for multiple runtime code writers.

@@ -257,7 +257,7 @@ Deno.test("cooldown: unknown keys and missing keys fail closed", () => {
 });
 
 Deno.test("cooldown: unsafe installation ids are rejected", () => {
-  for (const installationId of [0, -1, 1.5, 2 ** 53, Number.NaN]) {
+  for (const installationId of [-1, 1.5, 2 ** 53, Number.NaN]) {
     const issue = firstIssue(tryParse(
       parseGitHubCooldownV1,
       cooldown({
@@ -266,6 +266,13 @@ Deno.test("cooldown: unsafe installation ids are rejected", () => {
     ));
     assert.equal(issue.code, "invalid_count", `id ${installationId}`);
   }
+  // Scope 0 is the explicit no-App local owner scope and is valid.
+  const local = tryParse(
+    parseGitHubCooldownV1,
+    cooldown({ installationId: 0 }),
+  );
+  assert.equal(local.ok, true);
+  if (local.ok) assert.equal(local.value.installationId, 0);
   assert.equal(
     tryParse(parseGitHubCooldownV1, cooldown({ installationId: 1 })).ok,
     true,

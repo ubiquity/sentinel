@@ -65,6 +65,14 @@ class FakeCodexSession implements CodexSessionV1 {
     | null = null;
   private turnStarted = false;
 
+  constructor(
+    /**
+     * Configured `activePermissionProfile` acknowledgement; undefined omits
+     * the field entirely (the legacy thread acknowledgement).
+     */
+    private readonly activePermissionProfile?: Record<string, unknown>,
+  ) {}
+
   open(): void {
     this.openCalls++;
   }
@@ -74,13 +82,18 @@ class FakeCodexSession implements CodexSessionV1 {
     switch (method) {
       case "initialize":
         return Promise.resolve({ userAgent: "codex-app-server/0.153.4" });
-      case "thread/start":
-        return Promise.resolve({
+      case "thread/start": {
+        const ack: Record<string, unknown> = {
           thread: { id: "thread-1" },
           model: "gpt-5.6-luna",
           reasoningEffort: "max",
           modelProvider: "sentinel-host",
-        });
+        };
+        if (this.activePermissionProfile !== undefined) {
+          ack.activePermissionProfile = this.activePermissionProfile;
+        }
+        return Promise.resolve(ack);
+      }
       case "turn/start":
         this.turnStarted = true;
         return Promise.resolve({ turn: { id: "turn-1" } });
@@ -203,6 +216,19 @@ Deno.test("model-port: thread starts with bounded isolated-checkout write capabi
   // sandbox, scoped to the checkout cwd — not read-only (a commit would be
   // impossible) and never full access.
   assert.equal(params.sandbox, "workspace-write");
+  assert.equal(
+    "permissions" in params,
+    false,
+    "an omitted permission profile keeps the legacy sandbox request",
+  );
+  const initialize = session.sent.find(
+    (frame) => frame.method === "initialize",
+  );
+  assert.deepEqual(
+    (initialize?.params as Record<string, unknown>).capabilities,
+    { experimentalApi: false, requestAttestation: false },
+    "an omitted permission profile keeps the legacy capabilities",
+  );
   assert.equal(params.cwd, CHECKOUT, "write scope is the isolated checkout");
   assert.equal(params.approvalPolicy, "never");
   assert.equal(params.ephemeral, true);
@@ -231,6 +257,177 @@ Deno.test("model-port: thread starts with bounded isolated-checkout write capabi
     "the trusted-host verifier observed the session evidence",
   );
 });
+
+Deno.test(
+  "model-port: permission profile gates capabilities, thread permissions and exact acknowledgement",
+  async () => {
+    const session = new FakeCodexSession({ id: "sentinel-repair" });
+    const port = new CodexImplementationPort({
+      openSession: () => Promise.resolve(session),
+      checkoutDir: CHECKOUT,
+      checkout: {
+        resolve: () =>
+          Promise.resolve({
+            head: SHA3,
+            checkpointSha: null,
+            changedPaths: ["src/app.ts"],
+          }),
+      },
+      modelProvider: "sentinel-host",
+      permissionProfile: "sentinel-repair",
+    });
+
+    const result = await port.runModel({
+      taskId: asWorkItemId("issue-1"),
+      repository: { ...REPO },
+      base: SHA1,
+      issue: { number: 1, title: "title", body: "body" },
+      evidence: [],
+      model: "gpt-5.6-luna",
+      reasoning: "max",
+      maxDurationMs: 5_000,
+      maxOutputChars: 10_000,
+    });
+    assert.ok(result.ok, JSON.stringify(result));
+    if (!result.ok) return;
+    assert.equal(result.value.outcome, "completed");
+
+    const initialize = session.sent.find(
+      (frame) => frame.method === "initialize",
+    );
+    assert.ok(initialize, "initialize was sent");
+    assert.deepEqual(
+      (initialize?.params as Record<string, unknown>).capabilities,
+      { experimentalApi: true, requestAttestation: false },
+      "experimental capabilities are enabled only for a configured profile",
+    );
+    const threadStart = session.sent.find(
+      (frame) => frame.method === "thread/start",
+    );
+    assert.ok(threadStart, "thread/start was sent");
+    const params = threadStart?.params as Record<string, unknown>;
+    assert.equal(params.permissions, "sentinel-repair");
+    assert.equal(
+      "sandbox" in params,
+      false,
+      "the named profile replaces the legacy sandbox",
+    );
+    assert.equal(params.cwd, CHECKOUT);
+    assert.equal(params.approvalPolicy, "never");
+    const turnStart = session.sent.find(
+      (frame) => frame.method === "turn/start",
+    );
+    assert.ok(turnStart, "turn/start was sent");
+    const turnParams = turnStart?.params as Record<string, unknown>;
+    assert.equal(
+      "permissions" in turnParams,
+      false,
+      "the implementation turn inherits the thread profile",
+    );
+    assert.equal("sandboxPolicy" in turnParams, false);
+    assert.equal(session.closeCalls, 1);
+  },
+);
+
+Deno.test(
+  "model-port: permission profile missing or wrong acknowledgement fails closed before any turn",
+  async (t) => {
+    const cases: [string, Record<string, unknown> | undefined][] = [
+      ["missing", undefined],
+      ["wrong", { id: "other-profile" }],
+    ];
+    for (const [label, ack] of cases) {
+      await t.step(label, async () => {
+        const session = ack === undefined
+          ? new FakeCodexSession()
+          : new FakeCodexSession(ack);
+        const port = new CodexImplementationPort({
+          openSession: () => Promise.resolve(session),
+          checkoutDir: CHECKOUT,
+          checkout: {
+            resolve: () =>
+              Promise.resolve({
+                head: SHA3,
+                checkpointSha: null,
+                changedPaths: ["src/app.ts"],
+              }),
+          },
+          modelProvider: "sentinel-host",
+          permissionProfile: "sentinel-repair",
+        });
+        const result = await port.runModel({
+          taskId: asWorkItemId("issue-1"),
+          repository: { ...REPO },
+          base: SHA1,
+          issue: { number: 1, title: "title", body: "body" },
+          evidence: [],
+          model: "gpt-5.6-luna",
+          reasoning: "max",
+          maxDurationMs: 5_000,
+          maxOutputChars: 10_000,
+        });
+        assert.equal(
+          result.ok,
+          false,
+          `${label} acknowledgement must fail closed`,
+        );
+        if (result.ok) return;
+        assert.equal(result.error.kind, "unavailable");
+        assert.equal(
+          session.sent.some((frame) => frame.method === "turn/start"),
+          false,
+          "no turn starts without the exact acknowledgement",
+        );
+        assert.equal(session.closeCalls, 1, "the owned session settles");
+      });
+    }
+  },
+);
+
+Deno.test(
+  "model-port: invalid permission profile opens no session",
+  async (t) => {
+    const invalidProfiles = [
+      "",
+      "1bad",
+      "bad profile",
+      "a".repeat(65),
+      "danger-full-access",
+      "full-access",
+    ];
+    for (const profile of invalidProfiles) {
+      await t.step(JSON.stringify(profile), async () => {
+        const session = new FakeCodexSession({ id: profile });
+        let opened = 0;
+        const port = new CodexImplementationPort({
+          openSession: () => {
+            opened++;
+            return Promise.resolve(session);
+          },
+          checkoutDir: CHECKOUT,
+          modelProvider: "sentinel-host",
+          permissionProfile: profile,
+        });
+        const result = await port.runModel({
+          taskId: asWorkItemId("issue-1"),
+          repository: { ...REPO },
+          base: SHA1,
+          issue: { number: 1, title: "title", body: "body" },
+          evidence: [],
+          model: "gpt-5.6-luna",
+          reasoning: "max",
+          maxDurationMs: 5_000,
+          maxOutputChars: 10_000,
+        });
+        assert.equal(result.ok, false);
+        if (result.ok) return;
+        assert.equal(result.error.kind, "unavailable");
+        assert.equal(opened, 0, "no session opens for an invalid profile");
+        assert.equal(session.sent.length, 0);
+      });
+    }
+  },
+);
 
 Deno.test(
   "model-port: candidate commit waits for model session settlement",

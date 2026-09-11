@@ -96,10 +96,7 @@ export function rankEligibleWork(
       skipped[record.id] = "wip";
       continue;
     }
-    if (
-      record.repository.installationId !== 0 &&
-      !byRepository.has(repoKey(record.repository))
-    ) {
+    if (!byRepository.has(repoKey(record.repository))) {
       skipped[record.id] = "unconfigured";
       continue;
     }

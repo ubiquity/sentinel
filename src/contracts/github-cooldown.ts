@@ -104,7 +104,10 @@ export function parseGitHubRateLimitV1(input: unknown): GitHubRateLimitV1 {
  * converted to a deadline.
  */
 export interface GitHubCooldownV1 {
-  /** Affected GitHub App installation; positive safe integer. */
+  /**
+   * Affected GitHub installation scope; positive safe integers are App
+   * installations and 0 is the explicit no-App local owner scope.
+   */
   installationId: number;
   /** Earliest allowed request time; null means manual fail-closed hold. */
   retryNotBefore: number | null;
@@ -127,7 +130,7 @@ const COOLDOWN_KEYS = [
 export function parseGitHubCooldownV1(input: unknown): GitHubCooldownV1 {
   const obj = expectRecord(input, "$");
   expectExactKeys(obj, COOLDOWN_KEYS, "$");
-  const installationId = expectPositiveInstallationId(
+  const installationId = expectInstallationId(
     obj.installationId,
     "$.installationId",
   );
@@ -157,13 +160,16 @@ export function parseGitHubCooldownV1(input: unknown): GitHubCooldownV1 {
   };
 }
 
-/** GitHub App installation ids are positive safe integers; 0 is not an id. */
-function expectPositiveInstallationId(value: unknown, path: string): number {
-  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) {
+/**
+ * Installation scope: 0 is the explicit no-App local owner scope; positive
+ * safe integers are GitHub App installation ids.
+ */
+function expectInstallationId(value: unknown, path: string): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
     fail(
       path,
       "invalid_count",
-      `expected positive safe integer, got ${describeValue(value)}`,
+      `expected nonnegative safe installation id, got ${describeValue(value)}`,
     );
   }
   return value;

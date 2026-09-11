@@ -190,6 +190,16 @@ export function parseRepositoryConfigV1(input: unknown): RepositoryConfigV1 {
   );
 
   const adapter = parseRepositoryAdapter(obj.adapter, "$.adapter");
+  // Scope 0 is reserved for the explicit no-App local owner credential used by
+  // the github adapter; a gateway configuration still needs a real App
+  // installation.
+  if (adapter.kind === "gateway" && repository.installationId < 1) {
+    fail(
+      "$.repository.installationId",
+      "invalid_count",
+      "gateway adapter requires a positive GitHub App installation id; 0 is reserved for the no-App local owner scope",
+    );
+  }
 
   const commandsObj = expectRecord(obj.commands, "$.commands");
   expectExactKeys(commandsObj, COMMANDS_KEYS, "$.commands");

@@ -306,6 +306,11 @@ Deno.test(
     const review = prepared.value;
 
     assert.deepEqual(session.sent, ["initialize", "thread/start"]);
+    assert.deepEqual(
+      (session.params[0] as Record<string, unknown>).capabilities,
+      { experimentalApi: false },
+      "an omitted permission profile keeps the legacy capabilities",
+    );
     assert.equal(session.opened, 1);
     assert.equal(session.turnStarts(), 0);
     assert.equal(review.startAttempted(), false);
@@ -443,6 +448,128 @@ Deno.test(
     assert.equal(mismatch.ok, false);
     assert.equal(provider.closed, 1);
     assert.equal(provider.turnStarts(), 0);
+  },
+);
+
+Deno.test(
+  "reviewer: permission profile binds capabilities, thread permissions and the single turn",
+  async () => {
+    const session = new ScriptedCodexSession();
+    session.threadAck = {
+      thread: { id: "thread-1" },
+      model: "gpt-5.6-luna",
+      modelProvider: PROVIDER,
+      reasoningEffort: "max",
+      activePermissionProfile: { id: "sentinel-review" },
+    };
+    session.live = (scripted) => {
+      scripted.emit(
+        "item/completed",
+        agentMessage(
+          scripted.turnId,
+          "item-1",
+          JSON.stringify(CLEAN_RESULT),
+        ),
+      );
+      scripted.emit("turn/completed", turnCompleted(scripted.turnId));
+    };
+    const reviewer = makeReviewer(session, {
+      permissionProfile: "sentinel-review",
+    });
+    const prepared = await reviewer.prepare(
+      prepareRequest(await snapshotFixture()),
+    );
+    if (!prepared.ok) assert.fail(prepared.error.detail);
+    assert.deepEqual(
+      (session.params[0] as Record<string, unknown>).capabilities,
+      { experimentalApi: true },
+      "experimental capabilities are enabled only for a configured profile",
+    );
+    const threadParams = session.params[1] as Record<string, unknown>;
+    assert.equal(threadParams.permissions, "sentinel-review");
+    assert.equal(
+      "sandbox" in threadParams,
+      false,
+      "the named profile replaces the legacy sandbox",
+    );
+
+    const outcome = await prepared.value.start();
+    if (!outcome.ok) assert.fail(outcome.error.detail);
+    assert.equal(outcome.value.status, "clean");
+    const turnParams = session.params[2] as Record<string, unknown>;
+    assert.equal(turnParams.permissions, "sentinel-review");
+    assert.equal(
+      "sandboxPolicy" in turnParams,
+      false,
+      "the trusted profile replaces the legacy readOnly override",
+    );
+    assert.equal(turnParams.approvalPolicy, "never");
+    assert.equal(session.turnStarts(), 1);
+  },
+);
+
+Deno.test(
+  "reviewer: permission profile missing or wrong acknowledgement fails preparation before any turn",
+  async (t) => {
+    const cases: [string, Record<string, unknown> | undefined][] = [
+      ["missing", undefined],
+      ["wrong", { id: "other-profile" }],
+    ];
+    for (const [label, ack] of cases) {
+      await t.step(label, async () => {
+        const session = new ScriptedCodexSession();
+        if (ack !== undefined) {
+          session.threadAck = {
+            thread: { id: "thread-1" },
+            model: "gpt-5.6-luna",
+            modelProvider: PROVIDER,
+            reasoningEffort: "max",
+            activePermissionProfile: ack,
+          };
+        }
+        const reviewer = makeReviewer(session, {
+          permissionProfile: "sentinel-review",
+        });
+        const prepared = await reviewer.prepare(
+          prepareRequest(await snapshotFixture()),
+        );
+        assert.equal(prepared.ok, false);
+        if (prepared.ok) return;
+        assert.equal(prepared.error.kind, "unavailable");
+        assert.equal(session.turnStarts(), 0);
+        assert.equal(session.closed, 1, "the owned session settles");
+      });
+    }
+  },
+);
+
+Deno.test(
+  "reviewer: invalid permission profile opens no session",
+  async (t) => {
+    const invalidProfiles = [
+      "",
+      "1bad",
+      "bad profile",
+      "a".repeat(65),
+      "danger-full-access",
+      "full-access",
+    ];
+    for (const profile of invalidProfiles) {
+      await t.step(JSON.stringify(profile), async () => {
+        const session = new ScriptedCodexSession();
+        const reviewer = makeReviewer(session, {
+          permissionProfile: profile,
+        });
+        const prepared = await reviewer.prepare(
+          prepareRequest(await snapshotFixture()),
+        );
+        assert.equal(prepared.ok, false);
+        if (prepared.ok) return;
+        assert.equal(prepared.error.kind, "unavailable");
+        assert.equal(session.opened, 0);
+        assert.deepEqual(session.sent, []);
+      });
+    }
   },
 );
 

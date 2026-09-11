@@ -110,6 +110,15 @@ const MAX_COMMAND_ACTIONS = 64;
 const REQUIRED_MODEL_ID = "gpt-5.6-luna";
 /** The frozen runtime reasoning effort; no fallback is ever synthesized. */
 const REQUIRED_REASONING_EFFORT = "max";
+/**
+ * Trusted named permission profile: a host-defined name only. Built-in
+ * full-access mode identifiers are never accepted as a named profile binding.
+ */
+const PERMISSION_PROFILE_PATTERN = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
+const BUILTIN_FULL_ACCESS_PERMISSION_PROFILE_IDS = new Set([
+  "full-access",
+  "danger-full-access",
+]);
 
 /** A nonempty bounded identity (thread/turn/reroute/id strings). */
 function isBoundedId(value: string): boolean {
@@ -267,6 +276,16 @@ function isValidProvider(value: string): boolean {
     if (code <= 0x1f || code === 0x7f) return false;
   }
   return true;
+}
+
+/**
+ * A configured named permission profile must be a valid host-defined name and
+ * never a built-in full-access mode identifier.
+ */
+function isValidPermissionProfile(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  if (!PERMISSION_PROFILE_PATTERN.test(value)) return false;
+  return !BUILTIN_FULL_ACCESS_PERMISSION_PROFILE_IDS.has(value.toLowerCase());
 }
 
 /** One correlated runtime routing event acknowledged for the exact thread/turn. */
@@ -456,6 +475,10 @@ const MODEL_POLICY_DETAIL =
 /** Static fail-closed detail: configured provider is not a nonempty finite string. */
 const PROVIDER_POLICY_DETAIL =
   "model receipt unavailable: configured provider is not a nonempty finite string";
+
+/** Static fail-closed detail: configured permission profile is not a valid name. */
+const PERMISSION_PROFILE_POLICY_DETAIL =
+  "model receipt unavailable: configured permission profile is not a valid named profile";
 
 /** Static fail-closed detail: completed run produced no correlated output evidence. */
 const OUTPUT_EVIDENCE_DETAIL =
@@ -695,6 +718,17 @@ export interface CodexImplementationPortOptionsV1 {
    */
   modelProvider?: string;
   /**
+   * Optional trusted host-defined named permission profile. When present it
+   * must match /^[A-Za-z][A-Za-z0-9_-]{0,63}$/ and is never a built-in
+   * full-access id; an invalid value returns static unavailable before any
+   * session opens. With a configured profile the port enables the app-server
+   * experimental capabilities, submits `permissions` INSTEAD of the legacy
+   * `sandbox` on thread/start, and requires the exact
+   * `activePermissionProfile.id` acknowledgement BEFORE any turn starts.
+   * When omitted the legacy workspace-write sandbox behavior is unchanged.
+   */
+  permissionProfile?: string;
+  /**
    * Trusted-host receipt verifier (kept for tests/host injection); it is only
    * an ADDITIONAL restriction applied AFTER the concrete core request/runtime
    * checks, so it can never bypass correlation, routing or model-policy
@@ -716,6 +750,8 @@ export class CodexImplementationPort implements ImplementationPort {
   /** Optional additional restriction applied only after the core checks. */
   private readonly customVerifier: ReceiptVerifierV1 | null;
   private readonly graceMs: number;
+  /** Trusted configured named permission profile; null when omitted. */
+  private readonly permissionProfile: string | null;
 
   constructor(options: CodexImplementationPortOptionsV1) {
     this.options = options;
@@ -729,6 +765,7 @@ export class CodexImplementationPort implements ImplementationPort {
     this.customVerifier = options.receiptVerifier ?? null;
     this.graceMs = options.interruptSettlementGraceMs ??
       DEFAULT_INTERRUPT_SETTLEMENT_GRACE_MS;
+    this.permissionProfile = options.permissionProfile ?? null;
   }
 
   async runModel(
@@ -750,6 +787,14 @@ export class CodexImplementationPort implements ImplementationPort {
     }
     if (!isValidProvider(this.options.modelProvider)) {
       return portError("unavailable", PROVIDER_POLICY_DETAIL);
+    }
+    // A configured named permission profile must be a valid host-defined name
+    // BEFORE any session opens; built-in full-access ids are never permitted.
+    if (
+      this.permissionProfile !== null &&
+      !isValidPermissionProfile(this.permissionProfile)
+    ) {
+      return portError("unavailable", PERMISSION_PROFILE_POLICY_DETAIL);
     }
     let session: CodexSessionV1 | null = null;
     const invocationId = `codex-${request.taskId}-${Date.now()}`;
@@ -819,7 +864,12 @@ export class CodexImplementationPort implements ImplementationPort {
         title: "Sentinel repair controller",
         version: "0.1.0",
       },
-      capabilities: { experimentalApi: false, requestAttestation: false },
+      capabilities: {
+        // Experimental app-server capabilities are enabled ONLY for a trusted
+        // configured named permission profile; the legacy path stays as is.
+        experimentalApi: this.permissionProfile !== null,
+        requestAttestation: false,
+      },
     });
     if (
       typeof response !== "object" || response === null ||
@@ -854,11 +904,6 @@ export class CodexImplementationPort implements ImplementationPort {
       // observed thread receipt cannot silently inherit a weaker host default.
       config: { model_reasoning_effort: request.reasoning },
       cwd: this.options.checkoutDir,
-      // Bounded isolated-checkout write capability: the session may write
-      // within the secret-free checkout only (the thread cwd is the checkout
-      // root); the host approval policy stays "never" and no other sandbox is
-      // granted. "read-only" would make the requested commit impossible.
-      sandbox: "workspace-write",
       approvalPolicy: "never",
       ephemeral: true,
       baseInstructions: prompt,
@@ -866,6 +911,18 @@ export class CodexImplementationPort implements ImplementationPort {
       // explicitly so the thread response can acknowledge the exact provider.
       modelProvider: this.options.modelProvider,
     };
+    if (this.permissionProfile !== null) {
+      // Trusted named profile: the installed schema forbids combining
+      // `permissions` with the legacy `sandbox` field, so the configured
+      // profile replaces the sandbox entirely for this thread.
+      startParams.permissions = this.permissionProfile;
+    } else {
+      // Bounded isolated-checkout write capability: the session may write
+      // within the secret-free checkout only (the thread cwd is the checkout
+      // root); the host approval policy stays "never" and no other sandbox is
+      // granted. "read-only" would make the requested commit impossible.
+      startParams.sandbox = "workspace-write";
+    }
     const response = await session.send("thread/start", startParams);
     const record = requireRecord(response, "thread/start");
     const thread = (record.thread ?? null) as Record<string, unknown> | null;
@@ -894,6 +951,21 @@ export class CodexImplementationPort implements ImplementationPort {
         "malformed_line",
         "thread/start response does not acknowledge the requested provider/model/effort",
       );
+    }
+    // A configured named profile must be acknowledged exactly BEFORE any turn
+    // starts; a missing or wrong acknowledgement fails closed (the session is
+    // settled by the caller's owned close path) and no model turn is spent.
+    if (this.permissionProfile !== null) {
+      const active = record.activePermissionProfile;
+      if (
+        typeof active !== "object" || active === null ||
+        (active as Record<string, unknown>).id !== this.permissionProfile
+      ) {
+        throw new CodexProtocolError(
+          "malformed_line",
+          "thread/start response does not acknowledge the configured permission profile",
+        );
+      }
     }
     return { threadId, model, effort, provider };
   }
