@@ -16,6 +16,8 @@ import {
 } from "../../src/state/mod.ts";
 import { asWorkItemId } from "../../src/contracts/brands.ts";
 import type { GitSha } from "../../src/contracts/brands.ts";
+import type { GitHubIssueV1 } from "../../src/contracts/ports.ts";
+import { portOk } from "../../src/contracts/ports.ts";
 import { parseReviewReceiptV1 } from "../../src/contracts/review-receipt.ts";
 import type { ReviewReceiptV1 } from "../../src/contracts/review-receipt.ts";
 import type { RepairStateSnapshotV1 } from "../../src/contracts/state-snapshots.ts";
@@ -45,6 +47,7 @@ import {
   FakeIncidents,
   FakeModel,
   FakeReplay,
+  MemoryState,
   repairConfigs,
 } from "./helpers.ts";
 
@@ -126,8 +129,11 @@ async function makeRig(
   options: {
     summaries?: boolean;
     github?: ConstructorParameters<typeof FakeGithub>[0];
+    /** Exact fake port instance (e.g. one that serves native relations). */
+    githubPort?: FakeGithub;
     model?: ConstructorParameters<typeof FakeModel>[0];
     replay?: ConstructorParameters<typeof FakeReplay>[0];
+    incidents?: ConstructorParameters<typeof FakeIncidents>[0];
     configOverrides?: Record<string, unknown>;
   } = {},
 ): Promise<RigV1> {
@@ -147,10 +153,12 @@ async function makeRig(
     ...options.configOverrides,
   });
   const budget = new RollingStartBudget({ clock, state: store, configs });
-  const github = new FakeGithub({ baseSha: SHA1, ...options.github });
+  const github = options.githubPort ??
+    new FakeGithub({ baseSha: SHA1, ...options.github });
   const incidents = new FakeIncidents({
     summaries: options.summaries === false ? [] : [summaryFixture()],
     evidence: options.summaries === false ? null : evidenceFixture(),
+    ...options.incidents,
   });
   const replay = new FakeReplay(options.replay);
   const model = new FakeModel({
@@ -158,7 +166,12 @@ async function makeRig(
     changedPaths: ["src/app.ts"],
     ...options.model,
   });
-  const run = (deadlineMs = 600_000) =>
+  // Positive rigs need the declared review bound (10 min) plus the five-minute
+  // operation margin to fit INSIDE the loop deadline: a 10-minute caller
+  // deadline leaves no review window at all. 60 minutes stays under the fixed
+  // 120-minute ceiling and the 90-minute model cutoff; the clock is fake, so
+  // this costs no real time.
+  const run = (deadlineMs = 60 * 60_000) =>
     runRepairCycle({
       clock,
       state: store,
@@ -258,6 +271,86 @@ async function makeRig(
     sequence,
     acceptRelease,
   };
+}
+
+/** One full open-issue fixture (the frozen GitHubIssueV1 shape). */
+function issueRecord(
+  number: number,
+  overrides: Partial<GitHubIssueV1> = {},
+): GitHubIssueV1 {
+  return {
+    number,
+    title: `issue ${number}`,
+    body: "",
+    state: "open",
+    author: null,
+    labels: [],
+    createdAt: T0,
+    updatedAt: T0,
+    closedAt: null,
+    ...overrides,
+  };
+}
+
+/**
+ * Native-relation fake GitHub port. `listed` is what intake sees and `latest`
+ * is what every model-admission re-read sees, so a test can change the source
+ * between the intake listing and the admission read.
+ */
+class RelationsFakeGithub extends FakeGithub {
+  listed: GitHubIssueV1[] = [];
+  latest = new Map<number, GitHubIssueV1 | null>();
+  override listOpenIssues() {
+    this.calls.push("listOpenIssues");
+    return Promise.resolve(portOk(this.listed));
+  }
+  override readIssue(issueNumber: number) {
+    this.calls.push(`readIssue:${issueNumber}`);
+    return Promise.resolve(portOk(this.latest.get(issueNumber) ?? null));
+  }
+}
+
+/**
+ * Cheap in-memory issue-only loop rig: MemoryState plus fake ports. Unlike the
+ * real-Git `makeRig`, no temp directory or Git command is touched.
+ */
+function makeMemoryRig(github: FakeGithub) {
+  const clock = new FakeClock(T0);
+  const state = new MemoryState();
+  const configs = repairConfigs({
+    adapter: { kind: "github" },
+    sessionBound: { maxDurationMs: 240_000, maxOutputChars: 200_000 },
+  });
+  const budget = new RollingStartBudget({ clock, state, configs });
+  const githubCooldown = new DurableGitHubCooldownGate({ state, clock });
+  const incidents = new FakeIncidents({ summaries: [], evidence: null });
+  const replay = new FakeReplay();
+  const model = new FakeModel({
+    head: SHA3,
+    changedPaths: ["src/app.ts"],
+  });
+  const run = (stepLimit = 16) =>
+    runRepairCycle({
+      clock,
+      state,
+      configs,
+      controllerSha: SHA1,
+      github,
+      githubCooldown,
+      incidents,
+      replay,
+      model,
+      budget,
+    }, { deadline: clock.now() + 60 * 60_000, stepLimit });
+  const snapshot = async () => {
+    const read = await state.readRepair();
+    assert.ok(read.ok && read.value.status === "found");
+    if (!read.ok || read.value.status !== "found") {
+      throw new Error("no repair state");
+    }
+    return read.value.snapshot;
+  };
+  return { clock, state, github, model, run, snapshot };
 }
 
 Deno.test(
@@ -1122,6 +1215,153 @@ Deno.test(
         rig.github.calls.filter((call) => call === "listOpenIssues").length,
         2,
       );
+    } finally {
+      await rig.ctx.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "github adapter intake skips incident scans and admits a real seeded issue",
+  async () => {
+    // The fake incident source throws if touched at all: a github-only host
+    // must advance the real seeded issue without any incident read.
+    // The fake port serves the known-empty native relations that issue-only
+    // github-adapter intake requires before any admission.
+    const seededIssue = issueRecord(7, {
+      title: "repair the failing request",
+      labels: ["P1", "priority:9"],
+      createdAt: T0 - 300,
+      relations: { openBlockers: [], subIssueCount: 0 },
+    });
+    const githubPort = new RelationsFakeGithub({ baseSha: SHA1 });
+    githubPort.listed = [seededIssue];
+    githubPort.latest.set(7, seededIssue);
+    const rig = await makeRig("githubintake", {
+      summaries: false,
+      configOverrides: { adapter: { kind: "github" } },
+      incidents: { throwOnList: true },
+      githubPort,
+    });
+    try {
+      const first = await rig.run(1);
+      assert.equal(first.status, "margin", JSON.stringify(first));
+      const state = await rig.snapshot();
+      assert.equal(state.incidents.length, 0);
+      assert.equal(state.work.length, 1);
+      const issue = state.work[0];
+      assert.equal(issue.source.kind, "issue");
+      assert.equal(issue.source.id, "7");
+      assert.equal(issue.related.issueNumber, 7);
+      assert.equal(issue.source.revision, SHA1);
+      assert.equal(issue.target.base, SHA1);
+      assert.deepEqual(issue.classification, { severity: "P1", priority: 9 });
+      assert.equal(rig.model.requests.length, 0);
+      assert.equal(
+        rig.github.calls.filter((call) => call === "listOpenIssues").length,
+        1,
+      );
+    } finally {
+      await rig.ctx.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "github adapter issue intake gates on native relations before any model start",
+  async () => {
+    // A parent (has sub-issues) and an open-blocked issue are skipped at
+    // intake: no work record, no reservation and no model start.
+    const blocked = new RelationsFakeGithub({ baseSha: SHA1 });
+    blocked.listed = [
+      issueRecord(11, {
+        relations: {
+          openBlockers: [{ owner: "ubiquity", name: "ai.ubq.fi", number: 3 }],
+          subIssueCount: 0,
+        },
+      }),
+      issueRecord(12, {
+        relations: { openBlockers: [], subIssueCount: 2 },
+      }),
+    ];
+    const blockedRig = makeMemoryRig(blocked);
+    const blockedRun = await blockedRig.run(1);
+    assert.equal(blockedRun.status, "idle", JSON.stringify(blockedRun));
+    let state = await blockedRig.snapshot();
+    assert.equal(state.work.length, 0);
+    assert.equal(state.reservations.length, 0);
+    assert.equal(blockedRig.model.requests.length, 0);
+
+    // Absent relations are UNKNOWN, never empty: the run reports a source
+    // error and admits nothing.
+    const missing = new RelationsFakeGithub({ baseSha: SHA1 });
+    missing.listed = [issueRecord(13, { title: "unknown dependencies" })];
+    const missingRig = makeMemoryRig(missing);
+    const missingRun = await missingRig.run(1);
+    assert.equal(missingRun.status, "source_error", JSON.stringify(missingRun));
+    state = await missingRig.snapshot();
+    assert.equal(state.work.length, 0);
+    assert.equal(state.reservations.length, 0);
+    assert.equal(missingRig.model.requests.length, 0);
+
+    // A known-unblocked leaf is admitted and the implementation start is
+    // charged exactly once against the same latest read.
+    const leaf = new RelationsFakeGithub({ baseSha: SHA1 });
+    const leafIssue = issueRecord(14, {
+      relations: { openBlockers: [], subIssueCount: 0 },
+    });
+    leaf.listed = [leafIssue];
+    leaf.latest.set(14, leafIssue);
+    const leafRig = makeMemoryRig(leaf);
+    await leafRig.run(6);
+    state = await leafRig.snapshot();
+    assert.equal(state.work.length, 1);
+    assert.equal(leafRig.model.requests.length, 1);
+    assert.equal(state.reservations[0]?.outcome, "submitted");
+
+    // The source changes between the intake listing and the model-admission
+    // re-read (an open blocker appears): admission defers with zero
+    // reservation and zero model start, waiting exactly one hour so the next
+    // poll re-reads the native dependency.
+    const moved = new RelationsFakeGithub({ baseSha: SHA1 });
+    moved.listed = [
+      issueRecord(15, { relations: { openBlockers: [], subIssueCount: 0 } }),
+    ];
+    moved.latest.set(
+      15,
+      issueRecord(15, {
+        relations: {
+          openBlockers: [{ owner: "ubiquity", name: "sentinel", number: 99 }],
+          subIssueCount: 0,
+        },
+      }),
+    );
+    const movedRig = makeMemoryRig(moved);
+    await movedRig.run(6);
+    state = await movedRig.snapshot();
+    assert.equal(state.work.length, 1);
+    assert.equal(state.work[0].wait?.reason, "unavailable");
+    assert.equal(state.work[0].wait?.until, T0 + 60 * 60_000);
+    assert.equal(state.reservations.length, 0);
+    assert.equal(movedRig.model.requests.length, 0);
+  },
+);
+
+Deno.test(
+  "gateway intake keeps an incident source failure as a failure",
+  async () => {
+    // A single gateway configuration (and any ambiguous host) keeps the
+    // existing incident read and its source-error outcome.
+    const rig = await makeRig("gatewaysourcefail", {
+      summaries: false,
+      incidents: { failListNext: true },
+    });
+    try {
+      const result = await rig.run(1);
+      assert.equal(result.status, "source_error", JSON.stringify(result));
+      const state = await rig.snapshot();
+      assert.equal(state.work.length, 0);
+      assert.equal(rig.model.requests.length, 0);
     } finally {
       await rig.ctx.cleanup();
     }

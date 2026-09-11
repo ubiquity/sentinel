@@ -29,6 +29,7 @@
 import { asFixtureDigest } from "../contracts/brands.ts";
 import type { FixtureDigest } from "../contracts/brands.ts";
 import type { PortResultV1 } from "../contracts/ports.ts";
+import type { GatewayCausalProofV1 } from "./causal-proof.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -78,6 +79,15 @@ export interface ResolvedFixtureV1 {
   entries: ReplayFixtureEntryV1[];
   /** Trusted sanitization/provenance attestation. */
   provenance: FixtureProvenanceV1;
+  /**
+   * Optional trusted causal proof attached by the trusted fixture
+   * composition. Structural sanitization stays separate from causal
+   * verification: a redacted fixture keeps `redacted: true`, and the replay
+   * consuming boundary may suppress `fixture_redacted` ONLY when this proof
+   * re-validates against the resolved fixture, the actual bundle digest and
+   * the request/config identities.
+   */
+  causalProof?: GatewayCausalProofV1;
 }
 
 export interface FixtureResolverV1 {

@@ -12,12 +12,14 @@
  */
 
 import type { GitSha } from "../contracts/brands.ts";
+import { isGitSha } from "../contracts/brands.ts";
 import type { GitHubRateLimitV1 } from "../contracts/github-cooldown.ts";
 import type {
   Clock,
   GitHubBranchProtectionsV1,
   GitHubChecksV1,
   GitHubCooldownGateV1,
+  GitHubIssueRelationsV1,
   GitHubIssueV1,
   GitHubPullRequestV1,
   GitHubRefV1,
@@ -29,7 +31,13 @@ import { portError, portOk } from "../contracts/ports.ts";
 import type { RepositoryIdentityV1 } from "../contracts/shared.ts";
 import {
   expectArray,
+  expectCount,
+  expectEnum,
+  expectNonEmptyString,
+  expectPositiveInt,
   expectRecord,
+  fail,
+  MaxText,
   tryParse,
 } from "../contracts/validation.ts";
 import type { GitHubAuthProviderV1 } from "./auth.ts";
@@ -40,6 +48,7 @@ import {
 } from "./http.ts";
 import type { HttpRequestV1, HttpResponseV1, HttpTransportV1 } from "./http.ts";
 import { classifyGitHubRateLimit } from "./rate-limit.ts";
+import { MAX_JOURNAL_BYTES } from "./review-journal.ts";
 import {
   parseBranchRuleWire,
   parseCheckRunWire,
@@ -75,6 +84,39 @@ const REVIEW_DECISION_QUERY = `
   }
 `;
 
+/**
+ * Native issue dependency read (blockedBy + sub-issue total). The blockedBy
+ * connection is read one page of `first: 100`; `hasNextPage` is a hard
+ * truncation signal, never a silently ignored continuation.
+ */
+const ISSUE_RELATIONS_QUERY = `
+  query SentinelIssueRelations($owner: String!, $name: String!, $number: Int!) {
+    repository(owner: $owner, name: $name) {
+      issue(number: $number) {
+        number
+        blockedBy(first: 100) {
+          nodes {
+            number
+            state
+            repository {
+              nameWithOwner
+            }
+          }
+          pageInfo {
+            hasNextPage
+          }
+        }
+        subIssues(first: 1) {
+          totalCount
+        }
+      }
+    }
+  }
+`;
+
+/** Maximum native blockedBy nodes accepted from one relations read. */
+const MAX_BLOCKED_BY_NODES = 100;
+
 export interface GitHubApiClientOptionsV1 {
   repository: RepositoryIdentityV1;
   apiBaseUrl: string;
@@ -87,6 +129,13 @@ export interface GitHubApiClientOptionsV1 {
   cooldownGate: GitHubCooldownGateV1;
   /** Injectable clock for rate-limit observation timestamps. */
   clock: Clock;
+  /**
+   * Trusted opt-in: when exactly `true`, `listOpenIssues` and `readIssue`
+   * enrich each real REST issue record with native dependency relations
+   * (`blockedBy`/sub-issue count). Any other value (including absence) leaves
+   * `relations` unknown; it is never synthesized as empty.
+   */
+  includeIssueRelations?: boolean;
   /** Paged read bounds (safety limits; exceeding them is unavailable). */
   perPage?: number;
   maxPages?: number;
@@ -110,6 +159,16 @@ export type MergePutWireV1 =
   | { status: "ambiguous" };
 
 /**
+ * Mutating review-operation outcome. `ambiguous` means the request was
+ * submitted but its response was lost — the write may have applied and the
+ * caller must reconcile against exact authoritative state; it never retries
+ * and never creates a second object.
+ */
+export type ReviewMutationOutcomeV1 =
+  | { status: "applied"; review: GitHubReviewWireV1 }
+  | { status: "ambiguous" };
+
+/**
  * Raw transport outcome: `lost` means no response reached the caller at all
  * (a write may have applied); `response` carries a status even when it is
  * 5xx (a definite server answer); `error` is an auth/transport boundary
@@ -127,6 +186,7 @@ export class GitHubApiClient {
   private readonly maxPages: number;
   private readonly maxItems: number;
   private readonly requestDeadlineMs: number;
+  private readonly includeIssueRelations: boolean;
 
   constructor(private readonly options: GitHubApiClientOptionsV1) {
     this.repository = options.repository;
@@ -136,6 +196,10 @@ export class GitHubApiClient {
     this.maxItems = options.maxItems ?? MAX_OPEN_ISSUES;
     this.requestDeadlineMs = options.requestDeadlineMs ??
       DEFAULT_HTTP_DEADLINE_MS;
+    // Exactly `true` opts in. Every other value (absent, false, truthy
+    // non-boolean) leaves relations unknown: an untrusted or malformed
+    // setting can never fabricate an unblocked issue.
+    this.includeIssueRelations = options.includeIssueRelations === true;
   }
 
   // -------------------------------------------------------------------------
@@ -158,7 +222,20 @@ export class GitHubApiClient {
       // marks them with a `pull_request` key; a PR is never an issue here.
       const parsed = parseWith(item, (v) => parseIssueWire(v, "$"));
       if (!parsed.ok) return parsed;
-      if (parsed.value.kind === "issue") issues.push(parsed.value.issue);
+      if (parsed.value.kind === "issue") {
+        if (!this.includeIssueRelations) {
+          issues.push(parsed.value.issue);
+          continue;
+        }
+        // Trusted enrichment of an actual REST issue record. One relation
+        // read failure fails the WHOLE listing: a partially enriched list
+        // could otherwise present a blocked issue as unknown/absent.
+        const relations = await this.readIssueRelations(
+          parsed.value.issue.number,
+        );
+        if (!relations.ok) return relations;
+        issues.push({ ...parsed.value.issue, relations: relations.value });
+      }
     }
     return portOk(issues);
   }
@@ -179,7 +256,47 @@ export class GitHubApiClient {
       // one. Distinct from a transport failure, never a fabricated issue.
       return portOk(null);
     }
-    return portOk(parsed.value.issue);
+    if (!this.includeIssueRelations) return portOk(parsed.value.issue);
+    const relations = await this.readIssueRelations(parsed.value.issue.number);
+    if (!relations.ok) return relations;
+    return portOk({ ...parsed.value.issue, relations: relations.value });
+  }
+
+  /**
+   * Native dependency relations for one actual issue. Same authenticated
+   * GraphQL transport, whole-operation deadline, cooldown gate and typed
+   * error mapping as `readPullRequestReviewDecision`; there is no retry loop
+   * and no separate credential path. Every malformed, mismatched or
+   * truncated answer is a typed failure — never an empty success.
+   */
+  private async readIssueRelations(
+    issueNumber: number,
+  ): Promise<PortResultV1<GitHubIssueRelationsV1>> {
+    const raw = await this.sendCore(
+      "POST",
+      `${this.apiBaseUrl}/graphql`,
+      {
+        query: ISSUE_RELATIONS_QUERY,
+        variables: {
+          owner: this.repository.owner,
+          name: this.repository.name,
+          number: issueNumber,
+        },
+      },
+    );
+    if (raw.status === "error") {
+      return portError(raw.error.kind, raw.error.detail, raw.error.rateLimit);
+    }
+    if (raw.status === "lost") {
+      return portError("unavailable", "GitHub API request failed");
+    }
+    if (raw.response.status !== 200) {
+      return portError(...this.mapError(raw.response));
+    }
+    return parseWire(
+      raw.response,
+      (value) => parseIssueRelations(value, issueNumber),
+    );
   }
 
   /** Raw open/closed PR list for a head ref (discovery; exact match later). */
@@ -544,6 +661,123 @@ export class GitHubApiClient {
   }
 
   // -------------------------------------------------------------------------
+  // Review journal operations (pending-draft lifecycle)
+  // -------------------------------------------------------------------------
+  // The review body is the durable operation journal; all four operations go
+  // through the same authenticated gate/deadline/cooldown path as every other
+  // client call. There is no automatic retry of a mutating call and no create
+  // on ambiguity: the caller reconciles the exact review id first.
+
+  /** Read the exact review for the PR (404 is a real observed null). */
+  async readPullReview(
+    number: number,
+    reviewId: number,
+  ): Promise<PortResultV1<GitHubReviewWireV1 | null>> {
+    const invalid = validateReviewOperationInput(
+      { prNumber: number, reviewId },
+      ["reviewId"],
+    );
+    if (invalid !== null) return portError(invalid.kind, invalid.detail);
+    const response = await this.request(
+      "GET",
+      `/repos/${repoPath(this.repository)}/pulls/${number}/reviews/${reviewId}`,
+    );
+    if (!response.ok) return response;
+    if (response.value.status === 404) return portOk(null);
+    return parseWire(response.value, (v) => parseReviewWire(v, "$"));
+  }
+
+  /** Create a PENDING review on the exact head (no event is ever sent). */
+  async createPendingReview(
+    number: number,
+    head: GitSha,
+    body: string,
+  ): Promise<PortResultV1<ReviewMutationOutcomeV1>> {
+    const invalid = validateReviewOperationInput(
+      { prNumber: number, head, body },
+      ["head", "body"],
+    );
+    if (invalid !== null) return portError(invalid.kind, invalid.detail);
+    const raw = await this.sendCore(
+      "POST",
+      `${this.apiBaseUrl}/repos/${
+        repoPath(this.repository)
+      }/pulls/${number}/reviews`,
+      { commit_id: head, body },
+    );
+    return this.reviewMutationOutcome(raw, "pending");
+  }
+
+  /** Replace the body of the exact pending review (no event is ever sent). */
+  async updatePendingReview(
+    number: number,
+    reviewId: number,
+    body: string,
+  ): Promise<PortResultV1<ReviewMutationOutcomeV1>> {
+    const invalid = validateReviewOperationInput(
+      { prNumber: number, reviewId, body },
+      ["reviewId", "body"],
+    );
+    if (invalid !== null) return portError(invalid.kind, invalid.detail);
+    const raw = await this.sendCore(
+      "PUT",
+      `${this.apiBaseUrl}/repos/${
+        repoPath(this.repository)
+      }/pulls/${number}/reviews/${reviewId}`,
+      { body },
+    );
+    return this.reviewMutationOutcome(raw, "pending");
+  }
+
+  /**
+   * Submit the exact review with event COMMENT. APPROVE is never sent: the
+   * publisher is the PR author identity and must not approve its own work.
+   */
+  async submitReview(
+    number: number,
+    reviewId: number,
+    body: string,
+  ): Promise<PortResultV1<ReviewMutationOutcomeV1>> {
+    const invalid = validateReviewOperationInput(
+      { prNumber: number, reviewId, body },
+      ["reviewId", "body"],
+    );
+    if (invalid !== null) return portError(invalid.kind, invalid.detail);
+    const raw = await this.sendCore(
+      "POST",
+      `${this.apiBaseUrl}/repos/${
+        repoPath(this.repository)
+      }/pulls/${number}/reviews/${reviewId}/events`,
+      { event: "COMMENT", body },
+    );
+    return this.reviewMutationOutcome(raw, "commented");
+  }
+
+  private reviewMutationOutcome(
+    raw: RawSendResult,
+    expectedState: "pending" | "commented",
+  ): PortResultV1<ReviewMutationOutcomeV1> {
+    if (raw.status === "error") {
+      // Typed auth/rate-limit errors (including metadata) are preserved.
+      return portError(raw.error.kind, raw.error.detail, raw.error.rateLimit);
+    }
+    if (raw.status === "lost") {
+      // The request may have applied; reconciliation is the caller's job. No
+      // second request is issued by this method.
+      return portOk({ status: "ambiguous" });
+    }
+    if (raw.response.status !== 200 && raw.response.status !== 201) {
+      return portError(...this.mapError(raw.response));
+    }
+    const parsed = parseWire(raw.response, (v) => parseReviewWire(v, "$"));
+    if (!parsed.ok) return parsed;
+    if (parsed.value.state !== expectedState) {
+      return portError("invalid", "GitHub API response is malformed");
+    }
+    return portOk({ status: "applied", review: parsed.value });
+  }
+
+  // -------------------------------------------------------------------------
   // Transport plumbing
   // -------------------------------------------------------------------------
 
@@ -826,6 +1060,179 @@ export class GitHubApiClient {
 
 function repoPath(repository: RepositoryIdentityV1): string {
   return `${repository.owner}/${repository.name}`;
+}
+
+/**
+ * Strict parser for the native issue-relations GraphQL response. Fails
+ * closed on a non-empty `errors` array, a missing/mismatched issue identity,
+ * a truncated blockedBy page, an invalid blocker repository identity, state
+ * or number, or an invalid sub-issue count. Closed native blockers are
+ * dropped (closed state is authoritative for the dependency); open blockers
+ * are retained regardless of repository, so a cross-repository blocker still
+ * gates. An empty result is only ever returned after all of those checks
+ * passed on a complete, untruncated page.
+ */
+function parseIssueRelations(
+  input: unknown,
+  issueNumber: number,
+): GitHubIssueRelationsV1 {
+  const obj = expectRecord(input, "$");
+  const errors = obj.errors;
+  if (errors !== undefined && errors !== null) {
+    const list = expectArray(errors, "$.errors", 100, (value) => value);
+    if (list.length > 0) {
+      fail("$.errors", "invalid_value", "GraphQL response contains errors");
+    }
+  }
+  const data = expectRecord(obj.data, "$.data");
+  const repository = expectRecord(data.repository, "$.data.repository");
+  const rawIssue = repository.issue;
+  if (rawIssue === null || rawIssue === undefined) {
+    fail(
+      "$.data.repository.issue",
+      "invalid_value",
+      "GraphQL response has no issue",
+    );
+  }
+  const issuePath = "$.data.repository.issue";
+  const issue = expectRecord(rawIssue, issuePath);
+  const number = expectPositiveInt(issue.number, `${issuePath}.number`);
+  if (number !== issueNumber) {
+    fail(
+      `${issuePath}.number`,
+      "invalid_value",
+      "GraphQL issue identity does not match the requested number",
+    );
+  }
+  const blockedBy = expectRecord(issue.blockedBy, `${issuePath}.blockedBy`);
+  const nodes = expectArray(
+    blockedBy.nodes,
+    `${issuePath}.blockedBy.nodes`,
+    MAX_BLOCKED_BY_NODES,
+    (value) => value,
+  );
+  const pageInfo = expectRecord(
+    blockedBy.pageInfo,
+    `${issuePath}.blockedBy.pageInfo`,
+  );
+  const hasNextPage = pageInfo.hasNextPage;
+  if (hasNextPage !== false) {
+    if (hasNextPage === true) {
+      fail(
+        `${issuePath}.blockedBy.pageInfo.hasNextPage`,
+        "bound_exceeded",
+        "blockedBy page exceeded the read bound",
+      );
+    }
+    fail(
+      `${issuePath}.blockedBy.pageInfo.hasNextPage`,
+      "invalid_boolean",
+      "expected boolean",
+    );
+  }
+  const subIssues = expectRecord(issue.subIssues, `${issuePath}.subIssues`);
+  const subIssueCount = expectCount(
+    subIssues.totalCount,
+    `${issuePath}.subIssues.totalCount`,
+  );
+
+  const openBlockers: GitHubIssueRelationsV1["openBlockers"] = [];
+  const seenBlockers = new Set<string>();
+  for (let index = 0; index < nodes.length; index++) {
+    const nodePath = `${issuePath}.blockedBy.nodes[${index}]`;
+    const node = expectRecord(nodes[index], nodePath);
+    const blockerNumber = expectPositiveInt(node.number, `${nodePath}.number`);
+    const state = expectEnum(
+      node.state,
+      ["OPEN", "CLOSED"] as const,
+      `${nodePath}.state`,
+    );
+    const blockerRepository = expectRecord(
+      node.repository,
+      `${nodePath}.repository`,
+    );
+    const nameWithOwner = expectNonEmptyString(
+      blockerRepository.nameWithOwner,
+      `${nodePath}.repository.nameWithOwner`,
+      MaxText.owner + 1 + MaxText.name,
+    );
+    const separator = nameWithOwner.indexOf("/");
+    const owner = separator === -1 ? "" : nameWithOwner.slice(0, separator);
+    const name = separator === -1 ? "" : nameWithOwner.slice(separator + 1);
+    if (
+      owner.length === 0 || name.length === 0 || name.includes("/") ||
+      owner.length > MaxText.owner || name.length > MaxText.name
+    ) {
+      fail(
+        `${nodePath}.repository.nameWithOwner`,
+        "invalid_pattern",
+        "expected owner/name repository identity",
+      );
+    }
+    // Closed native blockers are authoritative as satisfied and excluded;
+    // open blockers are retained even when they live in another repository.
+    if (state === "CLOSED") continue;
+    const blockerKey = `${owner}\u0000${name}\u0000${blockerNumber}`;
+    if (seenBlockers.has(blockerKey)) continue;
+    seenBlockers.add(blockerKey);
+    openBlockers.push({ owner, name, number: blockerNumber });
+  }
+  return { openBlockers, subIssueCount };
+}
+
+type RequiredReviewOperationSlotV1 = "reviewId" | "head" | "body";
+
+const REQUIRED_REVIEW_DETAILS: Record<RequiredReviewOperationSlotV1, string> = {
+  reviewId: "invalid review id",
+  head: "invalid review head",
+  body: "invalid review body",
+};
+
+interface ReviewOperationInputV1 {
+  prNumber: number;
+  reviewId?: number;
+  head?: GitSha;
+  body?: string;
+}
+
+/**
+ * Input validation before any review request: positive safe-integer ids,
+ * exact 40-hex head and a finite non-empty body within the journal byte
+ * bound. The slots the operation requires are mandatory even when a runtime
+ * caller violates TypeScript: an absent/undefined required value is the same
+ * static invalid as a wrong-type one, and no request is ever issued.
+ * Failures are static sanitized caller errors; nothing is echoed.
+ */
+function validateReviewOperationInput(
+  input: ReviewOperationInputV1,
+  required: readonly RequiredReviewOperationSlotV1[],
+): PortErrorV1 | null {
+  if (!Number.isSafeInteger(input.prNumber) || input.prNumber < 1) {
+    return { kind: "invalid", detail: "invalid pull request number" };
+  }
+  for (const slot of required) {
+    if (input[slot] === undefined) {
+      return { kind: "invalid", detail: REQUIRED_REVIEW_DETAILS[slot] };
+    }
+  }
+  if (
+    input.reviewId !== undefined &&
+    (!Number.isSafeInteger(input.reviewId) || input.reviewId < 1)
+  ) {
+    return { kind: "invalid", detail: "invalid review id" };
+  }
+  if (input.head !== undefined && !isGitSha(input.head)) {
+    return { kind: "invalid", detail: "invalid review head" };
+  }
+  if (input.body !== undefined) {
+    if (
+      typeof input.body !== "string" || input.body.length === 0 ||
+      new TextEncoder().encode(input.body).length > MAX_JOURNAL_BYTES
+    ) {
+      return { kind: "invalid", detail: "invalid review body" };
+    }
+  }
+  return null;
 }
 
 /** Sanitized static transport-boundary failure (no status/body/URL echoed). */

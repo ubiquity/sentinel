@@ -14,16 +14,34 @@
  * before/after pair with the same bundle and owns ReplayResultV1
  * composition.
  *
+ * Gateway dispatch: a request whose `fixtureRef` parses through the frozen
+ * gateway identity grammar additionally receives the fixed root
+ * `.sentinel-replay-input.json` record — the exact canonical
+ * `{version,requestPath,upstreamPath,testIds}` bytes derived from the parsed
+ * incident/capture paths and the trusted resolved test ids — materialized
+ * OUTSIDE the digested two-entry bundle so the committed target consumer can
+ * select the exact fixture instead of scanning or hardcoding it. The gateway
+ * bundle must be exactly the two fixed request/upstream entries; missing,
+ * ambiguous or extra entries are rejected. A reserved-but-malformed gateway
+ * reference is rejected rather than silently treated as non-gateway, and
+ * non-gateway requests are unchanged (no metadata).
+ *
  * Command authority: `request.commandId` resolves against the trusted
  * configured `RepositoryConfigV1` command registry (own-property lookup
  * only). Request/model-supplied argv, shell strings and interpolations are
  * never executed. The targeted command is the target's own code, so it is
  * target-controlled: this port refuses to run any target command unless the
- * caller injected a trusted isolation capability/attestation from a
- * restricted execution host. `clearEnv` removes inherited credentials but is
- * NOT an OS sandbox — the attestation is the boundary, and local toy tests
- * construct an explicitly trusted fixture-mode capability (never a live
- * config bypass).
+ * caller injected a trusted isolation capability from a restricted execution
+ * host AND that capability carries a callable `run` boundary. The descriptive
+ * attestation is required but is NOT sufficient: a boolean-only capability is
+ * rejected at construction, the `run` property is captured exactly once and
+ * receiver-bound, and the configured target command (unchanged argv/bounds)
+ * executes ONLY through that captured runner with a read-write checkout. The
+ * ordinary `runtime` option is retained ONLY for trusted Git
+ * clone/checkout/SHA work; it is never the target execution path. `clearEnv`
+ * removes inherited credentials but is NOT an OS sandbox — the callable
+ * runner is the boundary, and local toy tests construct an explicitly trusted
+ * fixture-mode capability (never a live config bypass).
  *
  * Failure semantics: spawn failure, missing executable, wrong revision,
  * timeout, unsettled descendants (uncertain cleanup — the scratch is
@@ -55,6 +73,15 @@ import type {
 import type { ReplayLimitationV1 } from "../contracts/replay-result.ts";
 import type { RepositoryConfigV1 } from "../contracts/repository-config.ts";
 import { expectRestrictedRef } from "../contracts/shared.ts";
+import {
+  gatewayCausalProofMatches,
+  gatewayFixtureRefIdentity,
+  validateGatewayCausalProof,
+} from "./causal-proof.ts";
+import {
+  buildSentinelReplayInputMetadata,
+  SENTINEL_REPLAY_INPUT_PATH,
+} from "./causal-verifier.ts";
 import { checkResolvedFixture, computeReplayFixtureDigest } from "./fixture.ts";
 import type {
   ExpectedFailureV1,
@@ -64,7 +91,12 @@ import type {
   ResolvedFixtureV1,
 } from "./fixture.ts";
 import { DenoReplayRuntime } from "./runtime.ts";
-import type { ReplayCommandResultV1, ReplayRuntimeV1 } from "./runtime.ts";
+import type {
+  ReplayCommandInputV1,
+  ReplayCommandResultV1,
+  ReplayRuntimeV1,
+} from "./runtime.ts";
+import type { ReplayCheckoutAccessV1 } from "./isolation.ts";
 
 // ---------------------------------------------------------------------------
 // Constructor capability types
@@ -91,8 +123,113 @@ export interface ReplayIsolationAttestationV1 {
   attestationRef: string;
 }
 
+/**
+ * The ACTUAL restricted-execution boundary for one target-controlled command.
+ * `access` selects the checkout mount mode: read-write for real replays whose
+ * tests create temporary files in the disposable checkout, read-only for
+ * private causal snapshots. Implementations enforce the boundary themselves;
+ * the port never rewrites argv, bounds or result handling.
+ */
+export type ReplayIsolationRunnerV1 = (
+  input: ReplayCommandInputV1,
+  access: ReplayCheckoutAccessV1,
+) => Promise<ReplayCommandResultV1>;
+
 export interface ReplayIsolationCapabilityV1 {
   attestation: ReplayIsolationAttestationV1;
+  /**
+   * Callable restricted-execution boundary that ACTUALLY runs target
+   * commands. A descriptive (boolean) attestation alone is never sufficient:
+   * target-controlled code runs only through this captured, receiver-bound
+   * function, and a later mutation or accessor can never replace it.
+   */
+  run: ReplayIsolationRunnerV1;
+}
+
+/**
+ * Validate ONE untrusted whole-capability candidate and return a sanitized
+ * snapshot: a plain attestation record (hostile accessors/proxies never leak
+ * and later mutations are not observed) plus the `run` property captured
+ * EXACTLY ONCE and bound to the capability receiver (so a class method keeps
+ * its `this` and a changing getter cannot swap the validated function).
+ *
+ * Every fault — non-record, missing/empty fields, a false/missing
+ * `restrictedExecution`, a missing/non-callable `run`, a throwing getter or a
+ * hostile proxy trap — is the SAME null (the caller maps it to its own static
+ * non-echoing TypeError). Nothing caller-controlled is ever returned or
+ * thrown.
+ */
+export function validateReplayIsolationCapability(
+  capability: unknown,
+): ReplayIsolationCapabilityV1 | null {
+  const record = capability as Record<string, unknown>;
+  let attestationValue: unknown;
+  let runValue: unknown;
+  try {
+    // The shape probe itself is guarded: Array.isArray on a revoked Proxy
+    // throws a raw TypeError, which must still be the same static null.
+    if (
+      typeof capability !== "object" || capability === null ||
+      Array.isArray(capability)
+    ) {
+      return null;
+    }
+    // One read per property; a hostile accessor fault is contained here.
+    attestationValue = record.attestation;
+    runValue = record.run;
+  } catch {
+    return null;
+  }
+  const attestation = snapshotReplayIsolationAttestation(attestationValue);
+  if (attestation === null || typeof runValue !== "function") return null;
+  let bound: unknown;
+  try {
+    // Bind through the prototype so a hostile function `bind` accessor is
+    // never consulted, and bind to the capability receiver so a class method
+    // sees its own instance.
+    bound = Function.prototype.bind.call(runValue, capability);
+  } catch {
+    return null;
+  }
+  if (typeof bound !== "function") return null;
+  return { attestation, run: bound as ReplayIsolationRunnerV1 };
+}
+
+/** One-read-per-field attestation snapshot; null unless the exact v1 shape. */
+function snapshotReplayIsolationAttestation(
+  value: unknown,
+): ReplayIsolationAttestationV1 | null {
+  const record = value as Record<string, unknown>;
+  try {
+    // The shape probe is guarded for the same reason as the whole-capability
+    // validator: Array.isArray on a revoked Proxy throws a raw TypeError.
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      return null;
+    }
+    const version = record.version;
+    const restrictedExecution = record.restrictedExecution;
+    const host = record.host;
+    const boundary = record.boundary;
+    const attestationRef = record.attestationRef;
+    if (
+      version !== "v1" ||
+      restrictedExecution !== true ||
+      typeof host !== "string" || host.length === 0 ||
+      typeof boundary !== "string" || boundary.length === 0 ||
+      typeof attestationRef !== "string" || attestationRef.length === 0
+    ) {
+      return null;
+    }
+    return {
+      version: "v1",
+      host,
+      boundary,
+      attestationRef,
+      restrictedExecution: true,
+    };
+  } catch {
+    return null;
+  }
 }
 
 /** Trusted, read-only source of the repository to validate. */
@@ -112,12 +249,16 @@ export interface ReplayPortOptions {
   /** Trusted bundle/test policy (scopes, bounds, proof parser). */
   policy: ReplayPolicyV1;
   /**
-   * Trusted restricted-execution-host capability; required. Without it the
-   * port refuses to construct, because a target-controlled command may read
-   * workstation files even with clearEnv.
+   * Trusted restricted-execution capability; required. It must carry the
+   * descriptive v1 attestation AND the callable `run` boundary, because a
+   * target-controlled command may read workstation files even with clearEnv.
    */
   isolation: ReplayIsolationCapabilityV1;
-  /** Process runtime; defaults to the concrete DenoReplayRuntime. */
+  /**
+   * Process runtime for TRUSTED Git clone/checkout/SHA operations only. The
+   * configured target command never uses it: it runs through the captured
+   * isolation `run` boundary. Defaults to the concrete DenoReplayRuntime.
+   */
   runtime?: ReplayRuntimeV1;
   /** Clock for run timestamps; defaults to SystemClock. */
   clock?: Clock;
@@ -129,32 +270,38 @@ const MAX_TEST_IDS = 64;
 const TEST_ID_RE = /^[A-Za-z0-9._:-]{1,64}$/;
 const LOCAL_SOURCE_RE = /^https?:\/\/[^\s/@]+(?::\d+)?(?:\/[^\s]*)?$/;
 const FILE_SOURCE_RE = /^file:\/\/[^\s/@]+(?:\/[^\s]*)?$/;
+/**
+ * Reserved gateway dispatch namespace (mirrors the frozen grammar in
+ * `causal-proof.ts`). A reference in this namespace belongs to the gateway
+ * replay protocol: it must parse through `gatewayFixtureRefIdentity`, and a
+ * malformed reserved reference is rejected here — it never silently falls
+ * back to the non-gateway fixture protocol (which has no dispatch metadata).
+ */
+const GATEWAY_FIXTURE_REF_PREFIX = "fixture://gateway-replay/";
+/** Fixed gateway fixture directory root (frozen composition layout). */
+const GATEWAY_FIXTURE_ROOT = "tests/fixtures/gateway-replay";
 
 export class ReplayPortImpl implements ReplayPort {
   private readonly runtime: ReplayRuntimeV1;
+  private readonly isolation: ReplayIsolationCapabilityV1;
   private readonly clock: Clock;
   private readonly path: string;
   private lastUnavailableDetailText = "";
 
   constructor(private readonly options: ReplayPortOptions) {
-    const isolation = options.isolation;
-    const attestation = isolation?.attestation;
-    if (
-      attestation === null || attestation === undefined ||
-      attestation.version !== "v1" ||
-      attestation.restrictedExecution !== true ||
-      typeof attestation.host !== "string" || attestation.host.length === 0 ||
-      typeof attestation.boundary !== "string" ||
-      attestation.boundary.length === 0 ||
-      typeof attestation.attestationRef !== "string" ||
-      attestation.attestationRef.length === 0
-    ) {
+    // Whole-capability validation BEFORE any side effect: the descriptive
+    // attestation AND the callable runner must both be present. The runner is
+    // captured once and receiver-bound; a boolean-only attestation, a later
+    // mutation or a changing/hostile accessor can never become the executor.
+    const isolation = validateReplayIsolationCapability(options.isolation);
+    if (isolation === null) {
       throw new TypeError(
-        "ReplayPort requires an injected trusted isolation capability " +
-          "attesting restricted execution on the host (clearEnv is not a " +
+        "ReplayPort requires an injected trusted isolation capability with " +
+          "a callable restricted-execution runner (clearEnv is not a " +
           "sandbox; target-controlled commands need the restricted host)",
       );
     }
+    this.isolation = isolation;
     if (options.source.kind === "local") {
       if (
         typeof options.source.path !== "string" ||
@@ -208,6 +355,24 @@ export class ReplayPortImpl implements ReplayPort {
     }
     const spec = registry[request.commandId];
 
+    // Gateway dispatch identity: ONLY a valid frozen gateway fixture reference
+    // selects the dispatch-metadata protocol. A reference in the reserved
+    // gateway namespace that does not parse is rejected here instead of
+    // silently falling back to the non-gateway fixture path (which would run
+    // the target command without the fixed root dispatcher).
+    const gatewayRef = gatewayFixtureRefIdentity(request.fixtureRef);
+    if (
+      gatewayRef === null &&
+      (request.fixtureRef.startsWith(GATEWAY_FIXTURE_REF_PREFIX) ||
+        request.fixtureRef === GATEWAY_FIXTURE_REF_PREFIX.slice(0, -1))
+    ) {
+      return portError(
+        "invalid",
+        "malformed gateway fixture reference is never treated as a " +
+          "non-gateway fixture",
+      );
+    }
+
     const resolvedResult = await this.options.fixtures.resolveFixture(
       request.fixtureRef,
     );
@@ -238,6 +403,57 @@ export class ReplayPortImpl implements ReplayPort {
       return portError("invalid", check.reason);
     }
 
+    // Gateway dispatch metadata (OUTSIDE the digested two-entry bundle). It is
+    // derived ONLY from the already parsed frozen gateway fixture identity and
+    // the trusted resolved test identity — never from a scan or a model path.
+    // The expected gateway bundle is EXACTLY the two fixed request/upstream
+    // entries at the resolved incident/capture paths: a missing, ambiguous or
+    // extra entry is rejected before any target command runs. A non-gateway
+    // request keeps the unchanged protocol (no dispatch metadata).
+    let dispatchEntry: ReplayFixtureEntryV1 | null = null;
+    if (gatewayRef !== null) {
+      const base =
+        `${GATEWAY_FIXTURE_ROOT}/${gatewayRef.incidentId}/${gatewayRef.captureId}`;
+      const requestPath = `${base}/request.json`;
+      const upstreamPath = `${base}/upstream.json`;
+      const paths = new Set(resolved.entries.map((entry) => entry.path));
+      if (
+        resolved.entries.length !== 2 || paths.size !== 2 ||
+        !paths.has(requestPath) || !paths.has(upstreamPath)
+      ) {
+        return portError(
+          "invalid",
+          "gateway fixture bundle must contain exactly the fixed request and " +
+            "upstream entries",
+        );
+      }
+      const metadata = buildSentinelReplayInputMetadata(
+        requestPath,
+        upstreamPath,
+        resolved.testIds,
+      );
+      if (metadata === null) {
+        return portError(
+          "invalid",
+          "gateway dispatch metadata is outside its fixed bounds",
+        );
+      }
+      dispatchEntry = { path: SENTINEL_REPLAY_INPUT_PATH, bytes: metadata };
+    }
+
+    // Trusted causal-proof boundary (BEFORE any target command runs): a
+    // fully bound proof is the ONLY condition that may suppress the
+    // `fixture_redacted` limitation. An absent, structurally invalid or
+    // identity-mismatched proof keeps the ordinary redacted fixture and its
+    // limitation; this never weakens provenance (still redacted) and never
+    // clears any other limitation (output_truncated, unrelated failure,
+    // unavailable, wrong revision/command/test identity).
+    const proofValid = await this.proofValidFor(
+      resolved,
+      request,
+      actualDigest,
+    );
+
     const startedAt = this.clock.now();
     let taskDir: string | null = null;
     let preserveScratch = false;
@@ -263,6 +479,7 @@ export class ReplayPortImpl implements ReplayPort {
         return this.unavailable(
           startedAt,
           resolved,
+          proofValid,
           `git clone could not be proved settled on the owned process group; ` +
             `scratch preserved at ${taskDir}`,
         );
@@ -271,6 +488,7 @@ export class ReplayPortImpl implements ReplayPort {
         return this.unavailable(
           startedAt,
           resolved,
+          proofValid,
           clone.detail,
         );
       }
@@ -286,6 +504,7 @@ export class ReplayPortImpl implements ReplayPort {
         return this.unavailable(
           startedAt,
           resolved,
+          proofValid,
           `git rev-parse could not be proved settled on the owned process ` +
             `group; scratch preserved at ${taskDir}`,
         );
@@ -294,6 +513,7 @@ export class ReplayPortImpl implements ReplayPort {
         return this.unavailable(
           startedAt,
           resolved,
+          proofValid,
           `requested revision ${request.revision} is not present in the source`,
         );
       }
@@ -306,6 +526,7 @@ export class ReplayPortImpl implements ReplayPort {
         return this.unavailable(
           startedAt,
           resolved,
+          proofValid,
           `git checkout could not be proved settled on the owned process ` +
             `group; scratch preserved at ${taskDir}`,
         );
@@ -314,6 +535,7 @@ export class ReplayPortImpl implements ReplayPort {
         return this.unavailable(
           startedAt,
           resolved,
+          proofValid,
           `could not check out revision ${request.revision}`,
         );
       }
@@ -326,6 +548,7 @@ export class ReplayPortImpl implements ReplayPort {
         return this.unavailable(
           startedAt,
           resolved,
+          proofValid,
           `git rev-parse HEAD could not be proved settled on the owned ` +
             `process group; scratch preserved at ${taskDir}`,
         );
@@ -337,6 +560,7 @@ export class ReplayPortImpl implements ReplayPort {
         return this.unavailable(
           startedAt,
           resolved,
+          proofValid,
           "checked out HEAD does not match the requested revision",
         );
       }
@@ -344,25 +568,32 @@ export class ReplayPortImpl implements ReplayPort {
       const materialized = await this.materializeBundle(
         checkoutDir,
         resolved.entries,
+        dispatchEntry,
       );
       if (!materialized.ok) {
         return portError("invalid", materialized.reason);
       }
 
-      // Run the one configured target command with direct argv and the
-      // bounded process environment; enforce the existing spec caps.
+      // Run the one configured target command through the captured
+      // restricted-execution boundary with direct argv (never rewritten), the
+      // bounded credential-free environment and the existing spec caps. A
+      // read-write checkout is bound because real replay tests may create
+      // temporary files in the disposable checkout.
       const outputLimit = Math.min(
         spec.maxOutputBytes,
         request.outputLimitBytes,
       );
-      const runResult = await this.runtime.run({
-        executable: spec.executable,
-        args: spec.args,
-        cwd: checkoutDir,
-        env: this.commandEnv(homeDir),
-        maxDurationMs: spec.maxDurationMs,
-        maxOutputBytes: outputLimit,
-      });
+      const runResult = await this.isolation.run(
+        {
+          executable: spec.executable,
+          args: spec.args,
+          cwd: checkoutDir,
+          env: this.commandEnv(homeDir),
+          maxDurationMs: spec.maxDurationMs,
+          maxOutputBytes: outputLimit,
+        },
+        "read-write",
+      );
       if (!runResult.settled) {
         // Uncertain cleanup: no proof that an owned descendant is gone, so
         // the scratch must stay for inspection instead of being deleted.
@@ -370,12 +601,13 @@ export class ReplayPortImpl implements ReplayPort {
         return this.unavailable(
           startedAt,
           resolved,
+          proofValid,
           `target command settlement could not be proven (` +
             `${runResult.detail}); scratch preserved at ${taskDir}`,
         );
       }
       const endedAt = this.clock.now();
-      return this.finish(runResult, resolved, startedAt, endedAt);
+      return this.finish(runResult, resolved, proofValid, startedAt, endedAt);
     } catch (error) {
       return portError(
         "unavailable",
@@ -449,41 +681,55 @@ export class ReplayPortImpl implements ReplayPort {
   }
 
   /**
-   * Materialize the trusted bundle at its fixed safe paths.
+   * Materialize the trusted bundle at its fixed safe paths, plus the optional
+   * gateway dispatch metadata OUTSIDE the digested bundle.
    *
-   * Missing entries are written only. A safe existing target is accepted
-   * ONLY when its bytes are byte-identical to the trusted attested bundle —
-   * an actual candidate that already contains the permanent regression
-   * and recorded fixture must replay without rewriting them. Different
+   * ALL destinations (dispatch metadata and every bundle entry) are
+   * preflighted BEFORE anything is written; missing entries are written only.
+   * A safe existing target is accepted ONLY when its bytes are
+   * byte-identical to the trusted attested bytes — an actual candidate that
+   * already contains the permanent regression, the recorded fixture and the
+   * fixed dispatch metadata must replay without rewriting them. Different
    * bytes, directories, symlinks and unsafe (symlink/non-directory)
-   * ancestors are rejected before any target command runs.
+   * ancestors are rejected before any target command runs and before any
+   * other destination is written.
    */
   private async materializeBundle(
     checkoutDir: string,
     entries: readonly ReplayFixtureEntryV1[],
+    dispatchEntry: ReplayFixtureEntryV1 | null = null,
   ): Promise<{ ok: true } | { ok: false; reason: string }> {
     const sorted = [...entries].sort((a, b) =>
       a.path < b.path ? -1 : a.path > b.path ? 1 : 0
     );
-    const existing: string[] = [];
-    for (const entry of sorted) {
+    // The dispatch metadata is planned first but never enters the bundle
+    // digest, the scope/protected-path checks or the request fixture digest.
+    const planned = dispatchEntry === null
+      ? sorted
+      : [dispatchEntry, ...sorted];
+    const missing: string[] = [];
+    for (const entry of planned) {
       const conflict = await bundleTargetConflict(
         checkoutDir,
         entry.path,
         entry.bytes,
       );
       if (conflict !== null) return { ok: false, reason: conflict };
-      const target = `${checkoutDir}/${entry.path}`;
-      if (await targetExists(target)) existing.push(entry.path);
+      if (!(await targetExists(`${checkoutDir}/${entry.path}`))) {
+        missing.push(entry.path);
+      }
     }
     // Materialize ONLY the missing safe entries; already-present entries are
     // byte-identical (verified above) and are deliberately NOT rewritten.
-    for (const entry of sorted) {
-      if (existing.includes(entry.path)) continue;
+    // Every missing destination is created EXCLUSIVELY (createNew): a raced
+    // symlink or foreign file makes the create fail instead of being
+    // followed or overwritten.
+    for (const entry of planned) {
+      if (!missing.includes(entry.path)) continue;
       const target = `${checkoutDir}/${entry.path}`;
       const parent = target.slice(0, target.lastIndexOf("/"));
       await Deno.mkdir(parent, { recursive: true });
-      await Deno.writeFile(target, entry.bytes);
+      await Deno.writeFile(target, entry.bytes, { createNew: true });
     }
     return { ok: true };
   }
@@ -491,12 +737,18 @@ export class ReplayPortImpl implements ReplayPort {
   private async finish(
     runResult: ReplayCommandResultV1,
     resolved: ResolvedFixtureV1,
+    proofValid: boolean,
     startedAt: number,
     endedAt: number,
   ): Promise<PortResultV1<IsolatedReplayResultV1>> {
     const limitations: ReplayLimitationV1[] = [];
     if (runResult.truncated) limitations.push("output_truncated");
-    if (resolved.provenance.redacted) limitations.push("fixture_redacted");
+    // `fixture_redacted` is suppressed ONLY under a fully bound trusted
+    // causal proof; provenance remains redacted and every other limitation
+    // (truncation, unavailable, unrelated failure) still fails closed.
+    if (resolved.provenance.redacted && !proofValid) {
+      limitations.push("fixture_redacted");
+    }
 
     if (
       runResult.outcome === "spawn_failed" || runResult.outcome === "timed_out"
@@ -582,6 +834,7 @@ export class ReplayPortImpl implements ReplayPort {
   private unavailable(
     startedAt: number,
     resolved: ResolvedFixtureV1,
+    proofValid: boolean,
     detail: string,
   ): PortResultV1<IsolatedReplayResultV1> {
     // The frozen port interface records an unavailable run as outcome only
@@ -590,7 +843,9 @@ export class ReplayPortImpl implements ReplayPort {
     // into a ReplayResultV1.
     this.lastUnavailableDetailText = boundedDetail(detail);
     const limitations: ReplayLimitationV1[] = [];
-    if (resolved.provenance.redacted) limitations.push("fixture_redacted");
+    if (resolved.provenance.redacted && !proofValid) {
+      limitations.push("fixture_redacted");
+    }
     return portOk({
       outcome: "unavailable",
       exitCode: null,
@@ -610,6 +865,47 @@ export class ReplayPortImpl implements ReplayPort {
    */
   lastUnavailableDetail(): string {
     return this.lastUnavailableDetailText;
+  }
+
+  /**
+   * Strict trusted causal-proof verification at the consuming boundary.
+   *
+   * A proof is accepted ONLY when: structural validation passes; the fixture
+   * reference is the fixed gateway grammar; the proof binds the exact request
+   * repository, fixture ref, actual bundle digest, exact ordered test-id
+   * list, the resolved expected-failure identity and the configured replay +
+   * target-test command identities; and both observations are intended
+   * failures with equal canonical non-secret signature identities. The
+   * proof's original Git SHA is the immutable capture identity and is never
+   * required to equal the (possibly candidate) request revision.
+   */
+  private async proofValidFor(
+    resolved: ResolvedFixtureV1,
+    request: ReplayRunRequestV1,
+    actualDigest: FixtureDigest,
+  ): Promise<boolean> {
+    if (resolved.causalProof === undefined) return false;
+    const parsed = await validateGatewayCausalProof(resolved.causalProof);
+    if (parsed === null) return false;
+    const refIdentity = gatewayFixtureRefIdentity(request.fixtureRef);
+    if (refIdentity === null) return false;
+    if (
+      request.commandId !== parsed.replayCommandId &&
+      request.commandId !== parsed.testCommandId
+    ) {
+      return false;
+    }
+    return gatewayCausalProofMatches(parsed, {
+      repository: request.repository,
+      incidentId: refIdentity.incidentId,
+      captureId: refIdentity.captureId,
+      fixtureRef: request.fixtureRef,
+      bundleDigest: actualDigest,
+      replayCommandId: this.options.config.commands.replay,
+      testCommandId: this.options.config.commands.test,
+      testIds: resolved.testIds,
+      expectedFailure: resolved.expectedFailure,
+    });
   }
 
   private validateRequest(

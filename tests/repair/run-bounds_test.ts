@@ -436,12 +436,25 @@ Deno.test(
   "run ceiling: a tighter caller deadline admits a fitting declared operation and rejects one that cannot fit before any reservation",
   async () => {
     // A 10-minute caller deadline: the 4-minute session plus the 5-minute
-    // reserved margin fits, so the declared implementation starts.
+    // reserved margin fits, so the declared implementation starts. The later
+    // review (the full declared review bound plus the reserved margin) can no
+    // longer fit that window, so the run legitimately ends in the typed
+    // no-work margin with the review neither started nor charged.
     const fits = makeRig({ replayAdvanceMs: MINUTE });
     const fitted = await fits.run(10 * MINUTE);
-    assert.equal(fitted.status, "idle", JSON.stringify(fitted));
-    assert.equal(fits.model.requests.length, 1);
-    assert.equal((await fits.snapshot()).work[0]!.target.head, SHA3);
+    assert.equal(fitted.status, "margin", JSON.stringify(fitted));
+    assert.equal(fits.model.requests.length, 1, "the implementation start ran");
+    const fitState = await fits.snapshot();
+    assert.equal(fitState.work[0]!.target.head, SHA3);
+    assert.ok(
+      !fits.github.calls.includes("requestReview"),
+      "the review cannot fit the tighter window and is never started",
+    );
+    assert.equal(
+      fitState.reservations.length,
+      1,
+      "only the implementation admission is charged",
+    );
 
     // A 5-minute caller deadline: the same declared operation (9 minutes
     // with margin) cannot fit, so nothing is started and nothing is charged.
@@ -623,14 +636,15 @@ Deno.test(
         )
       ) {
         advanced = true;
-        rig.clock.advance(11 * MINUTE);
+        rig.clock.advance(61 * MINUTE);
       }
       return result;
     };
-    // A 10-minute caller deadline: deterministic publication runs, but the
-    // review reservation write crosses the tighter total deadline, so the
+    // A 60-minute caller deadline admits the full declared review bound (10
+    // minutes) plus the five-minute operation margin with room to spare, but
+    // the review reservation write crosses that tighter total deadline, so the
     // provably never-submitted start is refunded instead of dispatched.
-    const first = await rig.run(10 * MINUTE);
+    const first = await rig.run(60 * MINUTE);
     assert.equal(first.status, "margin", JSON.stringify(first));
     assert.ok(
       !rig.github.calls.includes("requestReview"),

@@ -66,6 +66,9 @@ const DB = Deno.cwd();
 /** A git-settings malformed sentinel: constructing it would fail first. */
 const POISON_GIT = { localDir: "", remoteUrl: "" } as DenoGitExecutorOptions;
 
+/** Recording drain for the parse-time literal (must never be called there). */
+const parseTimeDrainCalls: { deadline: number; interrupt: boolean }[] = [];
+
 function baseOptions(): GitHubHostOptionsV1 {
   return {
     repository: REPO,
@@ -90,6 +93,19 @@ function baseOptions(): GitHubHostOptionsV1 {
         ),
       readReview: () =>
         Promise.reject(new Error("parse-time code must never read a review")),
+      // The required drain capability records the exact request and answers a
+      // truthful no-owned-operations report; it is never reached at parse time.
+      drain: (request) => {
+        parseTimeDrainCalls.push(request);
+        return Promise.resolve({
+          ok: true,
+          operations: [],
+          faults: [],
+          deadline: request.deadline,
+          interrupted: false,
+          completedAt: T0,
+        });
+      },
     },
     trustedPrAuthor: PR_AUTHOR,
     trustedReviewer: REVIEWER,
@@ -182,6 +198,8 @@ Deno.test(
       expectedHead: SHA1,
       expectedBase: SHA2,
       expectedReviewer: REVIEWER,
+      latestStartAt: T0 + 60_000,
+      settleBy: T0 + 660_000,
     });
     assert.ok(reviewed.ok);
     if (!reviewed.ok) return;
@@ -196,6 +214,8 @@ Deno.test(
       expectedHead: SHA1,
       expectedBase: SHA2,
       expectedReviewer: REVIEWER,
+      latestStartAt: T0 + 60_000,
+      settleBy: T0 + 660_000,
     });
     // Every authenticated path passed the injected durable cooldown gate with
     // the exact installation identity (the client re-checks the gate before
@@ -207,6 +227,31 @@ Deno.test(
       REPO.installationId, // pull read: pre-auth + pre-request
       REPO.installationId, // review submission: one gated remote call
     ]);
+
+    // The bounded review-lifecycle drain forwards to the SAME injected
+    // review-service instance with the exact caller deadline/interrupt flag,
+    // and its truthful no-owned-operations report is returned unchanged.
+    rig.review.drainResult = {
+      ok: true,
+      operations: [],
+      faults: [],
+      deadline: T0 + 5000,
+      interrupted: false,
+      completedAt: T0,
+    };
+    const drained = await rig.host.port.drainReviews({
+      deadline: T0 + 5000,
+      interrupt: false,
+    });
+    assert.ok(drained.ok);
+    if (!drained.ok) return;
+    assert.deepEqual(drained.value, rig.review.drainResult);
+    assert.deepEqual(rig.review.drains, [
+      { deadline: T0 + 5000, interrupt: false },
+    ]);
+    // The parse-time literal was never drained: only the exact rig instance
+    // receives the forwarded request.
+    assert.deepEqual(parseTimeDrainCalls, []);
   },
 );
 
@@ -281,8 +326,8 @@ Deno.test(
   "composeGitHubHost: invalid repository identity fails closed before any construction",
   () => {
     const cases: RepositoryIdentityV1[] = [
-      // Zero is not a valid installation id.
-      { owner: "ubiquity", name: "sentinel", installationId: 0 },
+      // Zero is the explicit no-App scope, but negative ids are not valid.
+      { owner: "ubiquity", name: "sentinel", installationId: -2 },
       // Exact frozen pattern: an owner cannot contain a slash.
       { owner: "ubiquity!", name: "sentinel", installationId: 42 },
       { owner: "ubiquity", name: "sentinel", installationId: -1 },

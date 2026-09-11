@@ -4,6 +4,31 @@ Owner planning session: 2026-09-06 America/New_York; created across 2026-09-07 0
 
 ## 1. Outcome and scope
 
+Owner scope update, 2026-09-11: the immediate authorized outcome is to make
+Sentinel repair its own GitHub backlog, launch it locally, and monitor real
+autonomous work. This supersedes the first-version exclusions on self-repair
+and initial activation for this local Sentinel target. Use reviewed PRs and a
+trusted supervisor outside the model checkout; model workers cannot change live
+admission policy, credentials, state or promotion authority. Use gpt-5.6-luna
+with max reasoning, at most one model start per rolling hour (168 per rolling
+seven days), shared by implementation, review, retry and continuation starts.
+Run hourly with one exclusive writer; deterministic bookkeeping can continue
+without a model start. A local runtime release requires exact source identity,
+supervised restart and rollback; do not fabricate Deno deployment receipts for
+Sentinel. Existing gateway release work remains distinct. Canonical lane and
+Astra-owned task register stay unchanged.
+
+For the authorized local Sentinel host, use the existing owner's GitHub login
+through trusted code restricted to ubiquity/sentinel. Record the actual login;
+do not represent it as GitHub App authentication. Reserve installationId 0
+for this explicit no-App local credential scope; positive IDs retain their
+App meaning. The github adapter permits that scope, gateway configuration
+still requires a positive App installation, and every scope must match a
+configured repository. Preserve shared durable cooldown and model admission
+for scope 0. Local Git state may use a private persistent bare repository with
+the same repair/release refs and expected-head writes. Model workers receive
+neither GitHub credentials nor that state repository.
+
 Build a standalone Deno/TypeScript Sentinel at `/Users/nv/repos/ubiquity/sentinel` that polls configured repositories and incident adapters, captures sufficient failure evidence, produces permanent sanitized regression tests and bounded application fixes, waits for Codex review without holding an agent, merges accepted exact-head work, and directly promotes/monitors/rolls back exact Deno revisions through a separate deterministic release controller.
 
 Initial target: `ubiquity/ai.ubq.fi`. No webhook ingress, event bus, queue database, runtime matrix, agent fleet, generalized plugin framework, dashboard, autonomous self-modification, or automated bootstrap activation. One production implementation writer globally; at most three unfinished target PRs. A separate deterministic release writer exclusively owns Deno promotion and its release state. Multiple isolated development workers are permitted; this is not permission for multiple runtime code writers.
@@ -89,7 +114,7 @@ The permanent test is a minimal sanitized request/upstream fixture committed to 
 
 ## 7. Review, merge and release safety
 
-GitHub App authentication supplies short-lived scoped target access to the trusted host. No webhook subscription. Models get isolated checkouts and bounded evidence, not App private keys, state credentials, or Deno tokens. Restore current Codex/runtime authentication through the existing approved mechanism; verify actual model/effort receipts, never a CLI label alone.
+GitHub App authentication supplies short-lived scoped target access to the trusted host. No webhook subscription. Models get isolated checkouts and bounded evidence, not App private keys, state credentials, or Deno tokens. Restore current Codex/runtime authentication through the existing approved mechanism; verify actual model/effort receipts, never a CLI label alone. Owner clarification, 2026-09-09 21:38 UTC: accepted evidence is trusted submitted provider/model/effort configuration bound to the exact invocation/thread/turn, with all applicable runtime routing events and terminal result; label this request/runtime evidence, not backend provider attestation. Preserve Luna/max, no fallback and fail closed when correlation or required evidence is missing.
 
 Codex clean-verdict integration is an explicit uncertainty: obtain representative actual completed-clean and finding-bearing results with exact head identity. Validate them against the expected reviewer; missing machine-verifiable completion means unavailable. Do not build a permissive parser around eyes reactions or absence of comments. Use one pending request per head; corrections require new head validation and review. Do not reset review-round limits on each new commit. Human-authorized finding disputes must be recorded; the coding agent cannot clear its own merge gate.
 

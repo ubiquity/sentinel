@@ -40,6 +40,7 @@ import {
 import { runRepairEntrypoint } from "../../src/main.ts";
 import { runReleaseEntrypoint } from "../../src/release-main.ts";
 import { markerProofParser } from "../../src/replay/fixture.ts";
+import { toyIsolation } from "../replay/helpers.ts";
 import { DurableGitHubCooldownGate } from "../../src/repair/github-cooldown.ts";
 import { createRepairStateStore } from "../../src/state/mod.ts";
 import {
@@ -167,15 +168,7 @@ async function makeRepairRunnerFixture(
         maxEntryBytes: 256 * 1024,
         proof: markerProofParser(),
       },
-      isolation: {
-        attestation: {
-          version: "v1",
-          host: "harness",
-          restrictedExecution: true,
-          boundary: "bounded test host",
-          attestationRef: "attestation://harness/v1",
-        },
-      },
+      isolation: toyIsolation(),
     },
     model: {
       openSession: () => {

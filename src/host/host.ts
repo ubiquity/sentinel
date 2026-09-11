@@ -38,7 +38,8 @@
  * receipt verifier keeps the implementation port's default unverified-receipt
  * policy (no model session), an omitted release resolver keeps the
  * unavailable build-receipt default (no promotion), and a false/absent
- * restricted-execution attestation fails closed before construction.
+ * restricted-execution attestation or a capability without a callable runner
+ * fails closed before construction.
  *
  * Validation order (fail fast, static non-echoing `TypeError` text only):
  * the ONE clock and the ONE cooldown gate shapes, every capability shape,
@@ -46,8 +47,8 @@
  * the frozen contracts, the three repository bindings must agree exactly
  * with the composed repair repository and it must match exactly one
  * configured repository, the release target/policy are re-validated, and the
- * isolation attestation must prove restricted execution — all BEFORE any
- * downstream instance is constructed.
+ * isolation capability must prove restricted execution AND carry a callable
+ * runner — all BEFORE any downstream instance is constructed.
  */
 
 import { isGitSha } from "../contracts/brands.ts";
@@ -70,7 +71,11 @@ import {
   type GitHubHostOptionsV1,
   type GitHubHostResultV1,
 } from "./github.ts";
-import { composeRepairHost, type RepairHostOptionsV1 } from "./repair.ts";
+import {
+  composeRepairHost,
+  type RepairHostOptionsV1,
+  type RepairHostReplayOptionsV1,
+} from "./repair.ts";
 import { composeReleaseHost, type ReleaseHostOptionsV1 } from "./release.ts";
 import { createReplayIsolationHost } from "./providers.ts";
 
@@ -307,20 +312,27 @@ export function assembleTrustedHost(
     throw new TypeError(ERR_RELEASE_MISMATCH);
   }
 
-  // 6. Restricted-execution attestation: the concrete port requirement is
-  //    enforced at this boundary too, so a false/absent attestation fails
-  //    closed before the replay port could even refuse construction.
-  const replayRecord = readField(repairInput, "replay", ERR_REPLAY_INPUT);
+  // 6. Restricted-execution capability: the concrete port requirement is
+  //    enforced at this boundary too, so a false/absent attestation OR a
+  //    missing/non-callable runner fails closed before the replay port could
+  //    even refuse construction. The WHOLE capability is validated once and
+  //    the sanitized snapshot (plain attestation + captured bound runner) is
+  //    injected into the repair composition in step 7.
+  //
+  //    `validateRepairShapes` already proved the replay sub-record's source,
+  //    scratchDir and policy shapes, so it is read through the exact replay
+  //    option type; only `isolation` is replaced by the validated snapshot.
+  const replayRecord = readField<
+    Omit<RepairHostReplayOptionsV1, "isolation">
+  >(repairInput, "replay", ERR_REPLAY_INPUT);
   expectRecord(replayRecord, ERR_REPLAY_INPUT);
-  const isolation = readField(
+  const rawIsolation = readField(
     replayRecord,
     "isolation",
     ERR_REPLAY_INPUT,
-  ) as unknown as { attestation?: unknown } | null;
-  expectRecord(isolation, ERR_REPLAY_INPUT);
-  createReplayIsolationHost(
-    readField(isolation, "attestation", ERR_REPLAY_INPUT),
   );
+  expectRecord(rawIsolation, ERR_REPLAY_INPUT);
+  const validatedIsolation = createReplayIsolationHost(rawIsolation);
 
   // 7. Compose the three seams. The assembly's explicit clock/cooldown gate/
   //    composed GitHub port override any sub-record value, so a single shared
@@ -337,6 +349,12 @@ export function assembleTrustedHost(
     clock,
     github: github.port,
     githubCooldown,
+    // The sanitized validated capability (never the caller's raw object) is
+    // what the replay port actually consumes.
+    replay: {
+      ...spreadRecord(replayRecord, ERR_REPLAY_INPUT),
+      isolation: validatedIsolation,
+    },
   });
   const release = composeReleaseHost({
     ...spreadRecord(releaseInput, ERR_RELEASE_INPUT),

@@ -115,6 +115,14 @@ export interface CodexSessionV1 {
    * transport implements it and the model port fails closed when it is false.
    */
   isSettled?(): boolean;
+  /**
+   * Optional fatal transport/session error observed before close; null when
+   * the session closed cleanly. Test doubles may omit this capability; the
+   * real subprocess transport returns its sticky fatal error, so a verified
+   * receipt can never escape a transport that already failed closed — while
+   * an intentionally closed healthy session never manufactures one.
+   */
+  getFailure?(): CodexProtocolError | null;
 }
 
 /** One app-server session with a real subprocess. */
@@ -338,6 +346,11 @@ export class CodexSubprocessSession implements CodexSessionV1 {
 
   isSettled(): boolean {
     return this.groupSettled;
+  }
+
+  /** Sticky fatal stream/session error; null when the session failed nothing. */
+  getFailure(): CodexProtocolError | null {
+    return this.fatalError;
   }
 
   private cancelPumps(): void {

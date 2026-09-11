@@ -104,6 +104,7 @@ export interface GatewayIncidentAdapterOptionsV1 {
 
 export class GatewayIncidentAdapter implements IncidentAdapter {
   private readonly config: RepositoryConfigV1;
+  private readonly baseUrl: string;
   private readonly transport: GatewayTransportV1;
   private readonly auth: GatewayAuthProviderV1;
   private readonly clock: Clock;
@@ -116,13 +117,14 @@ export class GatewayIncidentAdapter implements IncidentAdapter {
         "GatewayIncidentAdapter requires a gateway adapter config",
       );
     }
-    if (
-      typeof config.adapter.baseUrl !== "string" ||
-      config.adapter.baseUrl.length === 0
-    ) {
+    // Capture the validated value once instead of re-reading a union member at
+    // each call site (no cast).
+    const baseUrl = config.adapter.baseUrl;
+    if (typeof baseUrl !== "string" || baseUrl.length === 0) {
       throw new Error("GatewayIncidentAdapter requires a configured base URL");
     }
     this.config = config;
+    this.baseUrl = baseUrl;
     this.transport = transport;
     this.auth = auth;
     this.clock = clock;
@@ -323,7 +325,7 @@ export class GatewayIncidentAdapter implements IncidentAdapter {
   ): Promise<PortResultV1<{ status: number; body: unknown }>> {
     return gatewayRead(
       {
-        baseUrl: this.config.adapter.baseUrl,
+        baseUrl: this.baseUrl,
         path,
         query,
         responseByteCap: byteCap,

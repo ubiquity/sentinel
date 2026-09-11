@@ -22,13 +22,18 @@
  *   gateway repository identity and a missing/ambiguous match are all
  *   rejected with a static `TypeError` BEFORE any instance is constructed.
  * - The replay port is constructed with the injected trusted isolation
- *   capability; without an attestation of real restricted execution the
- *   concrete `ReplayPortImpl` constructor itself fails closed, so the factory
- *   can never make a target-controlled command runnable on its own.
- * - The implementation port keeps its default unverified-receipt policy when
- *   the caller supplies no `receiptVerifier`: `runModel` stays `unavailable`
- *   and no model session is opened. The factory never fabricates a model
- *   receipt, model id, reasoning effort or fallback model.
+ *   capability; without the v1 restricted-execution attestation AND a
+ *   callable `run` boundary the concrete `ReplayPortImpl` constructor itself
+ *   fails closed, so the factory can never make a target-controlled command
+ *   runnable on its own.
+ * - The implementation port requires an explicit valid `modelProvider` before
+ *   any session opens — including the custom-verifier path: `runModel` stays
+ *   `unavailable` and no model session is opened when the host selects no
+ *   provider (a verifier callback never enables a missing provider). A
+ *   selected `modelProvider` always binds the concrete request/runtime
+ *   receipt producer inside the port; a supplied `receiptVerifier` is only an
+ *   additional restriction after those core checks. The factory never
+ *   fabricates a model receipt, model id, reasoning effort or fallback model.
  * - The gateway adapter maps a missing producer index to `unavailable` (never
  *   an empty successful page) and `runRepairEntrypoint` retains its static
  *   direct-execution fault; this file changes neither.
@@ -60,6 +65,7 @@ import type {
   GatewayTransportV1,
 } from "../adapters/gateway/http.ts";
 import {
+  type GatewayCausalVerifierV1,
   GatewayReplayComposition,
 } from "../adapters/gateway/replay-composition.ts";
 import type { GatewaySanitizerPolicyV1 } from "../adapters/gateway/sanitize.ts";
@@ -119,10 +125,23 @@ export interface RepairHostGatewayOptionsV1 {
   policy: GatewaySanitizerPolicyV1;
   /** Trusted replay command id recorded in replay metadata. */
   commandId: CommandId;
+  /**
+   * Trusted target-test command identity bound into a causal proof.
+   * Defaults to the matched repository config's configured test command
+   * when omitted (safe for non-proof callers, whose composition attaches no
+   * proof at all).
+   */
+  testCommandId?: CommandId;
   /** Trusted replay test identity attested by composed fixtures. */
   testIds: readonly string[];
   /** Trusted before-failure signature attested by composed fixtures. */
   expectedFailure: ExpectedFailureV1;
+  /**
+   * Optional trusted causal-proof verifier capability. Without it the
+   * composition attaches no proof and every redacted fixture keeps the
+   * ordinary `fixture_redacted` limitation.
+   */
+  verifier?: GatewayCausalVerifierV1;
 }
 
 /** Caller-supplied replay port inputs; the fixture resolver is the host-owned composition. */
@@ -130,7 +149,10 @@ export interface RepairHostReplayOptionsV1 {
   source: ReplaySourceV1;
   scratchDir: string;
   policy: ReplayPolicyV1;
-  /** Trusted restricted-execution capability; the concrete port requires it. */
+  /**
+   * Trusted restricted-execution capability (attestation + callable bound
+   * runner); the concrete port requires both.
+   */
   isolation: ReplayIsolationCapabilityV1;
   /** Optional process runtime; defaults to the concrete DenoReplayRuntime. */
   runtime?: ReplayRuntimeV1;
@@ -147,9 +169,19 @@ export interface RepairHostModelOptionsV1 {
   /** Optional trusted host commit step; defaults to the local checkout committer. */
   commitCandidate?: CandidateCommitterV1;
   /**
-   * Trusted-host receipt verifier; the factory NEVER supplies one, so the
-   * default unverified-receipt policy stays active unless the host provides
-   * an authoritative verifier.
+   * Explicit selected provider (e.g. `openai` or a host provider name),
+   * REQUIRED before any model session opens: when absent `runModel` stays
+   * `unavailable` and no session opens even if a `receiptVerifier` is
+   * supplied. The port always binds the real request/runtime receipt producer
+   * for the exact provider and submits the provider explicitly on
+   * thread/start.
+   */
+  modelProvider?: string;
+  /**
+   * Trusted-host receipt verifier; the factory NEVER supplies one. It is only
+   * an ADDITIONAL restriction applied after the concrete core
+   * request/runtime checks (correlation, routing, model policy), so it can
+   * never bypass them or enable a missing provider.
    */
   receiptVerifier?: ReceiptVerifierV1;
 }
@@ -242,9 +274,13 @@ export function composeRepairHost(
     keyBytes: options.gateway.keyBytes,
     policy: options.gateway.policy,
     commandId: options.gateway.commandId,
+    // Default the trusted target-test command identity to the matched
+    // repository config; an explicit host-supplied override is honored.
+    testCommandId: options.gateway.testCommandId ?? target.commands.test,
     testIds: options.gateway.testIds,
     expectedFailure: options.gateway.expectedFailure,
     clock: options.clock,
+    verifier: options.gateway.verifier,
   });
 
   // 5. The replay port resolver is the exact composition instance; the port
@@ -260,13 +296,19 @@ export function composeRepairHost(
     clock: options.clock,
   });
 
-  // 6. The implementation port keeps its fail-closed default receipt policy
-  //    unless the host supplies a verifier; no receipt is fabricated here.
+  // 6. The implementation port requires an explicit valid modelProvider before
+  //    any session opens and always binds the concrete request/runtime receipt
+  //    producer for that provider; a supplied verifier is only an additional
+  //    restriction. No receipt is fabricated here.
   const model = new CodexImplementationPort({
     openSession: options.model.openSession,
     checkoutDir: options.model.checkoutDir,
     checkout: options.model.checkout,
     receiptVerifier: options.model.receiptVerifier,
+    // The concrete request/runtime receipt verifier is always constructed
+    // inside the port for the exact selected provider, and the provider is
+    // submitted explicitly on thread/start.
+    modelProvider: options.model.modelProvider,
     commitCandidate: options.model.commitCandidate ??
       new LocalCandidateCommitter(options.model.checkoutDir),
   });

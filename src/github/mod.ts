@@ -15,6 +15,7 @@ export * from "./git-executor.ts";
 export * from "./wire.ts";
 export * from "./review-service.ts";
 export * from "./review-normalize.ts";
+export * from "./codex-review-transport.ts";
 export * from "./client.ts";
 export * from "./text.ts";
 export * from "./impl.ts";

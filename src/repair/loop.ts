@@ -49,6 +49,7 @@ import type {
 } from "../contracts/shared.ts";
 import type { WorkRecordV1 } from "../contracts/work-record.ts";
 import type { BudgetControllerV1 } from "../budget/mod.ts";
+import { MAX_REVIEW_TOTAL_MS } from "../github/codex-reviewer.ts";
 import {
   candidateBranch,
   closureIntentKey,
@@ -82,11 +83,10 @@ import {
   startAttempt,
 } from "./transitions.ts";
 
-/** The one trusted reviewer identity for runtime Sentinel PRs. */
-export const EXPECTED_REVIEWER = "chatgpt-codex-connector[bot]";
-
 // Private finite constants (no new env/secret/CLI surface is introduced).
 const INCIDENT_PAGE_LIMIT = 20;
+/** Full structured-review bound (one start through bounded close). */
+const REVIEW_BOUND_MS = MAX_REVIEW_TOTAL_MS;
 // Finite incident-scan page bound for the ACTUAL intake consumer. The gateway
 // adapter's private readIncident scan enforces its own bounds, but those do
 // not protect this pagination loop; a misbehaving producer (empty pages,
@@ -98,7 +98,20 @@ const MAX_INCIDENT_SCAN_PAGES = 128;
 const REVIEW_POLL_MS = 15 * 60_000;
 const CHECK_POLL_MS = 5 * 60_000;
 const RELEASE_POLL_MS = 5 * 60_000;
-const OPERATION_MARGIN_MS = 5 * 60_000;
+/**
+ * Recheck interval for a native GitHub issue prerequisite that could not be
+ * verified (closed/absent issue, unknown relations, parent or open native
+ * blocker). One hour matches the polling cadence and costs no reservation:
+ * the re-read happens on the next hourly poll.
+ */
+const ISSUE_PREREQUISITE_RETRY_MS = 60 * 60_000;
+/**
+ * The one five-minute finalization margin. The entrypoint reserves it OUTSIDE
+ * the loop deadline (the cycle receives hardDeadline - this margin) so the
+ * mandatory bounded review drain fits before the caller/ceiling hard deadline;
+ * per-operation fit checks inside the loop stay conservative.
+ */
+export const OPERATION_MARGIN_MS = 5 * 60_000;
 const DEFAULT_STEP_LIMIT = 32;
 
 /** Fixed repair job ceiling (plan §4): 120 minutes. */
@@ -219,6 +232,14 @@ export interface RepairCycleOptionsV1 {
   deadline: number;
   /** Bounded persisted transitions per run. */
   stepLimit?: number;
+  /**
+   * Trusted ORIGINAL run start instant (the entrypoint captured it once). The
+   * 90-minute model cutoff and the 120-minute ceiling are anchored to this
+   * instant, so a shortened loop deadline can never shift the model cutoff
+   * later. Direct callers that omit it keep the previous behavior (the cycle
+   * start is the run start).
+   */
+  runStartedAt?: number;
 }
 
 export type RepairCycleOutcomeV1 =
@@ -262,8 +283,15 @@ export async function runRepairCycle(
   // against NaN is false, so it must never bypass the fixed ceiling): it is
   // treated as unbounded and the ceiling governs. The real clock is the wall
   // clock; fakes advance it inside port calls so a step that crosses the
-  // cutoff mid-flight still fails closed.
-  const startedAt = deps.clock.now();
+  // cutoff mid-flight still fails closed. A trusted `runStartedAt` from the
+  // entrypoint anchors both bounds to the ORIGINAL run start; it is never
+  // moved forward by a shortened deadline (a future value is rejected).
+  const nowAtStart = deps.clock.now();
+  const startedAt = options.runStartedAt !== undefined &&
+      Number.isSafeInteger(options.runStartedAt) &&
+      options.runStartedAt <= nowAtStart
+    ? options.runStartedAt
+    : nowAtStart;
   const callerDeadline = Number.isNaN(options.deadline)
     ? Number.POSITIVE_INFINITY
     : options.deadline;
@@ -672,7 +700,18 @@ async function pollIntake(
   const seenCursors = new Set<string>();
   let pages = 0;
 
+  // Issue-only intake: a host with exactly one configured repository whose
+  // adapter is the GitHub variant reads issues only. Every gateway
+  // configuration, and every multi-repository or otherwise ambiguous
+  // configuration, keeps the existing incident scan and its source-error
+  // behavior.
+  const issueOnlyIntake = deps.configs.length === 1 &&
+    deps.configs[0].adapter.kind === "github";
+
   for (;;) {
+    // A GitHub issue-only host never scans incidents; the issue listing below
+    // is its only intake source.
+    if (issueOnlyIntake) break;
     // No new intake read may start at/after the total run deadline: every
     // page read is awaited wall-clock time, so the bounds are rechecked
     // between pages. A stop preserves whatever was already collected; the
@@ -820,6 +859,26 @@ async function pollIntake(
               record.source.id === String(issue.number),
           );
           if (existing !== undefined) continue;
+
+          // Issue-only (github adapter) intake gates on NATIVE dependency
+          // relations before any work record exists. Absent relations are
+          // unknown, never empty: the row is skipped and the run reports a
+          // source error instead of admitting an unverified issue. An issue
+          // that is itself a parent (has sub-issues) or has open native
+          // blockers is skipped without an error; it is re-listed on the next
+          // poll once those dependencies close.
+          if (issueOnlyIntake) {
+            const relations = issue.relations;
+            if (relations === undefined) {
+              error = `issue relations unavailable for #${issue.number}`;
+              continue;
+            }
+            if (
+              relations.subIssueCount > 0 || relations.openBlockers.length > 0
+            ) {
+              continue;
+            }
+          }
 
           const repositoryKey =
             `${issueRepository.owner}/${issueRepository.name}`;
@@ -1858,12 +1917,20 @@ async function executeImplementationStep(
   // invocation below.
   const issue = await readIssueForModel(deps, record);
   if (issue === "unavailable") {
+    // Prerequisite gating (closed/absent issue, unknown relations, parent or
+    // open native blocker) defers to the next hour with ZERO reservation and
+    // zero model start: a dependency that closes by then, or a source that
+    // recovers, is re-read on that poll. Not an indefinite wait.
     return persistWork(
       deps,
       context,
       setWait(
         record,
-        { reason: "unavailable", since: now, until: null },
+        {
+          reason: "unavailable",
+          since: now,
+          until: now + ISSUE_PREREQUISITE_RETRY_MS,
+        },
         now,
       ),
     );
@@ -2561,6 +2628,26 @@ async function requestReviewFor(
     };
   }
 
+  // The FULL structured-review bound must fit before the loop deadline's
+  // reserved finalization margin, and no review may be admitted in the last
+  // seconds merely because now < deadline. latestStartAt is additionally
+  // bounded by the ORIGINAL run model cutoff, so a shortened loop deadline
+  // never shifts that cutoff later. Both bounds flow through the submission,
+  // the transport and the producer, which rechecks them after the snapshot,
+  // after preparation and after the running-journal readback — immediately
+  // before the single start.
+  const latestStartAt = Math.min(
+    context.bounds.modelCutoff,
+    context.bounds.runDeadline - OPERATION_MARGIN_MS - REVIEW_BOUND_MS,
+  );
+  const settleBy = latestStartAt + REVIEW_BOUND_MS;
+  if (requestAt >= latestStartAt) {
+    return {
+      kind: "deferred",
+      detail: "review request cannot fit the remaining run bounds",
+    };
+  }
+
   // Review requests share the one rolling model-start budget: durable
   // admission precedes invocation, with a deterministic task/head/round
   // identity, so observation/recovery never resubmits or adds a second
@@ -2712,14 +2799,15 @@ async function requestReviewFor(
   }
 
   // Late-admission recheck AFTER the final beforeSubmit gate: the gate wait is
-  // awaited wall-clock work, so the 90-minute cutoff OR the total run deadline
-  // (a tighter caller deadline already governs it) may have been crossed with
-  // the grant. A review start that is provably never submitted is refunded
-  // with confirmed_not_submitted, its unsent intent is cleared, and the round
-  // counter it already prepared gives the next run a fresh reservation
-  // identity so it resumes without a duplicate start.
+  // awaited wall-clock work, so the review's latest admissible start instant
+  // (bounded by the ORIGINAL model cutoff and the loop deadline minus the full
+  // review bound and finalization margin) OR the total run deadline may have
+  // been crossed with the grant. A review start that is provably never
+  // submitted is refunded with confirmed_not_submitted, its unsent intent is
+  // cleared, and the round counter it already prepared gives the next run a
+  // fresh reservation identity so it resumes without a duplicate start.
   if (
-    deps.clock.now() >= context.bounds.modelCutoff ||
+    deps.clock.now() >= latestStartAt ||
     deps.clock.now() >= context.bounds.runDeadline
   ) {
     const refunded = await settleReviewCharge(
@@ -2751,8 +2839,10 @@ async function requestReviewFor(
     prNumber,
     expectedHead: head,
     expectedBase: current.target.base,
-    expectedReviewer: EXPECTED_REVIEWER,
+    expectedReviewer: deps.github.reviewerIdentity,
     operationKey,
+    latestStartAt,
+    settleBy,
   });
   if (!submitted.ok) {
     // The response may have been lost after submission: the start stays
@@ -3123,7 +3213,7 @@ async function applyObservedReview(
       kind: "review_receipt",
       id,
       requestId: value.requestId,
-      expectedReviewer: EXPECTED_REVIEWER,
+      expectedReviewer: deps.github.reviewerIdentity,
       observedReviewer: value.reviewer,
       repository: record.repository,
       pullRequest: {
@@ -3255,7 +3345,7 @@ async function executeMerge(
       review: receipt,
     }, {
       repository: record.repository,
-      expectedReviewer: EXPECTED_REVIEWER,
+      expectedReviewer: deps.github.reviewerIdentity,
     });
   } catch {
     // A receipt that no longer authorizes (identity/cleanliness mismatch)
@@ -3718,11 +3808,29 @@ async function readIssueForModel(
   if (issueNumber === null) return null;
   const read = await deps.github.readIssue(issueNumber);
   if (!read.ok) return "unavailable";
-  if (read.value === null) return "unavailable";
+  const issue = read.value;
+  // The latest native state is authoritative: a closed issue (or one that no
+  // longer exists) can never start model work, even when intake admitted it.
+  if (issue === null || issue.state !== "open") return "unavailable";
+  // Issue-only github-adapter intake also gates on native dependency
+  // relations: unknown relations, a parent issue (sub-issues) or any open
+  // native blocker defers admission. Closed blockers are already excluded by
+  // the client parser; no completed WorkRecord is synthesized for them.
+  const config = configFor(deps, record.repository);
+  if (config?.adapter.kind === "github") {
+    const relations = issue.relations;
+    if (
+      relations === undefined ||
+      relations.subIssueCount > 0 ||
+      relations.openBlockers.length > 0
+    ) {
+      return "unavailable";
+    }
+  }
   return {
-    number: read.value.number,
-    title: read.value.title,
-    body: read.value.body,
+    number: issue.number,
+    title: issue.title,
+    body: issue.body,
   };
 }
 
@@ -3740,10 +3848,14 @@ function configFor(
   deps: RepairCycleDepsV1,
   repository: RepositoryIdentityV1,
 ): RepositoryConfigV1 | null {
+  // Full scope identity: the same owner/name under a different installation
+  // (positive App id vs the explicit no-App local scope 0) must never be
+  // authorized through another scope's configuration.
   return deps.configs.find(
     (config) =>
       config.repository.owner === repository.owner &&
-      config.repository.name === repository.name,
+      config.repository.name === repository.name &&
+      config.repository.installationId === repository.installationId,
   ) ?? null;
 }
 

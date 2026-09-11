@@ -17,10 +17,12 @@
  *   constructor or a transport; a hostile accessor/property-enumeration
  *   fault while the header record is read is the same typed `auth_failed`
  *   malformed-record result, never a raw escape;
- * - the isolation adapter validates the raw attestation BEFORE any capability
- *   exists and throws one static non-echoing `TypeError` unless the
- *   attestation is the exact `v1` shape with `restrictedExecution === true`
- *   (clearEnv is not a sandbox). It never manufactures an attestation.
+ * - the isolation adapter validates the raw WHOLE capability BEFORE any
+ *   capability exists and throws one static non-echoing `TypeError` unless it
+ *   carries the exact `v1` attestation shape with `restrictedExecution ===
+ *   true` (clearEnv is not a sandbox) AND a callable `run` boundary. It never
+ *   manufactures a runner, never boolean-falls-back, and returns only a
+ *   sanitized snapshot whose runner was captured once and receiver-bound.
  *
  * Every helper is side-effect free: no `Deno.env`, filesystem, network,
  * credential construction, worktree or external call.
@@ -32,10 +34,8 @@ import { MaxText } from "../contracts/validation.ts";
 import type { GitHubAuthProviderV1 } from "../github/auth.ts";
 import type { GatewayAuthProviderV1 } from "../adapters/gateway/http.ts";
 import type { DenoAuthProviderV1 } from "../release/http.ts";
-import type {
-  ReplayIsolationAttestationV1,
-  ReplayIsolationCapabilityV1,
-} from "../replay/port.ts";
+import type { ReplayIsolationCapabilityV1 } from "../replay/port.ts";
+import { validateReplayIsolationCapability } from "../replay/port.ts";
 
 /** Static rejection text; no attestation field is ever echoed. */
 const ERR_ISOLATION =
@@ -197,38 +197,24 @@ function malformedRecord(): PortResultV1<never> {
 // ---------------------------------------------------------------------------
 
 /**
- * Validate a caller-supplied restricted-execution attestation and return the
- * typed capability the replay port requires. The check mirrors the concrete
- * `ReplayPortImpl` requirement exactly: `version === "v1"`,
- * `restrictedExecution === true` (a false/omitted flag is never coerced) and
- * non-empty `host`/`boundary`/`attestationRef` strings. Any other input —
- * including an omitted or `null` attestation — throws one static
- * non-echoing `TypeError` before any capability exists, so the assembly can
- * never make a target-controlled command runnable on its own.
+ * Validate a caller-supplied WHOLE restricted-execution capability (not a raw
+ * attestation) and return the sanitized typed capability the replay port
+ * requires: a plain `v1` attestation snapshot with `restrictedExecution ===
+ * true` AND the captured, receiver-bound callable `run` boundary. The check
+ * mirrors the concrete `ReplayPortImpl` requirement exactly through the one
+ * shared `validateReplayIsolationCapability`, so the adapter can never
+ * manufacture, repair or boolean-fallback a runner.
+ *
+ * Any other input — an omitted or `null` capability, an attestation-only or
+ * boolean-only object, a missing/non-callable `run`, a false/omitted
+ * `restrictedExecution` or a hostile nested accessor/proxy fault — throws one
+ * static non-echoing `TypeError` before any capability exists, so the
+ * assembly can never make a target-controlled command runnable on its own.
  */
 export function createReplayIsolationHost(
-  attestation: unknown,
+  capability: unknown,
 ): ReplayIsolationCapabilityV1 {
-  try {
-    if (typeof attestation !== "object" || attestation === null) {
-      throw new TypeError(ERR_ISOLATION);
-    }
-    const record = attestation as Record<string, unknown>;
-    if (record.version !== "v1" || record.restrictedExecution !== true) {
-      throw new TypeError(ERR_ISOLATION);
-    }
-    if (
-      typeof record.host !== "string" || record.host.length === 0 ||
-      typeof record.boundary !== "string" || record.boundary.length === 0 ||
-      typeof record.attestationRef !== "string" ||
-      record.attestationRef.length === 0
-    ) {
-      throw new TypeError(ERR_ISOLATION);
-    }
-    return { attestation: attestation as ReplayIsolationAttestationV1 };
-  } catch {
-    // A hostile accessor/proxy fault inside the attestation record is the
-    // SAME static non-echoing TypeError; nothing caller-controlled escapes.
-    throw new TypeError(ERR_ISOLATION);
-  }
+  const validated = validateReplayIsolationCapability(capability);
+  if (validated === null) throw new TypeError(ERR_ISOLATION);
+  return validated;
 }

@@ -71,7 +71,7 @@ const steps: { name: string; args: string[] }[] = [
     name: "test",
     args: [
       "test",
-      "--allow-read=.",
+      `--allow-read=.,/usr,/bin,${Deno.execPath()}`,
       "--allow-run",
       "--allow-write",
       "--allow-env=PATH,NODE_V8_COVERAGE",
@@ -79,6 +79,7 @@ const steps: { name: string; args: string[] }[] = [
       "tests/state/",
       "tests/budget/",
       "tests/github/",
+      "tests/host/",
       "tests/adapters/gateway/",
       "tests/replay/",
       "tests/repair/",

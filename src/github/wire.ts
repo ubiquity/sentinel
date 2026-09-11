@@ -544,9 +544,26 @@ export function parseReviewWire(
   const commitSha = obj.commit_id === null
     ? null
     : expectWireSha(obj.commit_id, `${path}.commit_id`);
-  const submittedAt = obj.submitted_at === null
-    ? null
-    : expectIsoTimestamp(obj.submitted_at, `${path}.submitted_at`);
+  // GitHub omits `submitted_at` on genuine PENDING review responses; that
+  // maps to null (no submission proof is fabricated). An omitted timestamp on
+  // a submitted state is a missing required field, while an explicit null
+  // stays a valid explicit null for every state.
+  const isPending = state === "PENDING";
+  let submittedAt: number | null;
+  if (obj.submitted_at === null) {
+    submittedAt = null;
+  } else if (obj.submitted_at === undefined) {
+    if (!isPending) {
+      fail(
+        `${path}.submitted_at`,
+        "missing_field",
+        "submitted review carries no submission timestamp",
+      );
+    }
+    submittedAt = null;
+  } else {
+    submittedAt = expectIsoTimestamp(obj.submitted_at, `${path}.submitted_at`);
+  }
   return {
     id,
     state: state.toLowerCase() as GitHubReviewStateWireV1,

@@ -412,6 +412,106 @@ Deno.test("semantics surface exactly as documented", async () => {
   assert.equal(record.observed.identity?.revisionId, "dep-0001");
 });
 
+Deno.test("repository adapter is a discriminated union with exact variant keys", async () => {
+  const gateway = structuredClone(
+    await readFixture("valid", "repository-config-v1.json"),
+  ) as Record<string, unknown>;
+  const parsedGateway = parseRepositoryConfigV1(structuredClone(gateway));
+  assert.deepEqual(parsedGateway.adapter, {
+    kind: "gateway",
+    baseUrl: "https://ai.ubq.fi",
+  });
+
+  // The GitHub variant is valid without any base address.
+  const github = structuredClone(gateway);
+  github.adapter = { kind: "github" };
+  const parsedGithub = tryParse(parseRepositoryConfigV1, github);
+  assert.equal(parsedGithub.ok, true);
+  if (parsedGithub.ok) {
+    assert.deepEqual(parsedGithub.value.adapter, { kind: "github" });
+  }
+
+  // A base address on the GitHub variant is an unknown key, never ignored.
+  const withBaseUrl = structuredClone(gateway);
+  withBaseUrl.adapter = { kind: "github", baseUrl: "https://ai.ubq.fi" };
+  const rejectedBase = tryParse(parseRepositoryConfigV1, withBaseUrl);
+  assert.equal(rejectedBase.ok, false);
+  if (!rejectedBase.ok) {
+    assert.equal(rejectedBase.issues[0]?.code, "unknown_key");
+    assert.equal(rejectedBase.issues[0]?.path, "$.adapter.baseUrl");
+  }
+
+  // Unknown kinds are refused.
+  const unknownKind = structuredClone(gateway);
+  unknownKind.adapter = { kind: "bitbucket", baseUrl: "https://ai.ubq.fi" };
+  const rejectedKind = tryParse(parseRepositoryConfigV1, unknownKind);
+  assert.equal(rejectedKind.ok, false);
+  if (!rejectedKind.ok) {
+    assert.equal(rejectedKind.issues[0]?.code, "invalid_enum");
+    assert.equal(rejectedKind.issues[0]?.path, "$.adapter.kind");
+  }
+
+  // The gateway variant still requires its base address.
+  const missingBase = structuredClone(gateway);
+  missingBase.adapter = { kind: "gateway" };
+  const rejectedMissing = tryParse(parseRepositoryConfigV1, missingBase);
+  assert.equal(rejectedMissing.ok, false);
+  if (!rejectedMissing.ok) {
+    assert.equal(rejectedMissing.issues[0]?.code, "missing_field");
+    assert.equal(rejectedMissing.issues[0]?.path, "$.adapter.baseUrl");
+  }
+});
+
+Deno.test("local owner: config parser reserves id 0 for the no-App github scope", async () => {
+  const gateway = structuredClone(
+    await readFixture("valid", "repository-config-v1.json"),
+  ) as Record<string, unknown>;
+
+  // The github adapter permits the explicit no-App local owner scope.
+  const local = structuredClone(gateway);
+  (local.repository as Record<string, unknown>).installationId = 0;
+  local.adapter = { kind: "github" };
+  const parsedLocal = tryParse(parseRepositoryConfigV1, local);
+  assert.equal(parsedLocal.ok, true);
+  if (parsedLocal.ok) {
+    assert.equal(parsedLocal.value.repository.installationId, 0);
+    assert.deepEqual(parsedLocal.value.adapter, { kind: "github" });
+  }
+
+  // A gateway configuration still requires a positive App installation id.
+  const gatewayLocal = structuredClone(local);
+  gatewayLocal.adapter = { kind: "gateway", baseUrl: "https://ai.ubq.fi" };
+  const rejectedGateway = tryParse(parseRepositoryConfigV1, gatewayLocal);
+  assert.equal(rejectedGateway.ok, false);
+  if (!rejectedGateway.ok) {
+    assert.equal(rejectedGateway.issues[0]?.code, "invalid_count");
+    assert.equal(
+      rejectedGateway.issues[0]?.path,
+      "$.repository.installationId",
+    );
+  }
+
+  // Negative, fractional and unsafe ids are rejected for both adapters.
+  const adapters = [
+    { kind: "github" },
+    { kind: "gateway", baseUrl: "https://ai.ubq.fi" },
+  ];
+  for (const installationId of [-1, 1.5, 2 ** 53, Number.NaN]) {
+    for (const adapter of adapters) {
+      const candidate = structuredClone(gateway);
+      (candidate.repository as Record<string, unknown>).installationId =
+        installationId;
+      candidate.adapter = adapter;
+      const rejected = tryParse(parseRepositoryConfigV1, candidate);
+      assert.equal(rejected.ok, false, `id ${installationId}`);
+      if (!rejected.ok) {
+        assert.equal(rejected.issues[0]?.code, "invalid_count");
+        assert.equal(rejected.issues[0]?.path, "$.repository.installationId");
+      }
+    }
+  }
+});
+
 Deno.test("command registry binds argv arrays with bounded runtime, never shell text", () => {
   const registry = parseCommandRegistryV1({
     version: "v1",

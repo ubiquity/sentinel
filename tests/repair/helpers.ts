@@ -25,6 +25,8 @@ import type {
   RepairStateWriter,
   ReplayPort,
   ReplayRunRequestV1,
+  ReviewDrainReportV1,
+  ReviewDrainRequestV1,
   ReviewObservationV1,
   StateReadResultV1,
   StateReadView,
@@ -190,7 +192,18 @@ export interface FakeGithubOptionsV1 {
 
 /** Recording fake GitHubPort; product logic never lives here. */
 export class FakeGithub implements GitHubPort {
+  /** Explicit trusted publisher identity; the loop must use this value. */
+  readonly reviewerIdentity = "chatgpt-codex-connector[bot]";
   readonly calls: string[] = [];
+  readonly drains: ReviewDrainRequestV1[] = [];
+  drainResult: PortResultV1<ReviewDrainReportV1> = portOk({
+    ok: true,
+    operations: [],
+    faults: [],
+    deadline: 0,
+    interrupted: true,
+    completedAt: 0,
+  });
   readonly pushes: { ref: string; sha: GitSha; expected: GitSha | null }[] = [];
   reviewObservations: ReviewObservationV1 | null = null;
   reviewStatus: "pending" | "completed" | "unavailable" = "pending";
@@ -372,6 +385,13 @@ export class FakeGithub implements GitHubPort {
     }));
   }
 
+  drainReviews(
+    request: ReviewDrainRequestV1,
+  ): Promise<PortResultV1<ReviewDrainReportV1>> {
+    this.drains.push(request);
+    return Promise.resolve(this.drainResult);
+  }
+
   observeReview(_request: unknown): Promise<PortResultV1<ReviewObservationV1>> {
     this.calls.push("observeReview");
     if (this.options.reviewUnavailable) {
@@ -485,6 +505,8 @@ export interface FakeIncidentOptionsV1 {
   evidence?: IncidentEvidenceV1 | null;
   failListNext?: boolean;
   coverageIncomplete?: boolean;
+  /** Fail loudly when an issue-only host touches the incident source. */
+  throwOnList?: boolean;
 }
 
 /** Recording fake IncidentAdapter. */
@@ -518,6 +540,9 @@ export class FakeIncidents implements IncidentAdapter {
     cursor: string | null,
     _limit: number,
   ): Promise<PortResultV1<IncidentPageV1>> {
+    if (this.options.throwOnList) {
+      throw new Error("incident listing called for an issue-only host");
+    }
     if (this.options.failListNext) {
       return Promise.resolve(
         portError("unavailable", "listing transport failure"),
@@ -669,6 +694,16 @@ export class FakeModel implements ImplementationPort {
       invocationId: `invoke-${this.requests.length}`,
       outcome: this.options.outcome ?? "completed",
       actual: {
+        evidenceKind: "request-runtime",
+        provider: "sentinel-host",
+        threadId: "thread-1",
+        turnId: "turn-1",
+        terminalOrigin: "runtime",
+        observedTerminalStatus: this.options.outcome === "interrupted"
+          ? "interrupted"
+          : this.options.outcome === "failed"
+          ? "failed"
+          : "completed",
         observedModel: "gpt-5.6-luna",
         observedReasoning: "max",
         durationMs: 100,

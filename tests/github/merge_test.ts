@@ -13,6 +13,10 @@ import type { ReviewReceiptV1 } from "../../src/contracts/review-receipt.ts";
 import type { GitSha } from "../../src/contracts/brands.ts";
 import { asFindingFingerprint } from "../../src/contracts/brands.ts";
 import { canonicalStringifySha256 } from "../../src/contracts/canonical.ts";
+import {
+  findingMessage,
+  type ReviewResultV1,
+} from "../../src/github/review-journal.ts";
 import type { ScriptedHttpTransport } from "./helpers.ts";
 
 import {
@@ -43,11 +47,14 @@ import {
   SHA4,
   statusChecksRuleWire,
   statusesPageWire,
+  structuredCompletedFixture,
   T0,
 } from "./helpers.ts";
 import type { ScriptEntry } from "./helpers.ts";
 
 const CLOCK = new FakeClock(T0 + 200_000);
+/** The canonical structured completion every positive merge fixture binds. */
+const CLEAN_COMPLETION = await structuredCompletedFixture();
 const RULES_PATH =
   "/repos/ubiquity/sentinel/rules/branches/development?per_page=100&page=1";
 const RULESETS_PATH =
@@ -186,9 +193,7 @@ interface HappyOptions {
 function happyScript(options: HappyOptions = {}): ScriptEntry[] {
   return [
     ...(options.pulls ?? [pullEntry(), pullEntry()]),
-    reviewsRead([
-      reviewWire({ id: 100, state: "APPROVED", body: "no issues found" }),
-    ]),
+    reviewsRead([CLEAN_COMPLETION.review]),
     commentsRead([]),
     ...rulesRead(
       options.rules ?? defaultRules(),
@@ -214,7 +219,7 @@ function happyScript(options: HappyOptions = {}): ScriptEntry[] {
 
 function trustedService(): FakeReviewService {
   const service = new FakeReviewService();
-  service.readResult = completedServiceRead();
+  service.readResult = CLEAN_COMPLETION.service;
   return service;
 }
 
@@ -471,11 +476,28 @@ Deno.test("mergePullRequest: wrong service receipt binding never authorizes", as
 });
 
 Deno.test("mergePullRequest: human resolution requires the trusted authenticated resolver", async () => {
+  // The authoritative GitHub evidence is one structured journal carrying the
+  // same P0 finding the request receipt resolves.
+  const evidenceResult: ReviewResultV1 = {
+    verdict: "findings",
+    summary: "data loss",
+    findings: [{
+      priority: 0,
+      title: "Data loss",
+      body: "The change loses committed data.",
+      path: "src/main.ts",
+      lineStart: 1,
+      lineEnd: 1,
+    }],
+  };
+  const evidenceFixture = await structuredCompletedFixture({
+    result: evidenceResult,
+  });
   const findingBase = {
-    id: "github-comment-500",
+    id: "github-review-100-finding-0",
     severity: "P0",
     path: "src/main.ts",
-    message: "[P0] data loss",
+    message: findingMessage(evidenceResult.findings[0]),
   };
   const realFingerprint = asFindingFingerprint(
     await canonicalStringifySha256(findingBase),
@@ -489,20 +511,23 @@ Deno.test("mergePullRequest: human resolution requires the trusted authenticated
       reference: "resolution-ref:12345",
     },
   };
-  // The authoritative GitHub evidence carries the same finding, unresolved.
   const evidenceScript: ScriptEntry[] = [
     pullEntry(),
     pullEntry(),
-    reviewsRead([
-      reviewWire({ id: 100, state: "CHANGES_REQUESTED", body: null }),
-    ]),
-    commentsRead([commentWire({ id: 500, body: "[P0] data loss" })]),
+    reviewsRead([evidenceFixture.review]),
+    commentsRead([]),
     ...rulesRead([], []), // No active rules: the protection gate reads empty.
     ...checksRead(),
   ];
+  const evidenceService = (): FakeReviewService => {
+    const service = new FakeReviewService();
+    service.readResult = evidenceFixture.service;
+    return service;
+  };
   const resolvedRequest = () =>
     mergeRequest({
       review: completedCleanReceipt({
+        summary: evidenceResult.summary,
         findings: [resolvedFinding],
         unresolvedSeverities: [],
       }),
@@ -513,7 +538,7 @@ Deno.test("mergePullRequest: human resolution requires the trusted authenticated
   const allowlistOnly = makePort({
     clock: CLOCK,
     script: evidenceScript,
-    review: trustedService(),
+    review: evidenceService(),
     trustedResolutionAuthors: ["some-human"],
   });
   const noVerifier = await allowlistOnly.port.mergePullRequest(
@@ -526,7 +551,7 @@ Deno.test("mergePullRequest: human resolution requires the trusted authenticated
   const unverifiedPort = makePort({
     clock: CLOCK,
     script: evidenceScript,
-    review: trustedService(),
+    review: evidenceService(),
     trustedResolutionAuthors: ["some-human"],
     resolutionVerifier: new FakeResolutionVerifier(false, "some-human"),
   });
@@ -538,7 +563,7 @@ Deno.test("mergePullRequest: human resolution requires the trusted authenticated
   const wrongIdentityPort = makePort({
     clock: CLOCK,
     script: evidenceScript,
-    review: trustedService(),
+    review: evidenceService(),
     trustedResolutionAuthors: ["some-human"],
     resolutionVerifier: new FakeResolutionVerifier(true, "other-human"),
   });
@@ -552,12 +577,13 @@ Deno.test("mergePullRequest: human resolution requires the trusted authenticated
   const forgedPort = makePort({
     clock: CLOCK,
     script: evidenceScript,
-    review: trustedService(),
+    review: evidenceService(),
     trustedResolutionAuthors: ["some-human"],
     resolutionVerifier: new FakeResolutionVerifier(true, "some-human"),
   });
   const forgedResult = await forgedPort.port.mergePullRequest(mergeRequest({
     review: completedCleanReceipt({
+      summary: evidenceResult.summary,
       findings: [{ ...resolvedFinding, fingerprint: "c".repeat(64) }],
       unresolvedSeverities: [],
     }),
@@ -571,7 +597,7 @@ Deno.test("mergePullRequest: human resolution requires the trusted authenticated
   const trustedPort = makePort({
     clock: CLOCK,
     script: evidenceScript,
-    review: trustedService(),
+    review: evidenceService(),
     trustedResolutionAuthors: ["some-human"],
     resolutionVerifier: verifier,
   });
@@ -981,7 +1007,7 @@ Deno.test("mergePullRequest: base movement after the last precheck is reconciled
   const { port, transport } = mergedPort([
     pullEntry(),
     pullEntry(),
-    reviewsRead([reviewWire()]),
+    reviewsRead([CLEAN_COMPLETION.review]),
     commentsRead([]),
     ...rulesRead(),
     ...checksRead(),
@@ -1044,7 +1070,7 @@ Deno.test("mergePullRequest: lost merge response reconciles exactly", async () =
   const noObservation = mergedPort([
     pullEntry(),
     pullEntry(),
-    reviewsRead([reviewWire()]),
+    reviewsRead([CLEAN_COMPLETION.review]),
     commentsRead([]),
     ...rulesRead(),
     ...checksRead(),
@@ -1085,7 +1111,7 @@ Deno.test("mergePullRequest: malformed merge response is invalid, rejected maps 
   const rejected = mergedPort([
     pullEntry(),
     pullEntry(),
-    reviewsRead([reviewWire()]),
+    reviewsRead([CLEAN_COMPLETION.review]),
     commentsRead([]),
     ...rulesRead(),
     ...checksRead(),
@@ -1104,7 +1130,7 @@ Deno.test("mergePullRequest: unreadable rules fail closed even when classic prot
   const malformed = mergedPort([
     pullEntry(),
     pullEntry(),
-    reviewsRead([reviewWire()]),
+    reviewsRead([CLEAN_COMPLETION.review]),
     commentsRead([]),
     {
       ...httpRespond("GET", RULES_PATH, 200, [{ type: 7 }]),
@@ -1121,7 +1147,7 @@ Deno.test("mergePullRequest: unreadable rules fail closed even when classic prot
   const failed = mergedPort([
     pullEntry(),
     pullEntry(),
-    reviewsRead([reviewWire()]),
+    reviewsRead([CLEAN_COMPLETION.review]),
     commentsRead([]),
     {
       ...httpRespond("GET", RULES_PATH, 403, { message: "rate limit" }, {
@@ -1140,7 +1166,7 @@ Deno.test("mergePullRequest: unreadable rules fail closed even when classic prot
   const badParams = mergedPort([
     pullEntry(),
     pullEntry(),
-    reviewsRead([reviewWire()]),
+    reviewsRead([CLEAN_COMPLETION.review]),
     commentsRead([]),
     httpRespond("GET", RULES_PATH, 200, [
       statusChecksRuleWire({

@@ -31,7 +31,11 @@ import {
   MaxText,
 } from "./validation.ts";
 
-export type AdapterKindV1 = "gateway";
+export type AdapterKindV1 = "gateway" | "github";
+/** Discriminated adapter variant: a GitHub host names no gateway base URL. */
+export type RepositoryAdapterV1 =
+  | { kind: "gateway"; baseUrl: string }
+  | { kind: "github" };
 export type StabilityMetricV1 =
   | "five_xx_rate"
   | "timeout_rate"
@@ -110,7 +114,7 @@ export interface RepositoryConfigV1 {
   kind: "repository_config";
   repository: RepositoryIdentityV1;
   baseBranch: string;
-  adapter: { kind: "gateway"; baseUrl: string };
+  adapter: RepositoryAdapterV1;
   /** Trusted credential-free command IDs resolved by the trusted host. */
   commands: { replay: CommandId; test: CommandId };
   /** Concrete resolved command registry (file/injected config, never env/flag). */
@@ -143,7 +147,8 @@ const REQUIREMENT_KEYS = [
   "stabilityPolicy",
 ] as const;
 const COMMANDS_KEYS = ["replay", "test"] as const;
-const ADAPTER_KEYS = ["kind", "baseUrl"] as const;
+const GATEWAY_ADAPTER_KEYS = ["kind", "baseUrl"] as const;
+const GITHUB_ADAPTER_KEYS = ["kind"] as const;
 const BUILD_KEYS = ["projectId", "acceptance"] as const;
 const ACCEPTANCE_KEYS = [
   "healthPath",
@@ -184,17 +189,17 @@ export function parseRepositoryConfigV1(input: unknown): RepositoryConfigV1 {
     MaxText.branch,
   );
 
-  const adapterObj = expectRecord(obj.adapter, "$.adapter");
-  expectExactKeys(adapterObj, ADAPTER_KEYS, "$.adapter");
-  expectEnum(adapterObj.kind, ["gateway"], "$.adapter.kind");
-  const baseUrl = expectPattern(
-    adapterObj.baseUrl,
-    "$.adapter.baseUrl",
-    /^https?:\/\/[^ /]+(?::\d+)?(?:\/[^ ]*)?$/,
-    "invalid_pattern",
-    "expected http(s) base URL",
-    MaxText.url,
-  );
+  const adapter = parseRepositoryAdapter(obj.adapter, "$.adapter");
+  // Scope 0 is reserved for the explicit no-App local owner credential used by
+  // the github adapter; a gateway configuration still needs a real App
+  // installation.
+  if (adapter.kind === "gateway" && repository.installationId < 1) {
+    fail(
+      "$.repository.installationId",
+      "invalid_count",
+      "gateway adapter requires a positive GitHub App installation id; 0 is reserved for the no-App local owner scope",
+    );
+  }
 
   const commandsObj = expectRecord(obj.commands, "$.commands");
   expectExactKeys(commandsObj, COMMANDS_KEYS, "$.commands");
@@ -287,7 +292,7 @@ export function parseRepositoryConfigV1(input: unknown): RepositoryConfigV1 {
     kind: "repository_config",
     repository,
     baseBranch,
-    adapter: { kind: "gateway", baseUrl },
+    adapter,
     commands: { replay, test },
     commandRegistry,
     protectedPaths,
@@ -298,6 +303,36 @@ export function parseRepositoryConfigV1(input: unknown): RepositoryConfigV1 {
     retention,
     stabilityPolicy,
   };
+}
+
+/**
+ * The adapter variant is discriminated and exact: the GitHub variant names no
+ * gateway base address — an extra key is an unknown key, never ignored — and
+ * an unknown kind falls through to the existing gateway validation, which
+ * refuses it.
+ */
+function parseRepositoryAdapter(
+  input: unknown,
+  path: string,
+): RepositoryAdapterV1 {
+  const obj = expectRecord(input, path);
+  if (obj.kind === "github") {
+    expectExactKeys(obj, GITHUB_ADAPTER_KEYS, path);
+    return { kind: "github" };
+  }
+  // Existing gateway validation order is preserved: exact keys, then kind,
+  // then the base URL pattern.
+  expectExactKeys(obj, GATEWAY_ADAPTER_KEYS, path);
+  expectEnum(obj.kind, ["gateway"], `${path}.kind`);
+  const baseUrl = expectPattern(
+    obj.baseUrl,
+    `${path}.baseUrl`,
+    /^https?:\/\/[^ /]+(?::\d+)?(?:\/[^ ]*)?$/,
+    "invalid_pattern",
+    "expected http(s) base URL",
+    MaxText.url,
+  );
+  return { kind: "gateway", baseUrl };
 }
 
 function parseAcceptance(input: unknown, path: string): AcceptanceIdentityV1 {

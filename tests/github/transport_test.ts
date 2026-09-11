@@ -19,7 +19,6 @@ import type {
 import type { HttpRequestV1 } from "../../src/github/http.ts";
 import {
   checkRunWire,
-  completedServiceRead,
   FakeClock,
   FakeCooldownGate,
   FakeGitExecutor,
@@ -30,12 +29,13 @@ import {
   pullWire,
   REPO,
   REVIEWER,
-  reviewWire,
   rulesetWire,
   SHA1,
   SHA2,
   statusChecksRuleWire,
   statusesPageWire,
+  structuredCompletedFixture,
+  type StructuredReviewFixtureV1,
   T0,
 } from "./helpers.ts";
 import type { ScriptEntry } from "./helpers.ts";
@@ -132,7 +132,14 @@ function completedReceipt(): ReviewReceiptV1 {
   });
 }
 
-function mergeHappyScript(): ScriptEntry[] {
+/**
+ * Merge script for the lost-PUT case. The standing completion is the exact
+ * structured ready journal fixture (the structured review is the production
+ * completion authority); the prose/APPROVED shape is intentionally gone.
+ */
+function mergeHappyScript(
+  fixture: StructuredReviewFixtureV1,
+): ScriptEntry[] {
   return [
     pullEntry(),
     pullEntry(),
@@ -140,7 +147,7 @@ function mergeHappyScript(): ScriptEntry[] {
       "GET",
       "/repos/ubiquity/sentinel/pulls/1/reviews?per_page=100&page=1",
       200,
-      [reviewWire({ id: 100, state: "APPROVED", body: "no issues found" })],
+      [fixture.review],
     ),
     httpRespond(
       "GET",
@@ -286,9 +293,10 @@ Deno.test("client: auth provider throws or hangs returns a sanitized typed failu
 });
 
 Deno.test("client: write submitted into a lost response stays ambiguous", async () => {
-  const script = mergeHappyScript();
+  const fixture = await structuredCompletedFixture();
+  const script = mergeHappyScript(fixture);
   const service = new FakeReviewService();
-  service.readResult = completedServiceRead();
+  service.readResult = fixture.service;
   const inner = makePort({ script });
   const transport = new HangingWriteTransport(
     inner.transport.fetch.bind(inner.transport),

@@ -96,10 +96,7 @@ export function rankEligibleWork(
       skipped[record.id] = "wip";
       continue;
     }
-    if (
-      record.repository.installationId !== 0 &&
-      !byRepository.has(repoKey(record.repository))
-    ) {
+    if (!byRepository.has(repoKey(record.repository))) {
       skipped[record.id] = "unconfigured";
       continue;
     }
@@ -221,10 +218,16 @@ function compareKeys(a: string[], b: string[]): number {
   return 0;
 }
 
+/**
+ * Scope identity for configured-repository matching: the same owner/name
+ * under a different installation (App or the explicit no-App local scope 0)
+ * is a different scope and must never authorize a record through another
+ * scope's configuration. Sorting tie keys are unchanged.
+ */
 function repoKey(repository: {
   owner: string;
   name: string;
   installationId: number;
 }): string {
-  return `${repository.owner}/${repository.name}`;
+  return `${repository.installationId}\u0000${repository.owner}/${repository.name}`;
 }

@@ -1,17 +1,34 @@
 // Review request/observation suite: exactly-one submission with exact
 // PR/head/base/reviewer binding, operation-key reconciliation across lost
-// responses, and fail-closed normalization — pending, completed-clean,
-// finding-bearing, missing findings, stale heads, wrong authors, CodeRabbit,
-// malformed service evidence, impossible completion times. Receipt
-// derivation is validated by the frozen parser.
+// responses, and fail-closed normalization — pending, structured completed
+// clean, structured finding-bearing, stale heads, wrong authors, CodeRabbit,
+// malformed service evidence, impossible completion times, old prose bodies.
+// Completion authorization consumes ONLY the strict structured journal, so the
+// positive fixtures below render a real ready journal whose digest, result id
+// and completion time bind to the service receipt; prose fixtures remain as
+// explicit negative coverage. Receipt derivation is validated by the frozen
+// parser.
 import assert from "node:assert/strict";
 
+import type { GitSha } from "../../src/contracts/brands.ts";
 import type {
   ReviewObservationRequestV1,
   ReviewSubmissionV1,
 } from "../../src/contracts/ports.ts";
-import { parseReviewReceiptV1 } from "../../src/contracts/review-receipt.ts";
+import {
+  deriveUnresolvedSeverities,
+  parseReviewReceiptV1,
+} from "../../src/contracts/review-receipt.ts";
+import {
+  renderReviewJournalBody,
+  REVIEW_MODEL,
+  REVIEW_REASONING,
+  type ReviewJournalReadyV1,
+  reviewResultDigest,
+  type ReviewResultV1,
+} from "../../src/github/review-journal.ts";
 import { deriveReviewReceiptV1 } from "../../src/github/review-normalize.ts";
+import type { ReviewServiceReadV1 } from "../../src/github/review-service.ts";
 import {
   commentWire,
   completedServiceRead,
@@ -41,6 +58,8 @@ function submitRequest(
     expectedBase: SHA2,
     expectedReviewer: REVIEWER,
     operationKey: "review:work-1",
+    latestStartAt: T0 + 60_000,
+    settleBy: T0 + 660_000,
     ...overrides,
   };
 }
@@ -100,6 +119,133 @@ function commentsRead(comments: unknown[]): ScriptEntry {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Structured review fixtures (the production completion authority)
+// ---------------------------------------------------------------------------
+
+const STRUCTURED_CLEAN: ReviewResultV1 = {
+  verdict: "clean",
+  summary: "no issues found",
+  findings: [],
+};
+
+const STRUCTURED_FINDINGS: ReviewResultV1 = {
+  verdict: "findings",
+  summary: "two issues found",
+  findings: [
+    {
+      priority: 1,
+      title: "Broken error handling",
+      body: "The handler swallows errors.\n\nIt must surface them.",
+      path: "src/main.ts",
+      lineStart: 10,
+      lineEnd: 12,
+    },
+    {
+      priority: 2,
+      title: "Naming is confusing",
+      body: "Rename the flag.",
+      path: "src/main.ts",
+      lineStart: 20,
+      lineEnd: 20,
+    },
+  ],
+};
+
+interface StructuredFixtureOptionsV1 {
+  result?: ReviewResultV1;
+  reviewId?: number;
+  expectedBase?: GitSha;
+  requestedAt?: number;
+  completedAt?: number;
+  service?: Partial<ReviewServiceReadV1>;
+  wire?: Record<string, unknown>;
+}
+
+/** One internally consistent ready journal for the canonical identities. */
+async function readyJournalFor(
+  options: StructuredFixtureOptionsV1 = {},
+): Promise<ReviewJournalReadyV1> {
+  const result = options.result ?? STRUCTURED_CLEAN;
+  const reviewId = options.reviewId ?? 100;
+  const requestedAt = options.requestedAt ?? T0 + 1000;
+  const completedAt = options.completedAt ?? T0 + 120_000;
+  return {
+    version: "v1",
+    phase: "ready",
+    repository: { owner: REPO.owner, name: REPO.name },
+    prNumber: 1,
+    expectedHead: SHA1,
+    expectedBase: options.expectedBase ?? SHA2,
+    operationKey: "review:work-1",
+    publisher: REVIEWER,
+    requestId: "req-1",
+    requestedAt,
+    reviewId,
+    completedAt,
+    result,
+    resultDigest: await reviewResultDigest(result),
+    execution: {
+      ownerRunId: "run-1",
+      invocationId: "review-invocation-review:work-1",
+      threadId: "thread-1",
+      submittedProvider: "openai",
+      model: REVIEW_MODEL,
+      reasoning: REVIEW_REASONING,
+      startMayOccur: true,
+      turnId: "turn-1",
+      resultId: "result-9",
+      actual: {
+        evidenceKind: "request-runtime",
+        provider: "openai",
+        threadId: "thread-1",
+        turnId: "turn-1",
+        terminalOrigin: "runtime",
+        observedTerminalStatus: "completed",
+        observedModel: REVIEW_MODEL,
+        observedReasoning: REVIEW_REASONING,
+        durationMs: 5,
+        outputChars: 10,
+      },
+    },
+  };
+}
+
+/**
+ * One internally consistent structured completion: the rendered ready journal,
+ * its exact standing GitHub review wire and the service receipt bound to the
+ * SAME digest, result id, review id and completion time.
+ */
+async function completedFixture(
+  options: StructuredFixtureOptionsV1 = {},
+): Promise<{
+  body: string;
+  review: Record<string, unknown>;
+  service: ReviewServiceReadV1;
+}> {
+  const journal = await readyJournalFor(options);
+  const body = renderReviewJournalBody(journal);
+  return {
+    body,
+    review: reviewWire({
+      id: journal.reviewId,
+      state: "COMMENTED",
+      body,
+      commit_id: SHA1,
+      submitted_at: "2026-09-07T01:00:00Z",
+      ...options.wire,
+    }),
+    service: completedServiceRead({
+      resultDigest: journal.resultDigest,
+      completedAt: journal.completedAt,
+      summary: journal.result.summary,
+      githubReviewId: journal.reviewId,
+      expectedBase: journal.expectedBase,
+      ...options.service,
+    }),
+  };
+}
+
 Deno.test("requestReview: exactly one submission with exact identities", async () => {
   const service = new FakeReviewService();
   service.submitResult = {
@@ -123,6 +269,8 @@ Deno.test("requestReview: exactly one submission with exact identities", async (
     expectedHead: SHA1,
     expectedBase: SHA2,
     expectedReviewer: REVIEWER,
+    latestStartAt: T0 + 60_000,
+    settleBy: T0 + 660_000,
   });
   assert.equal(transport.requests.length, 1); // one PR read, zero retries
 
@@ -249,16 +397,16 @@ Deno.test("observeReview: completed requires terminal provenance, review author 
   // Completed by the service but no GitHub review by the expected reviewer
   // (CodeRabbit only): unavailable.
   const service = new FakeReviewService();
-  service.readResult = completedServiceRead();
+  const fixture = await completedFixture();
+  service.readResult = fixture.service;
   const { port } = makePort({
     clock: new FakeClock(T0 + 200_000),
     script: observeScript([
       [PR_READ],
-      reviewsRead([reviewWire({
-        id: 5,
+      reviewsRead([{
+        ...fixture.review,
         user: { login: "coderabbitai[bot]" },
-        state: "APPROVED",
-      })]),
+      }]),
       commentsRead([]),
     ]),
     review: service,
@@ -281,7 +429,7 @@ Deno.test("observeReview: completed requires terminal provenance, review author 
           base: { ref: "development", sha: SHA2 },
         }),
       ),
-      reviewsRead([reviewWire({ commit_id: SHA2 })]),
+      reviewsRead([{ ...fixture.review, commit_id: SHA2 }]),
       commentsRead([]),
     ],
     review: service,
@@ -292,6 +440,21 @@ Deno.test("observeReview: completed requires terminal provenance, review author 
   assert.equal(stale.value.status, "unavailable");
   assert.equal(stale.value.observedHead, SHA2);
 
+  // A standing review on the wrong head never matches the journal identity.
+  const wrongHeadPort = makePort({
+    clock: new FakeClock(T0 + 200_000),
+    script: observeScript([
+      [PR_READ],
+      reviewsRead([{ ...fixture.review, commit_id: SHA3 }]),
+      commentsRead([]),
+    ]),
+    review: service,
+  });
+  const wrongHead = await wrongHeadPort.port.observeReview(observeRequest());
+  assert.ok(wrongHead.ok);
+  if (!wrongHead.ok) return;
+  assert.equal(wrongHead.value.status, "unavailable");
+
   // Malformed completion evidence: missing terminal success/output/result.
   for (
     const override of [
@@ -301,7 +464,10 @@ Deno.test("observeReview: completed requires terminal provenance, review author 
       { completedAt: null },
     ]
   ) {
-    service.readResult = completedServiceRead(override);
+    service.readResult = completedServiceRead({
+      resultDigest: fixture.service.resultDigest,
+      ...override,
+    });
     const malformed = await port.observeReview(observeRequest());
     assert.ok(malformed.ok);
     if (!malformed.ok) return;
@@ -315,6 +481,7 @@ Deno.test("observeReview: completed requires terminal provenance, review author 
 
   // Completion in the future is unverifiable under the observation clock.
   service.readResult = completedServiceRead({
+    resultDigest: fixture.service.resultDigest,
     completedAt: T0 + 10_000_000,
   });
   const future = await port.observeReview(observeRequest());
@@ -325,14 +492,13 @@ Deno.test("observeReview: completed requires terminal provenance, review author 
 
 Deno.test("observeReview: completed clean requires the exact reviewer review on the exact head", async () => {
   const service = new FakeReviewService();
-  service.readResult = completedServiceRead();
+  const fixture = await completedFixture();
+  service.readResult = fixture.service;
   const { port } = makePort({
     clock: new FakeClock(T0 + 200_000),
     script: observeScript([
       [PR_READ],
-      reviewsRead([
-        reviewWire({ id: 100, state: "APPROVED", body: "no issues found" }),
-      ]),
+      reviewsRead([fixture.review]),
       commentsRead([]),
     ]),
     review: service,
@@ -356,7 +522,7 @@ Deno.test("observeReview: completed clean requires the exact reviewer review on 
     script: observeScript([
       [PR_READ],
       reviewsRead([{
-        ...reviewWire({ id: 100, state: "APPROVED", body: "no issues found" }),
+        ...fixture.review,
         reactions: { total_count: 3, heart: 1 },
       }]),
       commentsRead([]),
@@ -370,23 +536,16 @@ Deno.test("observeReview: completed clean requires the exact reviewer review on 
   assert.deepEqual(withReactions.value.findings, []);
 });
 
-Deno.test("observeReview: finding-bearing completions carry the full parsed findings", async () => {
+Deno.test("observeReview: finding-bearing completions carry the full structured findings", async () => {
   const service = new FakeReviewService();
-  service.readResult = completedServiceRead();
+  const fixture = await completedFixture({ result: STRUCTURED_FINDINGS });
+  service.readResult = fixture.service;
   const { port } = makePort({
     clock: new FakeClock(T0 + 200_000),
     script: observeScript([
       [PR_READ],
-      reviewsRead([reviewWire({
-        id: 100,
-        state: "CHANGES_REQUESTED",
-        body: "[P2] tests could be tightened\n[P1] broken error handling",
-      })]),
-      commentsRead([
-        commentWire({ id: 500, body: "[P1] broken error handling" }),
-        commentWire({ id: 501, body: "looks reasonable" }),
-        commentWire({ id: 502, body: "**P2** naming is confusing" }),
-      ]),
+      reviewsRead([fixture.review]),
+      commentsRead([]),
     ]),
     review: service,
   });
@@ -394,22 +553,25 @@ Deno.test("observeReview: finding-bearing completions carry the full parsed find
   assert.ok(observed.ok);
   if (!observed.ok) return;
   assert.equal(observed.value.status, "completed");
-  assert.equal(observed.value.findings.length, 4);
+  assert.equal(observed.value.summary, STRUCTURED_FINDINGS.summary);
+  assert.equal(observed.value.findings.length, 2);
   const severities = observed.value.findings
     .map((finding) => finding.severity)
     .sort();
-  // Findings are a full set; the exact delivery order is not part of the
-  // contract, only completeness and exact identities.
-  assert.deepEqual(severities, ["P1", "P1", "P2", "P2"]);
+  assert.deepEqual(severities, ["P1", "P2"]);
   const p1 = observed.value.findings.find((finding) =>
     finding.severity === "P1"
   );
   assert.ok(p1 !== undefined);
   assert.equal(p1.path, "src/main.ts");
   assert.equal(p1.resolved, false);
-  assert.equal(p1.id, "github-comment-500");
+  assert.match(p1.id, /^github-review-100-finding-\d+$/);
   // Fingerprints are SHA-256 of the canonical finding identity.
   assert.match(p1.fingerprint, /^[0-9a-f]{64}$/);
+  // The FULL title, body, path and line range are preserved in the message.
+  assert.ok(p1.message.includes("Broken error handling"));
+  assert.ok(p1.message.includes("It must surface them."));
+  assert.ok(p1.message.includes("src/main.ts:10-12"));
 });
 
 Deno.test("observeReview: service-unavailable and finding-cap overflow are unavailable", async () => {
@@ -433,22 +595,46 @@ Deno.test("observeReview: service-unavailable and finding-cap overflow are unava
   if (!unavailable.ok) return;
   assert.equal(unavailable.value.status, "unavailable");
 
-  // More finding-bearing comments than the cap: incomplete, never a partial
+  // More structured findings than the cap: incomplete, never a partial
   // finding set claiming completeness.
-  service.readResult = completedServiceRead();
+  const overCapResult: ReviewResultV1 = {
+    verdict: "findings",
+    summary: "three findings",
+    findings: [
+      {
+        priority: 1,
+        title: "One",
+        body: "first",
+        path: "src/main.ts",
+        lineStart: 1,
+        lineEnd: 1,
+      },
+      {
+        priority: 2,
+        title: "Two",
+        body: "second",
+        path: "src/main.ts",
+        lineStart: 2,
+        lineEnd: 2,
+      },
+      {
+        priority: 3,
+        title: "Three",
+        body: "third",
+        path: "src/main.ts",
+        lineStart: 3,
+        lineEnd: 3,
+      },
+    ],
+  };
+  const fixture = await completedFixture({ result: overCapResult });
+  service.readResult = fixture.service;
   const overCap = makePort({
     clock: new FakeClock(T0 + 200_000),
     script: observeScript([
       [PR_READ],
-      reviewsRead([
-        reviewWire({ id: 100, state: "CHANGES_REQUESTED", body: null }),
-      ]),
-      commentsRead(
-        Array.from(
-          { length: 3 },
-          (_, index) => commentWire({ id: 1000 + index, body: "[P2] note" }),
-        ),
-      ),
+      reviewsRead([fixture.review]),
+      commentsRead([]),
     ]),
     review: service,
     findingCap: 2,
@@ -459,10 +645,35 @@ Deno.test("observeReview: service-unavailable and finding-cap overflow are unava
   assert.equal(capped.value.status, "unavailable");
 });
 
-Deno.test("observeReview: CHANGES_REQUESTED without parseable findings is unavailable", async () => {
+Deno.test("observeReview: old clean prose is never completed evidence", async () => {
   const service = new FakeReviewService();
   service.readResult = completedServiceRead();
   const { port } = makePort({
+    clock: new FakeClock(T0 + 200_000),
+    script: observeScript([
+      [PR_READ],
+      reviewsRead([
+        reviewWire({
+          id: 100,
+          state: "COMMENTED",
+          body: "## Codex review\n\nNo issues found. Looks good to merge.",
+        }),
+      ]),
+      commentsRead([
+        commentWire({ id: 500, body: "[P1] broken error handling" }),
+      ]),
+    ]),
+    review: service,
+  });
+  const observed = await port.observeReview(observeRequest());
+  assert.ok(observed.ok);
+  if (!observed.ok) return;
+  assert.equal(observed.value.status, "unavailable");
+  assert.equal(observed.value.findings.length, 0);
+
+  // CHANGES_REQUESTED prose without a structured journal is equally
+  // unavailable — never an invented finding set.
+  const changesPort = makePort({
     script: observeScript([
       [PR_READ],
       reviewsRead([
@@ -476,22 +687,37 @@ Deno.test("observeReview: CHANGES_REQUESTED without parseable findings is unavai
     ]),
     review: service,
   });
-  const observed = await port.observeReview(observeRequest());
-  assert.ok(observed.ok);
-  if (!observed.ok) return;
-  assert.equal(observed.value.status, "unavailable");
+  const changes = await changesPort.port.observeReview(observeRequest());
+  assert.ok(changes.ok);
+  if (!changes.ok) return;
+  assert.equal(changes.value.status, "unavailable");
 });
 
-Deno.test("observeReview: wrong-author comments never count as findings", async () => {
+Deno.test("observeReview: an unaccounted same-author comment makes completion unavailable", async () => {
   const service = new FakeReviewService();
-  service.readResult = completedServiceRead();
+  const fixture = await completedFixture();
+  service.readResult = fixture.service;
   const { port } = makePort({
     clock: new FakeClock(T0 + 200_000),
     script: observeScript([
       [PR_READ],
-      reviewsRead([
-        reviewWire({ id: 100, state: "APPROVED", body: "no issues found" }),
-      ]),
+      reviewsRead([fixture.review]),
+      commentsRead([commentWire({ id: 500, body: "extra structured note" })]),
+    ]),
+    review: service,
+  });
+  const unaccounted = await port.observeReview(observeRequest());
+  assert.ok(unaccounted.ok);
+  if (!unaccounted.ok) return;
+  assert.equal(unaccounted.value.status, "unavailable");
+  assert.equal(unaccounted.value.findings.length, 0);
+
+  // A FOREIGN-author comment is not evidence the journal must account for.
+  const foreignPort = makePort({
+    clock: new FakeClock(T0 + 200_000),
+    script: observeScript([
+      [PR_READ],
+      reviewsRead([fixture.review]),
       commentsRead([commentWire({
         id: 600,
         body: "[P1] planted by another bot",
@@ -500,7 +726,7 @@ Deno.test("observeReview: wrong-author comments never count as findings", async 
     ]),
     review: service,
   });
-  const observed = await port.observeReview(observeRequest());
+  const observed = await foreignPort.port.observeReview(observeRequest());
   assert.ok(observed.ok);
   if (!observed.ok) return;
   assert.equal(observed.value.status, "completed");
@@ -517,14 +743,13 @@ Deno.test("review receipts: derived and validated by the frozen parser", async (
     expectedReviewer: REVIEWER,
   };
   const service = new FakeReviewService();
-  service.readResult = completedServiceRead({ githubReviewId: 102 });
+  const fixture = await completedFixture({ reviewId: 102 });
+  service.readResult = fixture.service;
   const { port } = makePort({
     clock: new FakeClock(T0 + 200_000),
     script: observeScript([
       [PR_READ],
-      reviewsRead([
-        reviewWire({ id: 102, state: "APPROVED", body: "no issues found" }),
-      ]),
+      reviewsRead([fixture.review]),
       commentsRead([]),
     ]),
     review: service,
@@ -561,29 +786,41 @@ Deno.test("review receipts: derived and validated by the frozen parser", async (
 
   // A completed observation whose service completion predates the recorded
   // submission cannot be derived: fail closed with the same parser.
-  service.readResult = completedServiceRead({
-    githubReviewId: 102,
+  const staleFixture = await completedFixture({
+    reviewId: 102,
+    requestedAt: T0 - 5000,
     completedAt: T0 + 500,
   });
-  const staleObs = await port.observeReview(observeRequest());
+  service.readResult = staleFixture.service;
+  const staleObsPort = makePort({
+    clock: new FakeClock(T0 + 200_000),
+    script: observeScript([
+      [PR_READ],
+      reviewsRead([staleFixture.review]),
+      commentsRead([]),
+    ]),
+    review: service,
+  });
+  const staleObs = await staleObsPort.port.observeReview(observeRequest());
   assert.ok(staleObs.ok);
   if (!staleObs.ok) return;
+  assert.equal(staleObs.value.status, "completed");
   assert.throws(
     () => deriveReviewReceiptV1(staleObs.value, submission, REPO),
   );
 
   // Findings enrich the derived receipt with correct derived severities.
-  service.readResult = completedServiceRead({ githubReviewId: 103 });
+  const findingFixture = await completedFixture({
+    reviewId: 103,
+    result: STRUCTURED_FINDINGS,
+  });
+  service.readResult = findingFixture.service;
   const findingPort = makePort({
     clock: new FakeClock(T0 + 200_000),
     script: observeScript([
       [PR_READ],
-      reviewsRead([
-        reviewWire({ id: 103, state: "CHANGES_REQUESTED", body: null }),
-      ]),
-      commentsRead([
-        commentWire({ id: 700, body: "[P1] broken error handling" }),
-      ]),
+      reviewsRead([findingFixture.review]),
+      commentsRead([]),
     ]),
     review: service,
   });
@@ -604,103 +841,65 @@ Deno.test("review receipts: derived and validated by the frozen parser", async (
     summary: findingObs.value.summary,
     findings: findingObs.value.findings,
     findingsUncounted: 0,
-    unresolvedSeverities: ["P1"],
+    // The unresolved severity set must be derived from the exact observed
+    // P1/P2 findings; a hard-coded inconsistent set fails the frozen parser.
+    unresolvedSeverities: deriveUnresolvedSeverities(findingObs.value.findings),
     submittedAt: submission.submittedAt,
     completedAt: findingObs.value.completedAt,
     observedAt: findingObs.value.receivedAt,
   });
-  assert.deepEqual(findingReceipt.unresolvedSeverities, ["P1"]);
+  assert.deepEqual(findingReceipt.unresolvedSeverities, ["P1", "P2"]);
 });
 
-Deno.test("observeReview: commented review with a minus-bullet finding preserves the full message", async () => {
-  const service = new FakeReviewService();
-  service.readResult = completedServiceRead();
-  const { port } = makePort({
-    clock: new FakeClock(T0 + 200_000),
-    script: observeScript([
-      [PR_READ],
-      reviewsRead([
-        reviewWire({
-          id: 100,
-          state: "COMMENTED",
-          body: "Review findings below",
-        }),
-      ]),
-      commentsRead([
-        commentWire({ id: 500, body: "- [P1] Fix credential exposure" }),
-      ]),
-    ]),
-    review: service,
-  });
-  const observed = await port.observeReview(observeRequest());
-  assert.ok(observed.ok);
-  if (!observed.ok) return;
-  assert.equal(observed.value.status, "completed");
-  assert.equal(observed.value.findings.length, 1);
-  const finding = observed.value.findings[0];
-  assert.equal(finding.severity, "P1");
-  assert.equal(finding.id, "github-comment-500");
-  // The FULL original message is preserved, label and bullet included.
-  assert.equal(finding.message, "- [P1] Fix credential exposure");
-  assert.equal(finding.resolved, false);
-  assert.match(finding.fingerprint, /^[0-9a-f]{64}$/);
-});
-
-Deno.test("observeReview: unparseable badge finding never yields completed empty findings", async () => {
-  const service = new FakeReviewService();
-  service.readResult = completedServiceRead();
-  const { port } = makePort({
-    clock: new FakeClock(T0 + 200_000),
-    script: observeScript([
-      [PR_READ],
-      reviewsRead([
-        reviewWire({
-          id: 100,
-          state: "COMMENTED",
-          body: "Review findings below",
-        }),
-      ]),
-      commentsRead([
-        commentWire({
-          id: 500,
-          body:
-            "![P1 Badge](https://example.invalid/P1) Fix credential exposure",
-        }),
-      ]),
-    ]),
-    review: service,
-  });
-  const observed = await port.observeReview(observeRequest());
-  assert.ok(observed.ok);
-  if (!observed.ok) return;
-  // Incomplete finding evidence: unavailable, never a completed empty set.
-  assert.equal(observed.value.status, "unavailable");
-  assert.equal(observed.value.findings.length, 0);
-});
+Deno.test(
+  "observeReview: APPROVED and CHANGES_REQUESTED never complete the transport contract",
+  async () => {
+    for (const state of ["APPROVED", "CHANGES_REQUESTED"]) {
+      // ONLY the state changes: the exact ready journal body, the bound
+      // service receipt, the head and the submission timestamp stay otherwise
+      // valid. The transport contract is COMMENTED only.
+      const fixture = await completedFixture({ wire: { state } });
+      const service = new FakeReviewService();
+      service.readResult = fixture.service;
+      const { port } = makePort({
+        clock: new FakeClock(T0 + 200_000),
+        script: observeScript([
+          [PR_READ],
+          reviewsRead([fixture.review]),
+          commentsRead([]),
+        ]),
+        review: service,
+      });
+      const observed = await port.observeReview(observeRequest());
+      assert.ok(observed.ok);
+      if (!observed.ok) return;
+      assert.equal(observed.value.status, "unavailable", state);
+      assert.equal(observed.value.findings.length, 0, state);
+      assert.equal(fixture.review.state, state);
+    }
+  },
+);
 
 Deno.test("observeReview: exact-id review binding, not latest by time", async () => {
-  // The recorded result is id 100 but a LATER review by the same reviewer on
-  // the same head exists: the recorded result is no longer authoritative.
+  // The recorded result is id 100 but a LATER structured review by the same
+  // reviewer on the same head exists: the recorded result is no longer
+  // authoritative.
   const service = new FakeReviewService();
-  service.readResult = completedServiceRead();
+  const earlier = await completedFixture({
+    reviewId: 100,
+    wire: { submitted_at: "2026-09-07T01:00:00Z" },
+  });
+  const later = await completedFixture({
+    reviewId: 101,
+    result: { verdict: "clean", summary: "later approval", findings: [] },
+    wire: { submitted_at: "2026-09-07T02:00:00Z" },
+  });
+  service.readResult = earlier.service;
   const { port } = makePort({
     clock: new FakeClock(T0 + 200_000),
     script: observeScript([
       [PR_READ],
-      reviewsRead([
-        reviewWire({
-          id: 100,
-          state: "APPROVED",
-          body: "no issues found",
-          submitted_at: "2026-09-07T01:00:00Z",
-        }),
-        reviewWire({
-          id: 101,
-          state: "APPROVED",
-          body: "later approval",
-          submitted_at: "2026-09-07T02:00:00Z",
-        }),
-      ]),
+      reviewsRead([earlier.review, later.review]),
       commentsRead([]),
     ]),
     review: service,
@@ -712,25 +911,12 @@ Deno.test("observeReview: exact-id review binding, not latest by time", async ()
 
   // The recorded result is the latest review by the exact id: completed.
   const serviceOk = new FakeReviewService();
-  serviceOk.readResult = completedServiceRead({ githubReviewId: 101 });
+  serviceOk.readResult = later.service;
   const okPort = makePort({
     clock: new FakeClock(T0 + 200_000),
     script: observeScript([
       [PR_READ],
-      reviewsRead([
-        reviewWire({
-          id: 100,
-          state: "APPROVED",
-          body: "no issues found",
-          submitted_at: "2026-09-07T01:00:00Z",
-        }),
-        reviewWire({
-          id: 101,
-          state: "APPROVED",
-          body: "later approval",
-          submitted_at: "2026-09-07T02:00:00Z",
-        }),
-      ]),
+      reviewsRead([earlier.review, later.review]),
       commentsRead([]),
     ]),
     review: serviceOk,
@@ -743,6 +929,7 @@ Deno.test("observeReview: exact-id review binding, not latest by time", async ()
 });
 
 Deno.test("observeReview: missing or contradictory service binding is unavailable", async () => {
+  const fixture = await completedFixture();
   const cases: {
     name: string;
     override: Parameters<typeof completedServiceRead>[0];
@@ -766,16 +953,20 @@ Deno.test("observeReview: missing or contradictory service binding is unavailabl
     { name: "missing-base", override: { expectedBase: null } },
     { name: "missing-request-id", override: { requestId: null } },
     { name: "missing-github-review-id", override: { githubReviewId: null } },
+    { name: "wrong-result-digest", override: { resultDigest: "0".repeat(64) } },
+    { name: "wrong-completed-at", override: { completedAt: T0 + 1 } },
   ];
   for (const item of cases) {
     const service = new FakeReviewService();
-    service.readResult = completedServiceRead(item.override);
+    service.readResult = completedServiceRead({
+      resultDigest: fixture.service.resultDigest,
+      ...item.override,
+    });
     const { port } = makePort({
       clock: new FakeClock(T0 + 200_000),
       script: observeScript([
         [PR_READ],
-        [httpRespond("GET", "/repos/ubiquity/sentinel/pulls/2", 404, {})],
-        reviewsRead([]),
+        reviewsRead([fixture.review]),
         commentsRead([]),
       ]),
       review: service,
@@ -790,7 +981,8 @@ Deno.test("observeReview: missing or contradictory service binding is unavailabl
 
 Deno.test("observeReview: reviewed base comes from the service record, never the current base", async () => {
   const service = new FakeReviewService();
-  service.readResult = completedServiceRead({ expectedBase: SHA3 });
+  const fixture = await completedFixture({ expectedBase: SHA3 });
+  service.readResult = fixture.service;
   const { port } = makePort({
     clock: new FakeClock(T0 + 200_000),
     script: [
@@ -800,7 +992,7 @@ Deno.test("observeReview: reviewed base comes from the service record, never the
         200,
         pullWire({ base: { ref: "development", sha: SHA4 } }),
       ),
-      reviewsRead([reviewWire()]),
+      reviewsRead([fixture.review]),
       commentsRead([]),
     ],
     review: service,
@@ -812,30 +1004,29 @@ Deno.test("observeReview: reviewed base comes from the service record, never the
   assert.equal(observed.value.observedBase, SHA3);
 });
 
-Deno.test("observeReview: incomplete finding evidence preserves parsed findings as unavailable", async () => {
-  // One parseable P2 finding plus one unparseable marker: unavailable with
-  // the parseable finding retained, never a completed clean set.
+Deno.test("observeReview: a mismatched structured digest or head is unavailable", async () => {
   const service = new FakeReviewService();
-  service.readResult = completedServiceRead();
+  // The standing body's result digest no longer matches its result: the
+  // journal parser rejects it, so no completion is ever inferred.
+  const journal = await readyJournalFor();
+  const tampered = renderReviewJournalBody({
+    ...journal,
+    resultDigest: "0".repeat(64),
+  });
+  service.readResult = completedServiceRead({
+    resultDigest: "0".repeat(64),
+  });
   const { port } = makePort({
     clock: new FakeClock(T0 + 200_000),
     script: observeScript([
       [PR_READ],
-      reviewsRead([
-        reviewWire({
-          id: 100,
-          state: "COMMENTED",
-          body: "Review findings below",
-        }),
-      ]),
-      commentsRead([
-        commentWire({ id: 500, body: "[P2] naming is confusing" }),
-        commentWire({
-          id: 501,
-          body:
-            "![P1 Badge](https://example.invalid/P1) Fix credential exposure",
-        }),
-      ]),
+      reviewsRead([reviewWire({
+        id: 100,
+        state: "COMMENTED",
+        body: tampered,
+        commit_id: SHA1,
+      })]),
+      commentsRead([]),
     ]),
     review: service,
   });
@@ -843,7 +1034,5 @@ Deno.test("observeReview: incomplete finding evidence preserves parsed findings 
   assert.ok(observed.ok);
   if (!observed.ok) return;
   assert.equal(observed.value.status, "unavailable");
-  assert.equal(observed.value.findings.length, 1);
-  assert.equal(observed.value.findings[0].severity, "P2");
-  assert.equal(observed.value.findings[0].message, "[P2] naming is confusing");
+  assert.equal(observed.value.findings.length, 0);
 });

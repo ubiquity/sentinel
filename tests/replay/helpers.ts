@@ -32,6 +32,8 @@ import type {
   ReplaySourceV1,
 } from "../../src/replay/port.ts";
 import { ReplayPortImpl } from "../../src/replay/port.ts";
+import { DenoReplayRuntime } from "../../src/replay/runtime.ts";
+import type { ReplayRuntimeV1 } from "../../src/replay/runtime.ts";
 
 export const TEST_ID = "gateway:stream-termination";
 export const FIXTURE_REF = "fixture://captures/toy/upstream.json";
@@ -215,8 +217,17 @@ export function toyPolicy(): ReplayPolicyV1 {
   };
 }
 
-/** Explicitly trusted fixture-mode capability for local toy tests only. */
-export function toyIsolation(): ReplayIsolationCapabilityV1 {
+/**
+ * Explicitly trusted fixture-mode capability for local toy tests only. The
+ * callable `run` is an explicit fixture-only boundary: it delegates to the
+ * supplied test runtime, or to a fresh DenoReplayRuntime when none is given.
+ * It never stands in for a production restricted-execution host.
+ */
+export function toyIsolation(
+  runtime?: ReplayRuntimeV1,
+): ReplayIsolationCapabilityV1 {
+  const fixtureRuntime = runtime ??
+    new DenoReplayRuntime(Deno.env.get("PATH") ?? "/usr/bin:/bin");
   return {
     attestation: {
       version: "v1",
@@ -226,6 +237,7 @@ export function toyIsolation(): ReplayIsolationCapabilityV1 {
         "test fixture mode: disposable local toy checkout, no external calls",
       attestationRef: "fixture://isolation/toy",
     },
+    run: (input) => fixtureRuntime.run(input),
   };
 }
 
@@ -279,7 +291,10 @@ export function toyOptions(
     scratchDir,
     fixtures: new ToyFixtureResolver(toyBundle()),
     policy: toyPolicy(),
-    isolation: toyIsolation(),
+    // Bind the fixture boundary to the caller-supplied runtime BEFORE the
+    // override spread, so a deliberate `isolation: undefined` stays invalid
+    // instead of being silently repaired by a later override.
+    isolation: toyIsolation(overrides.runtime),
     ...overrides,
   };
 }

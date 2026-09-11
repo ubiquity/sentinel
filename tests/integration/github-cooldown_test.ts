@@ -108,7 +108,7 @@ Deno.test("cooldown entrypoint: restart and fault modes keep zero further HTTP/a
           state: rig.store,
           configs,
         }),
-      }, { deadline: rig.clock.now() + 600000, stepLimit: 16 });
+      }, { deadline: rig.clock.now() + 1800000, stepLimit: 16 });
       const snapshot = await rig.snapshot();
       assert.equal(auth, 1);
       assert.equal(http, 1);
@@ -156,7 +156,7 @@ Deno.test("cooldown ambiguity: lost response keeps durable intent, cooldown and 
             state: rig.store,
             configs,
           }),
-        }, { deadline: rig.clock.now() + 600000, stepLimit: 16 });
+        }, { deadline: rig.clock.now() + 1800000, stepLimit: 16 });
       const throttle = () =>
         gate.recordRateLimit(7, {
           kind: "secondary",
@@ -310,8 +310,11 @@ Deno.test("cooldown admission: awaited gate cannot consume an ineligible model r
       model,
       budget: new RollingStartBudget({ clock, state, configs }),
     }, {
+      // The initial hard deadline must still leave the declared 240000ms
+      // session plus the 300000ms review-drain and 300000ms operation
+      // margins; the 120000ms gate advance then makes it ineligible.
       deadline: clock.now() +
-        (mode === "implementation-fit" ? 600000 : 7200000),
+        (mode === "implementation-fit" ? 900000 : 7200000),
       stepLimit: 16,
     });
     assert.equal(advanced, true, "test did not reach admission gate");

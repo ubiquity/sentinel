@@ -8,6 +8,7 @@ import {
   REVIEWER,
   SHA1,
   SHA2,
+  T0,
 } from "./helpers.ts";
 import {
   type GitHubCooldownGateV1,
@@ -132,6 +133,8 @@ Deno.test("github remote git/review gate and ambiguity handling", async () => {
         expectedHead: SHA1,
         expectedBase: SHA2,
         expectedReviewer: REVIEWER,
+        latestStartAt: T0 + 60000,
+        settleBy: T0 + 600000,
       })
       : await port.observeReview({
         operationKey: "review:work-1",

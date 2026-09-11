@@ -6,13 +6,27 @@
 // data) is applied in scratch to every checkout.
 import assert from "node:assert/strict";
 import type {
-  PortResultV1,
-  ReplayRunRequestV1,
+  CommandId,
+  FixtureDigest,
+  GitSha,
+  WorkItemId,
+} from "../../src/contracts/brands.ts";
+import { canonicalStringify } from "../../src/contracts/canonical.ts";
+import {
+  portOk,
+  type PortResultV1,
+  type ReplayRunRequestV1,
 } from "../../src/contracts/ports.ts";
 import { parseRepositoryConfigV1 } from "../../src/contracts/repository-config.ts";
 import type { RepositoryConfigV1 } from "../../src/contracts/repository-config.ts";
+import { SENTINEL_REPLAY_INPUT_PATH } from "../../src/replay/causal-verifier.ts";
+import { computeReplayFixtureDigest } from "../../src/replay/fixture.ts";
 import type { ResolvedFixtureV1 } from "../../src/replay/fixture.ts";
-import { ReplayPortImpl } from "../../src/replay/port.ts";
+import { LinuxReplayIsolation } from "../../src/replay/isolation.ts";
+import {
+  ReplayPortImpl,
+  validateReplayIsolationCapability,
+} from "../../src/replay/port.ts";
 import type { ReplayPortOptions } from "../../src/replay/port.ts";
 import { DenoReplayRuntime } from "../../src/replay/runtime.ts";
 import type {
@@ -33,11 +47,13 @@ import {
   replayRequest,
   revParse,
   sha256HexText,
+  testGitEnv,
   TOY_BUNDLE_FILES,
   TOY_REPOSITORY,
   toyBundle,
   toyConfig,
   ToyFixtureResolver,
+  toyIsolation,
   toyOptions,
   toyPolicy,
 } from "./helpers.ts";
@@ -76,7 +92,7 @@ function portWithBundle(
   overrides: Partial<ReplayPortOptions> = {},
 ): ReplayPortImpl {
   return new ReplayPortImpl({
-    ...toyOptions(toyRoot, scratchDir),
+    ...toyOptions(toyRoot, scratchDir, overrides),
     fixtures: new ToyFixtureResolver(bundle),
     ...overrides,
   });
@@ -571,6 +587,9 @@ Deno.test("repository mismatch is invalid; isolation is mandatory", async () => 
       () =>
         makePort(toy.root, `${root}/scratch3`, {
           isolation: {
+            // A real callable runner is present, so the ONLY fault under test
+            // is the false `restrictedExecution` attestation.
+            run: toyIsolation().run,
             attestation: {
               version: "v1",
               host: "not-restricted",
@@ -584,6 +603,209 @@ Deno.test("repository mismatch is invalid; isolation is mandatory", async () => 
       "unattested isolation must refuse construction",
     );
   });
+});
+
+Deno.test("isolation capability needs one captured callable run", async () => {
+  await withFixture(async (root) => {
+    const toy = await createToyApp(`${root}/toy`);
+    const valid = toyIsolation();
+    const invalid: unknown[] = [
+      { attestation: valid.attestation },
+      { attestation: valid.attestation, run: null },
+      { attestation: valid.attestation, run: "deno task test" },
+      new Proxy({ attestation: valid.attestation }, {
+        get(target, key) {
+          if (key === "run") throw new Error("EXOTIC-RUN-READ");
+          return Reflect.get(target, key);
+        },
+      }),
+      // A revoked proxy can no longer answer any property read at all.
+      (() => {
+        const revocable = Proxy.revocable(
+          { attestation: valid.attestation },
+          {},
+        );
+        revocable.revoke();
+        return revocable.proxy;
+      })(),
+    ];
+    for (const isolation of invalid) {
+      assert.throws(
+        () =>
+          makePort(toy.root, `${root}/scratch-bad`, {
+            isolation,
+          } as unknown as Partial<ReplayPortOptions>),
+        TypeError,
+        "a capability without a callable run must refuse construction",
+      );
+    }
+
+    const input: ReplayCommandInputV1 = {
+      executable: "deno",
+      args: [],
+      cwd: root,
+      env: {},
+      maxDurationMs: 1000,
+      maxOutputBytes: 1024,
+    };
+    // runtime.ts declares `detail: string` (never null), so the conforming
+    // bounded diagnostic is the empty string.
+    const commandResult: ReplayCommandResultV1 = {
+      outcome: "exited",
+      exitCode: 0,
+      stdout: new Uint8Array(),
+      stderr: new Uint8Array(),
+      truncated: false,
+      settled: true,
+      detail: "",
+    };
+
+    // The run is read exactly once: a getter that would swap the function on
+    // the second read can never replace the captured boundary.
+    let runReads = 0;
+    let firstCalls = 0;
+    const first = (
+      _input: ReplayCommandInputV1,
+      _access: "read-only" | "read-write",
+    ): Promise<ReplayCommandResultV1> => {
+      firstCalls += 1;
+      return Promise.resolve(commandResult);
+    };
+    const changing: { attestation: unknown } = {
+      attestation: valid.attestation,
+    };
+    Object.defineProperty(changing, "run", {
+      get() {
+        runReads += 1;
+        return runReads === 1 ? first : () => {
+          throw new Error("SWAPPED-RUN");
+        };
+      },
+    });
+    const captured = validateReplayIsolationCapability(changing);
+    assert.ok(captured !== null, "the first run read must validate");
+    const capturedResult = await captured.run(input, "read-only");
+    assert.equal(capturedResult.outcome, "exited");
+    assert.equal(firstCalls, 1, "the first captured run is the one invoked");
+    assert.equal(runReads, 1, "run is read exactly once");
+
+    // A class method keeps its receiver through validation: `run` is captured
+    // from the capability and bound to THAT capability object, so a class
+    // instance carrying both the attestation and the method sees its own
+    // fields. (An unbound method copied into a foreign wrapper would instead
+    // see the wrapper — the documented receiver is the capability itself.)
+    class FixtureCapability {
+      calls = 0;
+      readonly attestation = valid.attestation;
+      run(
+        _input: ReplayCommandInputV1,
+        _access: "read-only" | "read-write",
+      ): Promise<ReplayCommandResultV1> {
+        this.calls += 1;
+        return Promise.resolve(commandResult);
+      }
+    }
+    const receiver = new FixtureCapability();
+    const bound = validateReplayIsolationCapability(receiver);
+    assert.ok(bound !== null);
+    const result = await bound.run(input, "read-write");
+    assert.equal(result.outcome, "exited");
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.settled, true);
+    assert.equal(receiver.calls, 1, "the captured run keeps its receiver");
+
+    // Later mutation of the raw capability never reaches the snapshot.
+    const mutable = { attestation: valid.attestation, run: valid.run };
+    const snapshot = validateReplayIsolationCapability(mutable);
+    assert.ok(snapshot !== null);
+    const replacement = () => Promise.reject(new Error("MUTATED-RUN"));
+    mutable.run = replacement;
+    mutable.attestation = { ...valid.attestation, host: "mutated" };
+    assert.notEqual(snapshot.run, replacement);
+    assert.equal(snapshot.attestation.host, "toy-restricted-host");
+  });
+});
+
+Deno.test({
+  name: "Linux isolation executes the configured replay and test commands",
+  ignore: Deno.build.os !== "linux",
+  fn: async () => {
+    await withFixture(async (root) => {
+      const toy = await createToyApp(`${root}/toy`);
+      const scratch = `${root}/scratch`;
+      await Deno.mkdir(scratch);
+      const isolation = new LinuxReplayIsolation(scratch);
+      const port = makePort(toy.root, scratch, { isolation });
+      const bundle = toyBundle();
+
+      // Original head: the intended regression failure under the real
+      // bubblewrap boundary, with no partial-execution limitations.
+      const original = assertPortOk(
+        await port.runReplay(
+          await replayRequest(bundle, toy.originalSha, {
+            commandId: "replay",
+          }),
+        ),
+      );
+      assert.equal(original.outcome, "failed");
+      assert.equal(original.exitCode, 1);
+      assert.equal(original.failure?.intended, true);
+      assert.deepEqual(original.limitations, []);
+
+      // Candidate head through the configured replay command.
+      const candidate = assertPortOk(
+        await port.runReplay(
+          await replayRequest(bundle, toy.candidateSha, {
+            commandId: "replay",
+          }),
+        ),
+      );
+      assert.equal(candidate.outcome, "passed");
+      assert.equal(candidate.exitCode, 0);
+      assert.equal(candidate.failure, null);
+      assert.deepEqual(candidate.limitations, []);
+
+      // Candidate head through the configured test command.
+      const candidateTest = assertPortOk(
+        await port.runReplay(await replayRequest(bundle, toy.candidateSha)),
+      );
+      assert.equal(candidateTest.outcome, "passed");
+      assert.equal(candidateTest.exitCode, 0);
+      assert.equal(candidateTest.failure, null);
+      assert.deepEqual(candidateTest.limitations, []);
+
+      // Read-write proof: the trusted configured argv first writes inside its
+      // disposable checkout, then runs the toy's real target tests there.
+      const writePort = makePort(toy.root, scratch, {
+        isolation,
+        config: configWithCommand("test", {
+          executable: "deno",
+          args: [
+            "eval",
+            "await Deno.writeTextFile('sandbox-write.txt','public'); const s=await new Deno.Command('deno',{args:['task','test'],stdout:'inherit',stderr:'inherit'}).output(); Deno.exit(s.code);",
+          ],
+          maxDurationMs: 15000,
+          maxOutputBytes: 262144,
+        }),
+      });
+      const wrote = assertPortOk(
+        await writePort.runReplay(
+          await replayRequest(bundle, toy.candidateSha),
+        ),
+      );
+      assert.equal(wrote.outcome, "passed");
+      assert.equal(wrote.exitCode, 0);
+      assert.equal(wrote.failure, null);
+      assert.deepEqual(wrote.limitations, []);
+
+      // Every disposable checkout was removed: the isolation scratch is empty.
+      const remaining: string[] = [];
+      for await (const entry of Deno.readDir(scratch)) {
+        remaining.push(entry.name);
+      }
+      assert.deepEqual(remaining, []);
+    });
+  },
 });
 
 Deno.test("checked-out symlink ancestors are rejected at materialization", async () => {
@@ -841,6 +1063,662 @@ Deno.test(
       }
       assert.ok(entries.includes("checkout"), "checkout must survive");
       await Deno.remove(taskDir, { recursive: true }).catch(() => {});
+    });
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Gateway dispatch metadata (candidate ReplayPort path)
+//
+// A valid frozen gateway fixture reference selects the dispatch protocol: the
+// candidate checkout receives the fixed root `.sentinel-replay-input.json`
+// record — exact canonical {version,requestPath,upstreamPath,testIds} bound to
+// the resolved incident/capture paths and to the trusted resolved test ids —
+// materialized OUTSIDE the digested two-entry bundle. The committed toy
+// consumer and regression test below read ONLY that record, so a missing
+// dispatcher cannot pass by hardcoded fixture reads. Non-gateway references
+// are unchanged. This toy proves dispatch/selection wiring, not the target
+// gateway converter (tested separately in its own repository).
+// ---------------------------------------------------------------------------
+
+const GATEWAY_INCIDENT = "provider-00000000-0000-4000-8000-0000000000aa";
+const GATEWAY_CAPTURE = "synthetic-capture-2";
+const GATEWAY_TEST_ID = "gateway:stream-termination";
+const GATEWAY_TEST_ID_B = "gateway:second-test";
+const GATEWAY_DIR =
+  `tests/fixtures/gateway-replay/${GATEWAY_INCIDENT}/${GATEWAY_CAPTURE}`;
+const GATEWAY_REQUEST_PATH = `${GATEWAY_DIR}/request.json`;
+const GATEWAY_UPSTREAM_PATH = `${GATEWAY_DIR}/upstream.json`;
+
+const GATEWAY_REQUEST_TEXT = JSON.stringify({
+  endpoint: "/v1/responses",
+  method: "POST",
+  contentType: "application/json",
+  body: JSON.stringify({
+    model: "synthetic-model",
+    input: "hello",
+    stream: true,
+  }),
+});
+
+const GATEWAY_UPSTREAM_TEXT = JSON.stringify({
+  version: 1,
+  attempts: [{
+    provider: "chatgpt_codex",
+    status: 200,
+    content_type: "text/event-stream",
+    chunks_base64: [btoa('data: {"type":"response.created"}\n\n')],
+    terminal: "eof",
+  }],
+  attempts_truncated: false,
+  bytes_truncated: false,
+  chunks_truncated: false,
+});
+
+const GATEWAY_DENO_JSON = JSON.stringify(
+  {
+    tasks: {
+      replay: "deno run --allow-read=. scripts/replay.ts",
+      test: "deno test --allow-read=. tests/",
+    },
+  },
+  null,
+  2,
+) + "\n";
+
+/** Independent expectation of the exact canonical dispatch metadata bytes. */
+function gatewayDispatchText(
+  testIds: readonly string[] = [GATEWAY_TEST_ID],
+): string {
+  return canonicalStringify({
+    version: "v1",
+    requestPath: GATEWAY_REQUEST_PATH,
+    upstreamPath: GATEWAY_UPSTREAM_PATH,
+    testIds: [...testIds],
+  });
+}
+
+/** Toy gateway handler: original 502s on an incomplete recorded stream. */
+function gatewayAppSource(kind: "original" | "fixed"): string {
+  const outcome = kind === "original"
+    ? `const completed = chunkText.includes('"type":"response.completed"') ||
+    chunkText.includes("[DONE]");
+  if (!completed) {
+    return { status: 502, body: "stream terminated unexpectedly", completed: false };
+  }`
+    : `// CANDIDATE FIX: the recorded stream is complete without a separate
+  // terminator; tolerate the missing completion event.`;
+  return `/** Toy gateway stream handler (${kind}). */
+export function handleStreamTrace(
+  _request: unknown,
+  upstream: { attempts: { terminal: string; chunks_base64: string[] }[] },
+): { status: number; body: string; completed: boolean } {
+  const attempt = upstream.attempts[0];
+  const chunkText = new TextDecoder().decode(
+    Uint8Array.from(atob(attempt.chunks_base64[0] ?? ""), (c) => c.charCodeAt(0)),
+  );
+  ${outcome}
+  return { status: 200, body: JSON.stringify({ payload: chunkText.slice(0, 80) }), completed: true };
+}
+`;
+}
+
+/**
+ * Committed trusted consumer: it selects its inputs EXCLUSIVELY through the
+ * fixed root dispatch metadata record and verifies that the record names the
+ * exact expected request/upstream paths and the exact ordered trusted ids. A
+ * missing, malformed or differently-selected dispatcher exits 3 (settled,
+ * non-intended), so a missing dispatcher can never pass.
+ */
+function gatewayConsumerSource(
+  expectedIds: readonly string[] = [GATEWAY_TEST_ID],
+): string {
+  return `import { handleStreamTrace } from "../src/app.ts";
+const expectedRequest = "${GATEWAY_REQUEST_PATH}";
+const expectedUpstream = "${GATEWAY_UPSTREAM_PATH}";
+const expectedIds = ${JSON.stringify(expectedIds)};
+const dispatchBytes = await Deno.readFile("${SENTINEL_REPLAY_INPUT_PATH}");
+if (dispatchBytes.byteLength > 16 * 1024) Deno.exit(3);
+const dispatch = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(dispatchBytes));
+if (dispatch.version !== "v1") Deno.exit(3);
+if (Object.keys(dispatch).sort().join(",") !== "requestPath,testIds,upstreamPath,version") Deno.exit(3);
+if (dispatch.requestPath !== expectedRequest) Deno.exit(3);
+if (dispatch.upstreamPath !== expectedUpstream) Deno.exit(3);
+if (JSON.stringify(dispatch.testIds) !== JSON.stringify(expectedIds)) Deno.exit(3);
+const request = JSON.parse(await Deno.readTextFile(dispatch.requestPath));
+const upstream = JSON.parse(await Deno.readTextFile(dispatch.upstreamPath));
+const outcome = handleStreamTrace(request, upstream);
+for (const id of expectedIds) console.log("sentinel-replay-test:" + id);
+if (outcome.status === 502) {
+  console.error("stream terminated unexpectedly");
+  Deno.exit(1);
+}
+if (outcome.status === 200) Deno.exit(0);
+console.error("unsupported outcome");
+Deno.exit(2);
+`;
+}
+
+/** Permanent regression test: the same dispatch-driven input selection. */
+function gatewayRegressionSource(
+  expectedIds: readonly string[] = [GATEWAY_TEST_ID],
+): string {
+  return `import assert from "node:assert/strict";
+import { handleStreamTrace } from "../src/app.ts";
+
+Deno.test("gateway: recorded stream termination regression", async () => {
+  const expectedRequest = "${GATEWAY_REQUEST_PATH}";
+  const expectedUpstream = "${GATEWAY_UPSTREAM_PATH}";
+  const dispatchBytes = await Deno.readFile("${SENTINEL_REPLAY_INPUT_PATH}");
+  assert.ok(dispatchBytes.byteLength <= 16 * 1024);
+  const dispatch = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(dispatchBytes));
+  assert.equal(dispatch.version, "v1");
+  assert.deepEqual(Object.keys(dispatch).sort(), ["requestPath", "testIds", "upstreamPath", "version"]);
+  assert.equal(dispatch.requestPath, expectedRequest);
+  assert.equal(dispatch.upstreamPath, expectedUpstream);
+  assert.deepEqual(dispatch.testIds, ${JSON.stringify(expectedIds)});
+  const request = JSON.parse(await Deno.readTextFile(dispatch.requestPath));
+  const upstream = JSON.parse(await Deno.readTextFile(dispatch.upstreamPath));
+  const outcome = handleStreamTrace(request, upstream);
+  assert.equal(outcome.status, 200, "expected 200 but got " + outcome.status + ": " + outcome.body);
+  for (const id of ${JSON.stringify(expectedIds)}) {
+    console.log("sentinel-replay-test:" + id);
+  }
+});
+`;
+}
+
+interface GatewayToyV1 {
+  root: string;
+  env: Record<string, string>;
+  originalSha: GitSha;
+  cleanup(): Promise<void>;
+}
+
+async function makeGatewayToy(
+  root: string,
+  expectedIds: readonly string[] = [GATEWAY_TEST_ID],
+): Promise<GatewayToyV1> {
+  await Deno.mkdir(root, { recursive: true });
+  const env = testGitEnv(`${root}/home`);
+  await Deno.mkdir(`${root}/home`, { recursive: true });
+  const init = await gitRun(root, ["init", "-q", "-b", "main"], env);
+  assert.ok(init.ok, `gateway toy init failed: ${init.stderr}`);
+  await commitWith(root, env, {
+    "deno.json": GATEWAY_DENO_JSON,
+    "src/app.ts": gatewayAppSource("original"),
+    "scripts/replay.ts": gatewayConsumerSource(expectedIds),
+    "tests/regression_test.ts": gatewayRegressionSource(expectedIds),
+  }, "gateway toy original: recorded stream termination produces 502");
+  const originalSha = await revParse(root, env);
+  return {
+    root,
+    env,
+    originalSha,
+    cleanup: () => Deno.remove(root, { recursive: true }).catch(() => {}),
+  };
+}
+
+async function commitGatewayCandidate(
+  toy: GatewayToyV1,
+  extra: Record<string, string> = {},
+): Promise<GitSha> {
+  return await commitWith(toy.root, toy.env, {
+    "src/app.ts": gatewayAppSource("fixed"),
+    [GATEWAY_REQUEST_PATH]: GATEWAY_REQUEST_TEXT,
+    [GATEWAY_UPSTREAM_PATH]: GATEWAY_UPSTREAM_TEXT,
+    ...extra,
+  }, "gateway toy candidate: fix + permanent recorded fixture");
+}
+
+async function gatewayBundle(
+  testIds: readonly string[] = [GATEWAY_TEST_ID],
+  entries?: { path: string; bytes: Uint8Array }[],
+): Promise<{ bundle: ResolvedFixtureV1; digest: FixtureDigest; ref: string }> {
+  const bundleEntries = entries ?? [
+    { path: GATEWAY_REQUEST_PATH, bytes: text.encode(GATEWAY_REQUEST_TEXT) },
+    { path: GATEWAY_UPSTREAM_PATH, bytes: text.encode(GATEWAY_UPSTREAM_TEXT) },
+  ];
+  const digest = await computeReplayFixtureDigest(bundleEntries);
+  const ref =
+    `fixture://gateway-replay/${GATEWAY_INCIDENT}/${GATEWAY_CAPTURE}/${digest}`;
+  const bundle: ResolvedFixtureV1 = {
+    testIds: [...testIds],
+    expectedFailure: {
+      reason: "recorded stream termination produces 502",
+      match: { kind: "contains", text: "stream terminated unexpectedly" },
+    },
+    entries: bundleEntries,
+    provenance: {
+      sanitized: true,
+      sanitizer: "toy-sanitizer",
+      provenanceRef: "fixture://provenance/toy/gateway",
+      redacted: false,
+      note: "synthetic recorded gateway fixture; no credentials",
+    },
+  };
+  return { bundle, digest, ref };
+}
+
+function gatewayPort(
+  toyRoot: string,
+  scratchDir: string,
+  bundle: ResolvedFixtureV1,
+): ReplayPortImpl {
+  return new ReplayPortImpl({
+    ...toyOptions(toyRoot, scratchDir),
+    fixtures: { resolveFixture: () => Promise.resolve(portOk(bundle)) },
+  });
+}
+
+function gatewayRequest(
+  bundle: ResolvedFixtureV1,
+  ref: string,
+  digest: FixtureDigest,
+  revision: GitSha,
+  overrides: Record<string, unknown> = {},
+): ReplayRunRequestV1 {
+  return {
+    taskId: "incident:gateway-0001" as WorkItemId,
+    repository: TOY_REPOSITORY,
+    revision,
+    commandId: "replay" as CommandId,
+    fixtureRef: ref,
+    fixtureDigest: digest,
+    testIds: bundle.testIds,
+    outputLimitBytes: 262_144,
+    ...overrides,
+  } as ReplayRunRequestV1;
+}
+
+Deno.test(
+  "gateway dispatch: fail-before/pass-after materializes the dispatcher for both replay and test commands",
+  async () => {
+    await withFixture(async (root) => {
+      const toy = await makeGatewayToy(`${root}/toy`);
+      try {
+        const { bundle, digest, ref } = await gatewayBundle();
+        const port = gatewayPort(toy.root, `${root}/scratch`, bundle);
+
+        // Original revision: the dispatcher is materialized OUTSIDE the
+        // two-entry bundle and the committed consumer selects the exact
+        // fixture through it; a missing dispatcher would exit 3 and could
+        // never be an intended failure.
+        const before = assertPortOk(
+          await port.runReplay(
+            gatewayRequest(bundle, ref, digest, toy.originalSha),
+          ),
+        );
+        assert.equal(before.outcome, "failed");
+        assert.equal(before.exitCode, 1);
+        assert.equal(before.failure?.intended, true);
+        assert.deepEqual(before.limitations, []);
+
+        // Candidate revision: the two fixture entries are committed but the
+        // dispatcher is NOT, so the passing regression depends on ReplayPort
+        // materializing it — and the ordinary test command (not the replay
+        // command) receives the same trusted metadata.
+        const candidateSha = await commitGatewayCandidate(toy);
+        const after = assertPortOk(
+          await port.runReplay(
+            gatewayRequest(bundle, ref, digest, candidateSha, {
+              commandId: "test",
+            }),
+          ),
+        );
+        assert.equal(after.outcome, "passed");
+        assert.equal(after.exitCode, 0);
+        assert.deepEqual(after.limitations, []);
+
+        // The shared source working directory is untouched.
+        const status = await gitRun(
+          toy.root,
+          ["status", "--porcelain"],
+          toy.env,
+        );
+        assert.equal(status.stdout.trim(), "");
+      } finally {
+        await toy.cleanup();
+      }
+    });
+  },
+);
+
+Deno.test(
+  "gateway dispatch: a candidate that already carries the byte-identical dispatcher is accepted untouched",
+  async () => {
+    await withFixture(async (root) => {
+      const toy = await makeGatewayToy(`${root}/toy`);
+      try {
+        const { bundle, digest, ref } = await gatewayBundle();
+        const candidateSha = await commitGatewayCandidate(toy, {
+          [SENTINEL_REPLAY_INPUT_PATH]: gatewayDispatchText(),
+        });
+        const port = gatewayPort(toy.root, `${root}/scratch`, bundle);
+        const after = assertPortOk(
+          await port.runReplay(
+            gatewayRequest(bundle, ref, digest, candidateSha, {
+              commandId: "test",
+            }),
+          ),
+        );
+        assert.equal(after.outcome, "passed");
+        assert.equal(after.exitCode, 0);
+        assert.deepEqual(after.limitations, []);
+
+        // The delivered bytes are exactly the canonical record, untouched by
+        // the replay materialization.
+        const committed = await gitRun(
+          toy.root,
+          ["show", `${candidateSha}:${SENTINEL_REPLAY_INPUT_PATH}`],
+          toy.env,
+        );
+        assert.ok(committed.ok, `show failed: ${committed.stderr}`);
+        assert.equal(committed.stdout, gatewayDispatchText());
+      } finally {
+        await toy.cleanup();
+      }
+    });
+  },
+);
+
+Deno.test(
+  "gateway dispatch: foreign dispatcher bytes are rejected and never rewritten",
+  async () => {
+    await withFixture(async (root) => {
+      const toy = await makeGatewayToy(`${root}/toy`);
+      try {
+        const { bundle, digest, ref } = await gatewayBundle();
+        const foreign = JSON.stringify({
+          version: "v1",
+          requestPath: "tests/elsewhere/request.json",
+          upstreamPath: "tests/elsewhere/upstream.json",
+          testIds: [GATEWAY_TEST_ID],
+        });
+        const candidateSha = await commitGatewayCandidate(toy, {
+          [SENTINEL_REPLAY_INPUT_PATH]: foreign,
+        });
+        const result = await gatewayPort(
+          toy.root,
+          `${root}/scratch`,
+          bundle,
+        ).runReplay(
+          gatewayRequest(bundle, ref, digest, candidateSha, {
+            commandId: "test",
+          }),
+        );
+        assert.ok(!result.ok, "foreign dispatcher bytes must fail closed");
+        assert.equal(result.error.kind, "invalid");
+        assert.match(result.error.detail, /different bytes/);
+        assert.match(result.error.detail, /\.sentinel-replay-input\.json/);
+
+        // The committed foreign bytes are unchanged (never rewritten).
+        const committed = await gitRun(
+          toy.root,
+          ["show", `${candidateSha}:${SENTINEL_REPLAY_INPUT_PATH}`],
+          toy.env,
+        );
+        assert.ok(committed.ok);
+        assert.equal(committed.stdout, foreign);
+      } finally {
+        await toy.cleanup();
+      }
+    });
+  },
+);
+
+Deno.test(
+  "gateway dispatch: symlinked and directory dispatcher targets are rejected",
+  async () => {
+    await withFixture(async (root) => {
+      const { bundle, digest, ref } = await gatewayBundle();
+
+      // A symlink AT the dispatcher path (committed as a gitlink entry).
+      const linkToy = await makeGatewayToy(`${root}/toy-link`);
+      try {
+        const symlinkSha = await commitSymlink(
+          linkToy.root,
+          linkToy.env,
+          SENTINEL_REPLAY_INPUT_PATH,
+          "deno.json",
+        );
+        const asLink = await gatewayPort(
+          linkToy.root,
+          `${root}/scratch-link`,
+          bundle,
+        ).runReplay(gatewayRequest(bundle, ref, digest, symlinkSha));
+        assert.ok(!asLink.ok, "symlinked dispatcher must fail closed");
+        assert.equal(asLink.error.kind, "invalid");
+        assert.match(asLink.error.detail, /resolves through a symlink/);
+      } finally {
+        await linkToy.cleanup();
+      }
+
+      // A directory at the dispatcher path (git cannot track an empty
+      // directory, so it holds one file).
+      const dirToy = await makeGatewayToy(`${root}/toy-dir`);
+      try {
+        const dirSha = await commitWith(dirToy.root, dirToy.env, {
+          [`${SENTINEL_REPLAY_INPUT_PATH}/deeper.txt`]: "x",
+        }, "gateway toy tamper: dispatcher target is a directory");
+        const asDir = await gatewayPort(
+          dirToy.root,
+          `${root}/scratch-dir`,
+          bundle,
+        ).runReplay(gatewayRequest(bundle, ref, digest, dirSha));
+        assert.ok(!asDir.ok, "directory dispatcher must fail closed");
+        assert.equal(asDir.error.kind, "invalid");
+        assert.match(asDir.error.detail, /is a directory/);
+      } finally {
+        await dirToy.cleanup();
+      }
+    });
+  },
+);
+
+Deno.test(
+  "gateway dispatch: missing, ambiguous or extra gateway bundle entries are rejected",
+  async () => {
+    await withFixture(async (root) => {
+      const toy = await makeGatewayToy(`${root}/toy`);
+      try {
+        const expected = {
+          request: {
+            path: GATEWAY_REQUEST_PATH,
+            bytes: text.encode(GATEWAY_REQUEST_TEXT),
+          },
+          upstream: {
+            path: GATEWAY_UPSTREAM_PATH,
+            bytes: text.encode(GATEWAY_UPSTREAM_TEXT),
+          },
+        };
+
+        // Extra entry (a third file in the gateway bundle).
+        const extra = await gatewayBundle([GATEWAY_TEST_ID], [
+          expected.request,
+          expected.upstream,
+          { path: `${GATEWAY_DIR}/extra.json`, bytes: text.encode("{}") },
+        ]);
+        const extraRun = await gatewayPort(
+          toy.root,
+          `${root}/scratch-extra`,
+          extra.bundle,
+        ).runReplay(
+          gatewayRequest(
+            extra.bundle,
+            extra.ref,
+            extra.digest,
+            toy.originalSha,
+          ),
+        );
+        assert.ok(!extraRun.ok, "an extra entry must fail closed");
+        assert.equal(extraRun.error.kind, "invalid");
+        assert.match(
+          extraRun.error.detail,
+          /exactly the fixed request and upstream entries/,
+        );
+
+        // Wrong capture directory: the two paths are not the resolved ones.
+        const wrongDir = await gatewayBundle([GATEWAY_TEST_ID], [
+          {
+            path:
+              `tests/fixtures/gateway-replay/${GATEWAY_INCIDENT}/other-capture/request.json`,
+            bytes: text.encode(GATEWAY_REQUEST_TEXT),
+          },
+          expected.upstream,
+        ]);
+        const wrongDirRun = await gatewayPort(
+          toy.root,
+          `${root}/scratch-wrong-dir`,
+          wrongDir.bundle,
+        ).runReplay(
+          gatewayRequest(
+            wrongDir.bundle,
+            wrongDir.ref,
+            wrongDir.digest,
+            toy.originalSha,
+          ),
+        );
+        assert.ok(!wrongDirRun.ok, "wrong selected paths must fail closed");
+        assert.equal(wrongDirRun.error.kind, "invalid");
+        assert.match(
+          wrongDirRun.error.detail,
+          /exactly the fixed request and upstream entries/,
+        );
+
+        // Ambiguous (duplicate) entry path: rejected by the bundle validation
+        // before any command can run.
+        const duplicate = await gatewayBundle([GATEWAY_TEST_ID], [
+          expected.request,
+          expected.request,
+        ]);
+        const duplicateRun = await gatewayPort(
+          toy.root,
+          `${root}/scratch-duplicate`,
+          duplicate.bundle,
+        ).runReplay(
+          gatewayRequest(
+            duplicate.bundle,
+            duplicate.ref,
+            duplicate.digest,
+            toy.originalSha,
+          ),
+        );
+        assert.ok(!duplicateRun.ok, "an ambiguous entry must fail closed");
+        assert.equal(duplicateRun.error.kind, "invalid");
+        assert.match(duplicateRun.error.detail, /duplicate fixture entry path/);
+      } finally {
+        await toy.cleanup();
+      }
+    });
+  },
+);
+
+Deno.test(
+  "gateway dispatch: a malformed reserved gateway reference is rejected instead of falling back",
+  async () => {
+    await withFixture(async (root) => {
+      const toy = await makeGatewayToy(`${root}/toy`);
+      try {
+        const { bundle, digest } = await gatewayBundle();
+        // Reserved gateway references outside the frozen grammar: a capture id
+        // containing a colon (allowed by the restricted-ref pattern but never
+        // by the gateway identity grammar) and the bare reserved namespace
+        // (no trailing slash or path).
+        for (
+          const malformedRef of [
+            `fixture://gateway-replay/${GATEWAY_INCIDENT}/capture:broken/${digest}`,
+            "fixture://gateway-replay",
+          ]
+        ) {
+          const result = await gatewayPort(
+            toy.root,
+            `${root}/scratch`,
+            bundle,
+          ).runReplay(
+            gatewayRequest(bundle, malformedRef, digest, toy.originalSha),
+          );
+          assert.ok(
+            !result.ok,
+            `reserved reference ${malformedRef} must fail closed`,
+          );
+          assert.equal(result.error.kind, "invalid");
+          assert.match(
+            result.error.detail,
+            /malformed gateway fixture reference/,
+          );
+        }
+      } finally {
+        await toy.cleanup();
+      }
+    });
+  },
+);
+
+Deno.test(
+  "gateway dispatch: metadata binds the trusted resolved ids and rejects a different id set",
+  async () => {
+    await withFixture(async (root) => {
+      const resolvedIds = [GATEWAY_TEST_ID, GATEWAY_TEST_ID_B];
+      const toy = await makeGatewayToy(`${root}/toy`, resolvedIds);
+      try {
+        const { bundle, digest, ref } = await gatewayBundle(resolvedIds);
+        const candidateSha = await commitGatewayCandidate(toy);
+        const port = gatewayPort(toy.root, `${root}/scratch`, bundle);
+
+        // The request lists the same id SET in a different order: the
+        // identity check is exact-set, and the metadata must bind the trusted
+        // resolved order the committed consumer verifies.
+        const reordered = assertPortOk(
+          await port.runReplay(
+            gatewayRequest(bundle, ref, digest, candidateSha, {
+              commandId: "test",
+              testIds: [GATEWAY_TEST_ID_B, GATEWAY_TEST_ID],
+            }),
+          ),
+        );
+        assert.equal(reordered.outcome, "passed");
+        assert.equal(reordered.exitCode, 0);
+
+        // A request whose id set differs from the resolved identity is
+        // rejected before any command runs.
+        const mismatched = await port.runReplay(
+          gatewayRequest(bundle, ref, digest, candidateSha, {
+            testIds: [GATEWAY_TEST_ID],
+          }),
+        );
+        assert.ok(!mismatched.ok, "a different id set must fail closed");
+        assert.equal(mismatched.error.kind, "invalid");
+        assert.match(mismatched.error.detail, /test identity/);
+      } finally {
+        await toy.cleanup();
+      }
+    });
+  },
+);
+
+Deno.test(
+  "gateway dispatch: non-gateway references are unchanged and receive no dispatcher",
+  async () => {
+    await withFixture(async (root) => {
+      const toy = await makeGatewayToy(`${root}/toy`);
+      try {
+        const { bundle, digest } = await gatewayBundle();
+        // The same gateway-shaped bundle under a non-gateway reference: no
+        // dispatcher is materialized, so the metadata-reading consumer exits
+        // without the trusted marker and the run is never an intended
+        // regression.
+        const nonGatewayRef = "fixture://captures/toy/gateway.json";
+        const run = assertPortOk(
+          await gatewayPort(toy.root, `${root}/scratch`, bundle).runReplay(
+            gatewayRequest(bundle, nonGatewayRef, digest, toy.originalSha),
+          ),
+        );
+        assert.equal(run.outcome, "failed");
+        assert.equal(run.failure?.intended, false);
+      } finally {
+        await toy.cleanup();
+      }
     });
   },
 );

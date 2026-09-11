@@ -1,6 +1,6 @@
 /**
  * m04-repair durable GitHub cooldown gate. Every authenticated request is
- * gated on the exact persisted cooldown for the affected installation: a
+ * gated on the exact persisted cooldown for the affected installation scope: a
  * retained null deadline (manual fail-closed or unrepresentable value) or a
  * current time before the deadline is a normal rate_limited denial, and a
  * successful request never clears a cooldown. Observed limits are persisted
@@ -52,7 +52,7 @@ export class DurableGitHubCooldownGate implements GitHubCooldownGateV1 {
   async beforeRequest(installationId: number): Promise<PortResultV1<void>> {
     if (this.faulted) return faultResult();
     try {
-      if (!isPositiveSafeInteger(installationId)) return this.latch();
+      if (!isNonNegativeSafeInteger(installationId)) return this.latch();
       const now = this.clock.now();
       if (!isNonNegativeSafeInteger(now)) return this.latch();
 
@@ -83,7 +83,7 @@ export class DurableGitHubCooldownGate implements GitHubCooldownGateV1 {
   ): Promise<PortResultV1<void>> {
     if (this.faulted) return faultResult();
     try {
-      if (!isPositiveSafeInteger(installationId)) return this.latch();
+      if (!isNonNegativeSafeInteger(installationId)) return this.latch();
       // A caller-supplied plain object is re-validated through the strict
       // parser; the parsed result, never the raw input, is recorded.
       const rate = parseGitHubRateLimitV1(rateLimit);
@@ -136,10 +136,6 @@ function faultResult(): PortResultV1<void> {
     ok: false,
     error: { kind: "unavailable", detail: FAULT_DETAIL },
   };
-}
-
-function isPositiveSafeInteger(value: number): boolean {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 1;
 }
 
 function isNonNegativeSafeInteger(value: number): boolean {

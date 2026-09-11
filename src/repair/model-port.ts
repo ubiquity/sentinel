@@ -7,10 +7,35 @@
  * injectable ReceiptVerifier. The default verifier never certifies actual
  * provider model/effort, so the port returns `unavailable` and records the
  * live activation boundary — observed values are never synthesized from the
- * requested strings. A verifier is the trusted-host seam for authorized
- * runtime acceptance; without it no model budget is ever spent on a run the
- * controller cannot attribute, and the repair loop settles the durable
- * reservation ambiguous (charged) and blocks the task.
+ * requested strings. An EXPLICIT valid `modelProvider` is required before ANY
+ * session opens (including the custom-verifier path): a missing provider
+ * stays unavailable and a callback never enables a missing provider. With a
+ * selected provider the port binds the real request/runtime receipt producer
+ * (`createRequestRuntimeReceiptVerifier(expectedProvider)`): the receipt then
+ * proofs trusted submitted provider/model/effort configuration bound to the
+ * exact invocation/thread/turn and runtime routing/terminal events, labeled
+ * request/runtime evidence — never backend provider attestation. A supplied
+ * custom verifier remains only an ADDITIONAL restriction after the concrete
+ * core request/runtime checks; with no provider and no verifier the default
+ * stays unavailable and no model budget is ever spent on a run the controller
+ * cannot attribute; the repair loop settles the durable reservation ambiguous
+ * (charged) and blocks the task.
+ *
+ * Correlation, routing and model-policy validation are port duties and cannot
+ * be bypassed by an injected verifier: the port binds the exact session
+ * identity/thread/turn, rejects any matching reroute off the required Luna
+ * runtime model (even when routed back later), never synthesizes an actual
+ * identity or route fallback, and requires nonempty correlated output evidence
+ * for a completed run. Protocol or routing uncertainty (malformed reroute/
+ * terminal identity, off-policy route, registration failure) sets a sticky
+ * unavailable-evidence disposition: finishReceipt returns `unavailable`
+ * before ANY verifier or candidate action — such uncertainty is never
+ * certified as a valid failed runtime receipt. A HOST timeout (bounds elapsed
+ * without a runtime terminal) may retain failed ACCOUNTING with an explicit
+ * `host-timeout` terminal origin and the exact invocation/thread/turn
+ * identities, but never claims an observed terminal (observed status null).
+ * Failed/interrupted receipts may lack output; they are kept for accounting
+ * and can never authorize a successful candidate.
  *
  * The port never invents CLI flags/stdin controls or unsupported protocol
  * methods: thread and turn parameters come from the frozen installed schema
@@ -65,30 +90,376 @@ const MAX_UNIQUE_ITEM_IDS = 1024;
 const MAX_ACTIVE_COMMAND_IDS = 16;
 /** Settle deadline from ANY interrupt: grace from the request, never the old ceiling. */
 const SETTLE_GRACE_MS_EXTRA = 1;
+/** Bound for thread/turn/reroute identity strings; larger identities are never accepted. */
+const MAX_ID_CHARS = 256;
+/** Bound for the configured provider name (nonempty finite string). */
+const MAX_PROVIDER_CHARS = 256;
+/** Bounded complete correlated routing events retained, oldest first. */
+const MAX_REROUTES = 16;
+/** Bounded correlated successful output items retained. */
+const MAX_RESULT_ITEMS = 8;
+/** Private bound for one file-change change path (nonempty per schema). */
+const MAX_FILE_CHANGE_PATH_CHARS = 1024;
+/** Private bound for one file-change diff text (presence only; never stored). */
+const MAX_FILE_CHANGE_DIFF_CHARS = 256 * 1024;
+/** Private bound for changes entries inside one file-change item. */
+const MAX_CHANGES_PER_ITEM = 256;
+/** Private bound for one command item's best-effort parsed actions array. */
+const MAX_COMMAND_ACTIONS = 64;
+/** The frozen runtime model id; no fallback is ever synthesized. */
+const REQUIRED_MODEL_ID = "gpt-5.6-luna";
+/** The frozen runtime reasoning effort; no fallback is ever synthesized. */
+const REQUIRED_REASONING_EFFORT = "max";
+/**
+ * Trusted named permission profile: a host-defined name only. Built-in
+ * full-access mode identifiers are never accepted as a named profile binding.
+ */
+const PERMISSION_PROFILE_PATTERN = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
+const BUILTIN_FULL_ACCESS_PERMISSION_PROFILE_IDS = new Set([
+  "full-access",
+  "danger-full-access",
+]);
 
+/** A nonempty bounded identity (thread/turn/reroute/id strings). */
+function isBoundedId(value: string): boolean {
+  return value.length > 0 && value.length <= MAX_ID_CHARS;
+}
+
+/**
+ * Schema-shaped completed file-change output proof per the installed
+ * ThreadItem schema: status is exactly `completed` and `changes` is a nonempty
+ * bounded array whose entries carry the required `path` (nonempty bounded),
+ * `kind` ({type: add|delete|update}) and `diff` (bounded string) fields.
+ * Failed/declined/missing-status/empty-or-malformed changes can never prove
+ * output.
+ */
+function hasValidCompletedChanges(item: Record<string, unknown>): boolean {
+  if (item.status !== "completed") return false;
+  const changes = item.changes;
+  if (!Array.isArray(changes) || changes.length === 0) return false;
+  if (changes.length > MAX_CHANGES_PER_ITEM) return false;
+  for (const raw of changes) {
+    const change = raw as Record<string, unknown> | null;
+    if (typeof change !== "object" || change === null) return false;
+    const path = change.path;
+    if (
+      typeof path !== "string" || path.trim().length === 0 ||
+      path.length > MAX_FILE_CHANGE_PATH_CHARS
+    ) {
+      return false;
+    }
+    const kind = change.kind as Record<string, unknown> | null;
+    if (typeof kind !== "object" || kind === null) return false;
+    if (
+      kind.type !== "add" && kind.type !== "delete" && kind.type !== "update"
+    ) {
+      return false;
+    }
+    const diff = change.diff;
+    if (typeof diff !== "string" || diff.length > MAX_FILE_CHANGE_DIFF_CHARS) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** A bounded string that is neither empty nor whitespace-only. */
+function isNonemptyBounded(value: string, maxChars: number): boolean {
+  return value.trim().length > 0 && value.length <= maxChars;
+}
+
+/**
+ * Schema-shaped successful command-execution output proof per the installed
+ * ThreadItem/CommandAction schema: status exactly `completed`, exit code
+ * exactly 0, nonempty bounded `command` and `cwd`, a required bounded
+ * `commandActions` array (empty is supported) whose members obey the
+ * installed CommandAction oneOf — read requires type/command/name/path;
+ * listFiles type/command with an optional string|null path; search
+ * type/command with optional string|null path/query; unknown type/command —
+ * and any supplied optional aggregatedOutput/durationMs/source fields within
+ * their supported types/bounds (absent optional fields keep their schema
+ * defaults). Missing/invalid command/cwd/actions and malformed optional
+ * fields can never prove output; failed-command-loop classification is
+ * untouched by this proof gate.
+ */
+function hasValidCommandExecution(item: Record<string, unknown>): boolean {
+  if (item.status !== "completed" || item.exitCode !== 0) return false;
+  const command = item.command;
+  if (
+    typeof command !== "string" ||
+    !isNonemptyBounded(command, MAX_COMMAND_CHARS)
+  ) {
+    return false;
+  }
+  const cwd = item.cwd;
+  if (typeof cwd !== "string" || !isNonemptyBounded(cwd, MAX_CWD_CHARS)) {
+    return false;
+  }
+  const actions = item.commandActions;
+  if (!Array.isArray(actions) || actions.length > MAX_COMMAND_ACTIONS) {
+    return false;
+  }
+  for (const raw of actions) {
+    if (!isValidCommandAction(raw)) return false;
+  }
+  // Optional supplied fields: schema-typed and bounded when present; nothing
+  // not supplied is invented.
+  const output = item.aggregatedOutput;
+  if (output !== undefined && output !== null) {
+    if (typeof output !== "string" || output.length > MAX_OUTPUT_CHARS) {
+      return false;
+    }
+  }
+  const durationMs = item.durationMs;
+  if (durationMs !== undefined && durationMs !== null) {
+    if (
+      typeof durationMs !== "number" ||
+      !Number.isSafeInteger(durationMs) ||
+      durationMs < 0
+    ) return false;
+  }
+  const source = item.source;
+  if (
+    source !== undefined && source !== "agent" &&
+    source !== "userShell" && source !== "unifiedExecStartup" &&
+    source !== "unifiedExecInteraction"
+  ) {
+    return false;
+  }
+  return true;
+}
+
+/** One CommandAction member of the installed schema, with exact required fields. */
+function isValidCommandAction(raw: unknown): boolean {
+  const action = raw as Record<string, unknown> | null;
+  if (typeof action !== "object" || action === null) return false;
+  const command = action.command;
+  if (
+    typeof command !== "string" ||
+    !isNonemptyBounded(command, MAX_COMMAND_CHARS)
+  ) {
+    return false;
+  }
+  const optionalText = (value: unknown): boolean =>
+    value === undefined || value === null ||
+    (typeof value === "string" && isNonemptyBounded(value, MAX_COMMAND_CHARS));
+  switch (action.type) {
+    case "read": {
+      const name = action.name;
+      const path = action.path;
+      return typeof name === "string" &&
+        isNonemptyBounded(name, MAX_COMMAND_CHARS) &&
+        typeof path === "string" &&
+        isNonemptyBounded(path, MAX_CWD_CHARS);
+    }
+    case "listFiles":
+      return optionalText(action.path);
+    case "search":
+      return optionalText(action.path) && optionalText(action.query);
+    case "unknown":
+      return true;
+    default:
+      return false;
+  }
+}
+
+/**
+ * The configured provider must be a nonempty finite string with no control
+ * characters and no leading/trailing whitespace; anything else is rejected
+ * before any session or model work begins.
+ */
+function isValidProvider(value: string): boolean {
+  if (value.length === 0 || value.length > MAX_PROVIDER_CHARS) return false;
+  if (value.trim() !== value) return false;
+  for (let index = 0; index < value.length; index++) {
+    const code = value.charCodeAt(index);
+    if (code <= 0x1f || code === 0x7f) return false;
+  }
+  return true;
+}
+
+/**
+ * A configured named permission profile must be a valid host-defined name and
+ * never a built-in full-access mode identifier.
+ */
+function isValidPermissionProfile(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  if (!PERMISSION_PROFILE_PATTERN.test(value)) return false;
+  return !BUILTIN_FULL_ACCESS_PERMISSION_PROFILE_IDS.has(value.toLowerCase());
+}
+
+/** One correlated runtime routing event acknowledged for the exact thread/turn. */
+export interface ModelRerouteV1 {
+  threadId: string;
+  turnId: string;
+  from: string;
+  to: string;
+  /** Routing reason when the event carried one; null when absent. */
+  reason: string | null;
+}
+
+/** One successful correlated output item; notification-byte totals are not proof. */
+export interface SessionResultItemV1 {
+  itemId: string;
+  type: "commandExecution" | "fileChange" | "agentMessage";
+}
+
+/**
+ * Trusted request/runtime evidence for ONE exact invocation/thread/turn.
+ * Values are the submitted provider/model/effort configuration acknowledged by
+ * the app-server plus the exact session identities and runtime routing/terminal
+ * events the port bound itself — NEVER backend-observed provider attestation.
+ */
 export interface ActualSessionEvidenceV1 {
+  /** Exact invocation identity carried top-level by the receipt. */
+  invocationId: string;
+  /** Requested runtime model submitted with the run (frozen Luna policy). */
+  requestedModel: string;
+  /** Requested provider configuration; null when no provider is selected. */
+  requestedProvider: string | null;
+  /** Requested reasoning effort submitted with the run (frozen max policy). */
+  requestedEffort: string;
+  /** Exact thread identity acknowledged by thread/start. */
+  threadId: string;
+  /** Exact turn identity acknowledged by turn/start. */
+  turnId: string;
   /** Values the app-server itself acknowledged (configured thread metadata). */
   threadModel: string | null;
   threadModelProvider: string | null;
   threadEffort: string | null;
-  /** Actual reroute observed during the run, if any (model/rerouted event). */
-  rerouted: { from: string; to: string } | null;
+  /** Bounded complete correlated routing events, oldest first. */
+  reroutes: ModelRerouteV1[];
   terminal: {
-    status: "completed" | "interrupted" | "failed";
+    /** Observed runtime terminal status; null when none was observed (host timeout). */
+    status: "completed" | "interrupted" | "failed" | null;
     error: string | null;
     durationMs: number | null;
   };
+  /**
+   * Terminal evidence origin: `runtime` when the correlated runtime terminal
+   * event was observed; `host-timeout` when the host's own bounds elapsed
+   * without any runtime terminal (observed status stays null — the receipt is
+   * failed accounting only and never claims an observed terminal).
+   */
+  terminalOrigin: "runtime" | "host-timeout";
+  /**
+   * Own failed-command loop stop disposition: the early interrupt already
+   * decided the run; a completed runtime terminal racing the stop is preserved
+   * but may only ever produce interrupted/no-candidate accounting without
+   * successful output.
+   */
+  loopStopped: boolean;
+  /** Bounded successful output items for the exact thread/turn. */
+  resultItems: SessionResultItemV1[];
+  /** Notification-byte accounting total; never output proof. */
   outputChars: number;
 }
 
+/** Validated provider/model/effort values a verifier certifies. */
+export interface VerifiedRuntimeValuesV1 {
+  provider: string;
+  observedModel: string;
+  observedReasoning: string;
+}
+
 /**
- * Trusted-host verification seam: returns the observed model/effort values
- * only when an authoritative provider receipt establishes them; null means
+ * Trusted-host verification seam: returns the validated provider/model/effort
+ * values only when the request/runtime evidence establishes them; null means
  * the activation boundary stays unresolved and the port must fail closed.
+ * The verifier never reads config/env/files and never returns a caller-supplied
+ * output string as provider attestation.
  */
 export type ReceiptVerifierV1 = (
   evidence: ActualSessionEvidenceV1,
-) => { observedModel: string; observedReasoning: string } | null;
+) => VerifiedRuntimeValuesV1 | null;
+
+/**
+ * The real request/runtime receipt producer. It certifies ONLY the acknowledged
+ * submitted configuration bound to the exact invocation/thread/turn: expected
+ * provider plus the frozen Luna/max model/effort policy, correlated terminal
+ * status with its explicit origin and bounded complete routing. Exactly the
+ * validated provider/model/effort values are returned; the expected provider is
+ * the only trusted provider identity this function accepts. A completed run
+ * needs nonempty correlated output items (a command/file-change/agent
+ * deliverable — never the notification-byte total) UNLESS the host itself
+ * stopped the run (explicit loopStopped disposition), in which case only
+ * interrupted/no-candidate accounting is permitted. A host-timeout evidence
+ * (null observed status, `host-timeout` origin) stays certifiable for failed
+ * accounting without ever claiming an observed terminal. Failed/interrupted
+ * runtime evidence is certifiable without output.
+ */
+export function createRequestRuntimeReceiptVerifier(
+  expectedProvider: string,
+): ReceiptVerifierV1 {
+  return (evidence: ActualSessionEvidenceV1) => {
+    if (!isValidProvider(expectedProvider)) return null;
+    // Request/thread/turn correlation: exact identities and requested policy.
+    if (
+      evidence.requestedModel !== REQUIRED_MODEL_ID ||
+      evidence.requestedEffort !== REQUIRED_REASONING_EFFORT ||
+      evidence.requestedProvider !== expectedProvider ||
+      !isBoundedId(evidence.threadId) || !isBoundedId(evidence.turnId) ||
+      !isBoundedId(evidence.invocationId)
+    ) {
+      return null;
+    }
+    // The thread response must acknowledge exactly the requested configuration.
+    if (
+      evidence.threadModel !== evidence.requestedModel ||
+      evidence.threadEffort !== evidence.requestedEffort ||
+      evidence.threadModelProvider !== expectedProvider
+    ) {
+      return null;
+    }
+    // Terminal origin must be explicit and consistent: an observed terminal is
+    // only certifiable as runtime evidence; a null observed status is only
+    // certifiable as a host-timeout (never an observed terminal).
+    if (evidence.terminalOrigin === "runtime") {
+      if (evidence.terminal.status === null) return null;
+    } else if (evidence.terminalOrigin === "host-timeout") {
+      if (evidence.terminal.status !== null) return null;
+    } else {
+      return null;
+    }
+    // Terminal status: completed runs need nonempty correlated output — unless
+    // the host itself stopped the run (loopStopped), where only interrupted/
+    // no-candidate accounting is permitted without successful output. A
+    // failed/interrupted/host-timeout receipt may lack output and stays
+    // certifiable for accounting (it can never authorize a candidate).
+    if (
+      evidence.terminal.status === "completed" &&
+      evidence.resultItems.length === 0 && !evidence.loopStopped
+    ) {
+      return null;
+    }
+    // Bounded complete routing: any matching reroute off required Luna fails
+    // even if the run was routed back later; well-formed unrelated events are
+    // ignored; over-bound or matching malformed events fail closed.
+    if (evidence.reroutes.length > MAX_REROUTES) return null;
+    for (const reroute of evidence.reroutes) {
+      if (
+        reroute.threadId !== evidence.threadId ||
+        reroute.turnId !== evidence.turnId
+      ) {
+        continue;
+      }
+      if (
+        !isBoundedId(reroute.from) || !isBoundedId(reroute.to) ||
+        reroute.from === reroute.to ||
+        reroute.from !== evidence.requestedModel ||
+        reroute.to !== evidence.requestedModel ||
+        (reroute.reason !== null && !isBoundedId(reroute.reason))
+      ) {
+        return null;
+      }
+    }
+    return {
+      provider: expectedProvider,
+      observedModel: evidence.requestedModel,
+      observedReasoning: evidence.requestedEffort,
+    };
+  };
+}
 
 /** The default verifier never certifies; nothing is ever synthesized. */
 export const unavailableReceiptVerifier: ReceiptVerifierV1 = () => null;
@@ -96,6 +467,39 @@ export const unavailableReceiptVerifier: ReceiptVerifierV1 = () => null;
 /** Exact existing typed `unavailable` detail for the unverified-receipt boundary. */
 const UNAVAILABLE_RECEIPT_DETAIL =
   "model receipt unavailable: actual provider model/effort could not be verified at this boundary";
+
+/** Static fail-closed detail: requested runtime model/effort is not Luna/max. */
+const MODEL_POLICY_DETAIL =
+  "model receipt unavailable: requested runtime model/effort is not the required Luna/max";
+
+/** Static fail-closed detail: configured provider is not a nonempty finite string. */
+const PROVIDER_POLICY_DETAIL =
+  "model receipt unavailable: configured provider is not a nonempty finite string";
+
+/** Static fail-closed detail: configured permission profile is not a valid name. */
+const PERMISSION_PROFILE_POLICY_DETAIL =
+  "model receipt unavailable: configured permission profile is not a valid named profile";
+
+/** Static fail-closed detail: completed run produced no correlated output evidence. */
+const OUTPUT_EVIDENCE_DETAIL =
+  "model receipt unavailable: completed run has no correlated output evidence";
+
+/** Static fail-closed detail: terminal replay identity is missing/over bound. */
+const IDENTITY_POLICY_DETAIL =
+  "model receipt unavailable: session identity is missing or over bound";
+
+/** Static fail-closed detail: an additional verifier contradicted the core. */
+const RECEIPT_MISMATCH_DETAIL =
+  "model receipt mismatch: verifier values differ from the validated request/runtime evidence";
+
+/**
+ * Static sanitized accounting error for a host timeout: the host's own bounds
+ * elapsed before any runtime terminal evidence, so the receipt is failed
+ * ACCOUNTING only — it never claims an observed terminal (the observed status
+ * stays null and the terminal origin is `host-timeout`).
+ */
+const HOST_TIMEOUT_ACCOUNTING_ERROR =
+  "host timeout without terminal settlement";
 
 /** Local credential-free checkout identity resolution (no remote, no creds). */
 export interface CheckoutResolverV1 {
@@ -302,7 +706,34 @@ export interface CodexImplementationPortOptionsV1 {
   checkoutDir: string;
   /** Local checkout identity resolver (injectable for tests). */
   checkout?: CheckoutResolverV1;
-  /** Trusted-host receipt verifier; the default never certifies. */
+  /**
+   * Explicit selected provider, e.g. `openai` or a host provider name. A
+   * nonempty finite string is REQUIRED before any session opens — including
+   * the custom-verifier path: a missing provider stays unavailable and a
+   * callback never enables a missing provider. With a selected provider the
+   * port always binds the real request/runtime receipt producer for that exact
+   * provider, submits the provider explicitly on thread/start, and validates
+   * the acknowledged thread provider/model/effort and bounded thread id BEFORE
+   * any turn starts.
+   */
+  modelProvider?: string;
+  /**
+   * Optional trusted host-defined named permission profile. When present it
+   * must match /^[A-Za-z][A-Za-z0-9_-]{0,63}$/ and is never a built-in
+   * full-access id; an invalid value returns static unavailable before any
+   * session opens. With a configured profile the port enables the app-server
+   * experimental capabilities, submits `permissions` INSTEAD of the legacy
+   * `sandbox` on thread/start, and requires the exact
+   * `activePermissionProfile.id` acknowledgement BEFORE any turn starts.
+   * When omitted the legacy workspace-write sandbox behavior is unchanged.
+   */
+  permissionProfile?: string;
+  /**
+   * Trusted-host receipt verifier (kept for tests/host injection); it is only
+   * an ADDITIONAL restriction applied AFTER the concrete core request/runtime
+   * checks, so it can never bypass correlation, routing or model-policy
+   * validation. Without a provider the port stays unavailable regardless.
+   */
   receiptVerifier?: ReceiptVerifierV1;
   /** Optional trusted host commit step for sandboxed model checkouts. */
   commitCandidate?: CandidateCommitterV1;
@@ -314,26 +745,56 @@ const DEFAULT_INTERRUPT_SETTLEMENT_GRACE_MS = 30_000;
 
 export class CodexImplementationPort implements ImplementationPort {
   private readonly options: CodexImplementationPortOptionsV1;
-  private readonly verifier: ReceiptVerifierV1;
+  /** Core concrete request/runtime producer; ALWAYS the first receipt gate. */
+  private readonly coreVerifier: ReceiptVerifierV1;
+  /** Optional additional restriction applied only after the core checks. */
+  private readonly customVerifier: ReceiptVerifierV1 | null;
   private readonly graceMs: number;
+  /** Trusted configured named permission profile; null when omitted. */
+  private readonly permissionProfile: string | null;
 
   constructor(options: CodexImplementationPortOptionsV1) {
     this.options = options;
-    this.verifier = options.receiptVerifier ?? unavailableReceiptVerifier;
+    // The concrete request/runtime receipt producer for the exact selected
+    // provider is ALWAYS the core gate (an invalid/missing provider returns
+    // unavailable before any session opens, so an empty expected provider is
+    // just a never-satisfied gate). A custom verifier can only restrict.
+    this.coreVerifier = createRequestRuntimeReceiptVerifier(
+      options.modelProvider ?? "",
+    );
+    this.customVerifier = options.receiptVerifier ?? null;
     this.graceMs = options.interruptSettlementGraceMs ??
       DEFAULT_INTERRUPT_SETTLEMENT_GRACE_MS;
+    this.permissionProfile = options.permissionProfile ?? null;
   }
 
   async runModel(
     request: ModelRunRequestV1,
   ): Promise<PortResultV1<ModelRunReceiptV1>> {
-    if (this.verifier === unavailableReceiptVerifier) {
-      // The default (or explicitly supplied unavailable) verifier never
-      // certifies actual provider model/effort: fail closed with the existing
-      // typed `unavailable` before any session opens or model work begins.
-      // Only a configured verifier can earn the session; a configured
-      // verifier is never invoked without real session evidence.
+    // Fail-closed model policy validation BEFORE any session or model work:
+    // the requested runtime model/effort must be exactly Luna/max.
+    if (
+      request.model !== REQUIRED_MODEL_ID ||
+      request.reasoning !== REQUIRED_REASONING_EFFORT
+    ) {
+      return portError("unavailable", MODEL_POLICY_DETAIL);
+    }
+    // An explicit valid modelProvider is REQUIRED before ANY session opens,
+    // including the custom-verifier path: a missing provider stays
+    // unavailable and a callback never enables a missing provider.
+    if (this.options.modelProvider === undefined) {
       return portError("unavailable", UNAVAILABLE_RECEIPT_DETAIL);
+    }
+    if (!isValidProvider(this.options.modelProvider)) {
+      return portError("unavailable", PROVIDER_POLICY_DETAIL);
+    }
+    // A configured named permission profile must be a valid host-defined name
+    // BEFORE any session opens; built-in full-access ids are never permitted.
+    if (
+      this.permissionProfile !== null &&
+      !isValidPermissionProfile(this.permissionProfile)
+    ) {
+      return portError("unavailable", PERMISSION_PROFILE_POLICY_DETAIL);
     }
     let session: CodexSessionV1 | null = null;
     const invocationId = `codex-${request.taskId}-${Date.now()}`;
@@ -352,7 +813,7 @@ export class CodexImplementationPort implements ImplementationPort {
         prompt,
         thread.threadId,
       );
-      const awaited = await this.awaitSettlement(
+      const captureSettlement = await this.awaitSettlement(
         session,
         request,
         thread.threadId,
@@ -371,7 +832,28 @@ export class CodexImplementationPort implements ImplementationPort {
           "model session process group did not settle",
         );
       }
-      return await this.finishReceipt(request, invocationId, thread, awaited);
+      // A fatal transport/session error observed before close is static typed
+      // unavailable evidence: a verified receipt can never escape a transport
+      // that already failed closed. Intentionally closing a healthy session
+      // never manufactures one (getFailure stays null after a clean close).
+      if (ownedSession.getFailure !== undefined) {
+        const failure = ownedSession.getFailure();
+        if (failure !== null) {
+          return portError("unavailable", failure.detail);
+        }
+      }
+      // Final evidence capture happens ONLY after the session is fully closed
+      // and its settlement/transport state is verified: bounded correlated
+      // routing notifications delivered during close are still validated into
+      // this snapshot, and a later notification can never change the receipt.
+      const settled = captureSettlement();
+      return await this.finishReceipt(
+        request,
+        invocationId,
+        thread,
+        turn.turnId,
+        settled,
+      );
     } catch (error) {
       const failure = unavailableFor(error);
       return portError(failure.kind, failure.detail);
@@ -387,7 +869,12 @@ export class CodexImplementationPort implements ImplementationPort {
         title: "Sentinel repair controller",
         version: "0.1.0",
       },
-      capabilities: { experimentalApi: false, requestAttestation: false },
+      capabilities: {
+        // Experimental app-server capabilities are enabled ONLY for a trusted
+        // configured named permission profile; the legacy path stays as is.
+        experimentalApi: this.permissionProfile !== null,
+        requestAttestation: false,
+      },
     });
     if (
       typeof response !== "object" || response === null ||
@@ -414,7 +901,7 @@ export class CodexImplementationPort implements ImplementationPort {
       provider: string | null;
     }
   > {
-    const response = await session.send("thread/start", {
+    const startParams: Record<string, unknown> = {
       model: request.model,
       // The thread response is the only app-server model/effort evidence
       // available to this bounded port.  Bind the required runtime effort in
@@ -422,22 +909,33 @@ export class CodexImplementationPort implements ImplementationPort {
       // observed thread receipt cannot silently inherit a weaker host default.
       config: { model_reasoning_effort: request.reasoning },
       cwd: this.options.checkoutDir,
+      approvalPolicy: "never",
+      ephemeral: true,
+      baseInstructions: prompt,
+      // A valid provider is required before this session opened: submit it
+      // explicitly so the thread response can acknowledge the exact provider.
+      modelProvider: this.options.modelProvider,
+    };
+    if (this.permissionProfile !== null) {
+      // Trusted named profile: the installed schema forbids combining
+      // `permissions` with the legacy `sandbox` field, so the configured
+      // profile replaces the sandbox entirely for this thread.
+      startParams.permissions = this.permissionProfile;
+    } else {
       // Bounded isolated-checkout write capability: the session may write
       // within the secret-free checkout only (the thread cwd is the checkout
       // root); the host approval policy stays "never" and no other sandbox is
       // granted. "read-only" would make the requested commit impossible.
-      sandbox: "workspace-write",
-      approvalPolicy: "never",
-      ephemeral: true,
-      baseInstructions: prompt,
-    });
+      startParams.sandbox = "workspace-write";
+    }
+    const response = await session.send("thread/start", startParams);
     const record = requireRecord(response, "thread/start");
     const thread = (record.thread ?? null) as Record<string, unknown> | null;
     const threadId = typeof thread?.id === "string" ? thread.id : null;
-    if (threadId === null) {
+    if (threadId === null || !isBoundedId(threadId)) {
       throw new CodexProtocolError(
         "malformed_line",
-        "thread/start response missing thread id",
+        "thread/start response missing a nonempty bounded thread id",
       );
     }
     const model = typeof record.model === "string" ? record.model : null;
@@ -447,6 +945,33 @@ export class CodexImplementationPort implements ImplementationPort {
     const provider = typeof record.modelProvider === "string"
       ? record.modelProvider
       : null;
+    // The thread response MUST acknowledge the exact provider, Luna/max and a
+    // nonempty bounded thread id BEFORE any turn starts: a mismatch never
+    // spends a model turn.
+    if (
+      model !== request.model || effort !== request.reasoning ||
+      provider !== this.options.modelProvider
+    ) {
+      throw new CodexProtocolError(
+        "malformed_line",
+        "thread/start response does not acknowledge the requested provider/model/effort",
+      );
+    }
+    // A configured named profile must be acknowledged exactly BEFORE any turn
+    // starts; a missing or wrong acknowledgement fails closed (the session is
+    // settled by the caller's owned close path) and no model turn is spent.
+    if (this.permissionProfile !== null) {
+      const active = record.activePermissionProfile;
+      if (
+        typeof active !== "object" || active === null ||
+        (active as Record<string, unknown>).id !== this.permissionProfile
+      ) {
+        throw new CodexProtocolError(
+          "malformed_line",
+          "thread/start response does not acknowledge the configured permission profile",
+        );
+      }
+    }
     return { threadId, model, effort, provider };
   }
 
@@ -465,31 +990,58 @@ export class CodexImplementationPort implements ImplementationPort {
     const record = requireRecord(response, "turn/start");
     const turn = (record.turn ?? null) as Record<string, unknown> | null;
     const turnId = typeof turn?.id === "string" ? turn.id : null;
-    if (turnId === null) {
+    if (turnId === null || !isBoundedId(turnId)) {
       throw new CodexProtocolError(
         "malformed_line",
-        "turn/start response missing turn id",
+        "turn/start response missing a nonempty bounded turn id",
       );
     }
     return { turnId };
   }
 
+  /**
+   * Bounded settlement wait. Returns a PRIVATE final-snapshot getter: the
+   * settlement promise only signals that the loop guard/turn work has stopped
+   * and the bounded drain finished, while the returned getter captures the
+   * final routing/terminal evidence at the exact moment the caller has also
+   * completed its close/settlement/transport checks. A routing notification
+   * delivered during close is therefore still validated into the receipt.
+   */
   private async awaitSettlement(
     session: CodexSessionV1,
     request: ModelRunRequestV1,
     threadId: string,
     turnId: string,
     maxOutputChars: number,
-  ): Promise<AwaitedSettlementV1> {
+  ): Promise<() => AwaitedSettlementV1> {
     let outputChars = 0;
-    let rerouted: { from: string; to: string } | null = null;
+    // Bounded COMPLETE correlated routing events for this exact thread/turn
+    // (well-formed events for other threads/turns are ignored at receipt);
+    // a malformed or matching off-Luna event fails closed immediately.
+    const reroutes: ModelRerouteV1[] = [];
+    // Bounded correlated successful output items (command/file-change/agent
+    // output) for this exact thread/turn; notification-byte totals are never
+    // output proof.
+    const resultItems: SessionResultItemV1[] = [];
     let terminal: AwaitedSettlementV1["terminal"] = null;
-    let resolver: ((value: AwaitedSettlementV1) => void) | null = null;
-    const terminalPromise = new Promise<AwaitedSettlementV1>((resolve) => {
+    // Host-timeout until a runtime terminal is actually observed; a settlement
+    // without a runtime terminal is never presented as an observed terminal.
+    let terminalOrigin: AwaitedSettlementV1["terminalOrigin"] = "host-timeout";
+    // Sticky unavailable-evidence disposition: protocol/routing uncertainty
+    // (malformed reroute/terminal identity, off-policy route, registration
+    // failure) makes the receipt `unavailable` before ANY verifier/candidate
+    // action — it is never certified as a valid failed runtime receipt.
+    let unavailable: AwaitedSettlementV1["unavailable"] = null;
+    // Evidence-capture finalization: set by the returned getter. Once set, no
+    // later notification — including a late correlated reroute — can mutate
+    // the captured receipt evidence.
+    let evidenceFinalized = false;
+    let resolver: (() => void) | null = null;
+    const terminalPromise = new Promise<void>((resolve) => {
       resolver = resolve;
     });
-    const resolveSettlement = (value: AwaitedSettlementV1) => {
-      resolver?.(value);
+    const resolveSettlement = () => {
+      resolver?.();
     };
 
     // --- loop-guard observability state. Every field below is initialized
@@ -532,14 +1084,12 @@ export class CodexImplementationPort implements ImplementationPort {
       // terminal stop has happened; the race loses to this resolution and the
       // sendSteer continuation observes `stopped` and returns without sending.
       cancelSettlement?.();
-      const value: AwaitedSettlementV1 = {
-        terminal,
-        outputChars,
-        rerouted,
-        loopStopped,
-      };
+      // The settlement signal carries no evidence snapshot: the final
+      // snapshot is captured separately by the returned getter AFTER the
+      // caller's close/settlement/transport checks, so a routing event
+      // delivered during close is still validated and counted.
       if (draining === null) {
-        resolveSettlement(value);
+        resolveSettlement();
         return;
       }
       // Await the bounded drain after canceling the steer: queued jobs were
@@ -548,7 +1098,7 @@ export class CodexImplementationPort implements ImplementationPort {
       // wait is finite and no separate cleanup timer can outlive settlement.
       // A rejection never escapes as a dangling rejecting finally chain.
       void draining.catch(() => {}).finally(() => {
-        resolveSettlement(value);
+        resolveSettlement();
       });
     };
 
@@ -563,19 +1113,16 @@ export class CodexImplementationPort implements ImplementationPort {
       interruptRequested = true;
       clearTimeout(settleTimer);
       settleTimer = setTimeout(() => {
-        if (terminal === null) {
-          terminal = {
-            status: "failed",
-            error: "timeout without terminal settlement",
-            durationMs: null,
-          };
-        }
+        // Host timeout: no runtime terminal arrived inside the grace. The
+        // settlement keeps the null observed terminal and the `host-timeout`
+        // origin — the run may retain failed accounting but never pretends it
+        // observed a terminal.
         settleNow();
       }, this.graceMs + SETTLE_GRACE_MS_EXTRA);
       try {
         session.send("turn/interrupt", { threadId, turnId }).catch(() => {
           // The interrupt request itself failed; the wait continues to the
-          // grace deadline and then fails closed without a terminal state.
+          // grace deadline and then settles as a host timeout.
         });
       } catch {
         // A synchronously-throwing session must never escape the receiver.
@@ -593,14 +1140,90 @@ export class CodexImplementationPort implements ImplementationPort {
       requestInterrupt();
     };
 
-    const failClosed = (detail: string) => {
+    /**
+     * Sticky unavailable-evidence disposition: protocol/routing uncertainty.
+     * It latches even AFTER the loop guard stopped (a correlated routing
+     * event can arrive during close), preserving the FIRST failure, and only
+     * drives the stop path when the run has not stopped yet.
+     */
+    const failEvidence = (detail: string) => {
+      if (evidenceFinalized) return;
+      if (unavailable === null) unavailable = { detail };
       if (stopped) return;
-      terminal = {
-        status: "failed",
-        error: detail,
-        durationMs: null,
-      };
       settleNow();
+    };
+
+    /**
+     * Record one successful correlated output item (bounded, earliest first).
+     * Only adequately identified items of the exact thread/turn qualify; an
+     * unidentifiable deliverable is never output proof and a completed run
+     * then fails closed instead of counting bytes.
+     */
+    const recordResultItem = (
+      item: Record<string, unknown>,
+      type: SessionResultItemV1["type"],
+    ) => {
+      if (resultItems.length >= MAX_RESULT_ITEMS) return;
+      const itemId = typeof item.id === "string" && isBoundedId(item.id)
+        ? item.id
+        : null;
+      if (itemId === null) return;
+      resultItems.push({ itemId, type });
+    };
+
+    /**
+     * Correlated routing validation for the EXACT thread/turn. Well-formed
+     * events for other threads/turns are ignored; a missing/malformed identity
+     * or a matching malformed/off-Luna event sets the sticky unavailable
+     * disposition (this routing uncertainty is never certified as a failed
+     * runtime receipt). Any matching reroute off the required Luna model
+     * rejects the run even when it is routed back later; no route fallback or
+     * synthesized identity exists. The bounded complete history is preserved
+     * (the well-formed event is recorded) BEFORE the off-policy rejection.
+     */
+    const collectReroute = (params: unknown) => {
+      const record = params as Record<string, unknown> | null;
+      const eventThreadId = typeof record?.threadId === "string"
+        ? record.threadId
+        : null;
+      const eventTurnId = typeof record?.turnId === "string"
+        ? record.turnId
+        : null;
+      if (
+        eventThreadId === null || eventTurnId === null ||
+        !isBoundedId(eventThreadId) || !isBoundedId(eventTurnId)
+      ) {
+        failEvidence("malformed reroute identity");
+        return;
+      }
+      if (eventThreadId !== threadId || eventTurnId !== turnId) return;
+      const from = typeof record?.fromModel === "string"
+        ? record.fromModel
+        : null;
+      const to = typeof record?.toModel === "string" ? record.toModel : null;
+      const rawReason = record?.reason;
+      const reason = typeof rawReason === "string" ? rawReason : null;
+      if (
+        from === null || to === null || !isBoundedId(from) ||
+        !isBoundedId(to) ||
+        (rawReason !== undefined && typeof rawReason !== "string") ||
+        (reason !== null && !isBoundedId(reason))
+      ) {
+        failEvidence("malformed matching reroute");
+        return;
+      }
+      if (reroutes.length >= MAX_REROUTES) {
+        failEvidence("reroute evidence exceeded bound");
+        return;
+      }
+      // Preserve the bounded correlated history before rejecting an off-policy
+      // route: the well-formed event is recorded, then the rejection is set.
+      reroutes.push({ threadId, turnId, from, to, reason });
+      if (
+        from === to || from !== request.model || to !== request.model
+      ) {
+        failEvidence("run routed off required Luna/max");
+      }
     };
 
     const collectStarted = (params: unknown) => {
@@ -681,11 +1304,39 @@ export class CodexImplementationPort implements ImplementationPort {
       if (record?.threadId !== threadId || record?.turnId !== turnId) return;
       const item = record?.item as Record<string, unknown> | null;
       if (item?.type === "fileChange") {
+        // Any edit is state progress (the repeated-failure sequence resets);
+        // only a COMPLETED file change with a nonempty valid changes array
+        // (required path/kind/diff fields per the installed ThreadItem schema)
+        // is genuine successful output — failed/declined/missing-status/empty-
+        // or-malformed changes can never prove output.
         generation++;
         guard.resetProgress();
+        if (hasValidCompletedChanges(item)) {
+          recordResultItem(item, "fileChange");
+        }
+        return;
+      }
+      if (item?.type === "agentMessage") {
+        // Only the supported nonblank bounded `text` field is genuine output
+        // evidence; the unsupported `content` fallback was removed and
+        // anything missing/blank/over-bound is never recorded as proof.
+        const text = typeof item.text === "string" ? item.text : null;
+        if (
+          text !== null && text.trim().length > 0 &&
+          text.length <= MAX_OUTPUT_CHARS
+        ) {
+          recordResultItem(item, "agentMessage");
+        }
         return;
       }
       if (item?.type !== "commandExecution") return;
+      // Only a schema-valid successful command proves output: status
+      // completed, exit code 0, nonempty bounded command/cwd and a bounded
+      // schema-valid commandActions array (empty supported). The failed-
+      // command-loop classification below is untouched by this proof gate.
+      if (hasValidCommandExecution(item)) {
+        recordResultItem(item, "commandExecution");
+      }
       let itemId: string | null = null;
       if (
         typeof item.id === "string" && item.id.length > 0 &&
@@ -867,34 +1518,39 @@ export class CodexImplementationPort implements ImplementationPort {
 
     const handleTerminal = (params: unknown) => {
       const record = params as Record<string, unknown> | null;
-      // Exact current thread AND turn id are required for a successful or
-      // interrupted settlement: a missing/nonobject turn (or missing thread
-      // identity) fails closed, a wrong/stale identity is ignored.
-      if (
-        typeof record !== "object" || record === null ||
-        typeof record.threadId !== "string"
-      ) {
-        failClosed("malformed terminal thread id");
+      // Identity validation happens BEFORE the stale comparison: a nonempty
+      // bounded thread id and turn id are required for a successful or
+      // interrupted settlement. A missing/nonobject turn (or missing,
+      // empty/over-bound thread or turn identity) sets the sticky unavailable
+      // disposition (protocol uncertainty is never certified as a failed
+      // runtime receipt); valid bounded unrelated identities are ignored.
+      const eventThreadId = typeof record?.threadId === "string"
+        ? record.threadId
+        : null;
+      if (eventThreadId === null || !isBoundedId(eventThreadId)) {
+        failEvidence("malformed terminal thread id");
         return;
       }
-      if (record.threadId !== threadId) return;
-      const turn = record.turn;
+      const turn = record?.turn;
       if (typeof turn !== "object" || turn === null) {
-        failClosed("malformed terminal turn");
+        failEvidence("malformed terminal turn");
         return;
       }
       const turnRecord = turn as Record<string, unknown>;
-      if (typeof turnRecord.id !== "string") {
-        failClosed("malformed terminal turn id");
+      const eventTurnId = typeof turnRecord.id === "string"
+        ? turnRecord.id
+        : null;
+      if (eventTurnId === null || !isBoundedId(eventTurnId)) {
+        failEvidence("malformed terminal turn id");
         return;
       }
-      if (turnRecord.id !== turnId) return;
+      if (eventThreadId !== threadId || eventTurnId !== turnId) return;
       const status = turnRecord.status;
       if (
         status !== "completed" && status !== "interrupted" &&
         status !== "failed"
       ) {
-        failClosed("malformed terminal turn status");
+        failEvidence("malformed terminal turn status");
         return;
       }
       const turnError = (turnRecord.error ?? null) as
@@ -910,11 +1566,30 @@ export class CodexImplementationPort implements ImplementationPort {
           ? turnRecord.durationMs
           : null,
       };
+      // An actual runtime terminal was observed for the exact thread/turn.
+      terminalOrigin = "runtime";
       settleNow();
     };
 
     const onEvent = (method: string, params: unknown) => {
-      if (stopped) return;
+      // Once the final evidence is captured nothing can change the receipt.
+      if (evidenceFinalized) return;
+      if (stopped) {
+        // Post-terminal/stop: the loop guard and every turn/output/job path
+        // stay stopped. ONLY bounded correlated routing evidence remains
+        // live, because a reroute can be emitted during close after the
+        // terminal; it uses the same identity/bound/off-policy validation and
+        // still counts toward routing output.
+        if (method === "model/rerouted") {
+          outputChars += JSON.stringify(params ?? {}).length;
+          if (outputChars > maxOutputChars) {
+            failEvidence("routing evidence exceeded output bound");
+            return;
+          }
+          collectReroute(params);
+        }
+        return;
+      }
       // Bounded output accounting FIRST: every nonterminal event contributes
       // to the total (malformed, over-bound and unknown events included) and
       // crossing the bound interrupts the turn — no event bypasses the total
@@ -936,13 +1611,9 @@ export class CodexImplementationPort implements ImplementationPort {
         return;
       }
       if (method === "model/rerouted") {
-        const record = params as Record<string, unknown>;
-        if (
-          typeof record?.fromModel === "string" &&
-          typeof record?.toModel === "string"
-        ) {
-          rerouted = { from: record.fromModel, to: record.toModel };
-        }
+        // Bounded complete correlated routing validation; the port alone
+        // decides reroute policy, never the injected verifier.
+        collectReroute(params);
         return;
       }
       // Unknown methods were counted above; nothing else is inferred.
@@ -956,13 +1627,9 @@ export class CodexImplementationPort implements ImplementationPort {
     const durationTimer = setTimeout(requestInterrupt, request.maxDurationMs);
     let settleTimer: ReturnType<typeof setTimeout>;
     settleTimer = setTimeout(() => {
-      if (terminal === null) {
-        terminal = {
-          status: "failed",
-          error: "timeout without terminal settlement",
-          durationMs: null,
-        };
-      }
+      // Final host timeout: no runtime terminal was ever observed, so the
+      // settlement keeps the null observed terminal and the `host-timeout`
+      // origin — never a synthesized failed terminal.
       settleNow();
     }, request.maxDurationMs + this.graceMs + SETTLE_GRACE_MS_EXTRA);
 
@@ -971,14 +1638,31 @@ export class CodexImplementationPort implements ImplementationPort {
     } catch {
       // Registration is part of the bounded session lifecycle. If a trusted
       // transport rejects it synchronously, settle through the same path as
-      // every other terminal failure so both timers are cleared immediately.
-      failClosed("notification registration failed");
+      // every other protocol failure so both timers are cleared immediately;
+      // a registration failure is protocol uncertainty and sets the sticky
+      // unavailable disposition (never a certifiable failed receipt).
+      failEvidence("notification registration failed");
     }
 
-    const settled = await terminalPromise;
+    await terminalPromise;
     clearTimeout(durationTimer);
     clearTimeout(settleTimer);
-    return settled;
+    // Private final-snapshot getter: cloned arrays plus the CURRENT terminal
+    // and sticky unavailable values, captured only after the caller closed
+    // and verified the session. It finalizes evidence capture so a later
+    // notification can never change the returned receipt.
+    return () => {
+      evidenceFinalized = true;
+      return {
+        terminal,
+        terminalOrigin,
+        unavailable,
+        outputChars,
+        reroutes: [...reroutes],
+        resultItems: [...resultItems],
+        loopStopped,
+      };
+    };
   }
 
   private async finishReceipt(
@@ -990,32 +1674,74 @@ export class CodexImplementationPort implements ImplementationPort {
       effort: string | null;
       provider: string | null;
     },
+    turnId: string,
     settled: AwaitedSettlementV1,
   ): Promise<PortResultV1<ModelRunReceiptV1>> {
+    // Sticky unavailable-evidence disposition FIRST: protocol/routing
+    // uncertainty (malformed reroute/terminal identity, off-policy route,
+    // registration failure) returns unavailable before ANY verifier or
+    // candidate action — it is never certified as a failed runtime receipt.
+    if (settled.unavailable !== null) {
+      return portError("unavailable", settled.unavailable.detail);
+    }
     const evidence: ActualSessionEvidenceV1 = {
+      invocationId,
+      requestedModel: request.model,
+      requestedProvider: this.options.modelProvider ?? null,
+      requestedEffort: request.reasoning,
+      threadId: thread.threadId,
+      turnId,
       threadModel: thread.model,
       threadModelProvider: thread.provider,
       threadEffort: thread.effort,
-      rerouted: settled.rerouted,
+      reroutes: settled.reroutes,
       terminal: {
-        status: settled.terminal?.status ?? "failed",
+        // Observed runtime terminal status; null means a host timeout, which
+        // never pretends a terminal was observed.
+        status: settled.terminal?.status ?? null,
         error: settled.terminal?.error ?? null,
         durationMs: settled.terminal?.durationMs ?? null,
       },
+      terminalOrigin: settled.terminalOrigin,
+      loopStopped: settled.loopStopped,
+      resultItems: settled.resultItems,
       outputChars: settled.outputChars,
     };
-    const verified = this.verifier(evidence);
+    // Port-side correlation and output-evidence validation: it runs for EVERY
+    // verifier (including a permissive injected one), so no custom callback
+    // can bypass exact-identity/routing/model-policy checks.
+    if (
+      !isBoundedId(evidence.threadId) || !isBoundedId(evidence.turnId) ||
+      !isBoundedId(evidence.invocationId)
+    ) {
+      return portError("unavailable", IDENTITY_POLICY_DETAIL);
+    }
+    if (
+      settled.terminal?.status === "completed" && !settled.loopStopped &&
+      settled.resultItems.length === 0
+    ) {
+      return portError("unavailable", OUTPUT_EVIDENCE_DETAIL);
+    }
+    // The concrete core request/runtime checks ALWAYS run first: correlation,
+    // thread acknowledgment, routing and output evidence are port duties and
+    // cannot be bypassed by a permissive injected verifier.
+    const verified = this.coreVerifier(evidence);
     if (verified === null) {
       return portError("unavailable", UNAVAILABLE_RECEIPT_DETAIL);
     }
-    if (
-      verified.observedModel !== request.model ||
-      verified.observedReasoning !== request.reasoning
-    ) {
-      return portError(
-        "unavailable",
-        "model receipt mismatch: observed model/effort differ from requested Luna/max",
-      );
+    // A custom verifier is only an ADDITIONAL restriction applied after the
+    // core checks; it can never bypass and its returned values must agree
+    // with the core validation.
+    if (this.customVerifier !== null) {
+      const custom = this.customVerifier(evidence);
+      if (
+        custom === null ||
+        custom.provider !== verified.provider ||
+        custom.observedModel !== verified.observedModel ||
+        custom.observedReasoning !== verified.observedReasoning
+      ) {
+        return portError("unavailable", RECEIPT_MISMATCH_DETAIL);
+      }
     }
     if (settled.terminal?.status === "completed" && !settled.loopStopped) {
       if (this.options.commitCandidate !== undefined) {
@@ -1047,64 +1773,98 @@ export class CodexImplementationPort implements ImplementationPort {
         changedPaths: resolved.changedPaths,
       }
       : null;
+    const actual = this.buildActual(thread.threadId, turnId, settled, verified);
     if (settled.loopStopped) {
       // Own early loop stop: the model/session did not fail as an application
-      // defect and no candidate may be produced — even if a completed terminal
-      // races the interrupt. The receipt carries only the sanitized marker.
+      // defect and no candidate may be produced — even if a completed runtime
+      // terminal races the interrupt, the completed terminal is preserved in
+      // the evidence but only interrupted/no-candidate accounting is
+      // permitted without successful output. The receipt carries only the
+      // sanitized marker.
       return portOk({
         invocationId,
         outcome: settled.terminal?.status === "failed"
           ? "failed"
           : "interrupted",
-        actual: {
-          observedModel: verified.observedModel,
-          observedReasoning: verified.observedReasoning,
-          durationMs: settled.terminal?.durationMs ?? 0,
-          outputChars: settled.outputChars,
-        },
+        actual,
         candidate: null,
         error: LOOP_STOP_MARKER,
       });
     }
-    if (settled.terminal?.status !== "completed") {
+    if (settled.terminal === null) {
+      // HOST timeout: the host's own bounds elapsed without any runtime
+      // terminal. The run may retain failed ACCOUNTING with the explicit
+      // `host-timeout` origin and the exact invocation/thread/turn identities,
+      // but it never pretends a terminal was observed (observed status null).
       return portOk({
         invocationId,
-        outcome: settled.terminal?.status === "interrupted"
+        outcome: "failed",
+        actual,
+        candidate: null,
+        error: HOST_TIMEOUT_ACCOUNTING_ERROR,
+      });
+    }
+    if (settled.terminal.status !== "completed") {
+      return portOk({
+        invocationId,
+        outcome: settled.terminal.status === "interrupted"
           ? "interrupted"
           : "failed",
-        actual: {
-          observedModel: verified.observedModel,
-          observedReasoning: verified.observedReasoning,
-          durationMs: settled.terminal?.durationMs ?? 0,
-          outputChars: settled.outputChars,
-        },
+        actual,
         candidate: null,
-        error: settled.terminal?.error ?? null,
+        error: settled.terminal.error ?? null,
       });
     }
     return portOk({
       invocationId,
       outcome: "completed",
-      actual: {
-        observedModel: verified.observedModel,
-        observedReasoning: verified.observedReasoning,
-        durationMs: settled.terminal?.durationMs ?? 0,
-        outputChars: settled.outputChars,
-      },
+      actual,
       candidate,
       error: null,
     });
   }
+
+  /** Identity-bound `actual` block: exact session identities copied from the port state. */
+  private buildActual(
+    threadId: string,
+    turnId: string,
+    settled: AwaitedSettlementV1,
+    verified: VerifiedRuntimeValuesV1,
+  ): ModelRunReceiptV1["actual"] {
+    return {
+      evidenceKind: "request-runtime",
+      provider: verified.provider,
+      threadId,
+      turnId,
+      terminalOrigin: settled.terminalOrigin,
+      observedTerminalStatus: settled.terminal?.status ?? null,
+      observedModel: verified.observedModel,
+      observedReasoning: verified.observedReasoning,
+      durationMs: settled.terminal?.durationMs ?? 0,
+      outputChars: settled.outputChars,
+    };
+  }
 }
 
 interface AwaitedSettlementV1 {
+  /** Observed runtime terminal; null when the host's own bounds elapsed first. */
   terminal: {
     status: "completed" | "interrupted" | "failed";
     error: string | null;
     durationMs: number | null;
   } | null;
+  /** Terminal evidence origin: runtime observation vs host timeout. */
+  terminalOrigin: "runtime" | "host-timeout";
+  /**
+   * Sticky unavailable-evidence disposition: protocol/routing uncertainty
+   * makes the receipt `unavailable` before any verifier/candidate action.
+   */
+  unavailable: { detail: string } | null;
   outputChars: number;
-  rerouted: { from: string; to: string } | null;
+  /** Bounded complete correlated routing events for the exact thread/turn. */
+  reroutes: ModelRerouteV1[];
+  /** Bounded correlated successful output items for the exact thread/turn. */
+  resultItems: SessionResultItemV1[];
   /** Own failed-command loop stop: early interrupt already decided. */
   loopStopped: boolean;
 }

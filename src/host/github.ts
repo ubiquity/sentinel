@@ -102,6 +102,12 @@ export interface GitHubHostOptionsV1 {
    * passed into the port and returned as the host's executor identity.
    */
   git: DenoGitExecutorOptions;
+  /**
+   * Trusted opt-in for native issue dependency relations: passed through to
+   * the composed port/client unchanged. When not exactly `true`, relations
+   * stay unknown; the host never defaults this on.
+   */
+  includeIssueRelations?: boolean;
 }
 
 /** The composed capability set a trusted repair host holds for GitHub. */
@@ -171,6 +177,7 @@ export function composeGitHubHost(
     trustedReviewer,
     trustedResolutionAuthors,
     resolutionVerifier: options.resolutionVerifier,
+    includeIssueRelations: options.includeIssueRelations,
   });
 
   return { port, git };

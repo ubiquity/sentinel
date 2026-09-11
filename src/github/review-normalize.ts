@@ -57,6 +57,12 @@ import type { RepositoryIdentityV1 } from "../contracts/shared.ts";
 import type { SeverityV1 } from "../contracts/shared.ts";
 import { tryParse } from "../contracts/validation.ts";
 import type { GitHubReviewCommentWireV1, GitHubReviewWireV1 } from "./wire.ts";
+import {
+  findingMessage,
+  parseReviewJournalBody,
+  type ReviewJournalV1,
+  type ReviewResultV1,
+} from "./review-journal.ts";
 import { UNRESOLVED_REQUEST_ID } from "./review-service.ts";
 import type { ReviewServiceReadV1 } from "./review-service.ts";
 
@@ -147,123 +153,15 @@ export function hasUnparsedFindingMarker(text: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// Finding extraction
+// Finding extraction (deterministic diagnostics only; production completion
+// authorization consumes the strict structured journal, never prose)
 // ---------------------------------------------------------------------------
-
-interface FindingItem {
-  parsed: ParsedFindingV1 | null;
-  /** True when the item structurally looks like it must have been a finding. */
-  overBound: boolean;
-  /** True when the item carries a finding label that could not be parsed. */
-  unparsedMarker: boolean;
-}
-
-function commentFinding(
-  comment: GitHubReviewCommentWireV1,
-): FindingItem {
-  const label = parseFindingSeverityLabel(comment.body);
-  if (label === null) {
-    return {
-      parsed: null,
-      overBound: false,
-      unparsedMarker: hasUnparsedFindingMarker(comment.body),
-    };
-  }
-  if (comment.body.length > MAX_FINDING_MESSAGE) {
-    return { parsed: null, overBound: true, unparsedMarker: false };
-  }
-  return {
-    parsed: {
-      id: `github-comment-${comment.id}`,
-      severity: label.severity,
-      path: comment.path,
-      // Full original message, prefixes and label included.
-      message: comment.body,
-    },
-    overBound: false,
-    unparsedMarker: false,
-  };
-}
-
-function reviewBodyFinding(
-  review: GitHubReviewWireV1,
-  lineIndex: number,
-  line: string,
-): FindingItem {
-  const label = parseFindingSeverityLabel(line);
-  if (label === null) {
-    return {
-      parsed: null,
-      overBound: false,
-      unparsedMarker: hasUnparsedFindingMarker(line),
-    };
-  }
-  return {
-    parsed: {
-      id: `github-review-${review.id}-line-${lineIndex}`,
-      severity: label.severity,
-      path: null,
-      message: line,
-    },
-    overBound: false,
-    unparsedMarker: false,
-  };
-}
 
 export interface FindingExtractionV1 {
   complete: boolean;
   findings: ParsedFindingV1[];
   /** Label-bearing items that could not be fully retained. */
   uncounted: number;
-}
-
-/**
- * Full finding set from the reviewer's GitHub evidence on the exact head.
- * `complete` is false (and the observation must be unavailable) when any
- * item is over-bound, any item's finding label could not be fully parsed,
- * or the cap was exceeded — the uncounted count is preserved so the unknown
- * findings are never silently zeroed.
- */
-function extractFindings(
-  comments: GitHubReviewCommentWireV1[],
-  author: string,
-  head: GitSha,
-  authoritative: GitHubReviewWireV1,
-  cap: number,
-): FindingExtractionV1 {
-  const candidates: FindingItem[] = [];
-  for (const comment of comments) {
-    if (comment.author !== author || comment.commitSha !== head) continue;
-    candidates.push(commentFinding(comment));
-  }
-  if (authoritative.body !== null) {
-    const lines = authoritative.body.split("\n");
-    for (let i = 0; i < lines.length; i++) {
-      candidates.push(reviewBodyFinding(authoritative, i, lines[i]));
-    }
-  }
-  const findings: ParsedFindingV1[] = [];
-  let uncounted = 0;
-  for (const item of candidates) {
-    if (item.overBound) {
-      uncounted++;
-      continue;
-    }
-    if (item.unparsedMarker) {
-      uncounted++;
-      continue;
-    }
-    if (item.parsed !== null) findings.push(item.parsed);
-  }
-  if (uncounted > 0) return { complete: false, findings, uncounted };
-  if (findings.length > cap) {
-    return {
-      complete: false,
-      findings: findings.slice(0, cap),
-      uncounted: findings.length - cap,
-    };
-  }
-  return { complete: true, findings, uncounted: 0 };
 }
 
 export function latestReview(
@@ -354,6 +252,7 @@ export async function normalizeReviewObservation(
   const verifiableCompletion = service.requestId !== null &&
     service.resultId !== null &&
     service.completedAt !== null &&
+    service.resultDigest !== null &&
     service.terminalTurnSucceeded === true &&
     service.outputPresent === true;
   if (!verifiableCompletion) {
@@ -391,9 +290,11 @@ export async function normalizeReviewObservation(
   if (latestAll !== null && isLaterReview(latestAll, authoritative)) {
     return portOk(await unavailable(service.resultId, service.summary));
   }
-  if (
-    authoritative.state === "dismissed" || authoritative.state === "pending"
-  ) {
+  // The transport contract is COMMENTED only: a standing COMMENTED review on
+  // the exact head with a submission timestamp is the single shape that can
+  // carry the durable ready journal. APPROVED/CHANGES_REQUESTED (or any other
+  // state) is never completion evidence, however valid the body/service are.
+  if (authoritative.state !== "commented") {
     return portOk(await unavailable(service.resultId, service.summary));
   }
   if (authoritative.submittedAt === null) {
@@ -401,36 +302,42 @@ export async function normalizeReviewObservation(
     return portOk(await unavailable(service.resultId, service.summary));
   }
 
-  const extracted = extractFindings(
-    input.comments,
-    expectedReviewer,
-    pullRequest.head,
-    authoritative,
-    findingCap,
-  );
-  if (!extracted.complete) {
-    // Unsupported/over-bound/unparsed finding evidence: the unknown count is
-    // preserved and no completed verdict is inferred (never empty-findings
-    // clean).
-    return portOk(
-      await unavailable(
-        service.resultId,
-        service.summary,
-        extracted.findings,
-      ),
-    );
+  // 3. HARD CUT: the standing GitHub review body must parse as the exact
+  // durable structured journal. Old prose bodies, truncated bodies, foreign
+  // publishers and any other unaccounted shape are unavailable — never a
+  // clean verdict, and never a permissive compatibility route.
+  const journal = await parseStandingJournal(authoritative.body);
+  if (journal === null || journal.phase !== "ready") {
+    return portOk(await unavailable(service.resultId, service.summary));
   }
-  if (
-    authoritative.state === "changes_requested" &&
-    extracted.findings.length === 0
-  ) {
-    // Changes were requested but the findings cannot be read from the
-    // evidence: missing findings never yield a completed result.
+  if (!journalMatchesService(journal, input, service)) {
+    return portOk(await unavailable(service.resultId, service.summary));
+  }
+  if (journal.result.verdict === "unavailable") {
+    return portOk(await unavailable(null, journal.result.summary));
+  }
+  const execution = journal.execution;
+  if (execution === null || execution.resultId !== service.resultId) {
     return portOk(await unavailable(service.resultId, service.summary));
   }
   if (
-    authoritative.body !== null && authoritative.body.length > MAX_REVIEW_BODY
+    execution.actual.terminalOrigin !== "runtime" ||
+    execution.actual.observedTerminalStatus !== "completed"
   ) {
+    return portOk(await unavailable(service.resultId, service.summary));
+  }
+  // Any additional same-author review comment on the exact head is evidence
+  // the structured journal cannot account for: completeness is unavailable.
+  const unaccounted = input.comments.filter(
+    (comment) =>
+      comment.author === expectedReviewer &&
+      comment.commitSha === pullRequest.head,
+  );
+  if (unaccounted.length > 0) {
+    return portOk(await unavailable(service.resultId, service.summary));
+  }
+  const findings = structuredFindings(journal.result, journal.reviewId);
+  if (findings.length > findingCap) {
     return portOk(await unavailable(service.resultId, service.summary));
   }
 
@@ -438,14 +345,79 @@ export async function normalizeReviewObservation(
     status: "completed",
     requestId,
     reviewer: expectedReviewer,
-    resultId: service.resultId,
-    completedAt: service.completedAt,
+    resultId: execution.resultId,
+    completedAt: journal.completedAt,
     observedHead,
     observedBase: reviewedBase,
-    findings: await toReviewFindings(extracted.findings),
-    summary: authoritative.body,
+    findings: await toReviewFindings(findings),
+    summary: journal.result.summary,
     receivedAt: input.receivedAt,
   });
+}
+
+/** Parse the standing review body as the exact durable journal; null on any
+ * malformed, truncated, over-bound or non-journal body. */
+async function parseStandingJournal(
+  body: string | null,
+): Promise<ReviewJournalV1 | null> {
+  if (body === null) return null;
+  try {
+    return await parseReviewJournalBody(body);
+  } catch {
+    return null;
+  }
+}
+
+/** Exact journal/service/request/GitHub object identity comparison. */
+function journalMatchesService(
+  journal: ReviewJournalV1,
+  input: ReviewNormalizationInputV1,
+  service: ReviewServiceReadV1,
+): boolean {
+  if (journal.phase !== "ready") return false;
+  if (journal.repository.owner !== input.repository.owner) return false;
+  if (journal.repository.name !== input.repository.name) return false;
+  if (journal.prNumber !== input.request.prNumber) return false;
+  if (journal.expectedHead !== input.request.head) return false;
+  if (journal.expectedHead !== input.pullRequest?.head) return false;
+  if (journal.expectedBase !== service.expectedBase) return false;
+  if (journal.operationKey !== input.expectedOperationKey) return false;
+  if (journal.requestId !== service.requestId) return false;
+  if (journal.publisher !== input.expectedReviewer) return false;
+  if (journal.reviewId !== service.githubReviewId) return false;
+  if (journal.completedAt !== service.completedAt) return false;
+  if (journal.resultDigest !== service.resultDigest) return false;
+  return true;
+}
+
+/**
+ * Full normalized finding messages from the validated structured result:
+ * title, complete multiline body, exact path and line range, bounded by the
+ * journal parser's combined message bound.
+ */
+function structuredFindings(
+  result: ReviewResultV1,
+  reviewId: number,
+): ParsedFindingV1[] {
+  return result.findings.map((finding, index) => ({
+    id: `github-review-${reviewId}-finding-${index}`,
+    severity: prioritySeverity(finding.priority),
+    path: finding.path,
+    message: findingMessage(finding),
+  }));
+}
+
+function prioritySeverity(priority: 0 | 1 | 2 | 3): SeverityV1 {
+  switch (priority) {
+    case 0:
+      return "P0";
+    case 1:
+      return "P1";
+    case 2:
+      return "P2";
+    case 3:
+      return "P3";
+  }
 }
 
 /**

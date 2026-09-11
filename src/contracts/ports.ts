@@ -98,6 +98,24 @@ export type WriteOutcomeV1 = "applied" | "ambiguous";
 // are locally validated commits; the trusted GitHub writer publishes them.
 // ---------------------------------------------------------------------------
 
+/**
+ * Native GitHub issue dependency metadata as observed at read time.
+ *
+ * `openBlockers` contains only blockers whose native state is currently open
+ * (closed blockers are excluded because closed native state is authoritative
+ * for the dependency) and retains cross-repository blockers: an open blocker
+ * in another repository still blocks this issue. `subIssueCount` is the total
+ * native sub-issue count, not a page slice.
+ */
+export interface GitHubIssueRelationsV1 {
+  openBlockers: {
+    owner: string;
+    name: string;
+    number: number;
+  }[];
+  subIssueCount: number;
+}
+
 export interface GitHubIssueV1 {
   number: number;
   title: string;
@@ -108,6 +126,12 @@ export interface GitHubIssueV1 {
   createdAt: number;
   updatedAt: number;
   closedAt: number | null;
+  /**
+   * Native dependency relations. Absence means unknown, NOT empty: a caller
+   * that requires dependency gating must treat a missing value as a source
+   * failure rather than an unblocked issue.
+   */
+  relations?: GitHubIssueRelationsV1;
 }
 
 export interface GitHubPullRequestV1 {
@@ -199,7 +223,11 @@ export interface PullRequestPublishV1 {
 /**
  * Review submission carries the exact PR/head/base identity plus a
  * deterministic operation key, so recovery works even when the request
- * response (and its request id) is lost.
+ * response (and its request id) is lost. `latestStartAt` is the last absolute
+ * instant at which the single model start may be admitted and `settleBy` the
+ * absolute instant by which the whole review (including interrupt and close)
+ * must settle; both are bounded by the original run's model cutoff and the
+ * loop deadline minus the full review bound and finalization margin.
  */
 export interface ReviewSubmissionV1 {
   prNumber: number;
@@ -207,12 +235,55 @@ export interface ReviewSubmissionV1 {
   expectedBase: GitSha;
   expectedReviewer: string;
   operationKey: string;
+  latestStartAt: number;
+  settleBy: number;
 }
 
 export interface ReviewRequestOutcomeV1 {
   outcome: WriteOutcomeV1;
   requestId: string | null;
   requestedAt: number;
+}
+
+// ---------------------------------------------------------------------------
+// Review drain: bounded lifecycle finalization of every owned review
+// operation. A `ready` durable journal awaiting publication is
+// restart-recoverable; an operation whose owned producer process was not
+// proved settled, or whose durable fault is sanitized below, is faulted.
+// ---------------------------------------------------------------------------
+
+export type ReviewDrainOutcomeV1 = "settled" | "recoverable" | "faulted";
+
+export interface ReviewDrainOperationV1 {
+  operationKey: string;
+  outcome: ReviewDrainOutcomeV1;
+  /** True when no owned producer process for this operation remains live. */
+  processSettled: boolean;
+  /** True when a durable ready journal records the operation's result. */
+  durable: boolean;
+  /** Journalled lifecycle phase observed at drain time. */
+  phase: "none" | "intent" | "running" | "ready" | "published";
+  /** Static sanitized fault code; null unless the outcome is faulted. */
+  fault: string | null;
+}
+
+export interface ReviewDrainReportV1 {
+  /** True only when no owned operation is faulted. */
+  ok: boolean;
+  operations: ReviewDrainOperationV1[];
+  /** Bounded static sanitized fault codes (never raw transport detail). */
+  faults: string[];
+  /** Absolute deadline the drain was bounded by. */
+  deadline: number;
+  interrupted: boolean;
+  completedAt: number;
+}
+
+export interface ReviewDrainRequestV1 {
+  /** Absolute deadline; the drain never exceeds it. */
+  deadline: number;
+  /** Interrupt owned producer sessions that are still running. */
+  interrupt: boolean;
 }
 
 /** Review observation is addressed by operation key + PR/head, never by id alone. */
@@ -285,6 +356,12 @@ export interface MergeRequestV1 {
 export type IssueCloseOutcomeV1 = "closed" | "already_closed";
 
 export interface GitHubPort {
+  /**
+   * Exact trusted review publisher identity configured for this port. The
+   * repair loop uses this value for every review request and receipt binding;
+   * there is no hardcoded connector default.
+   */
+  readonly reviewerIdentity: string;
   readIssue(issueNumber: number): Promise<PortResultV1<GitHubIssueV1 | null>>;
   listOpenIssues(): Promise<PortResultV1<GitHubIssueV1[]>>;
   /** Find the PR for a deterministic head branch; null when none exists. */
@@ -319,6 +396,16 @@ export interface GitHubPort {
     request: MergeRequestV1,
   ): Promise<PortResultV1<MergeOutcomeV1>>;
   closeIssue(issueNumber: number): Promise<PortResultV1<IssueCloseOutcomeV1>>;
+  /**
+   * Bounded lifecycle finalization forwarded to the SAME review-service
+   * transport instance the port submits through: admission stops, owned
+   * review operations are awaited or interrupted, and every journal is
+   * reconciled inside the supplied deadline. Never starts a model, never
+   * reserves budget and never writes repair state.
+   */
+  drainReviews(
+    request: ReviewDrainRequestV1,
+  ): Promise<PortResultV1<ReviewDrainReportV1>>;
 }
 
 // ---------------------------------------------------------------------------
@@ -423,9 +510,12 @@ export interface ReplayPort {
 
 // ---------------------------------------------------------------------------
 // ImplementationPort (m04): bounded pinned model session with a secret-free
-// checkout; the receipt records what was actually observed, never the CLI
-// label alone. A model candidate is a locally validated commit; only the
-// trusted GitHub writer publishes it.
+// checkout; the receipt records trusted request/runtime evidence — the exact
+// submitted provider/model/effort configuration bound to the exact
+// invocation/thread/turn and runtime routing/terminal events — never the CLI
+// label alone and never a backend-observed provider attestation. A model
+// candidate is a locally validated commit; only the trusted GitHub writer
+// publishes it.
 // ---------------------------------------------------------------------------
 
 export type ModelIdV1 = "gpt-5.6-luna";
@@ -453,11 +543,47 @@ export interface CandidateOutcomeV1 {
   changedPaths: string[];
 }
 
+/**
+ * Receipt of ONE bounded model run. The `actual` block is explicit
+ * request/runtime evidence: `evidenceKind: "request-runtime"` labels trusted
+ * submitted provider/model/effort configuration bound to the exact
+ * invocation/thread/turn identity and runtime routing/terminal events. It is
+ * NEVER a backend-observed provider attestation. The old field names are the
+ * existing contract; `observedModel`/`observedReasoning` document the
+ * acknowledged request/runtime metadata, not backend observation.
+ */
 export interface ModelRunReceiptV1 {
   invocationId: string;
   outcome: "completed" | "failed" | "interrupted";
   actual: {
+    /** Evidence class: request/runtime evidence, never backend attestation. */
+    evidenceKind: "request-runtime";
+    /** Acknowledged provider configuration submitted with the run. */
+    provider: string;
+    /** Exact app-server thread identity acknowledged for the run. */
+    threadId: string;
+    /** Exact app-server turn identity acknowledged for the run. */
+    turnId: string;
+    /**
+     * Terminal evidence origin: `runtime` means a correlated runtime terminal
+     * event was actually observed for the exact thread/turn; `host-timeout`
+     * means the host's own bounds elapsed without any runtime terminal and the
+     * receipt is failed ACCOUNTING only — the run never claims an observed
+     * terminal.
+     */
+    terminalOrigin: "runtime" | "host-timeout";
+    /**
+     * Observed runtime terminal status: `completed`/`interrupted`/`failed`
+     * when a correlated runtime terminal event was actually observed for the
+     * exact thread/turn, and null on a host timeout. The exact runtime status
+     * is preserved even when the host's own loop stop yields `interrupted`
+     * accounting over a completed terminal; null never pretends a terminal
+     * was observed.
+     */
+    observedTerminalStatus: "completed" | "interrupted" | "failed" | null;
+    /** Acknowledged model (request/runtime metadata, not backend observation). */
     observedModel: string;
+    /** Acknowledged reasoning effort (request/runtime metadata, not observation). */
     observedReasoning: string;
     durationMs: number;
     outputChars: number;
