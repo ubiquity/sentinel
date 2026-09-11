@@ -79,6 +79,7 @@ const steps: { name: string; args: string[] }[] = [
       "tests/state/",
       "tests/budget/",
       "tests/github/",
+      "tests/host/",
       "tests/adapters/gateway/",
       "tests/replay/",
       "tests/repair/",

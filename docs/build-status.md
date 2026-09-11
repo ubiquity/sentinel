@@ -36,7 +36,7 @@ source types4a68fb2d-3d5e-4702-b62c-7b9e697a5e7b passed;
 format08b43de7-fb50-469f-9fc7-ebcc0b8d159a passed. Prior overbroad loop run
 1a337dca-1476-4766-8a8a-8cbca5c9109a interrupted after9min in unchanged
 review-recovery scenarios; exact owned evidence process40520/group40524 settled.
-Its new reviewseverity diagnostic is preserved, separate from8pre-existing dirs.
+Its final uncertain-6809b374a6c54e5a diagnostic is preserved, separate from8pre-existing dirs.
 
 No-model local permission proof684f97e4-26f0-49d4-9d0b-4dd82feba8c3 passed:
 installed Codex0.154.0 named profile acknowledged, checkout read/write allowed,
@@ -45,6 +45,115 @@ outside read/write denied, session settled. Immutable probe V4 in
 failed helper execution; installed standalone runtime directory read access
 resolves traversal without granting unrelated host access. No model turn or
 credential in probe. Runtime profile wiring remains next; no live activation.
+
+Next bounded writer14:55UTC: profile binding in model-port/codex-reviewer and
+their tests only, canonical base68109c17659fa051cea7da522b8b5edf0edfd2e1.
+Same playbook hash7b2b79fd711a391f7d589a187be8103bb7d09b83296a11078abf5b917ca37850
+revalidated. Registered self-model-profile; GPT runs after settlement. First
+edit2min, handback5min/35calls, one final formatter on owned4files; no children,
+checks or Git. Named profile must be acknowledged before model turn; reviewer
+turn must retain profile rather than overriding it with legacy sandbox policy.
+
+Profile draft14:59UTC: DSH persisted616f1648/stream7701e2b8/PID61771 completed,
+live cwd/NODE_ENV and request Flash/max/workspace-write/ask verified.46calls
+exceeded35-call assignment; no test/Git/child execution. GPT profile receipt
+fc424d95-6c8b-48ba-940f-86d9c752986a passed, types9b96a5b7-8f00-4e59-8a96-045576806dc2
+passed. Primary requests runtime typeof validation for late JS profile values
+before acceptance. Issue5 body now records owner hourly approval; remains open
+until policy is applied to an actual local runner.
+
+Next bounded shared-foundation assignment15:03UTC: explicit local owner scope0
+in repository/cooldown validation and configured-repository selection, preserving
+positive-only App provider/gateway behavior; also correct profile typeof guards.
+One canonical writer, base68109c1 plus preserved profile draft.60calls/6min,
+first edit2min, no children/checks/Git, one formatter. GPT owns self-local-owner
+and self-model-profile checks after settlement. Credential choice uses existing
+GITHUB_TOKEN solely in trusted local host, no new credential/env interface.
+
+Local owner/profile accepted 2026-09-11 15:12 UTC: canonical commit
+713da23f73bc6880d1fcf3545e561db50ad986f5 includes the named profile and explicit
+no-App scope. Worker aa33660f completed and settled; actual Flash/max,
+workspace-write/ask, cwd and NODE_ENV verified. Actual 73 calls exceeded the
+60-call assignment; useful changes preserved and independently checked.
+Executed receipts in the namespace above: local owner
+f7a575da-b5e5-4884-997c-279fc1fdf318, profile
+2536bfd7-545a-4a59-9dbb-bba41e23eae5, source types
+012e6d00-7af1-4d4e-b73c-ee3b24cf69fb all passed. No live model start.
+
+Native issue relations assignment started 15:13 UTC in the same canonical lane
+at 713da23. DSH PID64347, exec15430, stream6291cfd7, persisted06276977;
+actual Flash/max, workspace-write/ask, cwd and NODE_ENV verified. Sole writer
+owns issue metadata/client/host pass-through, issue pre-admission gating,
+exact scope matching and focused fixtures. No children/checks/Git; 65 calls,
+8 minutes, first edit within2 minutes. Feedback at settled handback and bounded
+task-owned stop authority. GPT owns self-issue-relations acceptance. Native
+GraphQL read proved parent3 has13 children and actual blockedBy relations;
+closed dependencies must be distinguished from open ones. No successful empty
+metadata defaults. Local runtime composition and exact local restart receipt
+remain next, followed by integrated review/publication and actual launch.
+
+Dependency source integrated as ae0d91bf193984dad1ddb393008dbdf5efb7261f at
+15:23 UTC. The worker exceeded65 calls and continued inspecting completed edits;
+Astra verified PID/cwd/no children, stopped exact PID64347 and confirmed exit.
+No terminal result exists: this was salvaged partial output, not a compliant
+completed DSH run. GPT independently inspected it and executed successful
+client/local-scope84f4d742-df96-465d-a36a-ee9a332af3ea,
+MemoryState intake/admission3238b63c-0cb7-4c24-850c-2e08b80a3074,
+types759f845e-b5d4-4bc4-b7d7-dfcca8eacf75 and existing
+intake896e8cd2-02bc-4a0b-8c93-c1d1141b4a9e. Format receipt
+24d3c25f-5e9a-456e-9f3c-ec4236b2afa4 failed solely on one test signature wrap;
+the next writer owns only that formatting correction in the prior patch.
+
+Concrete local runtime assignment started15:23 UTC, same lane/baseae0d91b.
+PID66687/exec15167/streamce2cda2a/persisted5b3be74f. Live cwd/NODE_ENV and
+actual Flash/max/workspace-write/ask verified. Child environment is cleared
+and carries only the required DeepSeek credential. Own local.ts, main direct
+execution, deno task wiring and focused local tests; one writer, no children,
+tests or Git.85-call/12-minute checkpoint; no speculative post-edit rechecks.
+GPT owns runtime acceptance and activation. Runtime uses persistent per-task
+checkouts, private bare state, OS writer lock, unresolved-session crash latch,
+host-only credentials and one shared hourly Luna/max budget.
+
+Remote activation prerequisites applied15:25 UTC: ruleset22933441 is active
+on development, requires PR plus strict current-base test-local check from
+GitHub Actions app15368, no bypass actors, no force push/deletion. Existing
+runtime Codex review receipt gate remains additional. Readback of effective
+branch rules confirmed all4 rules. Unwired hosted repair353743354,
+release353743353 and observe353743351 workflows are disabled_manually;
+CI353613034 stays active. This stops recurring failed hosted jobs and does
+not mean the local scheduler is installed or running.
+
+Concrete local host ready for aggregate acceptance15:39 UTC. V1
+persisted5b3be74f/streamce2cda2a completed exit0,85calls; it ran the formatter
+twice despite one-pass assignment. V2 persisted6d1cd423/streamde07dca1/PID68585
+completed exit0,33calls, one formatter, no checks/Git/children. Both writers
+settled. V2 actual Flash/max/workspace-write/ask and live cwd/NODE_ENV verified.
+V2 fixes installed permission schema, uses existing bounded process-group Git
+runtime, records controller SHA separately from target base, writes status
+under lock, and includes local tests in canonical CI discovery.
+
+GPT executed V2 receipts: types4c14e9e9-6555-42d7-9019-6b4cda2dd4c8,
+unitc758c534-3e5e-4e96-86fc-72fe6b22cb47,
+formatd5d7e920-b1e1-401d-ac5d-98b50b6bf719,
+lint9b84c8a2-9cc2-458a-8fbb-49ca73b48897 all passed. Actual installed Codex
+permission proof69299b18-ee56-489a-b617-95c883de7426 passed using production
+renderLocalCodexConfig: zero model turns/credentials, allowed checkout
+read/write, denied outside read/write, complete session settlement.
+
+Initial live intake00c6ad22 and diagnostic218017f6 failed closed because the
+new private bare state had no snapshot. Astra then performed the authorized
+one-time bootstrap under runner.lock with expected-null CAS; readback proved
+genesis6206b09ea6a12a31e49c61e01a2da84a79be866a, zero work/reservations.
+Actual state root /Users/nv/.local/state/sentinel-local; do not reset it or
+reinitialize missing later state. Bootstrap receipt is external at
+/tmp/sentinel-self-20260911/bootstrap-state-receipt.json. Real production-client
+native issue read09c9b243-ec87-4c92-be66-31d5abae92cc then passed against GitHub,
+zero model starts and GitHub writes. One-time operator bootstrap is required;
+the local entrypoint intentionally cannot infer empty trusted state from an
+absent repair ref. No local model run or scheduler installation yet. Next:
+aggregate CI/review, local launch and live model/PR monitoring; deterministic
+local self-update receipt consumer remains to be completed before autonomous
+deployment/issue closure can succeed. No Deno receipt substitution.
 
 This section is the current authoritative task list. The dated history below
 is evidence, not a second queue. Only the current GPT-6 Astra integration owner

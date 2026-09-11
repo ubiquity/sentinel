@@ -78,7 +78,10 @@ function blocker(
   return { number, state, repository: { nameWithOwner } };
 }
 
-function blockedBy(nodes: unknown[], hasNextPage = false): Record<string, unknown> {
+function blockedBy(
+  nodes: unknown[],
+  hasNextPage = false,
+): Record<string, unknown> {
   return { nodes, pageInfo: { hasNextPage } };
 }
 

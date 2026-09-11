@@ -1,0 +1,1391 @@
+/**
+ * Concrete local repair host for the authorized ubiquity/sentinel target.
+ *
+ * One bounded hourly pass over real trusted capabilities: a private state
+ * root with an exclusive writer lock and crash marker, a persistent local
+ * state Git repository, a persistent trusted source checkout, one
+ * authenticated GitHub login, one shared durable cooldown gate, the real
+ * Codex review transport and a per-task isolated Codex implementation
+ * checkout. Incident and replay capability stay explicitly unavailable: no
+ * empty fixture is ever reported as success.
+ *
+ * Trusted inputs only. Tokens are read from the caller/environment, written
+ * to mode-0600 files outside every checkout and never reach a model child
+ * environment or a log line.
+ */
+
+import { isGitSha } from "../contracts/brands.ts";
+import type { GitSha } from "../contracts/brands.ts";
+import { portError, portOk, SystemClock } from "../contracts/ports.ts";
+import type {
+  Clock,
+  EncryptedArtifactV1,
+  GitHubCooldownGateV1,
+  GitHubPort,
+  ImplementationPort,
+  IncidentAdapter,
+  IncidentPageV1,
+  IsolatedReplayResultV1,
+  ModelRunReceiptV1,
+  ModelRunRequestV1,
+  PortResultV1,
+  RepairStateWriter,
+  ReplayPort,
+  ReplayRunRequestV1,
+  StateReadView,
+} from "../contracts/ports.ts";
+import type { BudgetReservationV1 } from "../contracts/budget-reservation.ts";
+import type { IncidentEvidenceV1 } from "../contracts/incident.ts";
+import { parseRepositoryConfigV1 } from "../contracts/repository-config.ts";
+import type { RepositoryConfigV1 } from "../contracts/repository-config.ts";
+import type { RepositoryIdentityV1 } from "../contracts/shared.ts";
+import { createRepairStateStore } from "../state/mod.ts";
+import { RollingStartBudget } from "../budget/mod.ts";
+import type { GitHubAuthProviderV1 } from "../github/auth.ts";
+import { GitHubApiClient } from "../github/client.ts";
+import { fetchHttpTransport, headerMap } from "../github/http.ts";
+import type { HttpTransportV1 } from "../github/http.ts";
+import { GitReviewSnapshot } from "../github/review-snapshot.ts";
+import { CodexStructuredReviewer } from "../github/codex-reviewer.ts";
+import { GitHubCodexReviewTransport } from "../github/codex-review-transport.ts";
+import {
+  type CodexSessionV1,
+  CodexSubprocessSession,
+} from "../repair/codex-transport.ts";
+import {
+  type CandidateCommitterV1,
+  CodexImplementationPort,
+  LocalCandidateCommitter,
+} from "../repair/model-port.ts";
+import { DurableGitHubCooldownGate } from "../repair/github-cooldown.ts";
+import type { RepairCycleOutcomeV1 } from "../repair/loop.ts";
+import { DenoReplayRuntime } from "../replay/runtime.ts";
+import { composeGitHubHost } from "./github.ts";
+import { runRepairEntrypoint } from "../main.ts";
+
+/** Fixed local target identity (explicit no-App owner credential scope). */
+const LOCAL_REPOSITORY: RepositoryIdentityV1 = {
+  owner: "ubiquity",
+  name: "sentinel",
+  installationId: 0,
+};
+
+const REMOTE_URL = "https://github.com/ubiquity/sentinel.git";
+const API_BASE_URL = "https://api.github.com";
+const API_USER_URL = "https://api.github.com/user";
+const UOS_BASE_URL = "http://127.0.0.1:8000/v1";
+
+const GIT_TIMEOUT_MS = 120_000;
+const GIT_MAX_OUTPUT_BYTES = 1024 * 1024;
+const RUN_DEADLINE_MS = 3_600_000;
+const STEP_LIMIT = 64;
+const SESSION_DEADLINE_MS = 1_500_000;
+const REVIEW_SESSION_DEADLINE_MS = 1_200_000;
+const HOUR_MS = 3_600_000;
+
+/** Applied runtime implementation model identity (fixed, not overridable). */
+const IMPLEMENTATION_MODEL = "gpt-5.6-luna";
+const IMPLEMENTATION_REASONING = "max";
+
+const UNAVAILABLE_DETAIL = "local target does not provide this capability";
+
+const STATIC_INVALID_OPTIONS =
+  "local repair host rejected: host options are invalid";
+const STATIC_INVALID_CONTROLLER =
+  "local repair host rejected: controller SHA is not an exact lowercase 40-hex commit SHA";
+const STATIC_ORPHAN =
+  "local repair host refused: a prior run left an active session marker; orphan recovery is not reclaimed by time or process guess";
+const STATIC_UNSETTLED =
+  "local repair host failed: owned model sessions did not settle; the session marker was retained";
+const STATIC_GIT_FAILED =
+  "local repair host git command failed; output withheld";
+const STATIC_GIT_BOUND =
+  "local repair host git command exceeded its bounded output";
+const STATIC_GITHUB_LOGIN =
+  "local repair host rejected: authenticated GitHub login is unavailable";
+const STATIC_MODEL_INPUT =
+  "local repair host rejected: model request is invalid";
+const STATIC_CHECKOUT =
+  "local repair host rejected: isolated model checkout is unavailable";
+const STATIC_IMPORT =
+  "local repair host failed: candidate objects could not be imported into the trusted source repository";
+const STATIC_MARKER =
+  "local repair host failed: the session marker could not be cleared";
+
+/** Caller-supplied trusted inputs for one bounded local run. */
+export interface LocalRepairHostOptionsV1 {
+  stateRoot: string;
+  sourceDir: string;
+  controllerSha: GitSha;
+  githubToken: string;
+  modelToken: string;
+  codexExecutable: string;
+  denoExecutable: string;
+  trustedPath: string;
+}
+
+/** Outcome of one startup attempt. Busy is an explicit refusal, not a wait. */
+export type LocalRepairHostRunV1 =
+  | { status: "busy" }
+  | { status: "ran"; outcome: RepairCycleOutcomeV1; statusPath: string };
+
+/** A prior marker proves a possible orphaned writer; never reclaimed here. */
+export class LocalHostOrphanError extends Error {
+  constructor() {
+    super(STATIC_ORPHAN);
+    this.name = "LocalHostOrphanError";
+  }
+}
+
+/** Owned sessions did not settle; the marker and lock are retained. */
+export class LocalHostSettlementError extends Error {
+  constructor() {
+    super(STATIC_UNSETTLED);
+    this.name = "LocalHostSettlementError";
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Fixed configuration (pure; no I/O)
+// ---------------------------------------------------------------------------
+
+/** The one fixed local repository configuration, through the frozen parser. */
+export function createLocalRepositoryConfig(): RepositoryConfigV1 {
+  return parseRepositoryConfigV1({
+    version: "v1",
+    kind: "repository_config",
+    repository: { ...LOCAL_REPOSITORY },
+    baseBranch: "development",
+    adapter: { kind: "github" },
+    commands: { replay: "replay_capture", test: "test_ci" },
+    commandRegistry: {
+      version: "v1",
+      commands: {
+        test_ci: {
+          executable: "deno",
+          args: ["task", "test:local"],
+          maxDurationMs: 1_800_000,
+          maxOutputBytes: 4_194_304,
+        },
+        replay_capture: {
+          executable: "deno",
+          args: ["task", "replay:capture"],
+          maxDurationMs: 600_000,
+          maxOutputBytes: 1_048_576,
+        },
+      },
+    },
+    protectedPaths: [
+      ".github/workflows/",
+      "AGENTS.md",
+      "MASTER-PLAN.md",
+      "docs/build-status.md",
+      "src/host/local.ts",
+      "src/host/local-supervisor.ts",
+      "src/budget/",
+    ],
+    build: { projectId: null, acceptance: null },
+    secretRef: "secret://host/injected/sentinel-local-owner",
+    liveStartLimits: { perHour: 1, perSevenDays: 168 },
+    sessionBound: { maxDurationMs: 1_200_000, maxOutputChars: 400_000 },
+    retention: null,
+    stabilityPolicy: null,
+  });
+}
+
+/** Inputs of one isolated Codex client configuration. */
+export interface LocalCodexConfigInputV1 {
+  profile: "sentinel-local" | "sentinel-review";
+  /** Private model token file read by the app-server auth command. */
+  tokenFile: string;
+  /** HOME of shell commands: the isolated checkout. */
+  shellHome: string;
+  shellPath: string;
+  shellTmpDir: string;
+  shellDenoDir: string;
+  codexDistributionDir: string;
+  denoExecutable: string;
+  /** Exact extra writable grants outside the checkout (empty for review). */
+  writeGrants: string[];
+}
+
+/**
+ * Render the per-client Codex configuration: provider uos over the local
+ * app-server gateway, top-level approval/login/permission defaults, the proved
+ * flat filesystem and network permission tables (relative grants live under
+ * `:workspace_roots`) and a fixed minimal environment. Pure text; no token
+ * value is ever included.
+ */
+export function renderLocalCodexConfig(input: LocalCodexConfigInputV1): string {
+  const profile = input.profile;
+  const lines = [
+    "# Sentinel local host client config (generated; do not edit).",
+    'approval_policy = "never"',
+    "allow_login_shell = false",
+    `default_permissions = ${toml(profile)}`,
+    'model_provider = "uos"',
+    "",
+    "[model_providers.uos]",
+    'name = "uos"',
+    `base_url = "${UOS_BASE_URL}"`,
+    'wire_api = "responses"',
+    "",
+    "[model_providers.uos.auth]",
+    'command = "/bin/cat"',
+    `args = [${toml(input.tokenFile)}]`,
+    "",
+    "[features]",
+    "apps = false",
+    "multi_agent = false",
+    "plugins = false",
+    "web_search = false",
+    "",
+    `[permissions.${profile}.filesystem]`,
+    '":minimal" = "read"',
+    `${toml(input.codexDistributionDir)} = "read"`,
+    `${toml(input.denoExecutable)} = "read"`,
+  ];
+  if (profile === "sentinel-local") {
+    for (const grant of input.writeGrants) {
+      lines.push(`${toml(grant)} = "write"`);
+    }
+  }
+  lines.push(
+    "",
+    `[permissions.${profile}.filesystem.":workspace_roots"]`,
+  );
+  if (profile === "sentinel-local") {
+    lines.push(
+      '"." = "write"',
+      '".git" = "read"',
+      '".codex" = "read"',
+    );
+  } else {
+    lines.push('"." = "read"');
+  }
+  lines.push(
+    "",
+    `[permissions.${profile}.network]`,
+    "enabled = false",
+    "",
+    "[shell_environment_policy]",
+    'inherit = "none"',
+    "",
+    "[shell_environment_policy.set]",
+    `PATH = ${toml(input.shellPath)}`,
+    `HOME = ${toml(input.shellHome)}`,
+    `TMPDIR = ${toml(input.shellTmpDir)}`,
+    `DENO_DIR = ${toml(input.shellDenoDir)}`,
+    "",
+  );
+  return lines.join("\n");
+}
+
+/** Stable private checkout key of one task (SHA-256 hex). */
+export async function localCheckoutKey(taskId: string): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(taskId),
+  );
+  return [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+// ---------------------------------------------------------------------------
+// Exclusive writer lock (narrow, testable)
+// ---------------------------------------------------------------------------
+
+/**
+ * Acquire the exclusive state-root writer lock without waiting: a held lock
+ * returns null immediately. The caller holds the file open and closes it only
+ * after every owned session has settled.
+ */
+export async function tryAcquireLocalHostLock(
+  stateRoot: string,
+): Promise<Deno.FsFile | null> {
+  const lockPath = joinPath(stateRoot, "runner.lock");
+  const file = await Deno.open(lockPath, {
+    create: true,
+    read: true,
+    write: true,
+    mode: 0o600,
+  });
+  try {
+    if (file.tryLockSync(true)) return file;
+  } catch {
+    // fall through to close + refusal
+  }
+  file.close();
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Entrypoints
+// ---------------------------------------------------------------------------
+
+/**
+ * Run one bounded local repair pass over real trusted capabilities. Returns
+ * `busy` when another writer holds the lock; throws on an orphaned marker,
+ * an unsettled session set or any host failure. Tokens never leave this
+ * process boundary.
+ */
+export async function runLocalRepairHost(
+  options: LocalRepairHostOptionsV1,
+): Promise<LocalRepairHostRunV1> {
+  const input = readLocalHostOptions(options);
+  const clock = new SystemClock();
+  const startedAt = clock.now();
+  const invocationId = crypto.randomUUID();
+  await ensurePrivateDir(input.stateRoot);
+  const lock = await tryAcquireLocalHostLock(input.stateRoot);
+  if (lock === null) return { status: "busy" };
+
+  const markerPath = joinPath(input.stateRoot, "session-active.json");
+  const statusPath = joinPath(input.stateRoot, "status.json");
+  const tracker = new LocalSessionTracker();
+  const http = fetchHttpTransport();
+  let markerWritten = false;
+  let settled = true;
+  let failure: unknown = null;
+  let outcome: RepairCycleOutcomeV1 | null = null;
+  let state: (StateReadView & RepairStateWriter) | null = null;
+  let login: string | null = null;
+  let targetBaseSha: string | null = null;
+  let config: RepositoryConfigV1 | null = null;
+
+  try {
+    // Fail closed on a prior marker before any new session exists.
+    if (await pathExists(markerPath)) throw new LocalHostOrphanError();
+
+    const scratch = joinPath(input.stateRoot, "state-scratch");
+    await ensurePrivateDir(scratch);
+    const stateGitPath = joinPath(input.stateRoot, "state.git");
+    await ensureBareStateRepository(stateGitPath, input, scratch);
+    const sourcePath = joinPath(input.stateRoot, "source");
+    await prepareSourceRepository(sourcePath, input, scratch);
+    targetBaseSha = await refreshDevelopment(sourcePath, input, scratch);
+
+    state = createRepairStateStore({
+      scratchDir: scratch,
+      remoteUrl: stateGitPath,
+    });
+
+    // One durable gate for the login read, the API client and the port.
+    const gate = new DurableGitHubCooldownGate({ state, clock });
+    login = await readAuthenticatedLogin(input.githubToken, http, gate);
+
+    // Marker BEFORE any model session or subprocess can start.
+    await writePrivateFile(
+      markerPath,
+      JSON.stringify({
+        version: "v1",
+        kind: "local_session_active",
+        invocationId,
+        checkoutPath: sourcePath,
+        startedAt,
+      }) + "\n",
+    );
+    markerWritten = true;
+
+    const appliedConfig = createLocalRepositoryConfig();
+    config = appliedConfig;
+    const reviewCheckout = joinPath(input.stateRoot, "review-checkout");
+    const reviewClientHome = joinPath(input.stateRoot, "clients", "review");
+    const reviewTmpDir = joinPath(input.stateRoot, "tmp", "review");
+    const reviewDenoDir = joinPath(input.stateRoot, "deno", "review");
+    await ensureReviewClient({
+      reviewCheckout,
+      reviewClientHome,
+      reviewTmpDir,
+      reviewDenoDir,
+      token: input.modelToken,
+      codexExecutable: input.codexExecutable,
+      denoExecutable: input.denoExecutable,
+      trustedPath: input.trustedPath,
+    });
+    const github = composeLocalGitHub({
+      clock,
+      state,
+      gate,
+      http,
+      token: input.githubToken,
+      login,
+      invocationId,
+      sourcePath,
+      scratch,
+      reviewCheckout,
+      reviewClientHome,
+      reviewTmpDir,
+      reviewDenoDir,
+      trustedPath: input.trustedPath,
+      codexExecutable: input.codexExecutable,
+      tracker,
+    });
+    const model = new LocalCheckoutModelPort({
+      stateRoot: input.stateRoot,
+      sourcePath,
+      scratch,
+      trustedPath: input.trustedPath,
+      codexExecutable: input.codexExecutable,
+      denoExecutable: input.denoExecutable,
+      modelToken: input.modelToken,
+      tracker,
+    });
+    outcome = await runRepairEntrypoint({
+      clock,
+      state,
+      configs: [appliedConfig],
+      controllerSha: input.controllerSha,
+      github: github,
+      githubCooldown: gate,
+      incidents: unavailableIncidents,
+      replay: unavailableReplay,
+      model,
+      budget: new RollingStartBudget({
+        clock,
+        state,
+        configs: [appliedConfig],
+      }),
+    }, {
+      deadline: startedAt + RUN_DEADLINE_MS,
+      stepLimit: STEP_LIMIT,
+    });
+  } catch (error) {
+    failure = error;
+  } finally {
+    settled = await tracker.settleAll();
+    if (settled) {
+      try {
+        if (markerWritten) {
+          try {
+            await Deno.remove(markerPath);
+          } catch {
+            failure ??= new Error(STATIC_MARKER);
+          }
+        }
+        if (state !== null && outcome !== null && config !== null) {
+          // Status is persisted while this run still owns the runner lock so
+          // a successor can never be overwritten by a prior runner's write.
+          try {
+            await writeLocalStatus({
+              state,
+              statusPath,
+              invocationId,
+              controllerSha: input.controllerSha,
+              targetBaseSha,
+              login,
+              config,
+              startedAt,
+              finishedAt: clock.now(),
+              outcome,
+            });
+          } catch (error) {
+            failure ??= error;
+          }
+        }
+      } finally {
+        lock.close();
+      }
+    }
+  }
+
+  if (!settled) throw new LocalHostSettlementError();
+  if (failure !== null) throw failure;
+  if (outcome === null) throw new Error(STATIC_INVALID_OPTIONS);
+  return { status: "ran", outcome, statusPath };
+}
+
+/**
+ * Production direct startup. Reads exactly HOME, PATH, GITHUB_TOKEN and
+ * UOS_AI_TOKEN; the source directory comes from this module URL and the
+ * controller SHA from trusted `git rev-parse HEAD`.
+ */
+export async function startLocalRepairHostFromEnv(): Promise<
+  LocalRepairHostRunV1
+> {
+  const home = requireEnv("HOME");
+  const trustedPath = requireEnv("PATH");
+  const githubToken = requireEnv("GITHUB_TOKEN");
+  const modelToken = requireEnv("UOS_AI_TOKEN");
+  const sourceDir = decodeURIComponent(
+    new URL("../../", import.meta.url).pathname,
+  );
+  const stateRoot = joinPath(home, ".local", "state", "sentinel-local");
+  await ensurePrivateDir(stateRoot);
+  const scratch = joinPath(stateRoot, "state-scratch");
+  await ensurePrivateDir(scratch);
+  const controllerSha = await readControllerSha(
+    sourceDir,
+    trustedPath,
+    scratch,
+  );
+  return await runLocalRepairHost({
+    stateRoot,
+    sourceDir,
+    controllerSha,
+    githubToken,
+    modelToken,
+    codexExecutable: joinPath(home, ".codex", "bin", "codex"),
+    denoExecutable: Deno.execPath(),
+    trustedPath,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Unsupported capability ports (never successful empty fixtures)
+// ---------------------------------------------------------------------------
+
+/** Static unavailable result for every unsupported port call. */
+function unavailable<Value>(): PortResultV1<Value> {
+  return portError("unavailable", UNAVAILABLE_DETAIL);
+}
+
+const unavailableIncidents: IncidentAdapter = {
+  listUnresolvedIncidents: (_cursor, _limit) =>
+    Promise.resolve(unavailable<IncidentPageV1>()),
+  readIncident: (_incidentId) =>
+    Promise.resolve(unavailable<IncidentEvidenceV1 | null>()),
+  readArtifact: (_ref, _maxBytes) =>
+    Promise.resolve(unavailable<EncryptedArtifactV1 | null>()),
+};
+
+const unavailableReplay: ReplayPort = {
+  runReplay: (_request: ReplayRunRequestV1) =>
+    Promise.resolve(unavailable<IsolatedReplayResultV1>()),
+};
+
+// ---------------------------------------------------------------------------
+// GitHub composition (one client, one gate, one actor)
+// ---------------------------------------------------------------------------
+
+interface LocalGitHubInputV1 {
+  clock: Clock;
+  state: StateReadView & RepairStateWriter;
+  gate: GitHubCooldownGateV1;
+  http: HttpTransportV1;
+  token: string;
+  login: string;
+  invocationId: string;
+  sourcePath: string;
+  scratch: string;
+  reviewCheckout: string;
+  reviewClientHome: string;
+  reviewTmpDir: string;
+  reviewDenoDir: string;
+  trustedPath: string;
+  codexExecutable: string;
+  tracker: LocalSessionTracker;
+}
+
+/** Compose the one authenticated GitHub port over the shared cooldown gate. */
+function composeLocalGitHub(input: LocalGitHubInputV1): GitHubPort {
+  const repository = { ...LOCAL_REPOSITORY };
+  const auth: GitHubAuthProviderV1 = {
+    authorizationHeader: () => Promise.resolve(portOk(`Bearer ${input.token}`)),
+  };
+  const gate = input.gate;
+  const client = new GitHubApiClient({
+    repository,
+    apiBaseUrl: API_BASE_URL,
+    http: input.http,
+    auth,
+    cooldownGate: gate,
+    clock: input.clock,
+    includeIssueRelations: true,
+  });
+  const snapshot = new GitReviewSnapshot({
+    trustedPath: input.trustedPath,
+    repositoryDir: input.sourcePath,
+    gitExecutable: trustedGitPath(input.trustedPath),
+  });
+  const reviewer = new CodexStructuredReviewer({
+    provider: "uos",
+    sessionCwd: input.reviewCheckout,
+    permissionProfile: "sentinel-review",
+    openSession: ({ cwd }) =>
+      input.tracker.open(() =>
+        new CodexSubprocessSession({
+          command: [input.codexExecutable, "app-server"],
+          cwd,
+          env: codexChildEnv(
+            input.reviewClientHome,
+            input.reviewTmpDir,
+            input.reviewDenoDir,
+            input.trustedPath,
+          ),
+          operationDeadlineMs: REVIEW_SESSION_DEADLINE_MS,
+        })
+      ),
+  });
+  const reviewService = new GitHubCodexReviewTransport({
+    client,
+    repository,
+    publisher: input.login,
+    clock: input.clock,
+    ownerRunId: input.invocationId,
+    snapshot,
+    reviewer,
+    maxActiveReviews: 1,
+  });
+  const host = composeGitHubHost({
+    repository,
+    http: input.http,
+    auth,
+    cooldownGate: gate,
+    clock: input.clock,
+    reviewService,
+    trustedPrAuthor: input.login,
+    trustedReviewer: input.login,
+    trustedResolutionAuthors: [input.login],
+    git: {
+      localDir: input.sourcePath,
+      remoteUrl: REMOTE_URL,
+      gitHome: input.scratch,
+      extraEnv: githubGitAuthEnv(input.token),
+      gitPath: trustedGitPath(input.trustedPath),
+      timeoutMs: GIT_TIMEOUT_MS,
+      maxOutputBytes: GIT_MAX_OUTPUT_BYTES,
+    },
+    includeIssueRelations: true,
+  });
+  return host.port;
+}
+
+/** Scoped Basic auth for trusted git only; never in a URL or config file. */
+function githubGitAuthEnv(token: string): Record<string, string> {
+  const basic = btoa(`x-access-token:${token}`);
+  return {
+    GIT_CONFIG_COUNT: "1",
+    GIT_CONFIG_KEY_0: `http.${REMOTE_URL}.extraheader`,
+    GIT_CONFIG_VALUE_0: `Authorization: Basic ${basic}`,
+  };
+}
+
+/** Authenticate the current owner login; strict nonempty bounded login. */
+async function readAuthenticatedLogin(
+  token: string,
+  http: HttpTransportV1,
+  gate: GitHubCooldownGateV1,
+): Promise<string> {
+  const admission = await gate.beforeRequest(LOCAL_REPOSITORY.installationId);
+  if (!admission.ok) throw new Error(STATIC_GITHUB_LOGIN);
+  const response = await http({
+    method: "GET",
+    url: API_USER_URL,
+    headers: headerMap({
+      accept: "application/vnd.github+json",
+      authorization: `Bearer ${token}`,
+      "user-agent": "sentinel-local-owner",
+      "x-github-api-version": "2022-11-28",
+    }),
+    body: null,
+  });
+  if (response.status !== 200) throw new Error(STATIC_GITHUB_LOGIN);
+  let login: unknown = null;
+  try {
+    login = (JSON.parse(response.bodyText) as { login?: unknown } | null)
+      ?.login;
+  } catch {
+    throw new Error(STATIC_GITHUB_LOGIN);
+  }
+  if (
+    typeof login !== "string" ||
+    !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(login)
+  ) {
+    throw new Error(STATIC_GITHUB_LOGIN);
+  }
+  return login;
+}
+
+// ---------------------------------------------------------------------------
+// Implementation port: one persistent isolated checkout per task
+// ---------------------------------------------------------------------------
+
+interface LocalModelInputV1 {
+  stateRoot: string;
+  sourcePath: string;
+  scratch: string;
+  trustedPath: string;
+  codexExecutable: string;
+  denoExecutable: string;
+  modelToken: string;
+  tracker: LocalSessionTracker;
+}
+
+/**
+ * Model port wrapper over the existing CodexImplementationPort. It owns one
+ * persistent private checkout per task (never reset or recloned), commits
+ * model edits atop the saved candidate, and imports the exact candidate head
+ * into the trusted source object repository before returning.
+ */
+class LocalCheckoutModelPort implements ImplementationPort {
+  constructor(private readonly input: LocalModelInputV1) {}
+
+  async runModel(
+    request: ModelRunRequestV1,
+  ): Promise<PortResultV1<ModelRunReceiptV1>> {
+    if (
+      request === null || typeof request !== "object" || !isGitSha(request.base)
+    ) {
+      return portError("unavailable", STATIC_MODEL_INPUT);
+    }
+    const key = await localCheckoutKey(request.taskId);
+    const prepared = await ensureTaskCheckout({
+      taskId: request.taskId,
+      base: request.base,
+      key,
+      stateRoot: this.input.stateRoot,
+      sourcePath: this.input.sourcePath,
+      scratch: this.input.scratch,
+      trustedPath: this.input.trustedPath,
+    });
+    if (!prepared.ok) return portError("unavailable", STATIC_CHECKOUT);
+
+    const clientHome = joinPath(this.input.stateRoot, "clients", key);
+    const tmpDir = joinPath(this.input.stateRoot, "tmp", key);
+    const denoDir = joinPath(this.input.stateRoot, "deno", key);
+    await ensureTaskClient({
+      clientHome,
+      tmpDir,
+      denoDir,
+      checkout: prepared.checkout,
+      token: this.input.modelToken,
+      codexExecutable: this.input.codexExecutable,
+      denoExecutable: this.input.denoExecutable,
+      trustedPath: this.input.trustedPath,
+    });
+
+    const commitBase = prepared.commitBase;
+    const committer: CandidateCommitterV1 = {
+      // Later review corrections commit uncommitted edits atop the saved
+      // candidate; the default resolver still binds request.base.
+      commit: () =>
+        new LocalCandidateCommitter(prepared.checkout).commit(commitBase),
+    };
+    const port = new CodexImplementationPort({
+      openSession: () =>
+        Promise.resolve(
+          this.input.tracker.open(() =>
+            new CodexSubprocessSession({
+              command: [this.input.codexExecutable, "app-server"],
+              cwd: prepared.checkout,
+              env: codexChildEnv(
+                clientHome,
+                tmpDir,
+                denoDir,
+                this.input.trustedPath,
+              ),
+              operationDeadlineMs: SESSION_DEADLINE_MS,
+            })
+          ),
+        ),
+      checkoutDir: prepared.checkout,
+      modelProvider: "uos",
+      permissionProfile: "sentinel-local",
+      commitCandidate: committer,
+    });
+
+    const result = await port.runModel(request);
+    if (!result.ok) return result;
+    const head = result.value.candidate?.head ?? null;
+    if (head !== null) {
+      const imported = await importCandidate({
+        sourcePath: this.input.sourcePath,
+        checkout: prepared.checkout,
+        head,
+        key,
+        scratch: this.input.scratch,
+        trustedPath: this.input.trustedPath,
+      });
+      if (!imported) return portError("unavailable", STATIC_IMPORT);
+    }
+    return result;
+  }
+}
+
+/** Create the one-time checkout at the exact base; reuse is exact-match only. */
+async function ensureTaskCheckout(input: {
+  taskId: string;
+  base: GitSha;
+  key: string;
+  stateRoot: string;
+  sourcePath: string;
+  scratch: string;
+  trustedPath: string;
+}): Promise<
+  { ok: true; checkout: string; commitBase: GitSha } | { ok: false }
+> {
+  const checkoutsDir = joinPath(input.stateRoot, "checkouts");
+  const checkout = joinPath(checkoutsDir, input.key);
+  const mappingPath = joinPath(checkoutsDir, `${input.key}.json`);
+  if (await pathExists(checkout)) {
+    const mapping = await readCheckoutMapping(mappingPath);
+    if (
+      mapping === null || mapping.taskId !== input.taskId ||
+      mapping.base !== input.base
+    ) {
+      return { ok: false };
+    }
+  } else {
+    if (await pathExists(mappingPath)) return { ok: false };
+    await ensurePrivateDir(checkoutsDir);
+    const cloned = await runTrustedGitResult({
+      args: [
+        "clone",
+        "--no-hardlinks",
+        "--no-checkout",
+        input.sourcePath,
+        checkout,
+      ],
+      cwd: input.stateRoot,
+      scratch: input.scratch,
+      trustedPath: input.trustedPath,
+    });
+    if (cloned.code !== 0) return { ok: false };
+    const fetched = await runTrustedGitResult({
+      args: [
+        "-C",
+        checkout,
+        "fetch",
+        "--no-tags",
+        input.sourcePath,
+        "+refs/sentinel/candidates/*:refs/sentinel/candidates/*",
+      ],
+      cwd: input.stateRoot,
+      scratch: input.scratch,
+      trustedPath: input.trustedPath,
+    });
+    if (fetched.code !== 0) return { ok: false };
+    const detached = await runTrustedGitResult({
+      args: [
+        "-C",
+        checkout,
+        "-c",
+        "advice.detachedHead=false",
+        "checkout",
+        "--detach",
+        input.base,
+      ],
+      cwd: input.stateRoot,
+      scratch: input.scratch,
+      trustedPath: input.trustedPath,
+    });
+    if (detached.code !== 0) return { ok: false };
+    await writePrivateFile(
+      mappingPath,
+      JSON.stringify({
+        version: "v1",
+        kind: "local_checkout",
+        taskId: input.taskId,
+        base: input.base,
+        key: input.key,
+      }) + "\n",
+    );
+  }
+
+  const headRead = await runTrustedGitResult({
+    args: ["-C", checkout, "rev-parse", "HEAD"],
+    cwd: input.stateRoot,
+    scratch: input.scratch,
+    trustedPath: input.trustedPath,
+  });
+  const head = headRead.code === 0 ? headRead.stdout.trim() : "";
+  if (!isGitSha(head)) return { ok: false };
+  const ancestor = await runTrustedGitResult({
+    args: ["-C", checkout, "merge-base", "--is-ancestor", input.base, head],
+    cwd: input.stateRoot,
+    scratch: input.scratch,
+    trustedPath: input.trustedPath,
+  });
+  if (ancestor.code !== 0) return { ok: false };
+  return { ok: true, checkout, commitBase: head };
+}
+
+/** Fetch the exact candidate head into the trusted source object repo. */
+async function importCandidate(input: {
+  sourcePath: string;
+  checkout: string;
+  head: GitSha;
+  key: string;
+  scratch: string;
+  trustedPath: string;
+}): Promise<boolean> {
+  const ref = `refs/sentinel/candidates/${input.key}`;
+  const fetched = await runTrustedGitResult({
+    args: [
+      "-C",
+      input.sourcePath,
+      "fetch",
+      "--no-tags",
+      input.checkout,
+      `+HEAD:${ref}`,
+    ],
+    cwd: input.sourcePath,
+    scratch: input.scratch,
+    trustedPath: input.trustedPath,
+  });
+  if (fetched.code !== 0) return false;
+  const observed = await runTrustedGitResult({
+    args: ["-C", input.sourcePath, "rev-parse", ref],
+    cwd: input.sourcePath,
+    scratch: input.scratch,
+    trustedPath: input.trustedPath,
+  });
+  return observed.code === 0 && observed.stdout.trim() === input.head;
+}
+
+/** Write the isolated client home, token file and config for one task. */
+async function ensureTaskClient(input: {
+  clientHome: string;
+  tmpDir: string;
+  denoDir: string;
+  checkout: string;
+  token: string;
+  codexExecutable: string;
+  denoExecutable: string;
+  trustedPath: string;
+}): Promise<void> {
+  await ensurePrivateDir(input.clientHome);
+  await ensurePrivateDir(input.tmpDir);
+  await ensurePrivateDir(input.denoDir);
+  const tokenFile = joinPath(input.clientHome, "model.token");
+  await writePrivateFile(tokenFile, input.token);
+  await writePrivateFile(
+    joinPath(input.clientHome, "config.toml"),
+    renderLocalCodexConfig({
+      profile: "sentinel-local",
+      tokenFile,
+      shellHome: input.checkout,
+      shellPath: input.trustedPath,
+      shellTmpDir: input.tmpDir,
+      shellDenoDir: input.denoDir,
+      codexDistributionDir: codexDistributionDir(input.codexExecutable),
+      denoExecutable: input.denoExecutable,
+      writeGrants: [input.tmpDir, input.denoDir],
+    }),
+  );
+}
+
+/** Isolated read-only review client home, token file and profile config. */
+async function ensureReviewClient(input: {
+  reviewCheckout: string;
+  reviewClientHome: string;
+  reviewTmpDir: string;
+  reviewDenoDir: string;
+  token: string;
+  codexExecutable: string;
+  denoExecutable: string;
+  trustedPath: string;
+}): Promise<void> {
+  await ensurePrivateDir(input.reviewCheckout);
+  await ensurePrivateDir(input.reviewClientHome);
+  await ensurePrivateDir(input.reviewTmpDir);
+  await ensurePrivateDir(input.reviewDenoDir);
+  const tokenFile = joinPath(input.reviewClientHome, "model.token");
+  await writePrivateFile(tokenFile, input.token);
+  await writePrivateFile(
+    joinPath(input.reviewClientHome, "config.toml"),
+    renderLocalCodexConfig({
+      profile: "sentinel-review",
+      tokenFile,
+      shellHome: input.reviewCheckout,
+      shellPath: input.trustedPath,
+      shellTmpDir: input.reviewTmpDir,
+      shellDenoDir: input.reviewDenoDir,
+      codexDistributionDir: codexDistributionDir(input.codexExecutable),
+      denoExecutable: input.denoExecutable,
+      writeGrants: [],
+    }),
+  );
+}
+
+/** Minimal child environment: no GitHub, UOS or host credentials. */
+function codexChildEnv(
+  clientHome: string,
+  tmpDir: string,
+  denoDir: string,
+  trustedPath: string,
+): Record<string, string> {
+  return {
+    PATH: trustedPath,
+    HOME: clientHome,
+    CODEX_HOME: clientHome,
+    TMPDIR: tmpDir,
+    DENO_DIR: denoDir,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Session settlement tracking
+// ---------------------------------------------------------------------------
+
+/** Every session this run opened, so close/settlement is verified once. */
+class LocalSessionTracker {
+  private readonly sessions = new Set<CodexSessionV1>();
+
+  open<Session extends CodexSessionV1>(factory: () => Session): Session {
+    const session = factory();
+    this.sessions.add(session);
+    return session;
+  }
+
+  /** Close every owned session and prove settlement; never throws. */
+  async settleAll(): Promise<boolean> {
+    let settled = true;
+    for (const session of [...this.sessions]) {
+      try {
+        await session.close();
+      } catch {
+        settled = false;
+      }
+      try {
+        if (session.isSettled?.() === false) settled = false;
+      } catch {
+        settled = false;
+      }
+    }
+    return settled;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Durable Git and filesystem helpers
+// ---------------------------------------------------------------------------
+
+/** Initialize the private bare state repository once; never clear it. */
+async function ensureBareStateRepository(
+  stateGitPath: string,
+  input: LocalRepairHostOptionsV1,
+  scratch: string,
+): Promise<void> {
+  if (await pathExists(stateGitPath)) return;
+  const result = await runTrustedGitResult({
+    args: ["init", "--bare", stateGitPath],
+    cwd: input.stateRoot,
+    trustedPath: input.trustedPath,
+    scratch,
+  });
+  if (result.code !== 0) throw new Error(STATIC_GIT_FAILED);
+}
+
+/** Clone the trusted source object repository once; no hardlinks, no creds. */
+async function prepareSourceRepository(
+  sourcePath: string,
+  input: LocalRepairHostOptionsV1,
+  scratch: string,
+): Promise<void> {
+  if (await pathExists(sourcePath)) return;
+  const result = await runTrustedGitResult({
+    args: ["clone", "--no-hardlinks", input.sourceDir, sourcePath],
+    cwd: input.stateRoot,
+    trustedPath: input.trustedPath,
+    scratch,
+  });
+  if (result.code !== 0) throw new Error(STATIC_GIT_FAILED);
+}
+
+/** Refresh the exact remote development ref through trusted authenticated git. */
+async function refreshDevelopment(
+  sourcePath: string,
+  input: LocalRepairHostOptionsV1,
+  scratch: string,
+): Promise<string> {
+  const fetched = await runTrustedGitResult({
+    args: [
+      "-C",
+      sourcePath,
+      "fetch",
+      "--no-tags",
+      REMOTE_URL,
+      "+refs/heads/development:refs/remotes/origin/development",
+    ],
+    cwd: input.stateRoot,
+    trustedPath: input.trustedPath,
+    scratch,
+    extraEnv: githubGitAuthEnv(input.githubToken),
+  });
+  if (fetched.code !== 0) throw new Error(STATIC_GIT_FAILED);
+  const head = await runTrustedGitResult({
+    args: ["-C", sourcePath, "rev-parse", "refs/remotes/origin/development"],
+    cwd: input.stateRoot,
+    trustedPath: input.trustedPath,
+    scratch,
+  });
+  if (head.code !== 0 || !isGitSha(head.stdout.trim())) {
+    throw new Error(STATIC_GIT_FAILED);
+  }
+  return head.stdout.trim();
+}
+
+/** Exact controller SHA through trusted git in the source worktree. */
+async function readControllerSha(
+  sourceDir: string,
+  trustedPath: string,
+  scratch: string,
+): Promise<GitSha> {
+  const result = await runTrustedGitResult({
+    args: ["-C", sourceDir, "rev-parse", "HEAD"],
+    cwd: sourceDir,
+    trustedPath,
+    scratch,
+  });
+  const sha = result.code === 0 ? result.stdout.trim() : "";
+  if (!isGitSha(sha)) throw new Error(STATIC_INVALID_CONTROLLER);
+  return sha;
+}
+
+interface LocalGitInputV1 {
+  args: string[];
+  cwd: string;
+  trustedPath: string;
+  scratch?: string;
+  extraEnv?: Record<string, string>;
+}
+
+/** Bounded trusted git result through the shared owned-group runtime. */
+async function runTrustedGitResult(
+  input: LocalGitInputV1,
+): Promise<{ code: number; stdout: string }> {
+  const scratch = input.scratch ??
+    joinPath(input.cwd, ".sentinel-git-home");
+  const result = await new DenoReplayRuntime(Deno.execPath()).run({
+    executable: trustedGitPath(input.trustedPath),
+    args: ["-c", "core.hooksPath=/dev/null", ...input.args],
+    cwd: input.cwd,
+    env: {
+      PATH: input.trustedPath,
+      HOME: scratch,
+      GIT_CONFIG_GLOBAL: "/dev/null",
+      GIT_CONFIG_SYSTEM: "/dev/null",
+      GIT_TERMINAL_PROMPT: "0",
+      ...(input.extraEnv ?? {}),
+    },
+    maxDurationMs: GIT_TIMEOUT_MS,
+    maxOutputBytes: GIT_MAX_OUTPUT_BYTES,
+  });
+  // Only a normal, fully settled, untruncated exit yields a usable result;
+  // every other outcome fails closed with a sanitized static fault.
+  if (result.outcome !== "exited" || !result.settled) {
+    throw new Error(STATIC_GIT_FAILED);
+  }
+  if (result.truncated) throw new Error(STATIC_GIT_BOUND);
+  return {
+    code: result.exitCode ?? 1,
+    stdout: new TextDecoder().decode(result.stdout),
+  };
+}
+
+async function readCheckoutMapping(
+  mappingPath: string,
+): Promise<{ taskId: string; base: string } | null> {
+  try {
+    const parsed = JSON.parse(await Deno.readTextFile(mappingPath)) as {
+      taskId?: unknown;
+      base?: unknown;
+    };
+    if (typeof parsed.taskId !== "string" || typeof parsed.base !== "string") {
+      return null;
+    }
+    return { taskId: parsed.taskId, base: parsed.base };
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Status and log
+// ---------------------------------------------------------------------------
+
+interface LocalStatusInputV1 {
+  state: StateReadView & RepairStateWriter;
+  statusPath: string;
+  invocationId: string;
+  /** Exact controller revision this run was started with. */
+  controllerSha: GitSha;
+  /** Refreshed remote development tip used as the target base. */
+  targetBaseSha: string | null;
+  /** Authenticated owner login, already shape-validated before this point. */
+  login: string | null;
+  /** Applied trusted repository configuration. */
+  config: RepositoryConfigV1;
+  startedAt: number;
+  finishedAt: number;
+  outcome: RepairCycleOutcomeV1;
+}
+
+/** Sanitized status: identities, stages and times only; no bodies or tokens. */
+async function writeLocalStatus(input: LocalStatusInputV1): Promise<void> {
+  const status: Record<string, unknown> = {
+    version: "v1",
+    kind: "sentinel_local_status",
+    invocationId: input.invocationId,
+    controllerSha: input.controllerSha,
+    targetBaseSha: input.targetBaseSha,
+    login: input.login,
+    model: IMPLEMENTATION_MODEL,
+    reasoning: IMPLEMENTATION_REASONING,
+    limits: {
+      perHour: input.config.liveStartLimits?.perHour ?? null,
+      perSevenDays: input.config.liveStartLimits?.perSevenDays ?? null,
+    },
+    startedAt: input.startedAt,
+    finishedAt: input.finishedAt,
+    outcome: input.outcome,
+  };
+  try {
+    const read = await input.state.readRepair();
+    if (read.ok && read.value.status === "found") {
+      const snapshot = read.value.snapshot;
+      status.work = snapshot.work.map((record) => ({
+        id: record.id,
+        sourceKind: record.source.kind,
+        issueNumber: record.related.issueNumber,
+        nextStep: record.nextStep,
+        head: record.target.head,
+        pr: record.target.pr,
+        updatedAt: record.updatedAt,
+      }));
+      status.reservations = snapshot.reservations.map((reservation) => ({
+        taskId: reservation.taskId,
+        purpose: reservation.purpose,
+        createdAt: reservation.createdAt,
+        settledAt: reservation.settledAt,
+        outcome: reservation.outcome,
+      }));
+      status.nextEligibleStartAt = nextEligibleStart(
+        snapshot.reservations,
+        input.finishedAt,
+      );
+    } else {
+      status.state = "unavailable";
+    }
+  } catch {
+    status.state = "unavailable";
+  }
+  const text = JSON.stringify(status, null, 2) + "\n";
+  await writePrivateFile(input.statusPath, text);
+  console.log(JSON.stringify(status));
+}
+
+/** Earliest next hourly start from real reservations; null when none. */
+function nextEligibleStart(
+  reservations: readonly BudgetReservationV1[],
+  now: number,
+): number | null {
+  const recent = reservations.filter((reservation) =>
+    reservation.outcome !== "confirmed_not_submitted" &&
+    reservation.createdAt > now - HOUR_MS
+  );
+  if (recent.length === 0) return null;
+  return Math.min(...recent.map((reservation) => reservation.createdAt)) +
+    HOUR_MS;
+}
+
+// ---------------------------------------------------------------------------
+// Small primitives
+// ---------------------------------------------------------------------------
+
+function readLocalHostOptions(
+  options: LocalRepairHostOptionsV1,
+): LocalRepairHostOptionsV1 {
+  let record: Record<string, unknown>;
+  try {
+    record = options as unknown as Record<string, unknown>;
+  } catch {
+    throw new TypeError(STATIC_INVALID_OPTIONS);
+  }
+  const controllerSha = record?.controllerSha;
+  if (!isGitSha(controllerSha)) throw new TypeError(STATIC_INVALID_CONTROLLER);
+  return {
+    stateRoot: requirePath(record.stateRoot, "stateRoot"),
+    sourceDir: requirePath(record.sourceDir, "sourceDir"),
+    controllerSha,
+    githubToken: requirePath(record.githubToken, "githubToken"),
+    modelToken: requirePath(record.modelToken, "modelToken"),
+    codexExecutable: requirePath(record.codexExecutable, "codexExecutable"),
+    denoExecutable: requirePath(record.denoExecutable, "denoExecutable"),
+    trustedPath: requirePath(record.trustedPath, "trustedPath"),
+  };
+}
+
+function requirePath(value: unknown, _field: string): string {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new TypeError(STATIC_INVALID_OPTIONS);
+  }
+  return value;
+}
+
+function requireEnv(name: string): string {
+  const value = Deno.env.get(name);
+  if (value === undefined || value.length === 0) {
+    throw new Error(`local repair host requires environment variable ${name}`);
+  }
+  return value;
+}
+
+/** Trusted git: /usr/bin/git first, otherwise the trusted PATH. */
+function trustedGitPath(trustedPath: string): string {
+  if (pathExistsSync("/usr/bin/git")) return "/usr/bin/git";
+  for (const dir of trustedPath.split(":")) {
+    const candidate = joinPath(dir.length > 0 ? dir : "/", "git");
+    if (pathExistsSync(candidate)) return candidate;
+  }
+  return "git";
+}
+
+/** Installed Codex distribution directory derived from the executable path. */
+function codexDistributionDir(codexExecutable: string): string {
+  return joinPath(
+    dirnamePath(dirnamePath(codexExecutable)),
+    "packages",
+    "standalone",
+  );
+}
+
+async function ensurePrivateDir(path: string): Promise<void> {
+  await Deno.mkdir(path, { recursive: true, mode: 0o700 });
+  await Deno.chmod(path, 0o700);
+}
+
+async function writePrivateFile(path: string, text: string): Promise<void> {
+  await Deno.writeTextFile(path, text, { mode: 0o600 });
+  await Deno.chmod(path, 0o600);
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await Deno.stat(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function pathExistsSync(path: string): boolean {
+  try {
+    Deno.statSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function toml(value: string): string {
+  return JSON.stringify(value);
+}
+
+function joinPath(base: string, ...parts: string[]): string {
+  let out = base.replace(/\/+$/, "");
+  for (const part of parts) {
+    out += "/" + part.replace(/^\/+|\/+$/g, "");
+  }
+  return out.length === 0 ? "/" : out;
+}
+
+function dirnamePath(path: string): string {
+  const index = path.lastIndexOf("/");
+  if (index < 0) return ".";
+  if (index === 0) return "/";
+  return path.slice(0, index);
+}

@@ -19,9 +19,10 @@
  *   `enabled` agreement without a durable admitted reservation is never a
  *   model start, and this entrypoint never calls a model port itself.
  *
- * Executing this module directly is never a wired production run: without the
- * host-injected capability set the script exits non-zero with a static fault
- * (fail closed; see the bottom of this file).
+ * Executing this module directly starts the one authorized concrete local
+ * host (`startLocalRepairHostFromEnv`, dynamically imported at the bottom of
+ * this file) from trusted environment inputs; importing it as a library stays
+ * side-effect free.
  */
 
 import type { GitSha } from "./contracts/brands.ts";
@@ -231,16 +232,18 @@ export async function runRepairEntrypoint(
 }
 
 // ---------------------------------------------------------------------------
-// Fail-closed direct execution: no capability wiring is shipped with the
-// repository (transports, credentials and auth providers are injected by the
-// trusted host at activation). A direct invocation is never a busy loop and
-// never touches an external service. Importing this module (the normal
-// production path) is unaffected.
+// Authorized local target: direct execution starts the concrete trusted local
+// host (src/host/local.ts). The import is dynamic so importing this module
+// stays side-effect free; an ordinary library import never starts a host.
 // ---------------------------------------------------------------------------
 
 if (import.meta.main) {
-  throw new Error(
-    "repair entrypoint requires injected trusted capabilities: " +
-      "no host capability wiring is installed in this repository",
-  );
+  const { startLocalRepairHostFromEnv } = await import("./host/local.ts");
+  const run = await startLocalRepairHostFromEnv();
+  if (run.status === "busy") {
+    console.error(
+      "local repair host busy: another writer holds the state lock",
+    );
+    Deno.exitCode = 1;
+  }
 }
