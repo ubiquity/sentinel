@@ -106,3 +106,36 @@ Deno.test("local owner: scope 0 work still requires a configured repository", ()
   assert.deepEqual(configured.ordered, [record.id]);
   assert.equal(configured.skipped[record.id], undefined);
 });
+
+Deno.test("local owner: same owner/name under another installation is unconfigured", () => {
+  const record = workRecord("local-owner-2", { repository: { ...LOCAL } });
+  const snapshot: RepairStateSnapshotV1 = {
+    ...emptySnapshot(),
+    work: [record],
+  };
+
+  // Exact same owner/name but a DIFFERENT installation scope (a positive App
+  // id): the local scope 0 record must never be authorized through another
+  // App's configuration, even though owner/name match.
+  const otherScope = rankEligibleWork(
+    snapshot,
+    repairConfigs({
+      repository: { owner: LOCAL.owner, name: LOCAL.name, installationId: 7 },
+      adapter: { kind: "github" },
+    }),
+    T0,
+  );
+  assert.equal(otherScope.skipped[record.id], "unconfigured");
+  assert.deepEqual(otherScope.ordered, []);
+
+  // The exact scope identity (installation 0) remains eligible.
+  const exactScope = rankEligibleWork(
+    snapshot,
+    repairConfigs({
+      repository: { ...LOCAL },
+      adapter: { kind: "github" },
+    }),
+    T0,
+  );
+  assert.deepEqual(exactScope.ordered, [record.id]);
+});

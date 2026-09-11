@@ -98,6 +98,24 @@ export type WriteOutcomeV1 = "applied" | "ambiguous";
 // are locally validated commits; the trusted GitHub writer publishes them.
 // ---------------------------------------------------------------------------
 
+/**
+ * Native GitHub issue dependency metadata as observed at read time.
+ *
+ * `openBlockers` contains only blockers whose native state is currently open
+ * (closed blockers are excluded because closed native state is authoritative
+ * for the dependency) and retains cross-repository blockers: an open blocker
+ * in another repository still blocks this issue. `subIssueCount` is the total
+ * native sub-issue count, not a page slice.
+ */
+export interface GitHubIssueRelationsV1 {
+  openBlockers: {
+    owner: string;
+    name: string;
+    number: number;
+  }[];
+  subIssueCount: number;
+}
+
 export interface GitHubIssueV1 {
   number: number;
   title: string;
@@ -108,6 +126,12 @@ export interface GitHubIssueV1 {
   createdAt: number;
   updatedAt: number;
   closedAt: number | null;
+  /**
+   * Native dependency relations. Absence means unknown, NOT empty: a caller
+   * that requires dependency gating must treat a missing value as a source
+   * failure rather than an unblocked issue.
+   */
+  relations?: GitHubIssueRelationsV1;
 }
 
 export interface GitHubPullRequestV1 {

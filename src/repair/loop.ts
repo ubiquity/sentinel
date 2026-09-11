@@ -99,6 +99,13 @@ const REVIEW_POLL_MS = 15 * 60_000;
 const CHECK_POLL_MS = 5 * 60_000;
 const RELEASE_POLL_MS = 5 * 60_000;
 /**
+ * Recheck interval for a native GitHub issue prerequisite that could not be
+ * verified (closed/absent issue, unknown relations, parent or open native
+ * blocker). One hour matches the polling cadence and costs no reservation:
+ * the re-read happens on the next hourly poll.
+ */
+const ISSUE_PREREQUISITE_RETRY_MS = 60 * 60_000;
+/**
  * The one five-minute finalization margin. The entrypoint reserves it OUTSIDE
  * the loop deadline (the cycle receives hardDeadline - this margin) so the
  * mandatory bounded review drain fits before the caller/ceiling hard deadline;
@@ -852,6 +859,26 @@ async function pollIntake(
               record.source.id === String(issue.number),
           );
           if (existing !== undefined) continue;
+
+          // Issue-only (github adapter) intake gates on NATIVE dependency
+          // relations before any work record exists. Absent relations are
+          // unknown, never empty: the row is skipped and the run reports a
+          // source error instead of admitting an unverified issue. An issue
+          // that is itself a parent (has sub-issues) or has open native
+          // blockers is skipped without an error; it is re-listed on the next
+          // poll once those dependencies close.
+          if (issueOnlyIntake) {
+            const relations = issue.relations;
+            if (relations === undefined) {
+              error = `issue relations unavailable for #${issue.number}`;
+              continue;
+            }
+            if (
+              relations.subIssueCount > 0 || relations.openBlockers.length > 0
+            ) {
+              continue;
+            }
+          }
 
           const repositoryKey =
             `${issueRepository.owner}/${issueRepository.name}`;
@@ -1890,12 +1917,20 @@ async function executeImplementationStep(
   // invocation below.
   const issue = await readIssueForModel(deps, record);
   if (issue === "unavailable") {
+    // Prerequisite gating (closed/absent issue, unknown relations, parent or
+    // open native blocker) defers to the next hour with ZERO reservation and
+    // zero model start: a dependency that closes by then, or a source that
+    // recovers, is re-read on that poll. Not an indefinite wait.
     return persistWork(
       deps,
       context,
       setWait(
         record,
-        { reason: "unavailable", since: now, until: null },
+        {
+          reason: "unavailable",
+          since: now,
+          until: now + ISSUE_PREREQUISITE_RETRY_MS,
+        },
         now,
       ),
     );
@@ -3773,11 +3808,29 @@ async function readIssueForModel(
   if (issueNumber === null) return null;
   const read = await deps.github.readIssue(issueNumber);
   if (!read.ok) return "unavailable";
-  if (read.value === null) return "unavailable";
+  const issue = read.value;
+  // The latest native state is authoritative: a closed issue (or one that no
+  // longer exists) can never start model work, even when intake admitted it.
+  if (issue === null || issue.state !== "open") return "unavailable";
+  // Issue-only github-adapter intake also gates on native dependency
+  // relations: unknown relations, a parent issue (sub-issues) or any open
+  // native blocker defers admission. Closed blockers are already excluded by
+  // the client parser; no completed WorkRecord is synthesized for them.
+  const config = configFor(deps, record.repository);
+  if (config?.adapter.kind === "github") {
+    const relations = issue.relations;
+    if (
+      relations === undefined ||
+      relations.subIssueCount > 0 ||
+      relations.openBlockers.length > 0
+    ) {
+      return "unavailable";
+    }
+  }
   return {
-    number: read.value.number,
-    title: read.value.title,
-    body: read.value.body,
+    number: issue.number,
+    title: issue.title,
+    body: issue.body,
   };
 }
 
@@ -3795,10 +3848,14 @@ function configFor(
   deps: RepairCycleDepsV1,
   repository: RepositoryIdentityV1,
 ): RepositoryConfigV1 | null {
+  // Full scope identity: the same owner/name under a different installation
+  // (positive App id vs the explicit no-App local scope 0) must never be
+  // authorized through another scope's configuration.
   return deps.configs.find(
     (config) =>
       config.repository.owner === repository.owner &&
-      config.repository.name === repository.name,
+      config.repository.name === repository.name &&
+      config.repository.installationId === repository.installationId,
   ) ?? null;
 }
 

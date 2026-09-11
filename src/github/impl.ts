@@ -118,6 +118,12 @@ export interface GitHubPortOptionsV1 {
   perPage?: number;
   maxPages?: number;
   maxItems?: number;
+  /**
+   * Trusted opt-in: when exactly `true`, issue reads are enriched with native
+   * dependency relations (`blockedBy`/sub-issue count). Absence leaves
+   * relations unknown — never an empty list.
+   */
+  includeIssueRelations?: boolean;
   /** Finite whole-operation HTTP deadline (auth + request + body read). */
   requestDeadlineMs?: number;
   /** Finding normalization cap (default the contract 256). */
@@ -211,6 +217,7 @@ export class GitHubPortImpl implements GitHubPort {
       perPage: options.perPage,
       maxPages: options.maxPages,
       maxItems: options.maxItems,
+      includeIssueRelations: options.includeIssueRelations,
       requestDeadlineMs: options.requestDeadlineMs,
     });
   }
