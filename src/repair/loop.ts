@@ -123,7 +123,7 @@ const DEFAULT_STEP_LIMIT = 32;
 export const REPAIR_RUN_CEILING_MS = 120 * 60_000;
 /** No NEW model work may start after 90 minutes of one run (plan §4). */
 export const REPAIR_MODEL_CUTOFF_MS = 90 * 60_000;
-const MAX_IMPLEMENTATION_ATTEMPTS = 3;
+const MAX_IMPLEMENTATION_ATTEMPTS = 4;
 const MAX_OUTPUT_LIMIT_BYTES = 4096;
 const MODEL_ID = "gpt-5.6-luna" as const;
 const REASONING = "max" as const;
