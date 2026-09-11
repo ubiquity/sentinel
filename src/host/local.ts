@@ -198,7 +198,7 @@ export function createLocalRepositoryConfig(): RepositoryConfigV1 {
     build: { projectId: null, acceptance: null },
     secretRef: "secret://host/injected/sentinel-local-owner",
     liveStartLimits: { perHour: 1, perSevenDays: 168 },
-    sessionBound: { maxDurationMs: 1_200_000, maxOutputChars: 400_000 },
+    sessionBound: { maxDurationMs: 1_200_000, maxOutputChars: 4_000_000 },
     retention: null,
     stabilityPolicy: null,
   });
