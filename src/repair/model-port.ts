@@ -2133,10 +2133,25 @@ function buildPrompt(request: ModelRunRequestV1): string {
     );
   }
   parts.push(
-    "Produce a minimal commit on the current checkout that resolves the " +
-      "problem. Follow repository AGENTS instructions. Do not modify " +
-      "protected paths, do not commit credentials, do not rewrite expected " +
-      "test assertions to force success.",
+    "Runtime implementer role: you are the bounded runtime implementer for " +
+      "this task. Edit only the current provided checkout, and only the files " +
+      "needed to resolve the problem. Do not run git add, git commit or git " +
+      "push, do not create or use worktrees, and do not delegate to other " +
+      "agents or subagents: the trusted host owns commits, pushes, review and " +
+      "release. Follow the applicable repository instructions for this " +
+      "checkout, but do not take over master-plan orchestration or change " +
+      "admission, budget, credential or model policy. The runtime model " +
+      `policy is fixed at ${request.model} with ${request.reasoning} ` +
+      "reasoning; do not change it or introduce a fallback. Do not modify " +
+      "protected paths, do not write or commit credentials, and do not " +
+      "rewrite expected test assertions to force success. Keep the change " +
+      "minimal and do not refactor beyond it. Your total event output " +
+      `allowance is ${request.maxOutputChars} characters; keep individual ` +
+      "command output bounded and prefer summaries over full dumps. Never " +
+      "dump docs/build-status.md in full: at 439 KB it exceeds that " +
+      "allowance, so inspect only the current checkpoint or bounded matching " +
+      "sections. Finish with a concise final response listing the files " +
+      "changed and the checks run.",
   );
   return parts.join("\n\n").slice(0, MAX_PROMPT_CHARS);
 }

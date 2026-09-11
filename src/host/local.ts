@@ -21,14 +21,18 @@ import type {
   Clock,
   EncryptedArtifactV1,
   GitHubCooldownGateV1,
+  GitHubIssueV1,
   GitHubPort,
   ImplementationPort,
   IncidentAdapter,
   IncidentPageV1,
   IsolatedReplayResultV1,
+  ModelIdV1,
   ModelRunReceiptV1,
   ModelRunRequestV1,
+  PortErrorKindV1,
   PortResultV1,
+  ReasoningEffortV1,
   RepairStateWriter,
   ReplayPort,
   ReplayRunRequestV1,
@@ -57,6 +61,7 @@ import {
   type CandidateCommitterV1,
   CodexImplementationPort,
   LocalCandidateCommitter,
+  LOOP_STOP_MARKER,
 } from "../repair/model-port.ts";
 import { DurableGitHubCooldownGate } from "../repair/github-cooldown.ts";
 import type { RepairCycleOutcomeV1 } from "../repair/loop.ts";
@@ -110,6 +115,8 @@ const STATIC_CHECKOUT =
   "local repair host rejected: isolated model checkout is unavailable";
 const STATIC_IMPORT =
   "local repair host failed: candidate objects could not be imported into the trusted source repository";
+const STATIC_MODEL_RESULT =
+  "local repair host failed: the private model result receipt could not be persisted; no candidate was imported";
 const STATIC_MARKER =
   "local repair host failed: the session marker could not be cleared";
 
@@ -294,6 +301,155 @@ export async function localCheckoutKey(taskId: string): Promise<string> {
 }
 
 // ---------------------------------------------------------------------------
+// Private local model-result diagnostics (outside every model checkout)
+// ---------------------------------------------------------------------------
+
+/**
+ * Fixed private classification of one local model result, derived ONLY from
+ * the receipt's own evidence. It never invents a cause or a model success.
+ */
+export type LocalModelResultReasonV1 =
+  | "output_limit"
+  | "failed_command_loop"
+  | "host_timeout"
+  | "runtime_error"
+  | null;
+
+/**
+ * Minimal private JSON projection of exactly one local model result. It is an
+ * explicit allow-list: no issue, evidence, prompt, changed path, raw error or
+ * credential content is ever serialized.
+ */
+export interface LocalModelResultProjectionV1 {
+  version: "v1";
+  kind: "local_model_result";
+  taskId: string;
+  base: string;
+  requested: {
+    model: ModelIdV1;
+    reasoning: ReasoningEffortV1;
+    maxDurationMs: number;
+    maxOutputChars: number;
+  };
+  observedAt: number;
+  result:
+    | {
+      ok: true;
+      outcome: "completed" | "failed" | "interrupted";
+      actual: {
+        provider: string;
+        threadId: string;
+        turnId: string;
+        terminalOrigin: "runtime" | "host-timeout";
+        observedTerminalStatus: "completed" | "interrupted" | "failed" | null;
+        observedModel: string;
+        observedReasoning: string;
+        durationMs: number;
+        outputChars: number;
+      };
+      candidate: { head: string | null; changedPathCount: number } | null;
+    }
+    | { ok: false; errorKind: PortErrorKindV1 };
+  reason: LocalModelResultReasonV1;
+}
+
+/**
+ * Persist one private minimal model-result diagnostic for a task under
+ * `<stateRoot>/model-results/<localCheckoutKey(taskId)>/`, using a unique
+ * `crypto.randomUUID()` filename, private 0700 directories and a 0600 file.
+ * Returns the exact written path. This diagnostic stays outside every model
+ * checkout and is never part of Actions status or public logs. A throw means
+ * the receipt was not saved: the caller must not import or publish a candidate.
+ */
+export async function writeLocalModelResult(
+  stateRoot: string,
+  request: ModelRunRequestV1,
+  result: PortResultV1<ModelRunReceiptV1>,
+  observedAt: number,
+): Promise<string> {
+  const key = await localCheckoutKey(request.taskId);
+  const root = joinPath(stateRoot, "model-results");
+  const dir = joinPath(root, key);
+  await ensurePrivateDir(stateRoot);
+  await ensurePrivateDir(root);
+  await ensurePrivateDir(dir);
+  const path = joinPath(dir, `${crypto.randomUUID()}.json`);
+  await writePrivateFile(
+    path,
+    JSON.stringify(projectLocalModelResult(request, result, observedAt)) + "\n",
+  );
+  return path;
+}
+
+function projectLocalModelResult(
+  request: ModelRunRequestV1,
+  result: PortResultV1<ModelRunReceiptV1>,
+  observedAt: number,
+): LocalModelResultProjectionV1 {
+  const common = {
+    version: "v1" as const,
+    kind: "local_model_result" as const,
+    taskId: request.taskId,
+    base: request.base,
+    requested: {
+      model: request.model,
+      reasoning: request.reasoning,
+      maxDurationMs: request.maxDurationMs,
+      maxOutputChars: request.maxOutputChars,
+    },
+    observedAt,
+  };
+  const reason = localModelResultReason(request, result);
+  if (!result.ok) {
+    return {
+      ...common,
+      result: { ok: false, errorKind: result.error.kind },
+      reason,
+    };
+  }
+  const receipt = result.value;
+  return {
+    ...common,
+    result: {
+      ok: true,
+      outcome: receipt.outcome,
+      actual: {
+        provider: receipt.actual.provider,
+        threadId: receipt.actual.threadId,
+        turnId: receipt.actual.turnId,
+        terminalOrigin: receipt.actual.terminalOrigin,
+        observedTerminalStatus: receipt.actual.observedTerminalStatus,
+        observedModel: receipt.actual.observedModel,
+        observedReasoning: receipt.actual.observedReasoning,
+        durationMs: receipt.actual.durationMs,
+        outputChars: receipt.actual.outputChars,
+      },
+      candidate: receipt.candidate === null ? null : {
+        head: receipt.candidate.head,
+        changedPathCount: receipt.candidate.changedPaths.length,
+      },
+    },
+    reason,
+  };
+}
+
+/** Fixed reason order; no classification is fabricated for a clean run. */
+function localModelResultReason(
+  request: ModelRunRequestV1,
+  result: PortResultV1<ModelRunReceiptV1>,
+): LocalModelResultReasonV1 {
+  if (!result.ok) return "runtime_error";
+  const receipt = result.value;
+  if (receipt.actual.outputChars > request.maxOutputChars) {
+    return "output_limit";
+  }
+  if (receipt.error === LOOP_STOP_MARKER) return "failed_command_loop";
+  if (receipt.actual.terminalOrigin === "host-timeout") return "host_timeout";
+  if (receipt.error !== null) return "runtime_error";
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // Exclusive writer lock (narrow, testable)
 // ---------------------------------------------------------------------------
 
@@ -435,6 +591,7 @@ export async function runLocalRepairHost(
       denoExecutable: input.denoExecutable,
       modelToken: input.modelToken,
       tracker,
+      clock,
     });
     outcome = await runRepairEntrypoint({
       clock,
@@ -653,7 +810,42 @@ function composeLocalGitHub(input: LocalGitHubInputV1): GitHubPort {
     },
     includeIssueRelations: true,
   });
-  return host.port;
+  return scopeLocalRepairIssues(host.port);
+}
+
+/**
+ * Restrict the privately-owned concrete local port to actual coding tasks.
+ *
+ * Only `listOpenIssues` and `readIssue` are replaced, and both originals are
+ * bound to this exact port before replacement, so every other method keeps
+ * the class instance and its `this` binding. An issue is in scope only when
+ * it carries the exact `bug` or `enhancement` label and does not carry the
+ * owner-decision `question` label. Errors pass through unchanged; an
+ * ineligible or absent read passes through as `null`, preserving the existing
+ * pre-admission wait gate. The loop re-reads the issue before every
+ * admission, so a queued issue that loses eligibility cannot consume budget.
+ */
+export function scopeLocalRepairIssues(port: GitHubPort): GitHubPort {
+  const listOpenIssues = port.listOpenIssues.bind(port);
+  const readIssue = port.readIssue.bind(port);
+  port.listOpenIssues = async () => {
+    const listed = await listOpenIssues();
+    return listed.ok ? portOk(listed.value.filter(isLocalRepairIssue)) : listed;
+  };
+  port.readIssue = async (issueNumber) => {
+    const read = await readIssue(issueNumber);
+    if (!read.ok || read.value === null || isLocalRepairIssue(read.value)) {
+      return read;
+    }
+    return portOk(null);
+  };
+  return port;
+}
+
+/** Exact-label admission: `bug` or `enhancement`, never `question`. */
+function isLocalRepairIssue(issue: GitHubIssueV1): boolean {
+  if (issue.labels.includes("question")) return false;
+  return issue.labels.includes("bug") || issue.labels.includes("enhancement");
 }
 
 /** Scoped Basic auth for trusted git only; never in a URL or config file. */
@@ -732,13 +924,15 @@ interface LocalModelInputV1 {
   denoExecutable: string;
   modelToken: string;
   tracker: LocalSessionTracker;
+  clock: Clock;
 }
 
 /**
  * Model port wrapper over the existing CodexImplementationPort. It owns one
  * persistent private checkout per task (never reset or recloned), commits
- * model edits atop the saved candidate, and imports the exact candidate head
- * into the trusted source object repository before returning.
+ * model edits atop the saved candidate, persists a private minimal result
+ * receipt, and imports the exact candidate head into the trusted source
+ * object repository before returning.
  */
 class LocalCheckoutModelPort implements ImplementationPort {
   constructor(private readonly input: LocalModelInputV1) {}
@@ -808,6 +1002,20 @@ class LocalCheckoutModelPort implements ImplementationPort {
     });
 
     const result = await port.runModel(request);
+    // Persist the private minimal diagnostic BEFORE returning the receipt or
+    // importing any candidate: a run without its saved receipt may not
+    // publish. A storage failure must not erase the existing checkout or the
+    // durable reservation, so it only returns static unavailable.
+    try {
+      await writeLocalModelResult(
+        this.input.stateRoot,
+        request,
+        result,
+        this.input.clock.now(),
+      );
+    } catch {
+      return portError("unavailable", STATIC_MODEL_RESULT);
+    }
     if (!result.ok) return result;
     const head = result.value.candidate?.head ?? null;
     if (head !== null) {
