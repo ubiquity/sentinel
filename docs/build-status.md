@@ -2932,3 +2932,21 @@ b2eb7498-847d-4294-b356-9f7bb1ac432c passed44.2s, executed. Full CI34619762334
 is still running on8c0626d; its Linux dependency installation passed. Next push
 includes this one-line correction and register. No runtime start or new budget
 reservation has occurred. Staged runtime9e485eb remains unactivated and superseded.
+
+16:10UTC: CI34619762334 completed910passed/7failed/7ignored. Besides the now
+fixed saved-bundle deadline, six failures expose Linux execution layout:
+/lib64 was linked to usr/lib instead of usr/lib64 (Ubuntu ELF loader ENOENT),
+and setup-deno's /opt executable remained before the copied fixed-/usr binary
+for causal tests using Deno.execPath(). One DSH correction owns isolation.ts,
+its exact-argv test and CI PATH selection only. No sandbox grant widening or
+skips.12calls/90sec, first edit30sec, one formatter, no checks/Git/children.
+GPT owns self-ci-linux-loader-types then actual Linux CI. Current ea16597 CI
+still verifies the preceding snapshot; its repeated Linux failure is expected.
+
+16:12UTC: Linux loader correction DSH PID77055/stream8f2c5d07/persistede6ae847b
+completed exit0 in12calls with actual Flash/max, workspace-write/ask, live
+cwd/NODE_ENV verified and no descendants. Only /lib64->usr/lib64, corresponding
+argv expectation/header, and CI fixed-Deno PATH selection changed. Read-only
+/usr, checkout grants, namespace/network and teardown rules are unchanged.
+GPT type receipt0552676f-d21d-4007-a7f8-f400b9f55a57 passed3.3s, executed.
+Next exact-head CI must prove real Linux execution; types are not that proof.

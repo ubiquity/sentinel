@@ -22,8 +22,8 @@
  *     rejected before anything is spawned.
  *   - Every run is a fixed `/usr/bin/bwrap` invocation:
  *     `--unshare-all --die-with-parent --new-session --clearenv`, a read-only
- *     `/usr` (with `usr/bin` and `usr/lib` symlinks so the fixed paths
- *     resolve), private `/proc` and `/dev`, a tmpfs `/tmp` containing
+ *     `/usr` (with `usr/bin`, `usr/lib` and `usr/lib64` symlinks so the fixed
+ *     paths resolve), private `/proc` and `/dev`, a tmpfs `/tmp` containing
  *     `/tmp/home` and `/tmp/deno`, only the needed destination parent
  *     directories, the exact checkout bound read-only or read-write at the
  *     same absolute path, and the exact cwd via `--chdir`.
@@ -391,7 +391,7 @@ function bwrapArgs(
     "usr/lib",
     "/lib",
     "--symlink",
-    "usr/lib",
+    "usr/lib64",
     "/lib64",
     "--proc",
     "/proc",

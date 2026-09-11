@@ -38,4 +38,6 @@ jobs:
           # user namespaces for bwrap. Never change this on a shared host.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Credential-free local harness
-        run: deno task test:local
+        run: |
+          export PATH="/usr/local/bin:$PATH"
+          /usr/local/bin/deno task test:local
