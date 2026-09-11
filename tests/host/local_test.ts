@@ -756,18 +756,33 @@ class FaultyIssueGithub extends FakeGithub {
   }
 }
 
+// Exact literal, deliberately not imported from the host module: the contract
+// is this standalone first line, so a typo in either copy must fail here.
+const LOCAL_REPAIR_MARKER = "<!-- sentinel:repair -->";
+
 Deno.test(
-  "local issue scope: only exact bug or enhancement tasks without question",
+  "local issue scope: only the exact standalone first-line marker admits",
   async () => {
     const github = new FakeGithub({
       openIssues: [
-        { number: 1, labels: ["bug"] },
-        { number: 2, labels: ["enhancement"] },
-        { number: 3, labels: ["bug", "question"] },
-        { number: 4 },
-        { number: 5, labels: ["documentation"] },
-        { number: 6, labels: ["bugfix"] },
-        { number: 7, labels: ["Bug"] },
+        { number: 1, body: `${LOCAL_REPAIR_MARKER}\n` },
+        { number: 2, body: LOCAL_REPAIR_MARKER },
+        { number: 3, body: `${LOCAL_REPAIR_MARKER}\r\nbody` },
+        { number: 4, body: `${LOCAL_REPAIR_MARKER} extra\n` },
+        { number: 5, body: ` ${LOCAL_REPAIR_MARKER}\n` },
+        { number: 6, body: `intro\n${LOCAL_REPAIR_MARKER}\n` },
+        { number: 7, body: `> ${LOCAL_REPAIR_MARKER}\n` },
+        { number: 8, body: `\`\`\`\n${LOCAL_REPAIR_MARKER}\n\`\`\`\n` },
+        { number: 9, body: LOCAL_REPAIR_MARKER.slice(0, -1) },
+        { number: 10, body: "unmarked prose" },
+        { number: 11, body: "unmarked but labelled", labels: ["bug"] },
+        // Labels have no role at all: a marked issue is admitted even while it
+        // still carries the labels the repository bot removes.
+        {
+          number: 12,
+          body: LOCAL_REPAIR_MARKER,
+          labels: ["bug", "enhancement", "question"],
+        },
       ],
     });
     const scoped = scopeLocalRepairIssues(github);
@@ -776,20 +791,23 @@ Deno.test(
     assert.ok(listed.ok);
     assert.deepEqual(
       listed.ok ? listed.value.map((issue) => issue.number) : [],
-      [1, 2],
+      [1, 2, 3, 12],
     );
     assert.deepEqual(github.calls, ["listOpenIssues"]);
   },
 );
 
 Deno.test(
-  "local issue scope: read re-check admits eligible issues and nulls the rest",
+  "local issue scope: read re-check admits marked issues and nulls the rest",
   async () => {
-    const labels = ["enhancement"];
+    const marked: Partial<GitHubIssueV1> = {
+      number: 11,
+      body: `${LOCAL_REPAIR_MARKER}\nbody`,
+    };
     const github = new FakeGithub({
       issues: [
-        { number: 11, labels },
-        { number: 12, labels: ["question"] },
+        marked,
+        { number: 12, body: `body\n${LOCAL_REPAIR_MARKER}` },
       ],
     });
     const scoped = scopeLocalRepairIssues(github);
@@ -799,9 +817,10 @@ Deno.test(
     assert.deepEqual(await scoped.readIssue(12), portOk(null));
     assert.deepEqual(await scoped.readIssue(99), portOk(null));
 
-    // The loop re-reads before admission: an issue that becomes a question
-    // after listing is refused instead of consuming budget.
-    labels.splice(0, labels.length, "question");
+    // The loop re-reads the real source before admission: removing the marker
+    // from the FakeGithub record revokes eligibility instead of consuming
+    // budget.
+    marked.body = "marker removed upstream";
     assert.deepEqual(await scoped.readIssue(11), portOk(null));
   },
 );
