@@ -59,6 +59,7 @@ import { gatewayRead } from "../../src/adapters/gateway/http.ts";
 import { denoRestCall } from "../../src/release/http.ts";
 import { UnavailableBuildReceiptResolver } from "../../src/release/resolver.ts";
 import { markerProofParser } from "../../src/replay/fixture.ts";
+import { toyIsolation } from "../replay/helpers.ts";
 import { createRepairStateStore } from "../../src/state/mod.ts";
 import type { RepairEntrypointDepsV1 } from "../../src/main.ts";
 import { runRepairEntrypoint } from "../../src/main.ts";
@@ -209,15 +210,7 @@ async function makeWiringRig(prefix: string): Promise<WiringRigV1> {
           maxEntryBytes: 256 * 1024,
           proof: markerProofParser(),
         },
-        isolation: {
-          attestation: {
-            version: "v1",
-            host: "harness",
-            restrictedExecution: true,
-            boundary: "bounded test host",
-            attestationRef: "attestation://harness/v1",
-          },
-        },
+        isolation: toyIsolation(),
       },
       model: {
         openSession: () => {
@@ -414,6 +407,7 @@ Deno.test(
                 boundary: "bounded test host",
                 attestationRef: "attestation://harness/v1",
               },
+              run: toyIsolation().run,
             },
           },
         },
@@ -656,7 +650,11 @@ Deno.test(
       },
     );
     assert.throws(
-      () => createReplayIsolationHost(hostileAttestation),
+      () =>
+        createReplayIsolationHost({
+          attestation: hostileAttestation,
+          run: toyIsolation().run,
+        }),
       (error: unknown) =>
         error instanceof TypeError &&
         error.message.startsWith(
@@ -664,6 +662,33 @@ Deno.test(
         ) &&
         !error.message.includes("EXOTIC-ATTESTATION-READ"),
     );
+
+    // --- Isolation: revoked proxies are the same static non-echoing
+    // TypeError for the WHOLE capability and for the nested attestation; the
+    // raw TypeError from Array.isArray on a revoked proxy never escapes.
+    const revokedCapability = Proxy.revocable(
+      { attestation: toyIsolation().attestation, run: toyIsolation().run },
+      {},
+    );
+    const revokedNested = Proxy.revocable(toyIsolation().attestation, {});
+    const revokedWholeProxy = revokedCapability.proxy;
+    const revokedNestedProxy = revokedNested.proxy;
+    revokedCapability.revoke();
+    revokedNested.revoke();
+    for (
+      const revokedInput of [
+        revokedWholeProxy,
+        { attestation: revokedNestedProxy, run: toyIsolation().run },
+      ]
+    ) {
+      assert.throws(
+        () => createReplayIsolationHost(revokedInput),
+        (error: unknown) =>
+          error instanceof TypeError &&
+          error.message ===
+            "replay isolation host rejected: the attestation does not prove restricted execution (clearEnv is not a sandbox)",
+      );
+    }
   },
 );
 

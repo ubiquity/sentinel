@@ -1082,7 +1082,7 @@ async function makeRepairRig(
         maxEntryBytes: 256 * 1024,
         proof: markerProofParser(),
       },
-      isolation: toyIsolation(),
+      isolation: toyIsolation(replayRuntime),
       runtime: replayRuntime,
     },
     model: {

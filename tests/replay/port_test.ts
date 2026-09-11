@@ -22,7 +22,11 @@ import type { RepositoryConfigV1 } from "../../src/contracts/repository-config.t
 import { SENTINEL_REPLAY_INPUT_PATH } from "../../src/replay/causal-verifier.ts";
 import { computeReplayFixtureDigest } from "../../src/replay/fixture.ts";
 import type { ResolvedFixtureV1 } from "../../src/replay/fixture.ts";
-import { ReplayPortImpl } from "../../src/replay/port.ts";
+import { LinuxReplayIsolation } from "../../src/replay/isolation.ts";
+import {
+  ReplayPortImpl,
+  validateReplayIsolationCapability,
+} from "../../src/replay/port.ts";
 import type { ReplayPortOptions } from "../../src/replay/port.ts";
 import { DenoReplayRuntime } from "../../src/replay/runtime.ts";
 import type {
@@ -49,6 +53,7 @@ import {
   toyBundle,
   toyConfig,
   ToyFixtureResolver,
+  toyIsolation,
   toyOptions,
   toyPolicy,
 } from "./helpers.ts";
@@ -87,7 +92,7 @@ function portWithBundle(
   overrides: Partial<ReplayPortOptions> = {},
 ): ReplayPortImpl {
   return new ReplayPortImpl({
-    ...toyOptions(toyRoot, scratchDir),
+    ...toyOptions(toyRoot, scratchDir, overrides),
     fixtures: new ToyFixtureResolver(bundle),
     ...overrides,
   });
@@ -582,6 +587,9 @@ Deno.test("repository mismatch is invalid; isolation is mandatory", async () => 
       () =>
         makePort(toy.root, `${root}/scratch3`, {
           isolation: {
+            // A real callable runner is present, so the ONLY fault under test
+            // is the false `restrictedExecution` attestation.
+            run: toyIsolation().run,
             attestation: {
               version: "v1",
               host: "not-restricted",
@@ -595,6 +603,209 @@ Deno.test("repository mismatch is invalid; isolation is mandatory", async () => 
       "unattested isolation must refuse construction",
     );
   });
+});
+
+Deno.test("isolation capability needs one captured callable run", async () => {
+  await withFixture(async (root) => {
+    const toy = await createToyApp(`${root}/toy`);
+    const valid = toyIsolation();
+    const invalid: unknown[] = [
+      { attestation: valid.attestation },
+      { attestation: valid.attestation, run: null },
+      { attestation: valid.attestation, run: "deno task test" },
+      new Proxy({ attestation: valid.attestation }, {
+        get(target, key) {
+          if (key === "run") throw new Error("EXOTIC-RUN-READ");
+          return Reflect.get(target, key);
+        },
+      }),
+      // A revoked proxy can no longer answer any property read at all.
+      (() => {
+        const revocable = Proxy.revocable(
+          { attestation: valid.attestation },
+          {},
+        );
+        revocable.revoke();
+        return revocable.proxy;
+      })(),
+    ];
+    for (const isolation of invalid) {
+      assert.throws(
+        () =>
+          makePort(toy.root, `${root}/scratch-bad`, {
+            isolation,
+          } as unknown as Partial<ReplayPortOptions>),
+        TypeError,
+        "a capability without a callable run must refuse construction",
+      );
+    }
+
+    const input: ReplayCommandInputV1 = {
+      executable: "deno",
+      args: [],
+      cwd: root,
+      env: {},
+      maxDurationMs: 1000,
+      maxOutputBytes: 1024,
+    };
+    // runtime.ts declares `detail: string` (never null), so the conforming
+    // bounded diagnostic is the empty string.
+    const commandResult: ReplayCommandResultV1 = {
+      outcome: "exited",
+      exitCode: 0,
+      stdout: new Uint8Array(),
+      stderr: new Uint8Array(),
+      truncated: false,
+      settled: true,
+      detail: "",
+    };
+
+    // The run is read exactly once: a getter that would swap the function on
+    // the second read can never replace the captured boundary.
+    let runReads = 0;
+    let firstCalls = 0;
+    const first = (
+      _input: ReplayCommandInputV1,
+      _access: "read-only" | "read-write",
+    ): Promise<ReplayCommandResultV1> => {
+      firstCalls += 1;
+      return Promise.resolve(commandResult);
+    };
+    const changing: { attestation: unknown } = {
+      attestation: valid.attestation,
+    };
+    Object.defineProperty(changing, "run", {
+      get() {
+        runReads += 1;
+        return runReads === 1 ? first : () => {
+          throw new Error("SWAPPED-RUN");
+        };
+      },
+    });
+    const captured = validateReplayIsolationCapability(changing);
+    assert.ok(captured !== null, "the first run read must validate");
+    const capturedResult = await captured.run(input, "read-only");
+    assert.equal(capturedResult.outcome, "exited");
+    assert.equal(firstCalls, 1, "the first captured run is the one invoked");
+    assert.equal(runReads, 1, "run is read exactly once");
+
+    // A class method keeps its receiver through validation: `run` is captured
+    // from the capability and bound to THAT capability object, so a class
+    // instance carrying both the attestation and the method sees its own
+    // fields. (An unbound method copied into a foreign wrapper would instead
+    // see the wrapper — the documented receiver is the capability itself.)
+    class FixtureCapability {
+      calls = 0;
+      readonly attestation = valid.attestation;
+      run(
+        _input: ReplayCommandInputV1,
+        _access: "read-only" | "read-write",
+      ): Promise<ReplayCommandResultV1> {
+        this.calls += 1;
+        return Promise.resolve(commandResult);
+      }
+    }
+    const receiver = new FixtureCapability();
+    const bound = validateReplayIsolationCapability(receiver);
+    assert.ok(bound !== null);
+    const result = await bound.run(input, "read-write");
+    assert.equal(result.outcome, "exited");
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.settled, true);
+    assert.equal(receiver.calls, 1, "the captured run keeps its receiver");
+
+    // Later mutation of the raw capability never reaches the snapshot.
+    const mutable = { attestation: valid.attestation, run: valid.run };
+    const snapshot = validateReplayIsolationCapability(mutable);
+    assert.ok(snapshot !== null);
+    const replacement = () => Promise.reject(new Error("MUTATED-RUN"));
+    mutable.run = replacement;
+    mutable.attestation = { ...valid.attestation, host: "mutated" };
+    assert.notEqual(snapshot.run, replacement);
+    assert.equal(snapshot.attestation.host, "toy-restricted-host");
+  });
+});
+
+Deno.test({
+  name: "Linux isolation executes the configured replay and test commands",
+  ignore: Deno.build.os !== "linux",
+  fn: async () => {
+    await withFixture(async (root) => {
+      const toy = await createToyApp(`${root}/toy`);
+      const scratch = `${root}/scratch`;
+      await Deno.mkdir(scratch);
+      const isolation = new LinuxReplayIsolation(scratch);
+      const port = makePort(toy.root, scratch, { isolation });
+      const bundle = toyBundle();
+
+      // Original head: the intended regression failure under the real
+      // bubblewrap boundary, with no partial-execution limitations.
+      const original = assertPortOk(
+        await port.runReplay(
+          await replayRequest(bundle, toy.originalSha, {
+            commandId: "replay",
+          }),
+        ),
+      );
+      assert.equal(original.outcome, "failed");
+      assert.equal(original.exitCode, 1);
+      assert.equal(original.failure?.intended, true);
+      assert.deepEqual(original.limitations, []);
+
+      // Candidate head through the configured replay command.
+      const candidate = assertPortOk(
+        await port.runReplay(
+          await replayRequest(bundle, toy.candidateSha, {
+            commandId: "replay",
+          }),
+        ),
+      );
+      assert.equal(candidate.outcome, "passed");
+      assert.equal(candidate.exitCode, 0);
+      assert.equal(candidate.failure, null);
+      assert.deepEqual(candidate.limitations, []);
+
+      // Candidate head through the configured test command.
+      const candidateTest = assertPortOk(
+        await port.runReplay(await replayRequest(bundle, toy.candidateSha)),
+      );
+      assert.equal(candidateTest.outcome, "passed");
+      assert.equal(candidateTest.exitCode, 0);
+      assert.equal(candidateTest.failure, null);
+      assert.deepEqual(candidateTest.limitations, []);
+
+      // Read-write proof: the trusted configured argv first writes inside its
+      // disposable checkout, then runs the toy's real target tests there.
+      const writePort = makePort(toy.root, scratch, {
+        isolation,
+        config: configWithCommand("test", {
+          executable: "deno",
+          args: [
+            "eval",
+            "await Deno.writeTextFile('sandbox-write.txt','public'); const s=await new Deno.Command('deno',{args:['task','test'],stdout:'inherit',stderr:'inherit'}).output(); Deno.exit(s.code);",
+          ],
+          maxDurationMs: 15000,
+          maxOutputBytes: 262144,
+        }),
+      });
+      const wrote = assertPortOk(
+        await writePort.runReplay(
+          await replayRequest(bundle, toy.candidateSha),
+        ),
+      );
+      assert.equal(wrote.outcome, "passed");
+      assert.equal(wrote.exitCode, 0);
+      assert.equal(wrote.failure, null);
+      assert.deepEqual(wrote.limitations, []);
+
+      // Every disposable checkout was removed: the isolation scratch is empty.
+      const remaining: string[] = [];
+      for await (const entry of Deno.readDir(scratch)) {
+        remaining.push(entry.name);
+      }
+      assert.deepEqual(remaining, []);
+    });
+  },
 });
 
 Deno.test("checked-out symlink ancestors are rejected at materialization", async () => {

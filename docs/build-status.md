@@ -7,22 +7,9 @@ is evidence, not a second queue. Only the current GPT-6 Astra integration owner
 may edit this file. Workers return proposed updates and immutable evidence;
 READY means awaiting Astra acceptance. Do not create replacement task lists.
 
-Last reconciled: 2026-09-10 19:21 UTC by the Astra integration owner.
-Canonical source HEAD is af11a373139a3b1211d86c44e33d1d2eda713408;
-the current ledger commit follows that source without changing tested bytes.
-T01, T02, T03, T04 and T13 are locally accepted. Canonical lane remains
-/Users/nv/repos/ubiquity/sentinel/.codex-worktrees/master-plan-gfa795549e5
-on codex/master-plan-gfa795549e5. T03 commit a617c52 and T04 commit af11a37
-are integrated here. All task-owned DSH writers and test processes settled.
-Only the eight pre-existing diagnostic directories remain untracked.
-Gateway m06 remains clean at cf5af622e72486c7f898b048ecaadd778e776485.
-No new worktree or branch was created. No new push, PR, deployment, live
-capture, promotion or activation occurred in this continuation. T08 retains
-aggregate publication and exact-head review; T05 is the next implementation.
-Astra directly supervises DSH using deepseek-official/deepseek-flash/max with
-enforced workspace-write/ask. Runtime implementation remains Luna/max.
-Playbook revision2026-09-10.2 adopted19:17UTC; earlier formatting violation
-and separate launch evidence are recorded below.
+Last reconciled: 2026-09-11 00:42 UTC by Astra after owner-authorized supervision transfer and focused issue4 acceptance. All task workers and acceptance jobs have exited; shared DSH Web was untouched.
+Canonical lane remains codex/master-plan-gfa795549e5 in its recorded worktree. Validated source base2fc0fc3c291cc70d4e93bea9302c4fa07a3585a0 plus the focused draft is bound by the204-file Linux manifest below; the focused commit records the accepted candidate.
+Issue #1 is closed through merged PR #17. T05/issue #4 now has local canonical acceptance: Linux4/4, Mac98/98, types/format/lint, and fresh independent Astra audit. All eight old diagnostic directories remain. No next issue is selected. Aggregate review/publication/merge remains T08/issue12. No production activation is claimed.
 
 Task states: pending, in_progress, ready, accepted, blocked, rejected. Only
 accepted closes a task, and only after the acceptance evidence below exists.
@@ -35,7 +22,7 @@ to keep retrying. Scope changes require an Astra entry with the reason.
 | T02 Runtime model receipt | accepted / Astra | Owner-approved correlated request/runtime evidence binds configured provider, Luna/max, routing and exact invocation/thread/turn; unavailable evidence fails closed | Frozen 12-path candidate verified; fresh source audit passed behavior, 72/72 tests and format/lint passed. Real concrete Luna/max smoke settled with completed runtime receipt. Acceptance details below. No backend-attestation or production-isolation claim. |
 | T03 Runtime review transport | accepted / Astra integration | Concrete completed review transport and durable receipt bind operation, PR, head, reviewer and terminal result; no silence-as-clean | Audited transport hash23507800 preserved. Integrated60a66325 passed146/147; corrected sole fixture passed2a236c00 in19s. Final source/test type, format and lint pass. Concrete producer/live request evidence retained. Local integration accepted; aggregate exact-head review, publication and runtime activation remain T08–T10. |
 | T04 Gateway replay consumer | accepted locally / Astra; publication remains T08 | Actual target command consumes the safe permanent fixture, fails original, passes candidate, and runs in target validation | Gateway checkpointcf5af622 passed77/77 and fresh source audit; clean existing m06 lane. Sentinel metadata/source checkpointaf11a37 passed71/71 (3109c98f), type/format/lint; actual local causal loop and original/sanitized/candidate dispatch verified. Transient metadata stays outside fixture digest. Publication and a subsequent live capture remain T08/T11; no historical SHA proof is fabricated. |
-| T05 Production replay isolation | in_progress / Astra | Real filesystem/network/credential/process restrictions tested on the execution host; arbitrary target commands cannot escape; no caller boolean as proof | Existing VPS rootless Bubblewrap/Deno synthetic boundary probe passed: receipt31a5a73a-767c-4242-95ba-f7fdcfc49db4. Actual ReplayPort integration, sibling/escape/process regressions and Linux causal verifier remain required. Local macOS acceptance does not close production isolation. |
+| T05 Production replay isolation | accepted locally / Astra; issue #4 | Captured callable isolation, real Linux configured target commands and read-only causal execution, malformed capability refusal and cleanup; preserved Mac behavior | Linux4/4, Mac98/98, types/format/lint and independent Astra audit passed on identical manifest-bound bytes; see issue4 acceptance below. Eight prior diagnostics preserved. Full aggregate review/merge remains issue12. |
 | T06 Trusted host wiring | pending / Astra; depends on T01–T05 | Real entrypoints assemble scoped authentication, durable state CAS, incident/replay/model/review and release capabilities; missing capabilities fail closed | Observer run `34389188768`: `observe_auth_missing`; repair `34388944531` and release `34388818273`: host wiring absent. Assemble existing ports with verified contracts, not another injected stub. |
 | T07 Activation decisions | pending / Astra prepares; user decides | Finite model limits/session bounds, retention duration/aggregate storage/key capability, stability baseline/thresholds, credential scopes, protected paths, isolated target and handover owner recorded | Rolling-hour/seven-day limit question sent01:59UTC remains unanswered; do not ask again or guess live caps. Existing dedicated App4682172 installation155687488 lacks repair permissions; organization App identity needs verification and scoped token issuance. Retention/storage and stability settings remain unresolved. |
 | T08 Integrated delivery | pending / Astra; depends on T01–T06 | Accepted worker tips are canonical ancestors; exact candidate passes integrated harness, current-head Codex review and required CI; resulting PR merged | Earlier source PR #2 is already merged; do not recreate it or redo fixed D6. New accepted changes require a new integrated candidate and evidence. |
@@ -2602,3 +2589,93 @@ T05a v3 settled f19bce87-d487-4fa4-b1f5-e92b20c86cec exit0, verified Flash/max w
 Linux executed receipt cc48556d9d6816f2605c36c352452867e2de5be694f7aa26c8a9330e9268c576/672e2b2a-a911-48b6-8805-f56b168a7bb6 passed8/8 on codex@vps.pavlovcik.com, Deno2.9.6 aarch64, full source archive hashes matched across SSH. This proves this class's actual exact-checkout filesystem isolation, environment clearing, network denial, read-only/write modes, timeout and detached-child teardown. Final lint6ce6fde1-ccb2-4a3c-b6a6-01ce8ec2d171 and format7cbb2243-9fb2-4f81-8b80-b25897c82a17 passed. Linux test also type-checked final fixture; primary reviewed implementation and assertions. Source sha256 eecd3f2a7604a1bb509a716f0d86b71f9c3ecbc10029bd05049d0b27e14708ba; test9da0a4c85767807bc87f8801ec7a5746e6803894004f9291a4b1272f76ac22d2. No production source change followed initial draft; corrections were test expectations.
 
 v4 session e98785b1-fe1e-4650-8bbd-13710fa17178 completed exit0 with verified Flash/max workspace-write/ask and live cwd/NODE_ENV. Actual calls13 exceed assigned8 because worker unnecessarily searched local bwrap and invented rule paths; record scope-discipline violation. One formatter/no acceptance checks, useful bounded test edits preserved; no children and parent exited. Next assignment prohibits host/tool/rule discovery and repeated post-format inspection. T05 remains active until actual port/host/Linux causal path uses callable isolation and passes integrated acceptance. No deployment or target activation.
+
+### T05b callable execution assignment (2026-09-10 19:45 UTC)
+
+Accepted T05a source7dbeafbc9a58bb64ec676e961a52d637e9c3b3d7 is exact base. Frozen private t05b-wiring-v1.md gives one writer replay port/causal verifier/host provider wiring and enumerated fixtures plus new isolation-integration_test.ts; source isolation.ts/runtime.ts and Astra ledger remain prohibited. No children or new lanes,65-call cap, first source3min and handback8-12min; one final formatter/no checks. Rule revision2026-09-10.2 adopted, no changes. GPT named t05-wiring targets registered before launch. Host/tool/rule rediscovery forbidden after previous worker scope-discipline violation. Actual Linux runner required at target execution; plain boolean attestation no longer sufficient. Canonical identity unchanged; eight diagnostic dirs preserved.
+T05b launch4014260e-ca93-469e-87a6-b542e57e1a7f verified actual Flash/max, workspace-write/ask, live PID99829 cwd/NODE_ENV. First source edit by19:48:44 within3min checkpoint. GPT prepared immutable t05b-linux-acceptance-v1.ts and registered t05-linux-wiring-acceptance; it includes new integration test and exact source manifest/transport.
+T05 acceptance follow-up identified by Astra: full test-local.ts and deno.json test currently grant --allow-read=. only, while real Linux isolation resolves fixed /usr binaries; after source worker settlement, permit the narrowly needed fixed tool reads in harness or prove existing permissions sufficient. This is part of T05 acceptance, not a new task; worker cannot edit root harness in current assignment. Do not substitute broader manual --allow-read acceptance for a working canonical harness.
+T05b v1 intervened19:50UTC: exceeded65-call assignment (68 observed then additional edits) after44 initial reads/searches; useful four-source wiring edits preserved. Primary verified PID99829 exact cwd and no children, saved private patch, TERM stopped only that task. Exec56859 settled exit0 without completed result; therefore INTERRUPTED/PARTIAL, not accepted worker completion. Final6 implementation files dirty, helper has imports only. No child/background jobs. v2 frozen fixture-only continuation owns8 existing tests/helper and one precise port validator revoked-proxy guard;40 calls with first edit within8 read/search calls. New Linux integration is separate next checkpoint. Primary source review found Array.isArray(revokedProxy) outside catch; explicit correction assigned, no silent acceptance.
+T05b v2 PID1234/session371e15ce-c69d-4e8e-9973-cd69dfca4003 also exceeded40-call bound (56 observed); primary stopped exact verified process19:53, saved patch, verified no children and exec86986 settled without completed result. Partial fixture migration preserved. Actual model/sandbox/live cwd/NODE_ENV verified, but run is not compliant completion. Type receipt087b6718-867b-4d73-a85a-97e53475028c identifies two exact defects; primary also found wrong wrapper receiver in new test. v3 explicitly assigns these corrections and compact Linux cases INSIDE existing port/causal suites, not a duplicate new file. Root harness existing read permission expands only to fixed /usr,/bin inspection; no whole-host read.90-call/5min bound; one final explicit formatter, no worker checks. Existing test registrations updated to avoid nonexistent duplicate file. Production T05 still unaccepted.
+
+Owner stop19:55UTC: exact task-owned PID2129 received TERM after cwd/identity/no-child check; exec88914 settled and exit was independently verified. No completed handback or acceptance is claimed. All partial edits and private patches retained. GitHub closeout parent#3 and children#4–#16 replace further implementation activity at owner request.
+
+### Issue 1 bounded interrupt wait assignment (2026-09-10 20:49 UTC)
+
+Owner requested one open GitHub issue only. Selected #1, independent of stopped
+T05/#4 replay work. Canonical lane/branch remain unchanged at 7dbeafb; all dirty
+replay work and diagnostic directories are preserved. Isolated module ID
+issue-1-interrupt-wait uses worktree master-plan-issue-1-interrupt-wait-acee1e8d50f
+at /Users/nv/repos/ubiquity/sentinel/.codex-worktrees/master-plan-issue-1-interrupt-wait-acee1e8d50f
+on codex/master-plan-issue-1-interrupt-wait-acee1e8d50f, exact published base
+22ac38871d6261c844f8419f80fcf038ddcdf133. This issue-only branch excludes
+unpublished T01-T05 work; accepted tip will also merge into canonical ancestry.
+One DSH writer owns only tests/repair/loop-guard-boundary_test.ts; no children,
+source/Git/remote writes or worker checks. Frozen assignment and primary receipts
+live in /tmp/sentinel-issue-1-20260910. Playbook revision 2026-09-10.2 adopted;
+SHA256 7b2b79fd711a391f7d589a187be8103bb7d09b83296a11078abf5b917ca37850.
+GPT registered issue-1-boundary and issue-1-integrated before launch. First edit
+3min, bounded handback about8min/30 calls; supported feedback is next settled
+assignment with task-owned intervention for confirmed failure/lack of progress.
+
+### Issue 1 merged delivery (2026-09-10 21:20 UTC)
+
+Issue #1 closed through PR #17. Focused worker commit
+261e0446fea831fd38419019e85c0db187b912d9 changes only the boundary fixture.
+Published merge d25115fe0d27e6f779903299c29c9a3e0f948822 is on development;
+canonical 2fc0fc3c291cc70d4e93bea9302c4fa07a3585a0 contains the accepted tip
+and published merge with ancestry preserved. Root development matches origin;
+pre-existing root error.log and all canonical replay dirt/diagnostic dirs remain.
+
+DSH actual Flash/max workspace-write/ask and live cwd/NODE_ENV verified for all
+three completed bounded runs. Two compile defects and one negative-test timing
+race corrected through DSH, no primary implementation edits. Negative cases use
+synchronous output-cap interrupt, assert missing/rejected/thrown observation,
+clear timeout error, script/close settlement and temporary-checkout cleanup.
+No DSH tests/Git writes/children. Session details/private report:
+/tmp/sentinel-issue-1-20260910/result.md and launch-receipt.txt.
+
+Published candidate focused receipt5e1a1ad3-aa16-4a8c-a94a-88316dced4d6
+passed18/18. Full Linux credential-free harness passed694 tests/68steps plus
+fmt/lint/types in PR34530058775, push34530049412, and merged34530752944.
+Exact-commit local Codex review completed exit0/no actionable findings; source
+inspection only (reviewer test registration waited on primary evidence lock and
+was stopped before execution). No unresolved review threads.
+
+Additional Mac full harness2301af15-9997-4ac4-9a22-5ca9b94a6267 was deliberately
+interrupted after21min once Linux candidate/merge acceptance passed; it remained
+active in unrelated release acceptance tests and blocked canonical focused
+execution through the shared lock. This is INTERRUPTED, not passed. Primary
+verified exact task evidence PID63867/cwd/process group63875, sent TERM through
+the evidence tool, confirmed all group members settled, and removed only its
+two newly created temporary directories. Complete output retained externally.
+
+Canonical fresh focused receipt65671137-4c96-4370-844e-759d2d2fbf4c is16pass/2fail:
+hung-steer and late-start on this unpublished canonical state report the new
+clear2000ms observation timeout. All three new negative cases pass. Do not claim
+the unpublished lane is green; preserve this result for its owner before wider
+acceptance. No unchanged rerun or expansion into another issue. The issue-only
+published candidate and merged CI remain green. All local receipts share
+namespace cc48556d9d6816f2605c36c352452867e2de5be694f7aa26c8a9330e9268c576.
+Only issue1 was started/completed. No production deployment or live activation.
+
+### Issue 4 supervision transfer and V4 assignment (2026-09-11 00:27 UTC)
+
+Owner explicitly transferred supervision of parent session-028abb8a-9268-4f09-8813-75eca5dd53fb and child274075ed-8a16-46f9-b191-df648bccda4c. API both running false; child turn/end completed; prior harness processes gone. Preserve all partial work. Fresh Astra audit passed resumption, not acceptance. Playbook2026-09-10.2 hash7b2b79fd711a391f7d589a187be8103bb7d09b83296a11078abf5b917ca37850 re-read. V4 owns only two replay test files, test-local.ts and deno.json; no source/ledger/Git/children/checks. Expected first edit2min, handback5-8min/55calls; one final formatter. Feedback next settled assignment with bounded task stop authority. GPT owns named t05-wiring targets and Linux v2 transport. Permission probe3e6628b4-fd93-4dd6-acd1-b8ff7428d5ac passed under deny-read. No production actions.
+V4 launch live PID5912/stream89b8427d/persisted a226ed8e verified exact cwd,NODE_ENV,Flash/max,workspace-write/ask. V4 stopped before edits: primary assignment mistakenly named nonexistent runTests; repeated exploration followed. Exact process exited, no children/jobs. Preserved patch. V5 corrects commandId-based runReplay interface and reduces scope to port tests plus two permission files,25calls/first edit after6reads. No causal edits in this slice. This corrects primary input, not model substitution.
+V5 session72392079/persisted899d6f1c PID7238 completed exit0,24calls with verified cwd/NODE_ENV/Flash/max/workspace-write/ask. It exceeded first-edit read checkpoint (18reads), but completed3-file scope with one formatter and no checks/children. Reviewed conforming receiver/changing-getter, revoked proxy, actual Linux port+write test and narrow permissions. Type receipt7d4a99fb-cea9-4687-85e8-676044197b83 passed. GPT Mac launch diagnostic7b7d8dce-0694-4c40-8f48-941277978b4d passed exact unchanged profile; prior Ralph exit71 is not reproduced outside worker sandbox. V6 owns only causal test additions plus port test name capitalization for existing Linux filter;3min/30calls/no checks, one formatter. Full T05 acceptance remains pending.
+
+### Issue 4 accepted local integration (2026-09-11 00:42 UTC)
+
+V6 stream7d3dd1cd/persistedc3c7417b PID8491 completed exit0,23calls, exact cwd/NODE_ENV/Flash/max/workspace-write/ask verified. Only causal test additions and port test capitalization; one formatter, no checks/Git/children. Both V5/V6 settled and all GPT acceptance jobs exited. Eight pre-existing diagnostic directories remain; test-owned temporary roots cleaned themselves.
+
+Frozen candidate source base2fc0fc3c291cc70d4e93bea9302c4fa07a3585a0 plus the accepted15-file implementation/test/config draft is bound by 204-file manifest and archive400766ac41fc3201af0e4c9a93a5e67a03ca63ab223b56bc05ec97d06639e6a8. Independent fresh Astra issue4_final_audit verified all204 hashes and returned PASS conditional on Mac results; that condition is now satisfied. Primary checked unchanged source hashes after acceptance. No source corrections remain.
+
+Executed GPT receipts (namespace cc48556d9d6816f2605c36c352452867e2de5be694f7aa26c8a9330e9268c576):
+- source/types1607124d-1af0-4c00-89f0-ab8b855336c2 passed;
+- format1ca65520-ca3e-41c9-b052-25c767cf16d2 passed;
+- lint49b5b35a-5c1d-4075-a612-b8981ddbeece passed;
+- Linux integratedd426f501-431b-4495-8829-5c6381e38b74 passed4/4 on codex@vps.pavlovcik.com, Deno2.9.6 aarch64: actual configured replay intended failure/pass, normal target tests and required checkout write; two independent read-only original-SHA causal executions; observed exit2 permission denial against existing public outside file; missing capability before scratch creation; cleanup. Remote archive hash matched local.
+- canonical Macc9894f93-e5dd-4bd2-931f-707f091631c3 passed98/98,4Linux-only ignored,272026ms. Includes real macOS positive/negative causal boundary, captured-request loop, host assembly, composed lifecycle and callable validation. Prior worker sandbox exit71 does not reproduce under GPT host acceptance.
+
+Accepted source uses captured receiver-bound callable capability, rejecting malformed/hostile or attestation-only values before target work. Trusted Git stays outside the target sandbox. Fixed-tool read grants are workspace,/usr,/bin and exact executable only. Primary reviewed entire focused diff and preserved all prior T05 source work. T05/issue4 local acceptance complete; source will be committed on canonical lane. Aggregate full-harness reconciliation, current-head Codex review and merge are issue12/T08, not claimed here; known unrelated cooldown-remote fixture type drift remains there. No deployment, live activation, paid harness call or target ownership change.

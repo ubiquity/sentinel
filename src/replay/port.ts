@@ -31,11 +31,17 @@
  * only). Request/model-supplied argv, shell strings and interpolations are
  * never executed. The targeted command is the target's own code, so it is
  * target-controlled: this port refuses to run any target command unless the
- * caller injected a trusted isolation capability/attestation from a
- * restricted execution host. `clearEnv` removes inherited credentials but is
- * NOT an OS sandbox — the attestation is the boundary, and local toy tests
- * construct an explicitly trusted fixture-mode capability (never a live
- * config bypass).
+ * caller injected a trusted isolation capability from a restricted execution
+ * host AND that capability carries a callable `run` boundary. The descriptive
+ * attestation is required but is NOT sufficient: a boolean-only capability is
+ * rejected at construction, the `run` property is captured exactly once and
+ * receiver-bound, and the configured target command (unchanged argv/bounds)
+ * executes ONLY through that captured runner with a read-write checkout. The
+ * ordinary `runtime` option is retained ONLY for trusted Git
+ * clone/checkout/SHA work; it is never the target execution path. `clearEnv`
+ * removes inherited credentials but is NOT an OS sandbox — the callable
+ * runner is the boundary, and local toy tests construct an explicitly trusted
+ * fixture-mode capability (never a live config bypass).
  *
  * Failure semantics: spawn failure, missing executable, wrong revision,
  * timeout, unsettled descendants (uncertain cleanup — the scratch is
@@ -85,7 +91,12 @@ import type {
   ResolvedFixtureV1,
 } from "./fixture.ts";
 import { DenoReplayRuntime } from "./runtime.ts";
-import type { ReplayCommandResultV1, ReplayRuntimeV1 } from "./runtime.ts";
+import type {
+  ReplayCommandInputV1,
+  ReplayCommandResultV1,
+  ReplayRuntimeV1,
+} from "./runtime.ts";
+import type { ReplayCheckoutAccessV1 } from "./isolation.ts";
 
 // ---------------------------------------------------------------------------
 // Constructor capability types
@@ -112,8 +123,113 @@ export interface ReplayIsolationAttestationV1 {
   attestationRef: string;
 }
 
+/**
+ * The ACTUAL restricted-execution boundary for one target-controlled command.
+ * `access` selects the checkout mount mode: read-write for real replays whose
+ * tests create temporary files in the disposable checkout, read-only for
+ * private causal snapshots. Implementations enforce the boundary themselves;
+ * the port never rewrites argv, bounds or result handling.
+ */
+export type ReplayIsolationRunnerV1 = (
+  input: ReplayCommandInputV1,
+  access: ReplayCheckoutAccessV1,
+) => Promise<ReplayCommandResultV1>;
+
 export interface ReplayIsolationCapabilityV1 {
   attestation: ReplayIsolationAttestationV1;
+  /**
+   * Callable restricted-execution boundary that ACTUALLY runs target
+   * commands. A descriptive (boolean) attestation alone is never sufficient:
+   * target-controlled code runs only through this captured, receiver-bound
+   * function, and a later mutation or accessor can never replace it.
+   */
+  run: ReplayIsolationRunnerV1;
+}
+
+/**
+ * Validate ONE untrusted whole-capability candidate and return a sanitized
+ * snapshot: a plain attestation record (hostile accessors/proxies never leak
+ * and later mutations are not observed) plus the `run` property captured
+ * EXACTLY ONCE and bound to the capability receiver (so a class method keeps
+ * its `this` and a changing getter cannot swap the validated function).
+ *
+ * Every fault — non-record, missing/empty fields, a false/missing
+ * `restrictedExecution`, a missing/non-callable `run`, a throwing getter or a
+ * hostile proxy trap — is the SAME null (the caller maps it to its own static
+ * non-echoing TypeError). Nothing caller-controlled is ever returned or
+ * thrown.
+ */
+export function validateReplayIsolationCapability(
+  capability: unknown,
+): ReplayIsolationCapabilityV1 | null {
+  const record = capability as Record<string, unknown>;
+  let attestationValue: unknown;
+  let runValue: unknown;
+  try {
+    // The shape probe itself is guarded: Array.isArray on a revoked Proxy
+    // throws a raw TypeError, which must still be the same static null.
+    if (
+      typeof capability !== "object" || capability === null ||
+      Array.isArray(capability)
+    ) {
+      return null;
+    }
+    // One read per property; a hostile accessor fault is contained here.
+    attestationValue = record.attestation;
+    runValue = record.run;
+  } catch {
+    return null;
+  }
+  const attestation = snapshotReplayIsolationAttestation(attestationValue);
+  if (attestation === null || typeof runValue !== "function") return null;
+  let bound: unknown;
+  try {
+    // Bind through the prototype so a hostile function `bind` accessor is
+    // never consulted, and bind to the capability receiver so a class method
+    // sees its own instance.
+    bound = Function.prototype.bind.call(runValue, capability);
+  } catch {
+    return null;
+  }
+  if (typeof bound !== "function") return null;
+  return { attestation, run: bound as ReplayIsolationRunnerV1 };
+}
+
+/** One-read-per-field attestation snapshot; null unless the exact v1 shape. */
+function snapshotReplayIsolationAttestation(
+  value: unknown,
+): ReplayIsolationAttestationV1 | null {
+  const record = value as Record<string, unknown>;
+  try {
+    // The shape probe is guarded for the same reason as the whole-capability
+    // validator: Array.isArray on a revoked Proxy throws a raw TypeError.
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      return null;
+    }
+    const version = record.version;
+    const restrictedExecution = record.restrictedExecution;
+    const host = record.host;
+    const boundary = record.boundary;
+    const attestationRef = record.attestationRef;
+    if (
+      version !== "v1" ||
+      restrictedExecution !== true ||
+      typeof host !== "string" || host.length === 0 ||
+      typeof boundary !== "string" || boundary.length === 0 ||
+      typeof attestationRef !== "string" || attestationRef.length === 0
+    ) {
+      return null;
+    }
+    return {
+      version: "v1",
+      host,
+      boundary,
+      attestationRef,
+      restrictedExecution: true,
+    };
+  } catch {
+    return null;
+  }
 }
 
 /** Trusted, read-only source of the repository to validate. */
@@ -133,12 +249,16 @@ export interface ReplayPortOptions {
   /** Trusted bundle/test policy (scopes, bounds, proof parser). */
   policy: ReplayPolicyV1;
   /**
-   * Trusted restricted-execution-host capability; required. Without it the
-   * port refuses to construct, because a target-controlled command may read
-   * workstation files even with clearEnv.
+   * Trusted restricted-execution capability; required. It must carry the
+   * descriptive v1 attestation AND the callable `run` boundary, because a
+   * target-controlled command may read workstation files even with clearEnv.
    */
   isolation: ReplayIsolationCapabilityV1;
-  /** Process runtime; defaults to the concrete DenoReplayRuntime. */
+  /**
+   * Process runtime for TRUSTED Git clone/checkout/SHA operations only. The
+   * configured target command never uses it: it runs through the captured
+   * isolation `run` boundary. Defaults to the concrete DenoReplayRuntime.
+   */
   runtime?: ReplayRuntimeV1;
   /** Clock for run timestamps; defaults to SystemClock. */
   clock?: Clock;
@@ -163,29 +283,25 @@ const GATEWAY_FIXTURE_ROOT = "tests/fixtures/gateway-replay";
 
 export class ReplayPortImpl implements ReplayPort {
   private readonly runtime: ReplayRuntimeV1;
+  private readonly isolation: ReplayIsolationCapabilityV1;
   private readonly clock: Clock;
   private readonly path: string;
   private lastUnavailableDetailText = "";
 
   constructor(private readonly options: ReplayPortOptions) {
-    const isolation = options.isolation;
-    const attestation = isolation?.attestation;
-    if (
-      attestation === null || attestation === undefined ||
-      attestation.version !== "v1" ||
-      attestation.restrictedExecution !== true ||
-      typeof attestation.host !== "string" || attestation.host.length === 0 ||
-      typeof attestation.boundary !== "string" ||
-      attestation.boundary.length === 0 ||
-      typeof attestation.attestationRef !== "string" ||
-      attestation.attestationRef.length === 0
-    ) {
+    // Whole-capability validation BEFORE any side effect: the descriptive
+    // attestation AND the callable runner must both be present. The runner is
+    // captured once and receiver-bound; a boolean-only attestation, a later
+    // mutation or a changing/hostile accessor can never become the executor.
+    const isolation = validateReplayIsolationCapability(options.isolation);
+    if (isolation === null) {
       throw new TypeError(
-        "ReplayPort requires an injected trusted isolation capability " +
-          "attesting restricted execution on the host (clearEnv is not a " +
+        "ReplayPort requires an injected trusted isolation capability with " +
+          "a callable restricted-execution runner (clearEnv is not a " +
           "sandbox; target-controlled commands need the restricted host)",
       );
     }
+    this.isolation = isolation;
     if (options.source.kind === "local") {
       if (
         typeof options.source.path !== "string" ||
@@ -458,20 +574,26 @@ export class ReplayPortImpl implements ReplayPort {
         return portError("invalid", materialized.reason);
       }
 
-      // Run the one configured target command with direct argv and the
-      // bounded process environment; enforce the existing spec caps.
+      // Run the one configured target command through the captured
+      // restricted-execution boundary with direct argv (never rewritten), the
+      // bounded credential-free environment and the existing spec caps. A
+      // read-write checkout is bound because real replay tests may create
+      // temporary files in the disposable checkout.
       const outputLimit = Math.min(
         spec.maxOutputBytes,
         request.outputLimitBytes,
       );
-      const runResult = await this.runtime.run({
-        executable: spec.executable,
-        args: spec.args,
-        cwd: checkoutDir,
-        env: this.commandEnv(homeDir),
-        maxDurationMs: spec.maxDurationMs,
-        maxOutputBytes: outputLimit,
-      });
+      const runResult = await this.isolation.run(
+        {
+          executable: spec.executable,
+          args: spec.args,
+          cwd: checkoutDir,
+          env: this.commandEnv(homeDir),
+          maxDurationMs: spec.maxDurationMs,
+          maxOutputBytes: outputLimit,
+        },
+        "read-write",
+      );
       if (!runResult.settled) {
         // Uncertain cleanup: no proof that an owned descendant is gone, so
         // the scratch must stay for inspection instead of being deleted.

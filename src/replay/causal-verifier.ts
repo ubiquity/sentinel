@@ -9,10 +9,13 @@
  * restricted verifier scratch snapshot and the exact composed sanitized
  * bundle into the other, and then executes the SAME committed trusted
  * consumer script in both snapshots by invoking the installed Deno binary
- * DIRECTLY under the macOS sandbox-exec seatbelt profile embedded below,
- * with the fixed no-prompt/no-config/no-remote protocol and read permission
- * confined to that snapshot — no env/network/run/ffi/write permissions, no
- * `deno task`, no target- or request-supplied argv, permissions or matchers.
+ * DIRECTLY with the fixed no-prompt/no-config/no-remote protocol and read
+ * permission confined to that snapshot — no env/network/run/ffi/write
+ * permissions, no `deno task`, no target- or request-supplied argv,
+ * permissions or matchers. The OS boundary around that invocation is the
+ * embedded macOS sandbox-exec seatbelt profile on darwin, and the injected
+ * callable replay-isolation capability (bwrap namespace, read-only checkout)
+ * on Linux; those are the only two supported platforms.
  * A proof is returned ONLY when BOTH executions are exited and settled,
  * untruncated, exit with code 1, keep stderr empty and print on stdout the
  * EXACT supported safe failure protocol: one `sentinel-replay-test:<id>\n`
@@ -60,16 +63,19 @@
  * permissions remain ADDITIONAL restrictions on top of the OS boundary.
  * Cwd is the current snapshot so relative Deno reads resolve inside it.
  *
- * On a non-macOS host, a missing sandbox-exec, an unresolved realpath or any
+ * On a non-macOS/non-Linux host, on Linux without a valid injected isolation
+ * capability, with a missing sandbox-exec, an unresolved realpath or any
  * sandbox/policy failure the verifier returns NO proof. There is NO
- * Deno-only fallback and NO import-scanner substitute: the OS boundary is
+ * Deno-only fallback and NO import-scanner substitute: a real OS boundary is
  * the requirement, not an optimization.
  *
- * Scope: this is a REAL Deno permission boundary for the supported local
- * consumer (read confined to the snapshot, everything else denied), not a
- * production OS sandbox for arbitrary target commands — the ReplayPort's
- * injected restricted-execution attestation remains the production isolation
- * gate and is untouched here.
+ * Scope: on macOS this is a REAL Deno permission boundary for the supported
+ * local consumer (read confined to the snapshot, everything else denied); on
+ * Linux the consumer runs inside the injected replay-isolation boundary with
+ * the same fixed direct-Deno argv, and trusted Git clone/checkout work stays
+ * on the ordinary runtime. Neither path is a general-purpose sandbox for
+ * arbitrary target commands — the ReplayPort's callable restricted-execution
+ * isolation capability remains the production gate for those.
  */
 
 import { isGitSha } from "../contracts/brands.ts";
@@ -94,8 +100,17 @@ import type {
 } from "./causal-proof.ts";
 import { computeReplayFixtureDigest, isSafeBundlePath } from "./fixture.ts";
 import type { ExpectedFailureV1, ReplayFixtureEntryV1 } from "./fixture.ts";
+import { validateReplayIsolationCapability } from "./port.ts";
+import type {
+  ReplayIsolationCapabilityV1,
+  ReplayIsolationRunnerV1,
+} from "./port.ts";
 import { DenoReplayRuntime } from "./runtime.ts";
-import type { ReplayCommandResultV1, ReplayRuntimeV1 } from "./runtime.ts";
+import type {
+  ReplayCommandInputV1,
+  ReplayCommandResultV1,
+  ReplayRuntimeV1,
+} from "./runtime.ts";
 
 // ---------------------------------------------------------------------------
 // Verifier port types (consumed by the trusted gateway composition)
@@ -164,8 +179,19 @@ export interface GatewayLocalCausalVerifierOptionsV1 {
    */
   sandboxExecPath?: string;
   /**
+   * Optional trusted isolation capability for the LINUX consumer boundary.
+   * macOS keeps the fixed embedded sandbox-exec profile and does not require
+   * (or consult) this capability. On Linux, an absent or invalid capability is
+   * NO proof — before any private filesystem write or consumer execution —
+   * and the fixed Deno consumer runs ONLY through the captured, receiver-bound
+   * `run` with a read-only checkout.
+   */
+  isolation?: ReplayIsolationCapabilityV1;
+  /**
    * Platform override for deterministic tests; defaults to Deno.build.os.
-   * The sandbox boundary exists ONLY on macOS (darwin), never elsewhere.
+   * The sandbox boundary exists ONLY on macOS (darwin, fixed sandbox-exec
+   * seatbelt profile) and Linux (the injected callable isolation capability);
+   * every other platform returns no proof.
    */
   osName?: string;
   /** Process runtime; defaults to the concrete DenoReplayRuntime. */
@@ -306,6 +332,12 @@ export class GatewayLocalCausalVerifier implements GatewayCausalVerifierV1 {
   private readonly runtime: ReplayRuntimeV1;
   private readonly sandboxExecPath: string;
   private readonly osName: string;
+  /**
+   * Captured Linux isolation boundary: the validated capability's `run`
+   * function, already receiver-bound at construction. Null when the caller
+   * supplied no valid capability (the Linux preflight then returns no proof).
+   */
+  private readonly isolationRunner: ReplayIsolationRunnerV1 | null;
 
   constructor(private readonly options: GatewayLocalCausalVerifierOptionsV1) {
     if (
@@ -432,6 +464,11 @@ export class GatewayLocalCausalVerifier implements GatewayCausalVerifierV1 {
     }
     this.sandboxExecPath = sandboxExecPath;
     this.osName = options.osName ?? Deno.build.os;
+    // Same whole-capability metadata checks as the replay port: the `run`
+    // property is captured ONCE and receiver-bound (or null when the caller
+    // supplied no valid capability). A hostile accessor/proxy never escapes.
+    this.isolationRunner =
+      validateReplayIsolationCapability(options.isolation)?.run ?? null;
     this.path = Deno.env.get("PATH") ?? "/usr/bin:/bin";
     this.runtime = options.runtime ?? new DenoReplayRuntime(this.path);
   }
@@ -497,12 +534,19 @@ export class GatewayLocalCausalVerifier implements GatewayCausalVerifierV1 {
       canonicalStringify(plainUpstream(upstream)),
     );
 
-    // ---- platform/boundary preflight: the narrow macOS slice ----
-    // No Deno-only or import-scanner fallback: without the real OS boundary
-    // this verifier returns NO proof.
-    if (this.osName !== "darwin") return null;
-    const sandboxInfo = await statRegular(this.sandboxExecPath);
-    if (sandboxInfo === null) return null;
+    // ---- platform/boundary preflight (BEFORE any private write) ----
+    // macOS keeps the fixed embedded seatbelt profile + installed
+    // sandbox-exec. Linux requires the injected callable isolation capability
+    // (bwrap namespace); absent/invalid capability is NO proof before any
+    // private filesystem write or consumer execution. Unsupported platforms
+    // are NO proof. There is no Deno-only or import-scanner fallback.
+    if (this.osName !== "darwin" && this.osName !== "linux") return null;
+    if (this.osName === "darwin") {
+      const sandboxInfo = await statRegular(this.sandboxExecPath);
+      if (sandboxInfo === null) return null;
+    } else if (this.isolationRunner === null) {
+      return null;
+    }
     let denoResolved: string;
     try {
       denoResolved = await Deno.realPath(this.options.denoPath);
@@ -747,20 +791,55 @@ export class GatewayLocalCausalVerifier implements GatewayCausalVerifierV1 {
   }
 
   /**
-   * One sandboxed consumer execution over the CURRENT snapshot: the direct
-   * installed Deno binary under the embedded fixed seatbelt profile with
-   * DENO/SNAPSHOT/CACHE substitution parameters as realpath-resolved paths,
-   * cwd = this snapshot, read confined to this snapshot (relative reads
-   * resolve against cwd; outside reads are denied by BOTH Deno permissions
-   * and the OS boundary), no env/network/run/ffi/write permissions. Never
-   * `deno task` and never a target-supplied permission or argv.
+   * One boundary-confined consumer execution over the CURRENT snapshot.
+   *
+   * macOS (unchanged): the direct installed Deno binary under the embedded
+   * fixed seatbelt profile with DENO/SNAPSHOT/CACHE substitution parameters
+   * as realpath-resolved paths, cwd = this snapshot, read confined to this
+   * snapshot (relative reads resolve against cwd; outside reads are denied by
+   * BOTH Deno permissions and the OS boundary), no
+   * env/network/run/ffi/write permissions.
+   *
+   * Linux: the SAME fixed direct-Deno protocol (never `deno task`, never a
+   * target-supplied permission or argv) runs through the captured isolation
+   * `run` with a read-only checkout bound at its own absolute path; no macOS
+   * sandbox binary and no host cache path are needed.
    */
   private async runConsumer(
     snapshotDir: string,
     homeDir: string,
     denoResolved: string,
   ): Promise<ReplayCommandResultV1> {
-    const cacheDir = `${homeDir}/.cache/deno`;
+    const fixedArgs = [
+      "run",
+      "--no-prompt",
+      "--no-config",
+      "--no-remote",
+      "--allow-read=.",
+      `${snapshotDir}/${this.options.consumerPath}`,
+    ];
+    const input: ReplayCommandInputV1 = {
+      executable: denoResolved,
+      args: fixedArgs,
+      cwd: snapshotDir,
+      env: {
+        PATH: this.path,
+        HOME: homeDir,
+        DENO_DIR: `${homeDir}/.cache/deno`,
+        NO_COLOR: "1",
+      },
+      maxDurationMs: this.options.maxDurationMs,
+      maxOutputBytes: this.options.maxOutputBytes,
+    };
+    if (this.osName === "linux") {
+      const runner = this.isolationRunner;
+      if (runner === null) {
+        // Unreachable after the preflight; fail closed without spawning.
+        throw new Error("causal verifier isolation capability is not bound");
+      }
+      return await runner(input, "read-only");
+    }
+    const cacheDir = input.env.DENO_DIR;
     await Deno.mkdir(cacheDir, { recursive: true });
     const snapshotResolved = await Deno.realPath(snapshotDir);
     const cacheResolved = await Deno.realPath(cacheDir);
@@ -776,22 +855,12 @@ export class GatewayLocalCausalVerifier implements GatewayCausalVerifierV1 {
         "-D",
         `CACHE=${cacheResolved}`,
         denoResolved,
-        "run",
-        "--no-prompt",
-        "--no-config",
-        "--no-remote",
-        "--allow-read=.",
-        `${snapshotDir}/${this.options.consumerPath}`,
+        ...fixedArgs,
       ],
       cwd: snapshotDir,
-      env: {
-        PATH: this.path,
-        HOME: homeDir,
-        DENO_DIR: cacheDir,
-        NO_COLOR: "1",
-      },
-      maxDurationMs: this.options.maxDurationMs,
-      maxOutputBytes: this.options.maxOutputBytes,
+      env: input.env,
+      maxDurationMs: input.maxDurationMs,
+      maxOutputBytes: input.maxOutputBytes,
     });
   }
 

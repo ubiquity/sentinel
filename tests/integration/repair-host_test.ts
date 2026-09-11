@@ -49,6 +49,7 @@ import {
   ReplayPortImpl,
   type ReplayPortOptions,
 } from "../../src/replay/port.ts";
+import { toyIsolation } from "../replay/helpers.ts";
 import { DurableGitHubCooldownGate } from "../../src/repair/github-cooldown.ts";
 import { CodexImplementationPort } from "../../src/repair/model-port.ts";
 import type {
@@ -84,8 +85,8 @@ const EXPECTED_FAILURE = {
 const UNVERIFIED_RECEIPT_DETAIL =
   "model receipt unavailable: actual provider model/effort could not be verified at this boundary";
 const REPLAY_ISOLATION_DETAIL =
-  "ReplayPort requires an injected trusted isolation capability " +
-  "attesting restricted execution on the host (clearEnv is not a " +
+  "ReplayPort requires an injected trusted isolation capability with " +
+  "a callable restricted-execution runner (clearEnv is not a " +
   "sandbox; target-controlled commands need the restricted host)";
 
 /** In-memory store that must never be touched by these tests. */
@@ -208,15 +209,7 @@ async function makeHostFixture(
         maxEntryBytes: 256 * 1024,
         proof: markerProofParser(),
       },
-      isolation: {
-        attestation: {
-          version: "v1",
-          host: "harness",
-          restrictedExecution: true,
-          boundary: "bounded test host",
-          attestationRef: "attestation://harness/v1",
-        },
-      },
+      isolation: toyIsolation(),
     },
     model: {
       openSession: () => {
@@ -237,7 +230,12 @@ async function makeHostFixture(
   };
 }
 
-/** A helper that leaves the isolation attestation without real restricted execution. */
+/**
+ * A helper that leaves the isolation attestation without real restricted
+ * execution; the fixture callable is present only so the whole-capability
+ * shape type-checks — the attestation is still refused before any runner is
+ * ever reachable.
+ */
 function unverifiedIsolation(): RepairHostOptionsV1["replay"]["isolation"] {
   return {
     attestation: {
@@ -247,6 +245,7 @@ function unverifiedIsolation(): RepairHostOptionsV1["replay"]["isolation"] {
       boundary: "clearEnv only",
       attestationRef: "attestation://harness/unrestricted",
     },
+    run: toyIsolation().run,
   };
 }
 

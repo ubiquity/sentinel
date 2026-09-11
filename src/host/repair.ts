@@ -22,9 +22,10 @@
  *   gateway repository identity and a missing/ambiguous match are all
  *   rejected with a static `TypeError` BEFORE any instance is constructed.
  * - The replay port is constructed with the injected trusted isolation
- *   capability; without an attestation of real restricted execution the
- *   concrete `ReplayPortImpl` constructor itself fails closed, so the factory
- *   can never make a target-controlled command runnable on its own.
+ *   capability; without the v1 restricted-execution attestation AND a
+ *   callable `run` boundary the concrete `ReplayPortImpl` constructor itself
+ *   fails closed, so the factory can never make a target-controlled command
+ *   runnable on its own.
  * - The implementation port requires an explicit valid `modelProvider` before
  *   any session opens — including the custom-verifier path: `runModel` stays
  *   `unavailable` and no model session is opened when the host selects no
@@ -148,7 +149,10 @@ export interface RepairHostReplayOptionsV1 {
   source: ReplaySourceV1;
   scratchDir: string;
   policy: ReplayPolicyV1;
-  /** Trusted restricted-execution capability; the concrete port requires it. */
+  /**
+   * Trusted restricted-execution capability (attestation + callable bound
+   * runner); the concrete port requires both.
+   */
   isolation: ReplayIsolationCapabilityV1;
   /** Optional process runtime; defaults to the concrete DenoReplayRuntime. */
   runtime?: ReplayRuntimeV1;
