@@ -2852,3 +2852,40 @@ Merged CI34567239743 passed validate and verify-artifact. Existing VPS deploy:vp
 GPT executed Mac acceptance receipt591bceabb6cc0ae63ee09ee9914b02c17ad0b9b53f9be3f4389670cde15755a5/4c684f9d-af71-4406-9ff7-8fcd90c75521 passed in2651ms at exact merged revision: direct and public health SHA/deployment body+headers; direct authenticated Responses semantic output pong plus response.completed/status completed, model gpt-5.6-luna. Existing token passed only through protected stdin, no secret copied or logged. Local round2 reviewer session01a08efe-7f70-7371-b6b4-09e1624d9000 and focused18test receipta9ed06ad-37e3-486b-a5b8-54727400b526 in the same namespace retained. Private deployment/review/acceptance artifacts under ~/.local/state/sentinel-probes/issue11-20260911.
 
 Issue11 closed2026-09-11T05:49:16Z with acceptance comment5630095727. Gateway root development equals refreshed origin/development; accepted cf5af622/ea852f1e ancestry verified. Two gateway untracked files and eight canonical Sentinel diagnostic directories preserved. All task-owned workers and acceptance jobs settled. Sentinel aggregate acceptance/merge remains issue12; no activation, promotion ownership transfer, rollback drill or new causal live delivery is claimed. Future live causal proof must use a capture from a consumer-containing revision. Stop after this single selected issue.
+
+### 2026-09-11 15:48 UTC — local launch continuation
+
+Canonical identity remains master-plan-gfa795549e5, branch
+codex/master-plan-gfa795549e5, base becbae65895635ccd37ddf68681d95c2615b9169.
+Astra remains integration owner; no worktree changes. Nine diagnostic directories
+are preserved. No local runtime has started and no scheduler is installed.
+The existing private state genesis is retained, never reset.
+
+CI34617462094 failed type checking because an old review fixture omitted two
+required deadlines. DSH PID70001/stream7ff11957/persistede4451985 settled exit0,
+completed with only tests/github/cooldown-remote_test.ts changed. Actual request
+Flash/max and workspace-write/ask, cwd and NODE_ENV verified. GPT receipt
+0366dfde-56b0-4e94-9930-73328ddc58a8 passed (3.7s, executed) in the existing
+cc48556d9d6816f2605c36c352452867e2de5be694f7aa26c8a9330e9268c576 namespace.
+
+The directly affected entrypoint test was updated by DSH PID70496,
+stream7cd20b26/persisted16d1be8e, completed exit0, no descendants or Git writes.
+Required request, permission and live launch evidence verified. GPT receipt
+45e1c3bb-0846-4594-a384-e5f102edb4c8 failed: dynamic import of local.ts deadlocks
+because local.ts imports main.ts. This is an actual startup defect, not missing
+credentials. Minimal src/main.ts static-import correction assigned to sole DSH
+PID70868; no other writer active. Playbook2026-09-10.2 hash
+7b2b79fd711a391f7d589a187be8103bb7d09b83296a11078abf5b917ca37850 re-read.
+Owned file only src/main.ts, no checks/Git/children; one formatter, four-call
+checkpoint, 45-second expected handback. GPT reruns self-direct-entrypoint after
+settlement. Feedback is next settled assignment; bounded task-owned stop applies
+to diagnosed repeated failure or unproductive work. Acceptance remains exact
+integrated checks, Codex review, aggregate PR/CI/merge, then first local run.
+
+15:49UTC: startup correction accepted. PID70868, streamd596182b,
+persisteda96351ee completed exit0 with verified Flash/max, workspace-write/ask,
+live cwd/NODE_ENV and no descendants. GPT exact-entrypoint receipt
+344d7412-f736-45f1-aac4-265e318dbf0a passed (3.5s, executed). The static import
+removes the top-level-await cycle while import.meta.main retains activation
+ownership. Only main.ts, the two affected tests and this register are accepted.
+Full Linux CI is the next aggregate gate; no local runner activation yet.

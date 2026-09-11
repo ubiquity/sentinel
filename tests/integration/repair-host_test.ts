@@ -17,8 +17,8 @@
  * - preserved trust boundaries: the replay isolation capability is still
  *   required, the model receipt stays unavailable without a host verifier
  *   (no session is ever opened), the missing gateway index stays a source
- *   fault, and direct execution of the repair entrypoint stays a static
- *   fault.
+ *   fault, and the real repair entrypoint (which now starts the local repair
+ *   host) rejects a missing HOME before any effect.
  * - an idle no-inference run through `runRepairEntrypoint` with the REAL
  *   GitStateStore over a disposable local remote and credential-free fake
  *   gateway transports.
@@ -796,14 +796,23 @@ Deno.test(
 );
 
 Deno.test(
-  "direct repair entrypoint execution stays a static fail-closed fault",
+  "direct repair entrypoint rejects a missing HOME before any effect",
   async () => {
-    // The host factory ships no capability wiring: executing src/main.ts
-    // directly must still terminate with the static fault, and the repository
-    // must never present a live activation path.
+    // The real entrypoint now starts the local repair host, so a direct
+    // execution must fail closed when its required environment is absent.
+    // The child gets every variable cleared except PATH and is granted only
+    // env access: with no write, net or run permission it cannot reach any
+    // external effect before the reject.
     const command = new Deno.Command("deno", {
-      args: ["run", "--quiet", "src/main.ts"],
+      args: [
+        "run",
+        "--quiet",
+        "--allow-env=HOME,PATH,GITHUB_TOKEN,UOS_AI_TOKEN",
+        "src/main.ts",
+      ],
       cwd: Deno.cwd(),
+      clearEnv: true,
+      env: { PATH: Deno.env.get("PATH")! },
       stdout: "piped",
       stderr: "piped",
     });
@@ -812,7 +821,9 @@ Deno.test(
     const output = new TextDecoder().decode(result.stdout) +
       new TextDecoder().decode(result.stderr);
     assert.ok(
-      output.includes("requires injected trusted capabilities"),
+      output.includes(
+        "local repair host requires environment variable HOME",
+      ),
       `unexpected direct-execution output: ${output}`,
     );
   },

@@ -20,12 +20,14 @@
  *   model start, and this entrypoint never calls a model port itself.
  *
  * Executing this module directly starts the one authorized concrete local
- * host (`startLocalRepairHostFromEnv`, dynamically imported at the bottom of
- * this file) from trusted environment inputs; importing it as a library stays
- * side-effect free.
+ * host (`startLocalRepairHostFromEnv`, statically imported below) from trusted
+ * environment inputs. Importing this module as a library never starts a host:
+ * every host side effect stays behind the `import.meta.main` guard at the
+ * bottom of this file.
  */
 
 import type { GitSha } from "./contracts/brands.ts";
+import { startLocalRepairHostFromEnv } from "./host/local.ts";
 import {
   parseRepositoryConfigV1,
   resolveGlobalLiveStartLimits,
@@ -233,12 +235,12 @@ export async function runRepairEntrypoint(
 
 // ---------------------------------------------------------------------------
 // Authorized local target: direct execution starts the concrete trusted local
-// host (src/host/local.ts). The import is dynamic so importing this module
-// stays side-effect free; an ordinary library import never starts a host.
+// host (src/host/local.ts). It is statically imported at the top of this file;
+// the host is only ever started from the `import.meta.main` guard below, so an
+// ordinary library import never starts a host.
 // ---------------------------------------------------------------------------
 
 if (import.meta.main) {
-  const { startLocalRepairHostFromEnv } = await import("./host/local.ts");
   const run = await startLocalRepairHostFromEnv();
   if (run.status === "busy") {
     console.error(
