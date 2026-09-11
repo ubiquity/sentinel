@@ -564,9 +564,9 @@ async function verifyCandidate(
   }
   const run = await runAndVerify(input, clock, request.revision, known);
   if (run.kind === "proof") {
-    // runAndVerify only ever returns a proof for an observed healthy outcome;
-    // the branch is validated explicitly so an injected or unhealthy proof can
-    // never reach acceptance.
+    // runAndVerify only returns kind proof for a settled, exactly bound run
+    // whose repair state was available; the explicit healthy check below still
+    // gates acceptance so an injected or unhealthy proof can never reach it.
     if (!isHealthyOutcome(run.proof.outcome)) {
       return { status: "failed", detail: DETAIL_PROOF_INVALID };
     }
@@ -991,9 +991,6 @@ async function runAndVerify(
   if (known.has(observed.invocationId)) {
     return { kind: "pending", detail: DETAIL_STATUS_DUPLICATE };
   }
-  if (!observed.stateAvailable) {
-    return { kind: "pending", detail: DETAIL_STATE_UNAVAILABLE };
-  }
   known.add(observed.invocationId);
   const proof: LocalRunProofV1 = {
     invocationId: observed.invocationId,
@@ -1002,12 +999,20 @@ async function runAndVerify(
     finishedAt: observed.finishedAt,
     outcome: observed.outcome,
   };
+  // An explicitly failed outcome is an objective failure even when the child
+  // reported its repair state as unavailable: the observed proof drives the
+  // ordinary exact-prior rollback. State availability is required only before
+  // a healthy proof may be accepted; a healthy missing/unavailable state is
+  // never acceptance and stays pending.
   if (isFailedOutcome(observed.outcome)) {
     return {
       kind: "failed",
       proof,
       detail: `local supervisor refused: the run reported ${observed.outcome}`,
     };
+  }
+  if (!observed.stateAvailable) {
+    return { kind: "pending", detail: DETAIL_STATE_UNAVAILABLE };
   }
   return { kind: "proof", proof };
 }
@@ -1442,84 +1447,43 @@ interface GitRunV1 {
 }
 
 /**
- * Bounded git with explicit args, never a shell string. Every git call is
- * credential-free: the supervisor only reads its private state root and the
- * local source path, so no owner token is ever placed in an environment or
- * argv for its own Git commands.
+ * Bounded git with explicit args, never a shell string. The run reuses the
+ * shared owned-group runtime, so both captured streams are drained
+ * concurrently (no full-pipe deadlock), the deadline covers the whole process
+ * group, and the aggregate retained output is bounded. Owner Git configuration
+ * is never consulted: a disposable private HOME, no global/system config and a
+ * null hooks path keep the command credential-free. A normal nonzero exit is
+ * still `ok: true` so ancestry can read its documented exit 1; only an
+ * unsettled, timed-out, spawn-failed or truncated run is `ok: false`.
  */
-async function runGit(
+export async function runGit(
   input: LocalSupervisorInputV1,
   args: readonly string[],
 ): Promise<GitRunV1> {
-  const command = new Deno.Command(gitExecutable(), {
-    args: [...args],
-    cwd: input.stateRoot,
-    env: {
-      HOME: input.env.HOME,
-      PATH: input.env.PATH,
-      GIT_TERMINAL_PROMPT: "0",
-      GIT_CONFIG_NOSYSTEM: "1",
-    },
-    clearEnv: true,
-    stdin: "null",
-    stdout: "piped",
-    stderr: "piped",
-  });
-  const child = command.spawn();
-  let timedOut = false;
-  const timer = setTimeout(() => {
-    timedOut = true;
-    try {
-      child.kill("SIGKILL");
-    } catch {
-      // the status wait below decides the result
-    }
-  }, GIT_TIMEOUT_MS);
+  const git = gitExecutable();
   try {
-    const [stdout, status] = await Promise.all([
-      collectBounded(child.stdout, GIT_MAX_OUTPUT_BYTES),
-      child.status,
-    ]);
-    await collectBounded(child.stderr, GIT_MAX_OUTPUT_BYTES);
-    if (timedOut) return { ok: false, exitCode: status.code, stdout };
-    return { ok: true, exitCode: status.code, stdout };
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-async function collectBounded(
-  stream: ReadableStream<Uint8Array>,
-  maxBytes: number,
-): Promise<string> {
-  const reader = stream.getReader();
-  const chunks: Uint8Array[] = [];
-  let size = 0;
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (value === undefined) continue;
-      if (size < maxBytes) {
-        const take = value.subarray(0, maxBytes - size);
-        chunks.push(take);
-        size += take.length;
-      }
+    const result = await new DenoReplayRuntime(git).run({
+      executable: git,
+      args: ["-c", "core.hooksPath=/dev/null", ...args],
+      cwd: input.stateRoot,
+      env: {
+        PATH: input.env.PATH,
+        HOME: input.stateRoot,
+        GIT_CONFIG_GLOBAL: "/dev/null",
+        GIT_CONFIG_SYSTEM: "/dev/null",
+        GIT_TERMINAL_PROMPT: "0",
+      },
+      maxDurationMs: GIT_TIMEOUT_MS,
+      maxOutputBytes: GIT_MAX_OUTPUT_BYTES,
+    });
+    const stdout = new TextDecoder().decode(result.stdout);
+    if (result.outcome !== "exited" || !result.settled || result.truncated) {
+      return { ok: false, exitCode: result.exitCode, stdout };
     }
-  } finally {
-    try {
-      reader.releaseLock();
-    } catch {
-      // the collected bytes are already decided
-    }
+    return { ok: true, exitCode: result.exitCode, stdout };
+  } catch {
+    return { ok: false, exitCode: null, stdout: "" };
   }
-  const merged = new Uint8Array(size);
-  let offset = 0;
-  for (const chunk of chunks) {
-    merged.set(chunk, offset);
-    offset += chunk.length;
-  }
-  return new TextDecoder().decode(merged);
 }
 
 function gitExecutable(): string {

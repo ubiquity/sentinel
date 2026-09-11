@@ -25,7 +25,7 @@ import {
   readLocalReleaseReceipt,
 } from "../../src/host/local-release.ts";
 import type { LocalSupervisorChildInputV1 } from "../../src/host/local-supervisor.ts";
-import { runLocalSupervisor } from "../../src/host/local-supervisor.ts";
+import { runGit, runLocalSupervisor } from "../../src/host/local-supervisor.ts";
 import {
   gitRun,
   releaseRequest,
@@ -320,6 +320,7 @@ async function buildFixture(
 type ChildStepV1 =
   | "idle"
   | "state_error"
+  | "state_error_unavailable"
   | "unsettled"
   | "missing_status"
   | "startup_failure"
@@ -366,14 +367,18 @@ function makeChildRunner(
         startedAt: finishedAt - 500,
         finishedAt,
         outcome: {
-          status: step === "state_error" ? "state_error" : "idle",
+          status: step === "state_error" || step === "state_error_unavailable"
+            ? "state_error"
+            : "idle",
         },
         // The real successful status shape: no explicit `state`, with the
         // observed work and reservation arrays present.
         work: [],
         reservations: [],
       };
-      if (step === "state_unavailable") {
+      if (
+        step === "state_unavailable" || step === "state_error_unavailable"
+      ) {
         status.state = "unavailable";
         delete status.work;
         delete status.reservations;
@@ -510,6 +515,146 @@ Deno.test(
         (receipt.value.priorProof?.finishedAt ?? 0) >
           (receipt.value.candidateProof?.finishedAt ?? 0),
         "rolled_back requires a fresh prior run proof",
+      );
+    } finally {
+      await fixture.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "local release: a failed outcome with unavailable state still rolls back to the exact prior",
+  async () => {
+    const fixture = await makeFixture("statefailunavailable");
+    try {
+      // The child reports an explicit failed outcome but its repair state is
+      // unavailable. That is still an objective failure with a bound proof,
+      // never a pending healthy run.
+      const child = makeChildRunner(fixture, {
+        steps: ["idle", "state_error_unavailable", "idle"],
+      });
+      const result = await runLocalSupervisor(
+        supervisorOptions(fixture, child.runChild),
+      );
+      assert.equal(result.status, "rolled_back", JSON.stringify(result));
+      assert.deepEqual(child.revisions, [
+        fixture.priorSha,
+        fixture.candidateSha,
+        fixture.priorSha,
+      ]);
+      assert.equal(await readPointer(fixture.stateRoot), fixture.priorSha);
+      const receipt = await readLocalReleaseReceipt(
+        fixture.stateRoot,
+        fixture.request,
+      );
+      assert.ok(receipt.ok && receipt.value !== null);
+      if (!receipt.ok || receipt.value === null) {
+        throw new Error("receipt missing");
+      }
+      assert.equal(receipt.value.phase, "rolled_back");
+      assert.equal(receipt.value.candidateProof?.outcome, "state_error");
+      assert.equal(receipt.value.priorProof?.controllerSha, fixture.priorSha);
+      assert.ok(
+        (receipt.value.priorProof?.finishedAt ?? 0) >
+          (receipt.value.candidateProof?.finishedAt ?? 0),
+        "rolled_back requires a fresh prior run proof",
+      );
+    } finally {
+      await fixture.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "local release: staging never executes an owner-configured Git hook",
+  async () => {
+    const fixture = await makeFixture("staginghook");
+    try {
+      const hooksDir = `${fixture.root}/fixture-hooks`;
+      const markerPath = `${fixture.root}/staging-hook-marker.txt`;
+      await Deno.mkdir(hooksDir, { recursive: true });
+      const hook = `${hooksDir}/post-checkout`;
+      await Deno.writeTextFile(
+        hook,
+        `#!/bin/sh\nprintf executed > '${markerPath}'\n`,
+      );
+      await Deno.chmod(hook, 0o755);
+      // Only the disposable fixture HOME carries the global hooks path; the
+      // real owner HOME is never read or written.
+      await Deno.writeTextFile(
+        `${fixture.env.HOME}/.gitconfig`,
+        `[core]\n\thooksPath = ${hooksDir}\n`,
+      );
+      const child = makeChildRunner(fixture, { steps: ["idle", "idle"] });
+      const result = await runLocalSupervisor(
+        supervisorOptions(fixture, child.runChild),
+      );
+      assert.equal(result.status, "accepted", JSON.stringify(result));
+      let markerExists = true;
+      try {
+        await Deno.lstat(markerPath);
+      } catch {
+        markerExists = false;
+      }
+      assert.equal(
+        markerExists,
+        false,
+        "supervisor staging must not execute an owner-configured hook",
+      );
+    } finally {
+      await fixture.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "local supervisor git: a large stderr stream cannot deadlock the bounded run",
+  async () => {
+    const fixture = await makeFixture("gitstderr");
+    try {
+      // A real `git apply --check` over thousands of non-applying diffs emits
+      // two error lines each to stderr: far beyond one pipe buffer, well under
+      // the bounded retained output, and it exits nonzero normally.
+      const patchPath = `${fixture.root}/large-stderr.patch`;
+      const diff = [
+        "diff --git a/file.txt b/file.txt",
+        "--- a/file.txt",
+        "+++ b/file.txt",
+        "@@ -1 +1 @@",
+        "-context that does not match",
+        "+replacement",
+        "",
+      ].join("\n");
+      await Deno.writeTextFile(patchPath, diff.repeat(3000));
+      const startedAt = Date.now();
+      const result = await runGit({
+        stateRoot: fixture.stateRoot,
+        sourceDir: `${fixture.stateRoot}/source`,
+        env: {
+          HOME: fixture.env.HOME,
+          PATH: fixture.env.PATH,
+          GITHUB_TOKEN: "",
+          UOS_AI_TOKEN: "",
+        },
+        denoExecutable: Deno.execPath(),
+        runChild: async () => ({ settled: true, exitCode: 0 }),
+      }, [
+        "-C",
+        `${fixture.stateRoot}/source`,
+        "apply",
+        "--check",
+        patchPath,
+      ]);
+      const elapsedMs = Date.now() - startedAt;
+      assert.equal(
+        result.ok,
+        true,
+        "a normal nonzero exit stays an inspectable bounded result",
+      );
+      assert.notEqual(result.exitCode, 0, "the non-applying patch must fail");
+      assert.ok(
+        elapsedMs < 60_000,
+        `the bounded run returned after ${elapsedMs}ms without a pipe stall`,
       );
     } finally {
       await fixture.cleanup();
