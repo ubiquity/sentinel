@@ -4,9 +4,11 @@ import assert from "node:assert/strict";
 
 import {
   createLocalRepositoryConfig,
+  ensureBareStateRepository,
   ensureTaskCheckout,
   localCheckoutKey,
   type LocalRepairHostOptionsV1,
+  prepareSourceRepository,
   readAuthenticatedLogin,
   refreshDevelopment,
   renderLocalCodexConfig,
@@ -1168,6 +1170,149 @@ Deno.test(
       assert.equal(malformedRefused.ok, false);
       assert.equal(await Deno.readTextFile(mappingPath), "{not json\n");
       assert.equal(await checkoutRev(fixture, "HEAD"), fixture.oldBase);
+    } finally {
+      await Deno.remove(fixture.root, { recursive: true }).catch(() => {});
+    }
+  },
+);
+
+async function localTestPathExists(path: string): Promise<boolean> {
+  try {
+    await Deno.lstat(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function localTestDirEntries(path: string): Promise<string[]> {
+  const names: string[] = [];
+  for await (const entry of Deno.readDir(path)) names.push(entry.name);
+  return names;
+}
+
+Deno.test(
+  "local durable git: absent and empty paths initialize, nonempty paths and symlinks are preserved",
+  async () => {
+    const fixture = await checkoutFixture();
+    try {
+      await Deno.mkdir(fixture.stateRoot, { recursive: true });
+      const options: LocalRepairHostOptionsV1 = {
+        stateRoot: fixture.stateRoot,
+        sourceDir: fixture.source,
+        controllerSha: SHA1,
+        githubToken: "dummy-token",
+        modelToken: "dummy-token",
+        codexExecutable: "/nonexistent/sentinel-test-codex",
+        denoExecutable: Deno.execPath(),
+        trustedPath: fixture.trustedPath,
+      };
+
+      // An absent bare state path is initialized in place.
+      const absentGit = `${fixture.root}/state.git`;
+      await ensureBareStateRepository(absentGit, options, fixture.scratch);
+      const absentBare = await fixture.git(absentGit, [
+        "rev-parse",
+        "--is-bare-repository",
+      ]);
+      assert.ok(absentBare.ok, absentBare.stderr);
+      assert.equal(absentBare.stdout.trim(), "true");
+
+      // An existing EMPTY state directory is still initialized, never skipped.
+      const emptyGit = `${fixture.root}/empty.git`;
+      await Deno.mkdir(emptyGit);
+      await ensureBareStateRepository(emptyGit, options, fixture.scratch);
+      const emptyBare = await fixture.git(emptyGit, [
+        "rev-parse",
+        "--is-bare-repository",
+      ]);
+      assert.ok(emptyBare.ok, emptyBare.stderr);
+      assert.equal(emptyBare.stdout.trim(), "true");
+
+      // An existing nonempty user directory is preserved exactly: no init and
+      // no reset of user files.
+      const keptGit = `${fixture.root}/kept.git`;
+      await Deno.mkdir(keptGit);
+      await Deno.writeTextFile(`${keptGit}/keep.txt`, "user work\n");
+      await ensureBareStateRepository(keptGit, options, fixture.scratch);
+      assert.equal(
+        await Deno.readTextFile(`${keptGit}/keep.txt`),
+        "user work\n",
+      );
+      assert.equal(
+        await localTestPathExists(`${keptGit}/HEAD`),
+        false,
+        "a nonempty path is never initialized over user files",
+      );
+
+      // A symlink is refused before any Git runs and its target is untouched.
+      const gitLinkTarget = `${fixture.root}/git-link-target`;
+      await Deno.mkdir(gitLinkTarget);
+      const gitLink = `${fixture.root}/git-link`;
+      const gitLinked = await new Deno.Command("/bin/ln", {
+        args: ["-s", gitLinkTarget, gitLink],
+        stdout: "null",
+        stderr: "null",
+      }).output();
+      assert.equal(gitLinked.code, 0, "the fixture symlink must be created");
+      await assert.rejects(
+        ensureBareStateRepository(gitLink, options, fixture.scratch),
+        (error: unknown) =>
+          error instanceof Error && error.message.includes(GIT_FAILED_TEXT),
+      );
+      assert.deepEqual(
+        await localTestDirEntries(gitLinkTarget),
+        [],
+        "a refused symlink never initializes its target",
+      );
+
+      // The source clone helper follows the same absent/empty/preserved rules.
+      const absentSource = `${fixture.root}/source-clone`;
+      await prepareSourceRepository(absentSource, options, fixture.scratch);
+      const absentHead = await fixture.git(absentSource, ["rev-parse", "HEAD"]);
+      assert.ok(absentHead.ok, absentHead.stderr);
+      assert.equal(absentHead.stdout.trim(), fixture.newBase);
+
+      const emptySource = `${fixture.root}/empty-source`;
+      await Deno.mkdir(emptySource);
+      await prepareSourceRepository(emptySource, options, fixture.scratch);
+      const emptyHead = await fixture.git(emptySource, ["rev-parse", "HEAD"]);
+      assert.ok(emptyHead.ok, emptyHead.stderr);
+      assert.equal(emptyHead.stdout.trim(), fixture.newBase);
+
+      const keptSource = `${fixture.root}/kept-source`;
+      await Deno.mkdir(keptSource);
+      await Deno.writeTextFile(`${keptSource}/keep.txt`, "user work\n");
+      await prepareSourceRepository(keptSource, options, fixture.scratch);
+      assert.equal(
+        await Deno.readTextFile(`${keptSource}/keep.txt`),
+        "user work\n",
+      );
+      assert.equal(
+        await localTestPathExists(`${keptSource}/.git`),
+        false,
+        "a nonempty source path is preserved, never reset by a clone",
+      );
+
+      const sourceLinkTarget = `${fixture.root}/source-link-target`;
+      await Deno.mkdir(sourceLinkTarget);
+      const sourceLink = `${fixture.root}/source-link`;
+      const sourceLinked = await new Deno.Command("/bin/ln", {
+        args: ["-s", sourceLinkTarget, sourceLink],
+        stdout: "null",
+        stderr: "null",
+      }).output();
+      assert.equal(sourceLinked.code, 0, "the fixture symlink must be created");
+      await assert.rejects(
+        prepareSourceRepository(sourceLink, options, fixture.scratch),
+        (error: unknown) =>
+          error instanceof Error && error.message.includes(GIT_FAILED_TEXT),
+      );
+      assert.deepEqual(
+        await localTestDirEntries(sourceLinkTarget),
+        [],
+        "a refused symlink never clones into its target",
+      );
     } finally {
       await Deno.remove(fixture.root, { recursive: true }).catch(() => {});
     }

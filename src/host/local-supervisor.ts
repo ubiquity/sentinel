@@ -54,6 +54,7 @@ import {
 import type { ReleaseRequestV1 } from "../contracts/release.ts";
 import type { RepairStateSnapshotV1 } from "../contracts/state-snapshots.ts";
 import type { ReviewReceiptV1 } from "../contracts/review-receipt.ts";
+import { DenoReplayRuntime } from "../replay/runtime.ts";
 import { createRepairStateStore } from "../state/mod.ts";
 import {
   compareAndSetLocalActiveRuntime,
@@ -399,8 +400,12 @@ async function reconcile(
         DETAIL_POINTER_CHANGED,
       );
     }
-    // The candidate is not active: never infer acceptance from that. Restore
-    // the exact prior by a fresh exact prior run and record rolled_back.
+    // The candidate is not active: never infer acceptance from that. Only the
+    // exact prior revision may be restored, and only a fresh exact prior run
+    // records rolled_back. When the pointer already equals that prior, the
+    // rollback intent is persisted first and the same-revision compare-set
+    // finishes without a candidate-to-prior swap; an unrelated pointer was
+    // refused above and is never overwritten.
     return await restorePrior(
       input,
       clock,
@@ -408,8 +413,9 @@ async function reconcile(
       prior,
       receipt.priorProof,
       receipt.createdAt,
-      null,
+      receipt.candidateProof,
       known,
+      true,
     );
   }
 
@@ -627,6 +633,8 @@ async function restorePrior(
   createdAt: number,
   failureProof: LocalRunProofV1 | null,
   known: KnownInvocationsV1,
+  /** True when the pointer was already observed at the exact prior revision. */
+  alreadyPrior = false,
 ): Promise<LocalSupervisorResultV1> {
   if (priorProof === null) {
     return { status: "pending", detail: DETAIL_STATUS_STALE };
@@ -647,9 +655,13 @@ async function restorePrior(
   if (!await persistReceipt(input.stateRoot, rollbackPending)) {
     return { status: "failed", detail: DETAIL_RECEIPT_WRITE };
   }
+  // The pointer is only ever moved under the supervisor lock with an exact
+  // compare immediately before the write. When the pointer already equals the
+  // prior, the same-revision compare still refuses an unrelated concurrent
+  // pointer without repeating the candidate-to-prior swap.
   const set = await compareAndSetLocalActiveRuntime(
     input.stateRoot,
-    request.revision,
+    alreadyPrior ? priorRevision : request.revision,
     priorRevision,
   );
   if (set !== "applied") {
@@ -1026,7 +1038,9 @@ async function verifyRuntime(
     return { ok: false, detail: DETAIL_RUNTIME_INVALID };
   }
   const head = await runGit(input, ["-C", runtimeDir, "rev-parse", "HEAD"]);
-  if (!head.ok || head.stdout.trim() !== revision) {
+  if (
+    !head.ok || head.exitCode !== 0 || head.stdout.trim() !== revision
+  ) {
     return { ok: false, detail: DETAIL_RUNTIME_INVALID };
   }
   const status = await runGit(input, [
@@ -1036,7 +1050,7 @@ async function verifyRuntime(
     "--porcelain",
     "--untracked-files=all",
   ]);
-  if (!status.ok || status.stdout.trim() !== "") {
+  if (!status.ok || status.exitCode !== 0 || status.stdout.trim() !== "") {
     return { ok: false, detail: DETAIL_RUNTIME_INVALID };
   }
   const symlinks = await verifyTrackedSymlinks(input, runtimeDir, realRuntime);
@@ -1055,7 +1069,9 @@ async function verifyTrackedSymlinks(
     "ls-files",
     "-s",
   ]);
-  if (!listed.ok) return { ok: false, detail: DETAIL_RUNTIME_INVALID };
+  if (!listed.ok || listed.exitCode !== 0) {
+    return { ok: false, detail: DETAIL_RUNTIME_INVALID };
+  }
   const links: string[] = [];
   for (const line of listed.stdout.split("\n")) {
     if (!line.startsWith("120000 ")) continue;
@@ -1142,7 +1158,7 @@ async function stageRuntime(
     ]);
     if (!checkedOut.ok) throw new Error(DETAIL_STAGE_FAILED);
     const head = await runGit(input, ["-C", stage, "rev-parse", "HEAD"]);
-    if (!head.ok || head.stdout.trim() !== revision) {
+    if (!head.ok || head.exitCode !== 0 || head.stdout.trim() !== revision) {
       throw new Error(DETAIL_STAGE_FAILED);
     }
     try {
@@ -1282,20 +1298,13 @@ async function prepareChildWriteBoundary(
     const mutableDirs: string[] = [];
     for (const name of CHILD_MUTABLE_STATE_DIRS) {
       const dir = joinPath(canonicalRoot, name);
-      await ensurePrivateDir(dir);
-      const info = await Deno.lstat(dir);
-      if (!info.isDirectory || info.isSymlink) return null;
-      const real = await Deno.realPath(dir);
-      if (real !== dir) return null;
-      mutableDirs.push(real);
+      if (!await prepareMutableGrantDir(dir)) return null;
+      mutableDirs.push(dir);
     }
     const denoDir = joinPath(canonicalRoot, CHILD_DENO_DIR);
     const tmpDir = joinPath(canonicalRoot, CHILD_TMP_DIR);
     for (const dir of [denoDir, tmpDir]) {
-      await ensurePrivateDir(dir);
-      const info = await Deno.lstat(dir);
-      if (!info.isDirectory || info.isSymlink) return null;
-      if (await Deno.realPath(dir) !== dir) return null;
+      if (!await prepareMutableGrantDir(dir)) return null;
     }
     return {
       profile: buildChildSandboxProfile(canonicalRoot, mutableDirs),
@@ -1305,6 +1314,27 @@ async function prepareChildWriteBoundary(
   } catch {
     return null;
   }
+}
+
+/**
+ * One mutable grant directory. An entry that already exists is re-observed
+ * BEFORE any chmod: a symlink there would otherwise redirect the mode change
+ * outside the state root, so a symlink or non-directory is a refusal and no
+ * existing entry is ever recreated, removed or reset. A missing entry is
+ * created private, and every accepted directory must resolve to its own exact
+ * path.
+ */
+async function prepareMutableGrantDir(dir: string): Promise<boolean> {
+  let info: Deno.FileInfo;
+  try {
+    info = await Deno.lstat(dir);
+  } catch {
+    await ensurePrivateDir(dir);
+    return await Deno.realPath(dir) === dir;
+  }
+  if (!info.isDirectory || info.isSymlink) return false;
+  await Deno.chmod(dir, 0o700);
+  return await Deno.realPath(dir) === dir;
 }
 
 /**
@@ -1361,79 +1391,48 @@ function sandboxLiteral(path: string): string {
 }
 
 /**
- * Spawn the exact sandboxed child, or `null` when the fixed platform boundary
- * cannot be applied. There is never an unsandboxed fallback.
- */
-function spawnSandboxedChild(
-  input: LocalSupervisorChildInputV1,
-  boundary: LocalChildWriteBoundaryV1,
-): Deno.ChildProcess | null {
-  try {
-    return new Deno.Command(SANDBOX_EXEC_PATH, {
-      args: [
-        "-p",
-        boundary.profile,
-        input.denoExecutable,
-        "task",
-        input.taskName,
-      ],
-      cwd: input.runtimeDir,
-      env: {
-        ...input.env,
-        DENO_DIR: boundary.denoDir,
-        TMPDIR: boundary.tmpDir,
-      },
-      clearEnv: true,
-      stdin: "null",
-      stdout: "piped",
-      stderr: "piped",
-    }).spawn();
-  } catch {
-    return null;
-  }
-}
-
-/**
  * The only injected implementation border: real Deno child execution. Every
- * real child is launched through the platform sandbox with `DENO_DIR` and
- * `TMPDIR` redirected beneath the private state; a platform or profile that
- * cannot provide that boundary returns a non-success result and the child is
- * never launched unsandboxed.
+ * real child is launched through the fixed platform sandbox with `DENO_DIR`
+ * and `TMPDIR` redirected beneath the private state, using the same owned
+ * process-group runtime as every other real subprocess. The deadline spans the
+ * whole sandboxed group and its captured streams, so a descendant that
+ * outlives the task leader is terminated and settlement is verified before the
+ * run is reported. A platform or profile that cannot provide the boundary
+ * returns a non-success result and the child is never launched unsandboxed.
  */
 export async function defaultRunChild(
   input: LocalSupervisorChildInputV1,
 ): Promise<LocalSupervisorChildResultV1> {
   const boundary = await prepareChildWriteBoundary(input.stateRoot);
   if (boundary === null) return { settled: false, exitCode: null };
-  const child = spawnSandboxedChild(input, boundary);
-  if (child === null) return { settled: false, exitCode: null };
-  let timedOut = false;
-  const timer = setTimeout(() => {
-    timedOut = true;
-    try {
-      child.kill("SIGKILL");
-    } catch {
-      // the status wait below decides the result
-    }
-  }, input.deadlineMs);
-  try {
-    const [stdout, stderr, status] = await Promise.all([
-      collectBounded(child.stdout, GIT_MAX_OUTPUT_BYTES),
-      collectBounded(child.stderr, GIT_MAX_OUTPUT_BYTES),
-      child.status,
-    ]);
-    await writeLocalChildLog(
-      input.stateRoot,
-      `child-${input.revision}-${Date.now()}`,
-      `stdout:\n${stdout}\nstderr:\n${stderr}\n`,
-    ).catch(() => {});
-    return {
-      settled: !timedOut,
-      exitCode: status.success ? 0 : status.code,
-    };
-  } finally {
-    clearTimeout(timer);
-  }
+  const result = await new DenoReplayRuntime(SANDBOX_EXEC_PATH).run({
+    executable: SANDBOX_EXEC_PATH,
+    args: [
+      "-p",
+      boundary.profile,
+      input.denoExecutable,
+      "task",
+      input.taskName,
+    ],
+    cwd: input.runtimeDir,
+    env: {
+      ...input.env,
+      DENO_DIR: boundary.denoDir,
+      TMPDIR: boundary.tmpDir,
+    },
+    maxDurationMs: input.deadlineMs,
+    maxOutputBytes: GIT_MAX_OUTPUT_BYTES,
+  });
+  const stdout = new TextDecoder().decode(result.stdout);
+  const stderr = new TextDecoder().decode(result.stderr);
+  await writeLocalChildLog(
+    input.stateRoot,
+    `child-${input.revision}-${Date.now()}`,
+    `stdout:\n${stdout}\nstderr:\n${stderr}\n`,
+  ).catch(() => {});
+  // Truthful mapping: an unsettled run stays unsettled and a timed-out run
+  // keeps its null exit code, so it can never be read as a successful run.
+  return { settled: result.settled, exitCode: result.exitCode };
 }
 
 interface GitRunV1 {

@@ -1433,13 +1433,19 @@ class LocalSessionTracker {
 // Durable Git and filesystem helpers
 // ---------------------------------------------------------------------------
 
-/** Initialize the private bare state repository once; never clear it. */
-async function ensureBareStateRepository(
+/**
+ * Initialize the private bare state repository when it is absent or an empty
+ * directory; an existing nonempty path is preserved and its existing later
+ * validation still refuses it. Nothing is ever deleted or reset.
+ */
+export async function ensureBareStateRepository(
   stateGitPath: string,
   input: LocalRepairHostOptionsV1,
   scratch: string,
 ): Promise<void> {
-  if (await pathExists(stateGitPath)) return;
+  const existing = await durableGitPathState(stateGitPath);
+  if (existing === "symlink") throw new Error(STATIC_GIT_FAILED);
+  if (existing === "present") return;
   const result = await runTrustedGitResult({
     args: ["init", "--bare", stateGitPath],
     cwd: input.stateRoot,
@@ -1449,13 +1455,19 @@ async function ensureBareStateRepository(
   if (result.code !== 0) throw new Error(STATIC_GIT_FAILED);
 }
 
-/** Clone the trusted source object repository once; no hardlinks, no creds. */
-async function prepareSourceRepository(
+/**
+ * Clone the trusted source object repository when it is absent or an empty
+ * directory; no hardlinks, no creds. An existing nonempty path is preserved
+ * and its existing later validation still refuses it.
+ */
+export async function prepareSourceRepository(
   sourcePath: string,
   input: LocalRepairHostOptionsV1,
   scratch: string,
 ): Promise<void> {
-  if (await pathExists(sourcePath)) return;
+  const existing = await durableGitPathState(sourcePath);
+  if (existing === "symlink") throw new Error(STATIC_GIT_FAILED);
+  if (existing === "present") return;
   const result = await runTrustedGitResult({
     args: ["clone", "--no-hardlinks", input.sourceDir, sourcePath],
     cwd: input.stateRoot,
@@ -1463,6 +1475,31 @@ async function prepareSourceRepository(
     scratch,
   });
   if (result.code !== 0) throw new Error(STATIC_GIT_FAILED);
+}
+
+/**
+ * Classify a durable Git path before initialization: an absent path and an
+ * existing EMPTY directory are initialized in place, an existing nonempty
+ * directory or plain file is preserved (its existing later validation still
+ * refuses it), and a symlink is refused before any Git runs so initialization
+ * can never follow it outside the private state root. Nothing is deleted.
+ */
+async function durableGitPathState(
+  path: string,
+): Promise<"absent" | "empty" | "present" | "symlink"> {
+  let info: Deno.FileInfo;
+  try {
+    info = await Deno.lstat(path);
+  } catch (error) {
+    if (error instanceof Deno.errors.NotFound) return "absent";
+    throw error;
+  }
+  if (info.isSymlink) return "symlink";
+  if (!info.isDirectory) return "present";
+  for await (const _entry of Deno.readDir(path)) {
+    return "present";
+  }
+  return "empty";
 }
 
 /** Refresh the exact remote development ref through trusted authenticated git. */

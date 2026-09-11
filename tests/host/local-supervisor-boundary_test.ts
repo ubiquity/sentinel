@@ -21,6 +21,9 @@ const PROTECTED_TEXT = "protected supervisor authority\n";
 const POINTER_TEXT = '{"version":"v1","kind":"local_active_runtime"}\n';
 const LOCK_TEXT = "supervisor lock\n";
 const DEADLINE_MS = 120_000;
+/** The real timeout test: short, but ample for shell and sandbox startup. */
+const TIMEOUT_DEADLINE_MS = 2_000;
+const DESCENDANT_SLEEP_SECONDS = 30;
 
 /** Every probe the sandboxed child runs, each expected to behave as stated. */
 const PROBE_NAMES = [
@@ -181,6 +184,18 @@ await Deno.writeTextFile(
 console.log(JSON.stringify({ probes: Object.keys(results).length }));
 `;
 
+/**
+ * A fake `deno` executable for the timeout test: it ignores the `task` argv,
+ * forks a shell `sleep` descendant that inherits (and therefore holds open)
+ * the captured pipes, persists that descendant's pid under the granted private
+ * TMPDIR, and then hangs so only the deadline can end the run.
+ */
+const FAKE_DENO_SOURCE = String.raw`#!/bin/sh
+sleep ${DESCENDANT_SLEEP_SECONDS} &
+echo $! > "$TMPDIR/descendant.pid"
+sleep ${DESCENDANT_SLEEP_SECONDS}
+`;
+
 async function exists(path: string): Promise<boolean> {
   try {
     await Deno.stat(path);
@@ -318,6 +333,76 @@ Deno.test({
       assert.ok(
         logText.includes("stdout:") && logText.includes('"probes"'),
         "the parent-side child log captures the real child stdout",
+      );
+    } finally {
+      await Deno.remove(root, { recursive: true }).catch(() => {});
+    }
+  },
+});
+
+Deno.test({
+  name:
+    "local supervisor boundary: a child deadline ends the whole sandboxed group",
+  ignore: Deno.build.os !== "darwin",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const root =
+      `${Deno.cwd()}/.local-supervisor-timeout-${crypto.randomUUID()}`;
+    const stateRoot = `${root}/state`;
+    const runtimeDir = `${root}/runtime`;
+    const fakeDeno = `${root}/fake-deno`;
+    const descendantPidPath = `${stateRoot}/tmp/host/descendant.pid`;
+    try {
+      await Deno.mkdir(runtimeDir, { recursive: true, mode: 0o700 });
+      await Deno.mkdir(stateRoot, { recursive: true, mode: 0o700 });
+      await Deno.writeTextFile(fakeDeno, FAKE_DENO_SOURCE);
+      await Deno.chmod(fakeDeno, 0o755);
+      const input: LocalSupervisorChildInputV1 = {
+        stateRoot,
+        runtimeDir,
+        revision: REVISION,
+        taskName: "repair:run",
+        env: {
+          HOME: `${root}/home`,
+          PATH: Deno.env.get("PATH") ?? "",
+          GITHUB_TOKEN: "",
+          UOS_AI_TOKEN: "",
+        },
+        denoExecutable: fakeDeno,
+        deadlineMs: TIMEOUT_DEADLINE_MS,
+        logPath: `${stateRoot}/supervisor-logs/unused.log`,
+      };
+
+      const startedAt = Date.now();
+      const result = await defaultRunChild(input);
+      const elapsedMs = Date.now() - startedAt;
+      assert.equal(result.settled, true, "the timed-out run must still settle");
+      assert.equal(result.exitCode, null, "a timeout is never a success");
+      assert.ok(
+        elapsedMs < TIMEOUT_DEADLINE_MS + 15_000,
+        `the bounded run returned after ${elapsedMs}ms`,
+      );
+
+      // The descendant's own pid was persisted inside the granted private temp
+      // directory; it must not exist after the deadline settlement.
+      const descendantPid = Number(
+        (await Deno.readTextFile(descendantPidPath)).trim(),
+      );
+      assert.ok(
+        Number.isSafeInteger(descendantPid) && descendantPid > 0,
+        "the descendant pid must be persisted",
+      );
+      const probe = await new Deno.Command("/bin/kill", {
+        args: ["-0", String(descendantPid)],
+        stdin: "null",
+        stdout: "null",
+        stderr: "null",
+      }).output();
+      assert.notEqual(
+        probe.code,
+        0,
+        "the owned descendant must be gone after the bounded return",
       );
     } finally {
       await Deno.remove(root, { recursive: true }).catch(() => {});

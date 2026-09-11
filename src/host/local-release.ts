@@ -9,15 +9,17 @@
  * - `active-runtime.json` — the private exact-revision pointer
  *   `{version:"v1",kind:"local_active_runtime",revision}` that names the one
  *   active runtime checkout;
- * - `status.json` — the existing bounded local host status receipt read back
- *   as an observed run proof source;
+ * - `status.json` — the bounded local host run receipt written by the repair
+ *   host and read back as an observed run proof source;
  * - `supervisor-logs/` — bounded private child logs.
  *
  * Every read is bounded before parsing and every write is private (0700
  * directories, 0600 files), written to a temporary sibling, synced and then
  * renamed, so no partial JSON is ever visible. Corrupt, unreadable, oversized
  * or identity-mismatched receipts are explicitly unavailable; a missing file
- * is an explicit null. No repair process writes any of these files.
+ * is an explicit null. The repair host writes only its own bounded status
+ * receipt and session marker; the supervisor exclusively owns the active
+ * pointer, release receipts and child logs.
  */
 
 import type { GitSha } from "../contracts/brands.ts";

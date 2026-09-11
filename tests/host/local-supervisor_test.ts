@@ -683,6 +683,131 @@ Deno.test(
 );
 
 Deno.test(
+  "local release: a corrupt runtime index refuses verification before any child run",
+  async () => {
+    const fixture = await makeFixture("corruptindex");
+    try {
+      // A present-but-corrupt index makes `git status` exit nonzero while its
+      // stdout stays empty. That is a failed verification, never a clean
+      // checkout, so the active runtime may not be executed at all.
+      await Deno.writeTextFile(
+        `${fixture.stateRoot}/runtimes/${fixture.priorSha}/.git/index`,
+        "corrupt index\n",
+      );
+      const child = makeChildRunner(fixture, { steps: ["idle"] });
+      const result = await runLocalSupervisor(
+        supervisorOptions(fixture, child.runChild),
+      );
+      assert.equal(result.status, "failed", JSON.stringify(result));
+      assert.equal(
+        child.revisions.length,
+        0,
+        "no child may run against an unverified runtime",
+      );
+      assert.equal(await readPointer(fixture.stateRoot), fixture.priorSha);
+      const receipt = await readLocalReleaseReceipt(
+        fixture.stateRoot,
+        fixture.request,
+      );
+      assert.ok(receipt.ok && receipt.value === null);
+    } finally {
+      await fixture.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "local release: a verifying receipt whose pointer already equals the prior recovers to rolled_back",
+  async () => {
+    const fixture = await makeFixture("verifyingprior");
+    try {
+      // First invocation: the candidate is installed and the verifying receipt
+      // is durable, but the candidate child never settles.
+      const first = makeChildRunner(fixture, {
+        steps: ["idle", "unsettled"],
+      });
+      const pending = await runLocalSupervisor(
+        supervisorOptions(fixture, first.runChild),
+      );
+      assert.equal(pending.status, "pending", JSON.stringify(pending));
+      assert.equal(await readPointer(fixture.stateRoot), fixture.candidateSha);
+      const crash = await readLocalReleaseReceipt(
+        fixture.stateRoot,
+        fixture.request,
+      );
+      assert.ok(crash.ok && crash.value !== null);
+      if (!crash.ok || crash.value === null) {
+        throw new Error("receipt missing");
+      }
+      assert.equal(crash.value.phase, "verifying");
+
+      // Simulate the exact-prior restore that crashed after the pointer write
+      // and before the receipt transition: the pointer already equals prior.
+      await Deno.writeTextFile(
+        `${fixture.stateRoot}/active-runtime.json`,
+        JSON.stringify({
+          version: "v1",
+          kind: "local_active_runtime",
+          revision: fixture.priorSha,
+        }) + "\n",
+        { mode: 0o600 },
+      );
+
+      // Recovery persists the rollback intent and proves the exact prior with
+      // one fresh prior run. The candidate-to-prior swap is not repeated, and
+      // acceptance is never inferred from the pointer.
+      const second = makeChildRunner(fixture, { steps: ["idle"] });
+      const result = await runLocalSupervisor(
+        supervisorOptions(fixture, second.runChild),
+      );
+      assert.equal(result.status, "rolled_back", JSON.stringify(result));
+      assert.deepEqual(second.revisions, [fixture.priorSha]);
+      assert.equal(await readPointer(fixture.stateRoot), fixture.priorSha);
+      const receipt = await readLocalReleaseReceipt(
+        fixture.stateRoot,
+        fixture.request,
+      );
+      assert.ok(receipt.ok && receipt.value !== null);
+      if (!receipt.ok || receipt.value === null) {
+        throw new Error("receipt missing");
+      }
+      assert.equal(receipt.value.phase, "rolled_back");
+      assert.equal(
+        receipt.value.createdAt,
+        crash.value.createdAt,
+        "the original creation timestamp is retained",
+      );
+      assert.ok(
+        sameLocalReleaseRequestV1(receipt.value.request, fixture.request),
+        "the exact request identity is retained",
+      );
+      assert.equal(
+        receipt.value.candidateProof,
+        crash.value.candidateProof,
+        "the saved candidate proof is preserved, never fabricated",
+      );
+      const freshPrior = receipt.value.priorProof;
+      assert.ok(freshPrior !== null);
+      if (freshPrior === null) {
+        throw new Error("fresh prior proof missing");
+      }
+      assert.equal(freshPrior.controllerSha, fixture.priorSha);
+      assert.ok(
+        freshPrior.startedAt >= receipt.value.createdAt,
+        "rolled_back requires a fresh exact prior run proof",
+      );
+      assert.notEqual(
+        freshPrior.invocationId,
+        crash.value.priorProof?.invocationId,
+        "the rollback proof is a new observed run, never the baseline",
+      );
+    } finally {
+      await fixture.cleanup();
+    }
+  },
+);
+
+Deno.test(
   "local release: wrong review head refuses promotion",
   async () => {
     const fixture = await makeFixture("wronghead", {
