@@ -9,18 +9,28 @@ import {
   readAuthenticatedLogin,
   refreshDevelopment,
   renderLocalCodexConfig,
+  scopeLocalRepairIssues,
   tryAcquireLocalHostLock,
+  writeLocalModelResult,
 } from "../../src/host/local.ts";
+import { asWorkItemId } from "../../src/contracts/brands.ts";
 import { portError, portOk } from "../../src/contracts/ports.ts";
-import type { GitHubCooldownGateV1 } from "../../src/contracts/ports.ts";
+import type {
+  GitHubCooldownGateV1,
+  GitHubIssueV1,
+  ModelRunReceiptV1,
+  ModelRunRequestV1,
+  PortResultV1,
+} from "../../src/contracts/ports.ts";
 import {
   parseRepairStateSnapshotV1,
   type RepairStateSnapshotV1,
 } from "../../src/contracts/state-snapshots.ts";
 import type { HttpTransportV1 } from "../../src/github/http.ts";
 import { DurableGitHubCooldownGate } from "../../src/repair/github-cooldown.ts";
-import { FakeClock, MemoryState } from "../repair/helpers.ts";
-import { SHA1, T0 } from "../state/helpers.ts";
+import { LOOP_STOP_MARKER } from "../../src/repair/model-port.ts";
+import { FakeClock, FakeGithub, MemoryState } from "../repair/helpers.ts";
+import { REPO, SHA1, SHA3, T0 } from "../state/helpers.ts";
 
 Deno.test("local repository config parses with fixed local scope", () => {
   const config = createLocalRepositoryConfig();
@@ -477,5 +487,342 @@ Deno.test(
         "recordRateLimit:0",
       ], mode);
     }
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Private local model-result receipts: minimal explicit projection, unique
+// 0600 files in 0700 directories and fixed reason classification. Real
+// temporary directory only; no model, network or external call.
+// ---------------------------------------------------------------------------
+
+const DUMMY_ISSUE_BODY = "dummy-issue-body-secret-marker";
+const DUMMY_EVIDENCE_REF = "dummy-evidence-ref-marker";
+const DUMMY_CHANGED_PATH = "src/dummy-changed-path-marker.ts";
+const DUMMY_RAW_ERROR = "dummy-raw-error-marker";
+const DUMMY_INVOCATION = "dummy-invocation-marker";
+
+function modelRequest(): ModelRunRequestV1 {
+  return {
+    taskId: asWorkItemId("issue-42"),
+    repository: { ...REPO },
+    base: SHA1,
+    issue: { number: 42, title: "receipt", body: DUMMY_ISSUE_BODY },
+    evidence: [{ kind: "replay_result", ref: DUMMY_EVIDENCE_REF }],
+    model: "gpt-5.6-luna",
+    reasoning: "max",
+    maxDurationMs: 1_200_000,
+    maxOutputChars: 400_000,
+  };
+}
+
+/** Receipt fixture with explicit overrides; candidate defaults to present. */
+function receipt(
+  overrides: {
+    outcome?: ModelRunReceiptV1["outcome"];
+    error?: string | null;
+    terminalOrigin?: "runtime" | "host-timeout";
+    observedTerminalStatus?: "completed" | "interrupted" | "failed" | null;
+    outputChars?: number;
+    candidate?: boolean;
+  } = {},
+): PortResultV1<ModelRunReceiptV1> {
+  return {
+    ok: true,
+    value: {
+      invocationId: DUMMY_INVOCATION,
+      outcome: overrides.outcome ?? "completed",
+      actual: {
+        evidenceKind: "request-runtime",
+        provider: "sentinel-host",
+        threadId: "thread-1",
+        turnId: "turn-1",
+        terminalOrigin: overrides.terminalOrigin ?? "runtime",
+        observedTerminalStatus: overrides.observedTerminalStatus !== undefined
+          ? overrides.observedTerminalStatus
+          : "completed",
+        observedModel: "gpt-5.6-luna",
+        observedReasoning: "max",
+        durationMs: 1_234,
+        outputChars: overrides.outputChars ?? 100,
+      },
+      candidate: overrides.candidate === false ? null : {
+        head: SHA3,
+        checkpointSha: null,
+        changedPaths: [DUMMY_CHANGED_PATH],
+      },
+      error: overrides.error ?? null,
+    },
+  };
+}
+
+Deno.test(
+  "local model results: private projection is minimal, unique and mode 0600",
+  async () => {
+    const stateRoot = await Deno.makeTempDir({
+      dir: ".",
+      prefix: "sentinel-model-results-",
+    });
+    try {
+      const request = modelRequest();
+      const first = await writeLocalModelResult(
+        stateRoot,
+        request,
+        receipt(),
+        T0,
+      );
+      const second = await writeLocalModelResult(
+        stateRoot,
+        request,
+        receipt(),
+        T0 + 1,
+      );
+      assert.notEqual(first, second, "every result keeps a unique filename");
+      assert.equal((await Deno.stat(first)).isFile, true);
+      assert.equal((await Deno.stat(second)).isFile, true);
+
+      const text = await Deno.readTextFile(first);
+      const written = JSON.parse(text) as Record<string, unknown>;
+      assert.equal(written.version, "v1");
+      assert.equal(written.kind, "local_model_result");
+      assert.equal(written.taskId, "issue-42");
+      assert.equal(written.base, SHA1);
+      assert.deepEqual(written.requested, {
+        model: "gpt-5.6-luna",
+        reasoning: "max",
+        maxDurationMs: 1_200_000,
+        maxOutputChars: 400_000,
+      });
+      assert.equal(written.observedAt, T0);
+      assert.equal(written.reason, null);
+      assert.deepEqual(written.result, {
+        ok: true,
+        outcome: "completed",
+        actual: {
+          provider: "sentinel-host",
+          threadId: "thread-1",
+          turnId: "turn-1",
+          terminalOrigin: "runtime",
+          observedTerminalStatus: "completed",
+          observedModel: "gpt-5.6-luna",
+          observedReasoning: "max",
+          durationMs: 1_234,
+          outputChars: 100,
+        },
+        candidate: { head: SHA3, changedPathCount: 1 },
+      });
+
+      // The explicit allow-list never serializes request/result payloads,
+      // changed paths, raw errors, invocation identity or credentials.
+      for (
+        const marker of [
+          DUMMY_ISSUE_BODY,
+          DUMMY_EVIDENCE_REF,
+          DUMMY_CHANGED_PATH,
+          DUMMY_INVOCATION,
+          "dummy-token",
+          "checkpointSha",
+        ]
+      ) {
+        assert.equal(
+          text.includes(marker),
+          false,
+          `private projection never serializes ${marker}`,
+        );
+      }
+
+      // 0600 file, 0700 directories.
+      assert.equal((await Deno.stat(first)).mode! & 0o777, 0o600);
+      assert.equal((await Deno.stat(second)).mode! & 0o777, 0o600);
+      assert.equal(
+        (await Deno.stat(`${stateRoot}/model-results`)).mode! & 0o777,
+        0o700,
+      );
+      const key = await localCheckoutKey("issue-42");
+      assert.equal(
+        (await Deno.stat(`${stateRoot}/model-results/${key}`)).mode! & 0o777,
+        0o700,
+      );
+
+      // output_limit wins when the actual output exceeds the request bound.
+      const limited = await writeLocalModelResult(
+        stateRoot,
+        request,
+        receipt({ outputChars: 400_001 }),
+        T0,
+      );
+      assert.equal(
+        (JSON.parse(await Deno.readTextFile(limited)) as Record<
+          string,
+          unknown
+        >)
+          .reason,
+        "output_limit",
+      );
+
+      // The exact loop-stop marker keeps its own classification.
+      const loop = await writeLocalModelResult(
+        stateRoot,
+        request,
+        receipt({ outcome: "failed", error: LOOP_STOP_MARKER }),
+        T0,
+      );
+      assert.equal(
+        (JSON.parse(await Deno.readTextFile(loop)) as Record<string, unknown>)
+          .reason,
+        "failed_command_loop",
+      );
+
+      // A host timeout preserves the observed null terminal status and the
+      // raw receipt error is never serialized.
+      const timeout = await writeLocalModelResult(
+        stateRoot,
+        request,
+        receipt({
+          outcome: "failed",
+          terminalOrigin: "host-timeout",
+          observedTerminalStatus: null,
+          error: DUMMY_RAW_ERROR,
+          candidate: false,
+        }),
+        T0,
+      );
+      const timeoutText = await Deno.readTextFile(timeout);
+      const timeoutWritten = JSON.parse(timeoutText) as Record<string, unknown>;
+      assert.equal(timeoutWritten.reason, "host_timeout");
+      assert.equal(
+        ((timeoutWritten.result as Record<string, unknown>)
+          .actual as Record<string, unknown>).observedTerminalStatus,
+        null,
+      );
+      assert.equal(timeoutText.includes(DUMMY_RAW_ERROR), false);
+
+      // Any other non-null receipt error is runtime_error.
+      const failed = await writeLocalModelResult(
+        stateRoot,
+        request,
+        receipt({ outcome: "failed", error: DUMMY_RAW_ERROR }),
+        T0,
+      );
+      const failedText = await Deno.readTextFile(failed);
+      assert.equal(
+        (JSON.parse(failedText) as Record<string, unknown>).reason,
+        "runtime_error",
+      );
+      assert.equal(failedText.includes(DUMMY_RAW_ERROR), false);
+
+      // A port-level error keeps only its error kind, never its raw detail.
+      const unavailable: PortResultV1<ModelRunReceiptV1> = {
+        ok: false,
+        error: { kind: "unavailable", detail: DUMMY_RAW_ERROR },
+      };
+      const portFailureText = await Deno.readTextFile(
+        await writeLocalModelResult(stateRoot, request, unavailable, T0),
+      );
+      const portFailure = JSON.parse(portFailureText) as Record<
+        string,
+        unknown
+      >;
+      assert.deepEqual(portFailure.result, {
+        ok: false,
+        errorKind: "unavailable",
+      });
+      assert.equal(portFailure.reason, "runtime_error");
+      assert.equal(portFailureText.includes(DUMMY_RAW_ERROR), false);
+    } finally {
+      await Deno.remove(stateRoot, { recursive: true });
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Local issue scope: only actual coding tasks are admitted. The concrete port
+// instance, its unrelated methods and the class `this` binding stay intact.
+// ---------------------------------------------------------------------------
+
+/** FakeGithub with injectable per-method faults; reuses every other method. */
+class FaultyIssueGithub extends FakeGithub {
+  listFault: PortResultV1<never> | null = null;
+  readFault: PortResultV1<never> | null = null;
+  override listOpenIssues(): Promise<PortResultV1<GitHubIssueV1[]>> {
+    if (this.listFault !== null) return Promise.resolve(this.listFault);
+    return super.listOpenIssues();
+  }
+  override readIssue(
+    issueNumber: number,
+  ): Promise<PortResultV1<GitHubIssueV1 | null>> {
+    if (this.readFault !== null) return Promise.resolve(this.readFault);
+    return super.readIssue(issueNumber);
+  }
+}
+
+Deno.test(
+  "local issue scope: only exact bug or enhancement tasks without question",
+  async () => {
+    const github = new FakeGithub({
+      openIssues: [
+        { number: 1, labels: ["bug"] },
+        { number: 2, labels: ["enhancement"] },
+        { number: 3, labels: ["bug", "question"] },
+        { number: 4 },
+        { number: 5, labels: ["documentation"] },
+        { number: 6, labels: ["bugfix"] },
+        { number: 7, labels: ["Bug"] },
+      ],
+    });
+    const scoped = scopeLocalRepairIssues(github);
+    assert.equal(scoped, github, "the same concrete port instance is scoped");
+    const listed = await scoped.listOpenIssues();
+    assert.ok(listed.ok);
+    assert.deepEqual(
+      listed.ok ? listed.value.map((issue) => issue.number) : [],
+      [1, 2],
+    );
+    assert.deepEqual(github.calls, ["listOpenIssues"]);
+  },
+);
+
+Deno.test(
+  "local issue scope: read re-check admits eligible issues and nulls the rest",
+  async () => {
+    const labels = ["enhancement"];
+    const github = new FakeGithub({
+      issues: [
+        { number: 11, labels },
+        { number: 12, labels: ["question"] },
+      ],
+    });
+    const scoped = scopeLocalRepairIssues(github);
+    const admitted = await scoped.readIssue(11);
+    assert.ok(admitted.ok);
+    assert.equal(admitted.value?.number, 11);
+    assert.deepEqual(await scoped.readIssue(12), portOk(null));
+    assert.deepEqual(await scoped.readIssue(99), portOk(null));
+
+    // The loop re-reads before admission: an issue that becomes a question
+    // after listing is refused instead of consuming budget.
+    labels.splice(0, labels.length, "question");
+    assert.deepEqual(await scoped.readIssue(11), portOk(null));
+  },
+);
+
+Deno.test(
+  "local issue scope: port errors pass through and other methods keep behavior",
+  async () => {
+    const github = new FaultyIssueGithub();
+    const listFault = portError("rate_limited", "list fault");
+    const readFault = portError("unavailable", "read fault");
+    github.listFault = listFault;
+    github.readFault = readFault;
+    const scoped = scopeLocalRepairIssues(github);
+    assert.equal(await scoped.listOpenIssues(), listFault);
+    assert.equal(await scoped.readIssue(1), readFault);
+
+    const other = new FakeGithub();
+    const scopedOther = scopeLocalRepairIssues(other);
+    const ref = await scopedOther.readRef("refs/heads/development");
+    assert.ok(ref.ok, "an unrelated class method still works");
+    assert.equal(ref.ok ? ref.value?.sha : null, SHA1);
+    assert.deepEqual(other.calls, ["readRef:refs/heads/development"]);
   },
 );

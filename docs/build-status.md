@@ -2,7 +2,7 @@
 
 ## Active task register — Astra owned
 
-Current checkpoint, 2026-09-11 16:26 UTC: canonical HEAD1b4907a passed the full Linux harness (917 tests, zero failures). Local Codex review round1 found one P1 late-routing defect and two P2 startup cooldown defects. One bounded DSH writer is correcting these findings before exact-candidate acceptance round2. Sentinel has NOT started. The local hourly policy and persistent state bootstrap exist; the scheduler, first live receipt and deterministic local self-update remain pending. Later dated entries in this register supersede this checkpoint; older receipts are historical evidence, not current status.
+Current checkpoint, 2026-09-11 17:34 UTC: canonical HEAD 8344c1251d075ae8e92623d29013931d5739be5b contains merged local runtime and Actions reporting. Diagnosis v2 is settled and independently checked; the pending four-file correction clarifies runtime ownership, persists private minimal model results, and limits local issue intake to bug/enhancement without question. Type, prompt, local-host and lint checks passed. Runtime still uses reviewed b0704e1, hourly at minute 53; next admission can occur at 17:53 UTC. One ambiguous first-run start remains charged; no candidate or autonomous delivery exists. Next action: commit, exact-candidate review and CI, then deploy this correction. Local self-update remains unfinished. Nine pre-existing diagnostic directories are preserved.
 
 Current owner instruction, 2026-09-11 14:34 UTC: make Sentinel autonomously fix
 itself, launch locally and monitor it. Astra owns integration. Hourly Luna/max
@@ -3034,3 +3034,51 @@ unavailable state, malformed input; all passed receipt66a9dccc-5766-4734-a189-
 3b0a9c76de94 (same namespace). Only fixed/validated fields render; blocked5 isred.
 New user-requested reporting delivery is separate from completed PR19 acceptance;
 review this one reporting commit, not another repair-runtime correction round.
+
+17:12 UTC operational acceptance: reporting PR20 merged8344c1251d075ae8e92623d29013931d5739be5b;
+canonical ff to merge. CI34625770135 and34625804156 passed. Exact reporting
+review765e82a had noP0/P1; remainingP2 trackedissue21 (bounded history projection).
+Manual actual Actions report34626295333 completed RED as expected, summary names
+blockedissue5 and nextbudget17:52:44.145UTC. Workflow setup/render execution verified.
+Private launchd job replaced only while idle/no marker; calendarMinute53,
+RunAtLoadfalse, same fixed runtimeb0704e1. Trusted command now dispatches fresh
+sanitized status after every pass, or a fixed unavailable status on startup failure;
+never reuses older status as fresh. Wrapper types receipt eccc8e97 passed.
+One immediate deterministic pass at exhausted durable model budget verifies the
+installed reporting seam; it must retain exactly one reservation and add no model
+start. Source/status/credentials remain on Mac; no GitHub self-hosted runner.
+
+17:14 UTC: installed launchd command completed invocation86be26d9 at17:14:10,
+exited0, settled/no active marker, and automatically dispatched Actions34626535154.
+That actual report completed RED with blockedissue5, one total reservation,
+five waiting records. Durable reservation count remained exactly1: zero extra
+model starts. Hourly calendarMinute53 is loaded; next scheduled17:53UTC/13:53EDT.
+This proves automatic per-pass reporting, not successful autonomous repair.
+Latest Actions URL https://github.com/ubiquity/sentinel/actions/runs/34626535154.
+Runtimecode b0704e1 unchanged; state/genesis/history preserved, targetbase8344c12.
+Central operator register has this uncommitted operational status update;
+implementation/workflow changes are merged throughPR19/20. No DSH worker active.
+
+17:18UTC next bounded correction: first run no detailed receipt is recoverable;
+no inference retry authorized before17:52:44.145UTC. Found concrete prompt conflict:
+buildPrompt requests a commit although trusted host owns Git writes. Operator
+ledger439KB also exceeds400K notification budget if dumped. Correct runtime-role
+prompt and add private minimal model-result receipts (no issue bodies/rawerrors/
+credentials) to diagnose next real pass. DSH owns model-port/local.ts and their
+two tests only, canonical8344c12 plus Astra-owned dirty register. Max50calls5min,
+first edit90sec, one final formatter, no tests/Git/children. GPT owns diagnosis
+checks and real next admitted receipt. Self-update remains separate work next.
+
+17:25UTC: diagnosisv1 PID96585/streamcb394230/persistedba2ef663 completedexit0,
+actualFlash/max workspace-write/ask and livecwd/NODE_ENV verified, no descendants.
+65calls exceeded50-call assignment; final read-only gitdiff afterformatter also
+violated immediatehandback/noGit rule. Useful4filepatch preserved. GPT types
+cbcff44c, actualprompt15937270, localreceiptf9ff2704 allpassed. Explicit ledger
+read warning was omitted; bounded final correction adds it with local issue
+eligibility. Local repair now targets existing bug/enhancement labels, excluding
+question; no new labels/interface/environment. Issue18 labelledbug; owner-decision
+issues6/7/8 labelledquestion; pendingstate preserved, source rechecked preadmission.
+This prevents spending next hourlystart on gateway owner-policy tasks. Label
+scope applies only concrete Mac GitHub host; gateway/general ports unchanged.
+
+17:34 UTC: resumed Astra verified canonical path, branch, HEAD and registered worktrees; no live DSH print writer remains. V2 PID 97758 is absent and stream session-7f43b851 ends completed; persisted session-9e5591a6 proves Flash/max, workspace-write/ask and owned edit events. Lost exec handle means exit code cannot be recovered; live cwd/NODE_ENV inspection was missed, so full launch attestation is not claimed. 37 calls exceeded 30; first edit about 101 seconds exceeded 60 seconds. One permitted final formatter and no subsequent calls; no children. Useful changes independently accepted for delivery, not runtime acceptance. GPT executed receipts in the namespace above: types 4e1a2323-cc88-4a45-9966-25b7df76b0b8, prompt da678510-f164-477a-a17d-a44bd82f3d22, local host d91e7d4f-2094-46f2-b993-7f67d090b172, lint f9ba7329-2901-4d68-993d-ca170ab87ec3, all successful. Git diff check passed. Original first-run cause remains unproved; prompt conflicts are concrete defects, not recovered cause evidence.

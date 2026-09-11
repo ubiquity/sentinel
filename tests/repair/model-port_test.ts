@@ -259,6 +259,97 @@ Deno.test("model-port: thread starts with bounded isolated-checkout write capabi
 });
 
 Deno.test(
+  "runtime prompt: thread/start and turn/start carry the runtime implementer role and request bounds",
+  async () => {
+    const session = new FakeCodexSession();
+    const port = new CodexImplementationPort({
+      openSession: () => Promise.resolve(session),
+      checkoutDir: CHECKOUT,
+      checkout: {
+        resolve: () =>
+          Promise.resolve({
+            head: SHA3,
+            checkpointSha: null,
+            changedPaths: ["src/app.ts"],
+          }),
+      },
+      modelProvider: "sentinel-host",
+    });
+
+    const result = await port.runModel({
+      taskId: asWorkItemId("issue-1"),
+      repository: { ...REPO },
+      base: SHA1,
+      issue: { number: 1, title: "title", body: "body" },
+      evidence: [],
+      model: "gpt-5.6-luna",
+      reasoning: "max",
+      maxDurationMs: 5_000,
+      maxOutputChars: 12_345,
+    });
+    assert.ok(result.ok, JSON.stringify(result));
+    if (!result.ok) return;
+    assert.equal(result.value.outcome, "completed");
+
+    // The assertions read the ACTUAL session frames: the prompt is the real
+    // thread/turn payload used by the runtime, not a helper-only echo.
+    const threadStart = session.sent.find(
+      (frame) => frame.method === "thread/start",
+    );
+    const turnStart = session.sent.find(
+      (frame) => frame.method === "turn/start",
+    );
+    assert.ok(threadStart, "thread/start was sent");
+    assert.ok(turnStart, "turn/start was sent");
+    const baseInstructions = (threadStart?.params as Record<string, unknown>)
+      .baseInstructions;
+    assert.equal(typeof baseInstructions, "string");
+    const turnInput = (turnStart?.params as Record<string, unknown>).input as
+      | { type?: unknown; text?: unknown }[]
+      | undefined;
+    assert.equal(turnInput?.[0]?.type, "text");
+    assert.equal(
+      turnInput?.[0]?.text,
+      baseInstructions,
+      "the same runtime prompt is submitted on thread/start and turn/start",
+    );
+
+    const prompt = (baseInstructions as string).toLowerCase();
+    for (
+      const required of [
+        "runtime implementer role",
+        "edit only the current provided checkout",
+        "do not run git add, git commit or git push",
+        "worktrees",
+        "delegate",
+        "the trusted host owns commits, pushes, review and release",
+        "do not take over master-plan orchestration",
+        "protected paths",
+        "credentials",
+        "expected test assertions",
+        "gpt-5.6-luna",
+        "max reasoning",
+        "total event output allowance is 12345 characters",
+        "keep individual command output bounded",
+        "never dump docs/build-status.md in full",
+        "bounded matching sections",
+        "concise final response",
+      ]
+    ) {
+      assert.ok(
+        prompt.includes(required),
+        `runtime prompt carries: ${required}`,
+      );
+    }
+    assert.equal(
+      prompt.includes("minimal commit"),
+      false,
+      "the obsolete commit-production instruction is gone",
+    );
+  },
+);
+
+Deno.test(
   "model-port: permission profile gates capabilities, thread permissions and exact acknowledgement",
   async () => {
     const session = new FakeCodexSession({ id: "sentinel-repair" });
