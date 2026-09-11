@@ -218,7 +218,6 @@ const POISON_SOURCE = "/nonexistent/sentinel-poison-source";
 const POISON_SCRATCH = "/nonexistent/sentinel-poison-scratch";
 
 const GIT_FAILED_TEXT = "git command failed";
-const LOGIN_FAILED_TEXT = "authenticated GitHub login is unavailable";
 
 Deno.test(
   "local refresh: durable refusal and a throwing gate stop before any Git or network",

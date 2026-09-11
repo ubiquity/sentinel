@@ -2983,3 +2983,21 @@ d9a5b316-fef9-4099-95cb-1bc3d6816615 (same evidence namespace above).
 The original reviewer reproduction already passed b3cebac4 with zero commits.
 Review batch accepted for commit; round 2 and full CI must inspect the new
 candidate. Local scheduler remains uninstalled and no live model start occurred.
+
+16:42 UTC: review round 2 at 433bdb32f3d64270ad29fcd103bced30b7c49087
+completed exit 0; no P0/P1. One substantiated P2: oversized valid findings can
+overflow review journal rendering and leave a running pending draft stranded.
+Backlog this lower finding under the bounded review policy; no correction round
+for it. CI34622939537 stopped only at unused LOGIN_FAILED_TEXT in local_test.ts.
+Sole tiny DSH assignment final-lint-v1 removes that declaration, 5 calls/45 sec,
+no tests/formatter/Git/children. Same playbook and settings verified. GPT owns
+self-review-final-lint; final candidate requires CI. Runtime remains unactivated.
+
+16:43 UTC: round-2 P2 is tracked at https://github.com/ubiquity/sentinel/issues/18,
+a bounded ready self-repair task. Final lint worker PID85754/streamb0a0c5c7/
+persisted24df15c2 completed exit0, exactly one declaration removed, no children.
+Persisted request confirms Flash/max and workspace-write/ask. Exact live cwd and
+NODE_ENV inspection missed its short process lifetime; launch argv carried both,
+but full live attestation is not claimed. GPT lint receipt
+5b8dc270-bbf6-46b7-9a8d-6eb402f4fad3 passed (same namespace). Final CI and
+round 3 will inspect the corrected integrated candidate; no fourth round.
