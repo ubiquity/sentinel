@@ -3001,3 +3001,36 @@ NODE_ENV inspection missed its short process lifetime; launch argv carried both,
 but full live attestation is not claimed. GPT lint receipt
 5b8dc270-bbf6-46b7-9a8d-6eb402f4fad3 passed (same namespace). Final CI and
 round 3 will inspect the corrected integrated candidate; no fourth round.
+
+2026-09-11 17:01 UTC: PR19 merged as6b285ce87730f743e13697da27aaa6e02fef6ba1.
+Final review round3 atb0704e1 completed exit0, only same P2 issue18. CI34623659688
+and PR CI34623714997 passed925tests/84steps/zero failures/7ignores.
+Canonical ff to merge6b285ce, all registered worker tips remain ancestors.
+Local job com.ubiquity.sentinel.local installed, hourly3600s, fixed reviewed
+runtime b0704e1 (tree identical to merge6b285ce). First invocatione60d729b ran
+16:51:56–16:54:55UTC, exited0, lock released and session marker cleared.
+Actual status /Users/nv/.local/state/sentinel-local/status.json: owner0x4007,
+Luna/max policy1/hour168/week, issue5 blocked with no candidate/PR; one ambiguous
+implementation reservation at16:52:44.145UTC, next eligible17:52:44.145UTC.
+Four others6,7,8,18 wait at shared budget. Do not claim successful repair.
+Detailed original model outcome was not persisted. No-model exact-client thread
+probe91e09977 passed Luna/max/uos/profile acknowledgement. Fake Responses wire
+probe837a0904 passed expected bearer and Luna request; auth works. Do not refund
+ambiguous reservation or reset blocked issue5 without supported evidence.
+User requests GitHub Actions visibility tonight. No existing self-hosted runner;
+org free/default group does not admit public repo. Optional execution-location
+question pending; proceeding with per-pass Actions reporting on GitHub-hosted
+runner, keeping execution/state/gateway on Mac. One DSH writer owns only new
+.github/workflows/local-status.yml, 15calls2min, no checks/Git/children, same
+playbook hash7b2b79fd711a391f7d589a187be8103bb7d09b83296a11078abf5b917ca37850.
+GPT owns real Actions acceptance. No extra production model start.
+
+17:06 UTC: reporting worker92667/persistede8088c3e completed, actual Flash/max,
+workspace-write/ask and live cwd/NODE_ENV verified, no children. Correction
+persisted272ac003 completed one-file edits, actual Flash/max verified; its short
+lifetime escaped live environment inspection. No worker tests/Git/children.
+GPT executed actual YAML shell in five cases: blocked, healthy, unknown step,
+unavailable state, malformed input; all passed receipt66a9dccc-5766-4734-a189-
+3b0a9c76de94 (same namespace). Only fixed/validated fields render; blocked5 isred.
+New user-requested reporting delivery is separate from completed PR19 acceptance;
+review this one reporting commit, not another repair-runtime correction round.
