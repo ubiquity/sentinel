@@ -2146,12 +2146,21 @@ function buildPrompt(request: ModelRunRequestV1): string {
       "protected paths, do not write or commit credentials, and do not " +
       "rewrite expected test assertions to force success. Keep the change " +
       "minimal and do not refactor beyond it. Your total event output " +
-      `allowance is ${request.maxOutputChars} characters; keep individual ` +
-      "command output bounded and prefer summaries over full dumps. Never " +
-      "dump docs/build-status.md in full: at 439 KB it exceeds that " +
-      "allowance, so inspect only the current checkpoint or bounded matching " +
-      "sections. Finish with a concise final response listing the files " +
-      "changed and the checks run.",
+      `allowance is ${request.maxOutputChars} characters, and every tool ` +
+      "notification counts against it; repeated full output is charged " +
+      "again. Keep every command's max_output_tokens at or below 2000 and " +
+      "keep individual command output bounded: prefer targeted symbol " +
+      "searches followed by excerpts of at most 100 lines. Read the " +
+      "applicable instructions only once, never repeat a full file read, " +
+      "and check the actual failure instead of retrying the same failing " +
+      "command unchanged. Stop broad source surveying once the target " +
+      "behavior is understood and make the smallest edit; reserve most of " +
+      "the allowance for implementation and focused validation. Focused " +
+      "repository tests and the necessary source context they need remain " +
+      "allowed. Never dump docs/build-status.md in full; inspect only the " +
+      "current checkpoint or bounded matching sections. Finish with a " +
+      "concise final response listing the files changed and the checks " +
+      "run.",
   );
   return parts.join("\n\n").slice(0, MAX_PROMPT_CHARS);
 }

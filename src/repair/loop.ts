@@ -34,6 +34,11 @@ import type { IncidentEvidenceV1 } from "../contracts/incident.ts";
 import { parseMergeRequestV1 } from "../contracts/merge-request.ts";
 import { parseReleaseRequestV1 } from "../contracts/release.ts";
 import type { ReleaseRequestV1 } from "../contracts/release.ts";
+import {
+  localReceiptBindsRequest,
+  parseLocalReleaseReceiptV1,
+} from "../contracts/local-release.ts";
+import type { LocalReleaseReceiptV1 } from "../contracts/local-release.ts";
 import { parseReplayResultV1 } from "../contracts/replay-result.ts";
 import type { ReplayResultV1 } from "../contracts/replay-result.ts";
 import {
@@ -1951,6 +1956,51 @@ async function executeImplementationStep(
   if (admissionCooling.kind === "deferred") {
     return { kind: "deferred", detail: admissionCooling.detail };
   }
+  // Queued issue work has no saved candidate, checkpoint, PR or open intent:
+  // its target base is only the development tip captured at intake, so it may
+  // have gone stale while the work waited. Refresh it through the same
+  // configured-ref read before any model reservation, so admission and the
+  // model request use the CURRENT development base instead of an obsolete one.
+  // A base read fault keeps the record, counters and history untouched and
+  // defers with the existing bounded unavailable wait (zero reservation).
+  if (
+    record.source.kind === "issue" &&
+    record.target.head === null &&
+    record.target.checkpoint === null &&
+    record.target.pr === null &&
+    record.intent === null
+  ) {
+    const latestBase = await readBase(deps, record.repository);
+    if (latestBase === null) {
+      return persistWork(
+        deps,
+        context,
+        setWait(
+          record,
+          {
+            reason: "unavailable",
+            since: now,
+            until: now + ISSUE_PREREQUISITE_RETRY_MS,
+          },
+          now,
+        ),
+      );
+    }
+    if (latestBase !== record.target.base) {
+      // Persist ONLY target.base and updatedAt: the immutable source revision,
+      // counters, evidence/history, creation time and every other identity are
+      // preserved. The returned progress reloads the authoritative state, so
+      // the admission below and the existing cooldown/bounds checks run again
+      // against the refreshed record (new base, same identity).
+      const refreshed: WorkRecordV1 = {
+        ...record,
+        target: { ...record.target, base: latestBase },
+        updatedAt: deps.clock.now(),
+      };
+      return persistWork(deps, context, refreshed);
+    }
+  }
+
   const startsAt = deps.clock.now();
   if (
     startsAt >= bounds.modelCutoff ||
@@ -3293,18 +3343,43 @@ function executeDeliveryStep(
 
   // Look up the durable release request by its SOURCE identity (exact PR and
   // reviewed head); the request's `revision` is the merged revision, which is
-  // never the candidate head, so it cannot be the lookup key. Retaining the
-  // merged revision inside the matched request keeps one exact request per
-  // PR/head and never replays a merge or fabricates a duplicate request.
+  // never the candidate head, so it cannot be the lookup key. The lookup also
+  // binds the full target scope (owner/name/installation), the production
+  // environment and the reviewed base: a request for another repository scope
+  // or another base can never be observed — and therefore never closed — for
+  // this delivery record. Retaining the merged revision inside the matched
+  // request keeps one exact request per PR/head/base and never replays a merge
+  // or fabricates a duplicate request.
   const existingRequest = context.snapshot.releaseRequests.find(
-    (request) =>
-      request.source.pullRequest === record.target.pr &&
-      request.source.head === record.target.head,
+    (request) => releaseRequestMatchesDelivery(request, record),
   );
   if (existingRequest !== undefined) {
     return observeReleaseAcceptance(deps, context, record, existingRequest);
   }
   return executeMerge(deps, context, record);
+}
+
+/**
+ * Exact delivery/release-request binding. PR and reviewed head alone are not
+ * enough: the request must belong to the record's exact repository scope
+ * (owner, name and installation id), be a production request, and carry the
+ * same reviewed base as the record. A receipt for another scope or another
+ * base is therefore never observed against this record.
+ */
+function releaseRequestMatchesDelivery(
+  request: ReleaseRequestV1,
+  record: WorkRecordV1,
+): boolean {
+  if (record.target.pr === null || record.target.head === null) return false;
+  if (request.source.pullRequest !== record.target.pr) return false;
+  if (request.source.head !== record.target.head) return false;
+  if (request.source.base !== record.target.base) return false;
+  if (request.target.environment !== "production") return false;
+  const target = request.target.repository;
+  const repository = record.repository;
+  return target.owner === repository.owner &&
+    target.name === repository.name &&
+    target.installationId === repository.installationId;
 }
 
 async function executeMerge(
@@ -3605,71 +3680,28 @@ async function buildReleaseRequest(
   }
 }
 
-async function observeReleaseAcceptance(
+/**
+ * The explicit local Sentinel scope: the no-App owner credential identity for
+ * exactly `ubiquity/sentinel` (`installationId` 0). Another repository that
+ * happens to share scope 0 is NOT the local Sentinel scope, so it can never
+ * read or consume the Sentinel local receipt. A local request never falls back
+ * to the hosted Deno release path, even when the local receipt capability is
+ * absent or broken.
+ */
+function isLocalReleaseScope(request: ReleaseRequestV1): boolean {
+  const repository = request.target.repository;
+  return repository.installationId === 0 &&
+    repository.owner === "ubiquity" &&
+    repository.name === "sentinel";
+}
+
+/** One explicit release wait; an unreadable or pending local receipt waits. */
+function waitRelease(
   deps: RepairCycleDepsV1,
   context: LoopContextV1,
   record: WorkRecordV1,
-  request: ReleaseRequestV1,
+  now: number,
 ): Promise<StepResultV1> {
-  const now = deps.clock.now();
-  const release = await deps.state.readRelease();
-  if (!release.ok || release.value.status !== "found") {
-    return persistWork(
-      deps,
-      context,
-      setWait(
-        record,
-        { reason: "unavailable", since: now, until: now + RELEASE_POLL_MS },
-        now,
-      ),
-    );
-  }
-  const observed = release.value.snapshot.releases.find(
-    (item) => item.requestId === request.id,
-  );
-  if (observed === undefined) {
-    return persistWork(
-      deps,
-      context,
-      setWait(
-        record,
-        { reason: "unavailable", since: now, until: now + RELEASE_POLL_MS },
-        now,
-      ),
-    );
-  }
-  if (observed.phase === "accepted") {
-    if (record.related.issueNumber === null) {
-      return persistWork(deps, context, markDone(record, now));
-    }
-    const intent = {
-      kind: "issue_closure" as const,
-      key: closureIntentKey(record.related.issueNumber),
-      startedAt: now,
-      branch: null,
-      expectedHead: record.target.head,
-      observedBase: record.target.base,
-      pr: record.target.pr,
-      requestId: request.id,
-      resultId: null,
-    };
-    const withIntent = setIntent(record, intent, now);
-    const persisted = await persistWork(deps, context, withIntent);
-    if (persisted.kind !== "progress") return persisted;
-    return retryClosure(deps, context, withIntent);
-  }
-  if (observed.phase === "failed" || observed.phase === "rolled_back") {
-    return persistWork(
-      deps,
-      context,
-      markBlocked(
-        record,
-        "other",
-        `release ${observed.phase}`,
-        now,
-      ),
-    );
-  }
   return persistWork(
     deps,
     context,
@@ -3679,6 +3711,125 @@ async function observeReleaseAcceptance(
       now,
     ),
   );
+}
+
+/**
+ * Local acceptance only ever reads the private local activation receipt. An
+ * absent capability is unavailable (never a Deno fallback), a missing/error
+ * receipt waits, an accepted receipt uses the existing closure intent logic,
+ * and a failed or rolled-back receipt uses the existing blocked behavior. The
+ * complete receipt is parsed again here and its request binding is enforced,
+ * so an injected reader cannot accept, close or block on a malformed,
+ * unproven or differently-bound value.
+ */
+async function observeLocalReleaseAcceptance(
+  deps: RepairCycleDepsV1,
+  context: LoopContextV1,
+  record: WorkRecordV1,
+  request: ReleaseRequestV1,
+): Promise<StepResultV1> {
+  const now = deps.clock.now();
+  const readLocalRelease = deps.state.readLocalRelease;
+  if (readLocalRelease === undefined) {
+    return waitRelease(deps, context, record, now);
+  }
+  let observed: PortResultV1<LocalReleaseReceiptV1 | null>;
+  try {
+    observed = await readLocalRelease.call(deps.state, request);
+  } catch {
+    return waitRelease(deps, context, record, now);
+  }
+  if (!observed.ok || observed.value === null) {
+    return waitRelease(deps, context, record, now);
+  }
+  let receipt: LocalReleaseReceiptV1;
+  try {
+    receipt = parseLocalReleaseReceiptV1(observed.value);
+  } catch {
+    return waitRelease(deps, context, record, now);
+  }
+  if (!localReceiptBindsRequest(receipt, request)) {
+    return waitRelease(deps, context, record, now);
+  }
+  if (receipt.phase === "accepted") {
+    return await acceptRelease(deps, context, record, request.id, now);
+  }
+  if (receipt.phase === "failed" || receipt.phase === "rolled_back") {
+    return blockRelease(deps, context, record, receipt.phase, now);
+  }
+  return waitRelease(deps, context, record, now);
+}
+
+/** Existing accepted behavior: closure intent when an issue is attached. */
+async function acceptRelease(
+  deps: RepairCycleDepsV1,
+  context: LoopContextV1,
+  record: WorkRecordV1,
+  requestId: string,
+  now: number,
+): Promise<StepResultV1> {
+  if (record.related.issueNumber === null) {
+    return persistWork(deps, context, markDone(record, now));
+  }
+  const intent = {
+    kind: "issue_closure" as const,
+    key: closureIntentKey(record.related.issueNumber),
+    startedAt: now,
+    branch: null,
+    expectedHead: record.target.head,
+    observedBase: record.target.base,
+    pr: record.target.pr,
+    requestId,
+    resultId: null,
+  };
+  const withIntent = setIntent(record, intent, now);
+  const persisted = await persistWork(deps, context, withIntent);
+  if (persisted.kind !== "progress") return persisted;
+  return retryClosure(deps, context, withIntent);
+}
+
+/** Existing failed/rolled_back behavior: an ordinary blocked record. */
+function blockRelease(
+  deps: RepairCycleDepsV1,
+  context: LoopContextV1,
+  record: WorkRecordV1,
+  phase: "failed" | "rolled_back",
+  now: number,
+): Promise<StepResultV1> {
+  return persistWork(
+    deps,
+    context,
+    markBlocked(record, "other", `release ${phase}`, now),
+  );
+}
+
+async function observeReleaseAcceptance(
+  deps: RepairCycleDepsV1,
+  context: LoopContextV1,
+  record: WorkRecordV1,
+  request: ReleaseRequestV1,
+): Promise<StepResultV1> {
+  if (isLocalReleaseScope(request)) {
+    return await observeLocalReleaseAcceptance(deps, context, record, request);
+  }
+  const now = deps.clock.now();
+  const release = await deps.state.readRelease();
+  if (!release.ok || release.value.status !== "found") {
+    return waitRelease(deps, context, record, now);
+  }
+  const observed = release.value.snapshot.releases.find(
+    (item) => item.requestId === request.id,
+  );
+  if (observed === undefined) {
+    return waitRelease(deps, context, record, now);
+  }
+  if (observed.phase === "accepted") {
+    return await acceptRelease(deps, context, record, request.id, now);
+  }
+  if (observed.phase === "failed" || observed.phase === "rolled_back") {
+    return blockRelease(deps, context, record, observed.phase, now);
+  }
+  return waitRelease(deps, context, record, now);
 }
 
 async function retryClosure(

@@ -45,7 +45,7 @@ jobs:
           const KNOWN_OUTCOMES = ["idle", "margin", "step_limit", "state_error", "source_error"];
           const ERROR_OUTCOMES = ["state_error", "source_error"];
           const HEADING = "# Sentinel local run report";
-          const PROVENANCE = "Execution is on the owner Mac; GitHub Actions records the result. Automatic local self-update is pending.";
+          const PROVENANCE = "Execution is on the owner Mac; GitHub Actions records the repair-pass result. A green report alone does not prove delivery or a runtime update.";
           const BUDGET_NOTE = "Waiting for the rolling-hour budget is normal and does not mean work was delivered.";
 
           const summaryPath = Deno.env.get("GITHUB_STEP_SUMMARY");

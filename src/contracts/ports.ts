@@ -15,6 +15,8 @@ import type {
 import { parseGitHubRateLimitV1 } from "./github-cooldown.ts";
 import type { GitHubRateLimitV1 } from "./github-cooldown.ts";
 import type { IncidentEvidenceV1, IncidentSummaryV1 } from "./incident.ts";
+import type { LocalReleaseReceiptV1 } from "./local-release.ts";
+import type { ReleaseRequestV1 } from "./release.ts";
 import type { ReplayLimitationV1 } from "./replay-result.ts";
 import type {
   ReviewFindingV1,
@@ -730,6 +732,18 @@ export interface StateReadView {
   readRelease(): Promise<
     PortResultV1<StateReadResultV1<ReleaseStateSnapshotV1>>
   >;
+  /**
+   * Optional local-activation capability, owned only by hosts that own the
+   * private local release scope. It reads the exact strict private receipt for
+   * one local Sentinel release request: a missing receipt is an explicit null,
+   * while a corrupt, unreadable or identity-mismatched receipt is unavailable
+   * (never a null and never a hosted-release fallback). Hosts without a local
+   * scope leave the method absent, and no repair process ever writes these
+   * receipts.
+   */
+  readLocalRelease?(
+    request: ReleaseRequestV1,
+  ): Promise<PortResultV1<LocalReleaseReceiptV1 | null>>;
 }
 
 export interface RepairStateWriter {
