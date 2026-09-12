@@ -245,6 +245,13 @@ export interface RepairCycleOptionsV1 {
    * start is the run start).
    */
   runStartedAt?: number;
+  /**
+   * Trusted host confirmation that NEW model starts are available. `false`
+   * makes the existing pre-admission model cutoff unreachable so the run does
+   * deterministic bookkeeping only: no budget, record or total-deadline
+   * behavior changes, and an omitted value keeps the existing cutoff.
+   */
+  modelStartsEnabled?: boolean;
 }
 
 export type RepairCycleOutcomeV1 =
@@ -304,7 +311,13 @@ export async function runRepairCycle(
     callerDeadline,
     startedAt + REPAIR_RUN_CEILING_MS,
   );
-  const modelCutoff = startedAt + REPAIR_MODEL_CUTOFF_MS;
+  // A trusted `false` from the host startup diagnostic keeps every existing
+  // pre-admission guard intact but makes the model cutoff unreachable, so the
+  // run can only do deterministic bookkeeping; budgets, records and the real
+  // total run deadline are untouched.
+  const modelCutoff = options.modelStartsEnabled === false
+    ? Number.NEGATIVE_INFINITY
+    : startedAt + REPAIR_MODEL_CUTOFF_MS;
   const bounds: RunBoundsV1 = { runDeadline, modelCutoff };
   const stepLimit = options.stepLimit ?? DEFAULT_STEP_LIMIT;
   let steps = 0;

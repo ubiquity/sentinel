@@ -18,6 +18,7 @@ import { RollingStartBudget } from "../budget/mod.ts";
 import { DurableGitHubCooldownGate } from "../repair/github-cooldown.ts";
 import { fetchHttpTransport } from "../github/http.ts";
 import { runRepairEntrypoint } from "../main.ts";
+import { runActionsPreflight } from "./actions-preflight.ts";
 import { createRepairStateStore, DenoGitRunner } from "../state/mod.ts";
 import {
   composeLocalGitHub,
@@ -48,6 +49,8 @@ const STATIC_CONTROLLER =
   "hosted repair host could not read an exact controller commit";
 const STATIC_EXECUTABLE = "hosted repair host could not resolve Codex";
 const STATIC_RUNNER = "hosted repair host sessions did not settle";
+const STATIC_PREFLIGHT =
+  "hosted Codex startup unavailable; deterministic repair pass completed";
 
 export interface ActionsRepairHostResultV1 {
   status: "ran";
@@ -55,6 +58,8 @@ export interface ActionsRepairHostResultV1 {
   controllerSha: GitSha;
   baseSha: string;
   login: string;
+  /** False when the model startup diagnostic failed for this run. */
+  startupReady: boolean;
 }
 
 /** Run one hosted repair pass through the actual production entrypoint. */
@@ -162,6 +167,18 @@ export async function runActionsRepairHost(): Promise<
   });
   const config = createLocalRepositoryConfig();
 
+  // Model startup availability is proved once, in-process, before the
+  // deterministic pass. The probe already logs its bounded dummy-only failure;
+  // a failed probe must not prevent deterministic bookkeeping, it only refuses
+  // new model starts for this run.
+  let startupReady = false;
+  try {
+    await runActionsPreflight();
+    startupReady = true;
+  } catch {
+    startupReady = false;
+  }
+
   let outcome: RepairCycleOutcomeV1 | null = null;
   let failure: unknown = null;
   try {
@@ -187,6 +204,7 @@ export async function runActionsRepairHost(): Promise<
     }, {
       deadline: clock.now() + RUN_DEADLINE_MS,
       stepLimit: STEP_LIMIT,
+      modelStartsEnabled: startupReady,
     });
   } catch (error) {
     failure = error;
@@ -204,8 +222,12 @@ export async function runActionsRepairHost(): Promise<
     controllerSha,
     baseSha,
     login: ACTIONS_LOGIN,
+    startupReady,
   };
   console.log(JSON.stringify(result));
+  // The deterministic pass and its drain completed and were logged above; the
+  // hosted run must still end red when model startup was unavailable.
+  if (!startupReady) throw new Error(STATIC_PREFLIGHT);
   return result;
 }
 

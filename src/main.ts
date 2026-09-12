@@ -121,6 +121,12 @@ export interface RepairEntrypointOptionsV1 {
   deadline: number;
   /** Bounded persisted transitions per run. */
   stepLimit?: number;
+  /**
+   * Trusted host startup result forwarded unchanged to the cycle. `false`
+   * refuses NEW model starts through the existing pre-admission guards while
+   * deterministic bookkeeping, drain and the total deadline stay unchanged.
+   */
+  modelStartsEnabled?: boolean;
 }
 
 /**
@@ -186,6 +192,7 @@ export async function runRepairEntrypoint(
         deadline: hardDeadline - OPERATION_MARGIN_MS,
         stepLimit: options.stepLimit,
         runStartedAt,
+        modelStartsEnabled: options.modelStartsEnabled,
       },
     );
   } catch (error) {

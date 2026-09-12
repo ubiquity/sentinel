@@ -86,7 +86,7 @@ async function resolveCodex(path: string): Promise<string> {
   throw new Error("installed codex executable not found on PATH");
 }
 
-async function main(): Promise<void> {
+export async function runActionsPreflight(): Promise<void> {
   // The only host input read is PATH; no credential is ever resolved.
   const path = Deno.env.get("PATH");
   if (path === undefined || path.length === 0) {
@@ -291,5 +291,5 @@ async function main(): Promise<void> {
 }
 
 if (import.meta.main) {
-  await main();
+  await runActionsPreflight();
 }
