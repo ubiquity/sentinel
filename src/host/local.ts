@@ -618,6 +618,7 @@ export async function runLocalRepairHost(
       modelToken: input.modelToken,
       tracker,
       clock,
+      localIteration: true,
     });
     github.pushHead = () =>
       Promise.resolve(portError(
@@ -990,6 +991,8 @@ export interface LocalModelInputV1 {
   clock: Clock;
   /** Provider endpoint used by the isolated implementation client. */
   modelBaseUrl?: string;
+  /** Explicit owner-local pause; hosted Actions must leave this false. */
+  localIteration?: boolean;
 }
 
 /**
@@ -1062,12 +1065,26 @@ export class LocalCheckoutModelPort implements ImplementationPort {
           ),
         ),
       checkoutDir: prepared.checkout,
+      localIteration: this.input.localIteration === true,
       modelProvider: "uos",
       permissionProfile: "sentinel-local",
       commitCandidate: committer,
     });
 
     const result = await port.runModel(request);
+    if (!result.ok) {
+      // The port detail is a bounded static diagnostic (never model output or
+      // a credential). Hosted runs otherwise only expose the generic blocked
+      // transition, which hides the actual failure boundary needed to repair
+      // the runtime.
+      console.log(JSON.stringify({
+        kind: "sentinel_model_result",
+        ok: false,
+        taskId: request.taskId,
+        errorKind: result.error.kind,
+        errorDetail: result.error.detail,
+      }));
+    }
     // Persist the private minimal diagnostic BEFORE returning the receipt or
     // importing any candidate: a run without its saved receipt may not
     // publish. A storage failure must not erase the existing checkout or the
