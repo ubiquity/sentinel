@@ -1622,7 +1622,10 @@ async function runTrustedGitResult(
   // Only a normal, fully settled, untruncated exit yields a usable result;
   // every other outcome fails closed with a sanitized static fault.
   if (result.outcome !== "exited" || !result.settled) {
-    throw new Error(STATIC_GIT_FAILED);
+    // The runtime detail is bounded and excludes captured stdout/stderr. It
+    // identifies spawn/timeout/settlement failures without exposing command
+    // output or credentials, which is needed to diagnose hosted startup.
+    throw new Error(`${STATIC_GIT_FAILED}: ${result.detail}`);
   }
   if (result.truncated) throw new Error(STATIC_GIT_BOUND);
   return {
