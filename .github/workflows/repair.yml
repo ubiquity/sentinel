@@ -40,6 +40,9 @@ jobs:
           node-version: 22
       - name: Install pinned Codex app-server
         run: npm install --global @openai/codex@0.154.0
+      # Credential-free startup boundary check before any model reservation.
+      - name: Verify isolated Codex startup
+        run: deno run --allow-read --allow-write --allow-run --allow-env=PATH src/host/actions-preflight.ts
       - name: Repair polling run
         env:
           GITHUB_TOKEN: ${{ github.token }}
