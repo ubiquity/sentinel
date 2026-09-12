@@ -22,6 +22,9 @@ const TOKEN = "unused-no-model-call";
 const OPERATION_DEADLINE_MS = 20_000;
 const ERROR_CAP = 2_000;
 const KIND = "sentinel_startup_preflight";
+const INSIDE_MARKER = "sentinel-inside-probe-marker";
+const OUTSIDE_MARKER = "sentinel-outside-probe-marker";
+const OVERWRITE_MARKER = "sentinel-outside-probe-overwrite";
 
 function log(entry: Record<string, unknown>): void {
   console.log(JSON.stringify({ kind: KIND, ...entry }));
@@ -31,6 +34,41 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null
     ? value as Record<string, unknown>
     : null;
+}
+
+/** Bound any failure message; the probe holds no secret or private payload. */
+function boundedMessage(error: unknown): string {
+  return (error instanceof Error ? error.message : String(error)).slice(
+    0,
+    ERROR_CAP,
+  );
+}
+
+/**
+ * One `command/exec` sandbox probe. The response is the verified
+ * `{ exitCode, stdout, stderr }` evidence shape.
+ */
+async function execProbe(
+  session: CodexSubprocessSession,
+  cwd: string,
+  command: string[],
+): Promise<{ exitCode: number; stdout: string }> {
+  const record = asRecord(
+    await session.send("command/exec", {
+      command,
+      cwd,
+      permissionProfile: PROFILE,
+      timeoutMs: 5_000,
+      outputBytesCap: 2_048,
+    }),
+  );
+  if (
+    record === null || typeof record.exitCode !== "number" ||
+    typeof record.stdout !== "string"
+  ) {
+    throw new Error("command/exec response missing exitCode/stdout evidence");
+  }
+  return { exitCode: record.exitCode, stdout: record.stdout };
 }
 
 /** Resolve the installed codex from the explicit trusted PATH and realPath it. */
@@ -57,6 +95,7 @@ async function main(): Promise<void> {
   let root: string | null = null;
   let session: CodexSubprocessSession | null = null;
   let passed = false;
+  let primary: unknown = null;
   let stage = "temp_root";
   try {
     // Unique private root (0700); client/tmp/deno are private subdirectories.
@@ -65,6 +104,8 @@ async function main(): Promise<void> {
     const clientHome = joinPath(root, "client");
     const tmpDir = joinPath(root, "tmp");
     const denoDir = joinPath(root, "deno");
+    const insideMarker = joinPath(checkout, "inside-marker.txt");
+    const outsideMarker = joinPath(root, "outside-marker.txt");
 
     stage = "resolve_codex";
     const codexExecutable = await resolveCodex(path);
@@ -83,6 +124,9 @@ async function main(): Promise<void> {
       trustedPath: path,
       baseUrl: BASE_URL,
     });
+    // Trusted-host fixture outside the checkout: the sandboxed session must
+    // neither read nor overwrite it.
+    await Deno.writeTextFile(outsideMarker, OUTSIDE_MARKER, { mode: 0o600 });
     log({ stage });
 
     stage = "open";
@@ -148,34 +192,95 @@ async function main(): Promise<void> {
       );
     }
     log({ stage, threadId });
+
+    // Sandbox boundary probes after the thread acknowledgement. No model turn
+    // is submitted and the child holds no host credential; the trusted host
+    // owns the marker outside the checkout. Only booleans are logged.
+    stage = "sandbox_inside_write";
+    const inside = await execProbe(session, checkout, [
+      "/bin/sh",
+      "-c",
+      `printf %s ${INSIDE_MARKER} > "$1"`,
+      "sentinel-probe",
+      insideMarker,
+    ]);
+    if (inside.exitCode !== 0) {
+      throw new Error("sandbox inside write did not succeed");
+    }
+    if (await Deno.readTextFile(insideMarker) !== INSIDE_MARKER) {
+      throw new Error("sandbox inside write not observed on host");
+    }
+    log({ stage, ok: true });
+
+    stage = "sandbox_outside_read";
+    const read = await execProbe(session, checkout, [
+      "/bin/cat",
+      outsideMarker,
+    ]);
+    if (read.exitCode === 0 || read.stdout.includes(OUTSIDE_MARKER)) {
+      throw new Error("sandbox outside read was not denied");
+    }
+    log({ stage, ok: true });
+
+    stage = "sandbox_outside_write";
+    const write = await execProbe(session, checkout, [
+      "/bin/sh",
+      "-c",
+      `printf %s ${OVERWRITE_MARKER} > "$1"`,
+      "sentinel-probe",
+      outsideMarker,
+    ]);
+    if (write.exitCode === 0) {
+      throw new Error("sandbox outside write was not denied");
+    }
+    if (await Deno.readTextFile(outsideMarker) !== OUTSIDE_MARKER) {
+      throw new Error("sandbox outside marker changed");
+    }
+    log({ stage, ok: true });
+
     passed = true;
   } catch (error) {
     // The probe holds no real token, prompt or private task data, so the
     // bounded message is safe to surface for the hosted startup boundary.
-    log({
-      pass: false,
-      stage,
-      error: (error instanceof Error ? error.message : String(error)).slice(
-        0,
-        ERROR_CAP,
-      ),
-    });
-    throw error;
-  } finally {
-    // Close the owned session, prove settlement, then remove only this
-    // probe's own temporary root. Pass is reported only after both hold.
-    let settled = true;
-    if (session !== null) {
+    primary = error;
+    log({ pass: false, stage, error: boundedMessage(error) });
+  }
+
+  // Cleanup is sequential, never a throwing `finally`: the primary startup
+  // failure survives, and cleanup failure is reported only when no primary
+  // exists. An unsettled session is never cleaned up, and the probe root is
+  // removed only after settlement is observed. Pass is emitted last.
+  let cleanup: unknown = null;
+  let settled = session === null;
+  if (session !== null) {
+    try {
       await session.close();
       settled = session.isSettled();
+      if (!settled) {
+        cleanup = new Error("codex preflight session did not settle");
+      }
+    } catch (error) {
+      cleanup = error;
     }
-    if (root !== null) await Deno.remove(root, { recursive: true });
-    if (!settled) {
-      log({ pass: false, stage: "close", error: "session did not settle" });
-      throw new Error("codex preflight session did not settle");
-    }
-    if (passed) log({ pass: true });
   }
+  if (root !== null && settled) {
+    try {
+      await Deno.remove(root, { recursive: true });
+    } catch (error) {
+      if (cleanup === null) cleanup = error;
+    }
+  }
+  if (primary !== null) {
+    if (cleanup !== null) {
+      log({ pass: false, stage: "cleanup", error: boundedMessage(cleanup) });
+    }
+    throw primary;
+  }
+  if (cleanup !== null) {
+    log({ pass: false, stage: "close", error: boundedMessage(cleanup) });
+    throw cleanup;
+  }
+  if (passed) log({ pass: true });
 }
 
 if (import.meta.main) {
