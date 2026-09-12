@@ -637,7 +637,7 @@ Deno.test(
           UOS_AI_TOKEN: "",
         },
         denoExecutable: Deno.execPath(),
-        runChild: async () => ({ settled: true, exitCode: 0 }),
+        runChild: () => Promise.resolve({ settled: true, exitCode: 0 }),
       }, [
         "-C",
         `${fixture.stateRoot}/source`,

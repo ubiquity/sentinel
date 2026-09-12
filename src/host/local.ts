@@ -615,26 +615,26 @@ export async function runLocalRepairHost(
       tracker,
       clock,
     });
-    github.pushHead = async () =>
-      portError(
+    github.pushHead = () =>
+      Promise.resolve(portError(
         "unavailable",
         "Owner local-only iteration: publication and reviews are paused",
-      );
-    github.createPullRequest = async () =>
-      portError(
+      ));
+    github.createPullRequest = () =>
+      Promise.resolve(portError(
         "unavailable",
         "Owner local-only iteration: publication and reviews are paused",
-      );
-    github.requestReview = async () =>
-      portError(
+      ));
+    github.requestReview = () =>
+      Promise.resolve(portError(
         "unavailable",
         "Owner local-only iteration: publication and reviews are paused",
-      );
-    github.mergePullRequest = async () =>
-      portError(
+      ));
+    github.mergePullRequest = () =>
+      Promise.resolve(portError(
         "unavailable",
         "Owner local-only iteration: publication and reviews are paused",
-      );
+      ));
     outcome = await runRepairEntrypoint({
       clock,
       state,
