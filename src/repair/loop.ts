@@ -39,6 +39,11 @@ import {
   parseLocalReleaseReceiptV1,
 } from "../contracts/local-release.ts";
 import type { LocalReleaseReceiptV1 } from "../contracts/local-release.ts";
+import {
+  actionsReceiptBindsRequest,
+  parseActionsReleaseReceiptV1,
+} from "../contracts/actions-release.ts";
+import type { ActionsReleaseReceiptV1 } from "../contracts/actions-release.ts";
 import { parseReplayResultV1 } from "../contracts/replay-result.ts";
 import type { ReplayResultV1 } from "../contracts/replay-result.ts";
 import {
@@ -3743,6 +3748,22 @@ async function observeLocalReleaseAcceptance(
 ): Promise<StepResultV1> {
   const now = deps.clock.now();
   const readLocalRelease = deps.state.readLocalRelease;
+  const readActionsRelease = deps.state.readActionsRelease;
+  // Two distinct receipt authorities for the same self scope cannot both
+  // attest one release: never guess which one is authoritative, wait for an
+  // unambiguous host wiring instead.
+  if (readLocalRelease !== undefined && readActionsRelease !== undefined) {
+    return waitRelease(deps, context, record, now);
+  }
+  if (readActionsRelease !== undefined) {
+    return await observeActionsReleaseAcceptance(
+      deps,
+      context,
+      record,
+      request,
+      now,
+    );
+  }
   if (readLocalRelease === undefined) {
     return waitRelease(deps, context, record, now);
   }
@@ -3771,6 +3792,45 @@ async function observeLocalReleaseAcceptance(
     return blockRelease(deps, context, record, receipt.phase, now);
   }
   return waitRelease(deps, context, record, now);
+}
+
+/**
+ * Hosted acceptance reads only the strict read-only Actions receipt for the
+ * exact self production request. A missing, thrown, error, malformed or
+ * differently-bound receipt waits; a valid receipt uses the existing accepted
+ * closure intent logic. There is never a local or Deno fallback, and no
+ * Actions proof exists for another repository or scope.
+ */
+async function observeActionsReleaseAcceptance(
+  deps: RepairCycleDepsV1,
+  context: LoopContextV1,
+  record: WorkRecordV1,
+  request: ReleaseRequestV1,
+  now: number,
+): Promise<StepResultV1> {
+  const readActionsRelease = deps.state.readActionsRelease;
+  if (readActionsRelease === undefined) {
+    return waitRelease(deps, context, record, now);
+  }
+  let observed: PortResultV1<ActionsReleaseReceiptV1 | null>;
+  try {
+    observed = await readActionsRelease.call(deps.state, request);
+  } catch {
+    return waitRelease(deps, context, record, now);
+  }
+  if (!observed.ok || observed.value === null) {
+    return waitRelease(deps, context, record, now);
+  }
+  let receipt: ActionsReleaseReceiptV1;
+  try {
+    receipt = parseActionsReleaseReceiptV1(observed.value);
+  } catch {
+    return waitRelease(deps, context, record, now);
+  }
+  if (!actionsReceiptBindsRequest(receipt, request)) {
+    return waitRelease(deps, context, record, now);
+  }
+  return await acceptRelease(deps, context, record, request.id, now);
 }
 
 /** Existing accepted behavior: closure intent when an issue is attached. */

@@ -23,6 +23,8 @@ import {
   type ActionsCiApprovalSummaryV1,
   runActionsCiApproval,
 } from "./actions-ci.ts";
+import { readActionsReleaseReceipt } from "./actions-release.ts";
+import type { ReleaseRequestV1 } from "../contracts/release.ts";
 import { createRepairStateStore, DenoGitRunner } from "../state/mod.ts";
 import {
   composeLocalGitHub,
@@ -172,6 +174,17 @@ export async function runActionsRepairHost(): Promise<
     localIteration: false,
   });
   const config = createLocalRepositoryConfig();
+
+  // The hosted self release path reads its read-only Actions receipt through
+  // this exact capability, using the same token/http/gate/clock as every other
+  // authenticated request. No durable schema change and no writes.
+  Object.assign(state, {
+    readActionsRelease: (request: ReleaseRequestV1) =>
+      readActionsReleaseReceipt(
+        { gate, http, token: githubToken, clock },
+        request,
+      ),
+  });
 
   // Model startup availability is proved once, in-process, before the
   // deterministic pass. The probe already logs its bounded dummy-only failure;

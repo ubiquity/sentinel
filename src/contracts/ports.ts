@@ -5,6 +5,7 @@
  * injected through these interfaces; product logic never lives in test fakes.
  */
 
+import type { ActionsReleaseReceiptV1 } from "./actions-release.ts";
 import type {
   CommandId,
   EncryptedArtifactDigest,
@@ -744,6 +745,17 @@ export interface StateReadView {
   readLocalRelease?(
     request: ReleaseRequestV1,
   ): Promise<PortResultV1<LocalReleaseReceiptV1 | null>>;
+  /**
+   * Optional hosted-Actions capability, owned only by the trusted hosted host
+   * for the explicit self scope-0 repository. It returns the exact strict
+   * read-only receipt for one self production release request: a missing
+   * successful exact run is an explicit null, while a foreign, malformed,
+   * mismatched or inaccessible proof is unavailable. No durable schema
+   * changes; hosts without the capability leave it absent.
+   */
+  readActionsRelease?(
+    request: ReleaseRequestV1,
+  ): Promise<PortResultV1<ActionsReleaseReceiptV1 | null>>;
 }
 
 export interface RepairStateWriter {

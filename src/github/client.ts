@@ -11,6 +11,25 @@
  * response body, URL, header or token value is ever echoed into `detail`.
  */
 
+import {
+  ACTIONS_RELEASE_BRANCH,
+  ACTIONS_RELEASE_JOB_NAME,
+  ACTIONS_RELEASE_LOG_MAX_BYTES,
+  ACTIONS_RELEASE_LOGIN,
+  ACTIONS_RELEASE_REPOSITORY,
+  ACTIONS_RELEASE_RUN_MAX,
+  ACTIONS_RELEASE_STEP_NAME,
+  ACTIONS_RELEASE_TIME_SLACK_MS,
+  ACTIONS_RELEASE_WORKFLOW_ID,
+  ACTIONS_RELEASE_WORKFLOW_PATH,
+  actionsAuthorityFiles,
+  actionsOptionalAuthorityFiles,
+  actionsReleaseCiApprovalCounts,
+  type ActionsReleaseOutcomeV1,
+  type ActionsReleaseReceiptV1,
+  actionsReleaseTreeEntries,
+  parseActionsReleaseReceiptV1,
+} from "../contracts/actions-release.ts";
 import type { GitSha } from "../contracts/brands.ts";
 import { isGitSha } from "../contracts/brands.ts";
 import type { GitHubRateLimitV1 } from "../contracts/github-cooldown.ts";
@@ -28,11 +47,14 @@ import type {
   PortResultV1,
 } from "../contracts/ports.ts";
 import { portError, portOk } from "../contracts/ports.ts";
+import type { ReleaseRequestV1 } from "../contracts/release.ts";
 import type { RepositoryIdentityV1 } from "../contracts/shared.ts";
 import {
   expectArray,
+  expectBoolean,
   expectCount,
   expectEnum,
+  expectExactKeys,
   expectNonEmptyString,
   expectNullableString,
   expectPositiveInt,
@@ -93,6 +115,20 @@ const CI_APPROVAL_SCOPE =
 const CI_APPROVAL_AMBIGUOUS = "CI approval found more than one matching run";
 const CI_APPROVAL_BOUND = "CI approval run list exceeded its bound";
 const CI_APPROVAL_RECONCILE = "CI approval outcome could not be reconciled";
+
+/** Whole hosted release-reader bound: no new request starts after this. */
+const ACTIONS_RELEASE_READ_DEADLINE_MS = 120_000;
+const ACTIONS_RELEASE_MAX_CANDIDATES = 3;
+/** Safe upper bound on a terminal step_limit count. */
+const ACTIONS_RELEASE_MAX_STEPS = 10_000;
+const ACTIONS_RELEASE_UNAVAILABLE = "hosted release evidence is unavailable";
+const ACTIONS_RELEASE_SCOPE =
+  "hosted release evidence is restricted to the scope-0 self request";
+const ACTIONS_RELEASE_REDIRECT = "hosted release log redirect is not trusted";
+const ACTIONS_RELEASE_LOG_HOST =
+  /^productionresultssa[0-9]+\.blob\.core\.windows\.net$/;
+const ACTIONS_RELEASE_TIMESTAMP_LINE =
+  /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z) (\{.*\})$/;
 
 const REVIEW_DECISION_QUERY = `
   query SentinelPullReviewDecision($owner: String!, $name: String!, $number: Int!) {
@@ -872,6 +908,315 @@ export class GitHubApiClient {
   }
 
   // -------------------------------------------------------------------------
+  // Hosted read-only release evidence (fixed self scope)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Read the exact hosted release receipt for one scope-0 self production
+   * request. Every authority is re-derived from the authenticated API before
+   * the log can attest: the merged PR, the merge commit parents, the immutable
+   * base/revision task-definition trees, the exact completed workflow attempt,
+   * its single `repair` job / `Repair polling run` step and that step's single
+   * terminal JSON record. A missing successful run is `null`; every foreign,
+   * malformed, truncated, mismatched or inaccessible proof is unavailable.
+   * No raw log, URL or credential is ever returned.
+   */
+  async readActionsRelease(
+    request: ReleaseRequestV1,
+  ): Promise<PortResultV1<ActionsReleaseReceiptV1 | null>> {
+    if (!actionsReleaseIsSelfRequest(request)) {
+      return portError("invalid", ACTIONS_RELEASE_SCOPE);
+    }
+    const deadline = createDeadline(ACTIONS_RELEASE_READ_DEADLINE_MS);
+    try {
+      const source = await this.readActionsReleaseSource(request, deadline);
+      if (!source.ok) return source;
+      const candidates = await this.findActionsReleaseCandidates(
+        request,
+        deadline,
+      );
+      if (!candidates.ok) return candidates;
+      for (const candidate of candidates.value) {
+        if (deadline.fired()) return this.actionsReleaseTimeout();
+        const execution = await this.readActionsReleaseExecution(
+          candidate,
+          request,
+          deadline,
+        );
+        if (!execution.ok) return execution;
+        const terminal = await this.readActionsReleaseTerminal(
+          execution.value,
+          request,
+          deadline,
+        );
+        if (!terminal.ok) return terminal;
+        const raw = {
+          version: "v1" as const,
+          kind: "actions_release_receipt" as const,
+          request,
+          proof: {
+            repository: ACTIONS_RELEASE_REPOSITORY,
+            workflowId: ACTIONS_RELEASE_WORKFLOW_ID,
+            workflowPath: ACTIONS_RELEASE_WORKFLOW_PATH,
+            branch: ACTIONS_RELEASE_BRANCH,
+            event: candidate.event,
+            controllerSha: request.revision,
+            baseSha: request.revision,
+            runId: execution.value.runId,
+            runAttempt: execution.value.runAttempt,
+            jobId: execution.value.jobId,
+            startedAt: execution.value.startedAt,
+            finishedAt: execution.value.finishedAt,
+            terminalAt: terminal.value.terminalAt,
+            observedAt: this.options.clock.now(),
+            outcome: terminal.value.outcome,
+            startupReady: true,
+            settled: true,
+            login: ACTIONS_RELEASE_LOGIN,
+            logDigest: terminal.value.logDigest,
+          },
+        };
+        return parseWith(raw, (value) => parseActionsReleaseReceiptV1(value));
+      }
+      return portOk(null);
+    } catch {
+      return portError("unavailable", ACTIONS_RELEASE_UNAVAILABLE);
+    } finally {
+      deadline.dispose();
+    }
+  }
+
+  private actionsReleaseTimeout(): PortResultV1<never> {
+    return portError("unavailable", ACTIONS_RELEASE_UNAVAILABLE);
+  }
+
+  private async actionsReleaseGet(
+    path: string,
+    query: Record<string, string> = {},
+    parent?: DeadlineV1,
+  ): Promise<PortResultV1<unknown>> {
+    const response = await this.request("GET", path, query, parent);
+    if (!response.ok) return response;
+    if (response.value.status !== 200) {
+      return portError(...this.mapError(response.value));
+    }
+    try {
+      return portOk(JSON.parse(response.value.bodyText));
+    } catch {
+      return portError("invalid", "GitHub API response is malformed");
+    }
+  }
+
+  private async readActionsReleaseSource(
+    request: ReleaseRequestV1,
+    deadline: DeadlineV1,
+  ): Promise<PortResultV1<void>> {
+    if (deadline.fired()) return this.actionsReleaseTimeout();
+    const repo = repoPath(this.repository);
+    const pull = await this.actionsReleaseGet(
+      `/repos/${repo}/pulls/${request.source.pullRequest}`,
+      {},
+      deadline,
+    );
+    if (!pull.ok) return pull;
+    const parsedPull = parseWith(
+      pull.value,
+      (value) => parseActionsReleasePull(value, request),
+    );
+    if (!parsedPull.ok) return parsedPull;
+
+    if (deadline.fired()) return this.actionsReleaseTimeout();
+    const commit = await this.actionsReleaseGet(
+      `/repos/${repo}/commits/${request.revision}`,
+      {},
+      deadline,
+    );
+    if (!commit.ok) return commit;
+    const parsedCommit = parseWith(
+      commit.value,
+      (value) => parseActionsReleaseCommit(value, request),
+    );
+    if (!parsedCommit.ok) return parsedCommit;
+
+    const baseTree = await this.readActionsReleaseTree(
+      request.source.base,
+      deadline,
+    );
+    if (!baseTree.ok) return baseTree;
+    const revisionTree = await this.readActionsReleaseTree(
+      request.revision,
+      deadline,
+    );
+    if (!revisionTree.ok) return revisionTree;
+    if (!actionsTreesEqual(baseTree.value, revisionTree.value)) {
+      return portError("unavailable", ACTIONS_RELEASE_UNAVAILABLE);
+    }
+    return portOk(undefined);
+  }
+
+  private async readActionsReleaseTree(
+    sha: GitSha,
+    deadline: DeadlineV1,
+  ): Promise<PortResultV1<Map<string, string>>> {
+    if (deadline.fired()) return this.actionsReleaseTimeout();
+    const response = await this.actionsReleaseGet(
+      `/repos/${repoPath(this.repository)}/git/trees/${sha}`,
+      { recursive: "1" },
+      deadline,
+    );
+    if (!response.ok) return response;
+    return parseWith(response.value, parseActionsReleaseTree);
+  }
+
+  private async findActionsReleaseCandidates(
+    request: ReleaseRequestV1,
+    deadline: DeadlineV1,
+  ): Promise<PortResultV1<ActionsReleaseCandidateV1[]>> {
+    if (deadline.fired()) return this.actionsReleaseTimeout();
+    const response = await this.request(
+      "GET",
+      `/repos/${repoPath(this.repository)}/actions/workflows/${
+        String(ACTIONS_RELEASE_WORKFLOW_ID)
+      }/runs`,
+      {
+        head_sha: request.revision,
+        branch: ACTIONS_RELEASE_BRANCH,
+        per_page: String(ACTIONS_RELEASE_RUN_MAX),
+      },
+      deadline,
+    );
+    if (!response.ok) return response;
+    if (response.value.status !== 200) {
+      return portError(...this.mapError(response.value));
+    }
+    if (nextLinkUrl(response.value.headers) !== null) {
+      return portError("unavailable", ACTIONS_RELEASE_UNAVAILABLE);
+    }
+    return parseWire(
+      response.value,
+      (value) => parseActionsReleaseRuns(value, request),
+    );
+  }
+
+  private async readActionsReleaseExecution(
+    candidate: ActionsReleaseCandidateV1,
+    request: ReleaseRequestV1,
+    deadline: DeadlineV1,
+  ): Promise<PortResultV1<ActionsReleaseExecutionV1>> {
+    if (deadline.fired()) return this.actionsReleaseTimeout();
+    const repo = repoPath(this.repository);
+    const attemptResponse = await this.request(
+      "GET",
+      `/repos/${repo}/actions/runs/${candidate.runId}/attempts/${candidate.runAttempt}`,
+      {},
+      deadline,
+    );
+    if (!attemptResponse.ok) return attemptResponse;
+    if (attemptResponse.value.status !== 200) {
+      return portError(...this.mapError(attemptResponse.value));
+    }
+    const attempt = parseWire(
+      attemptResponse.value,
+      (value) => parseActionsReleaseAttempt(value, candidate, request),
+    );
+    if (!attempt.ok) return attempt;
+
+    if (deadline.fired()) return this.actionsReleaseTimeout();
+    const jobsResponse = await this.request(
+      "GET",
+      `/repos/${repo}/actions/runs/${candidate.runId}/attempts/${candidate.runAttempt}/jobs`,
+      { per_page: String(ACTIONS_RELEASE_RUN_MAX) },
+      deadline,
+    );
+    if (!jobsResponse.ok) return jobsResponse;
+    if (jobsResponse.value.status !== 200) {
+      return portError(...this.mapError(jobsResponse.value));
+    }
+    if (nextLinkUrl(jobsResponse.value.headers) !== null) {
+      return portError("unavailable", ACTIONS_RELEASE_UNAVAILABLE);
+    }
+    return parseWire(
+      jobsResponse.value,
+      (value) =>
+        parseActionsReleaseJobs(value, candidate, request, attempt.value),
+    );
+  }
+
+  private async readActionsReleaseTerminal(
+    execution: ActionsReleaseExecutionV1,
+    request: ReleaseRequestV1,
+    deadline: DeadlineV1,
+  ): Promise<PortResultV1<ActionsReleaseTerminalV1>> {
+    if (deadline.fired()) return this.actionsReleaseTimeout();
+    const raw = await this.sendCore(
+      "GET",
+      `${this.apiBaseUrl}/repos/${
+        repoPath(this.repository)
+      }/actions/jobs/${execution.jobId}/logs`,
+      null,
+      "manual",
+      deadline,
+    );
+    if (raw.status === "error") {
+      return portError(raw.error.kind, raw.error.detail, raw.error.rateLimit);
+    }
+    if (raw.status === "lost") {
+      return portError("unavailable", ACTIONS_RELEASE_UNAVAILABLE);
+    }
+    if (raw.response.status !== 302) {
+      return portError("unavailable", ACTIONS_RELEASE_UNAVAILABLE);
+    }
+    const location = raw.response.headers.get("location");
+    if (location === null) {
+      return portError("unavailable", ACTIONS_RELEASE_REDIRECT);
+    }
+    const signedUrl = trustedActionsLogUrl(location);
+    if (signedUrl === null) {
+      return portError("unavailable", ACTIONS_RELEASE_REDIRECT);
+    }
+    if (deadline.fired()) return this.actionsReleaseTimeout();
+    let logResponse: HttpResponseV1;
+    try {
+      const signedCall = Promise.resolve().then(() =>
+        this.options.http({
+          method: "GET",
+          url: signedUrl,
+          // The signed URL is pre-authenticated: never send the API token,
+          // never follow a redirect and never reuse the gate for it.
+          headers: new Map<string, string>(),
+          body: null,
+          redirect: "error",
+        })
+      );
+      signedCall.catch(() => {});
+      logResponse = await deadline.race(signedCall);
+    } catch {
+      return portError("unavailable", ACTIONS_RELEASE_UNAVAILABLE);
+    }
+    if (logResponse.status !== 200) {
+      return portError("unavailable", ACTIONS_RELEASE_UNAVAILABLE);
+    }
+    if (
+      new TextEncoder().encode(logResponse.bodyText).length >
+        ACTIONS_RELEASE_LOG_MAX_BYTES
+    ) {
+      return portError("unavailable", ACTIONS_RELEASE_UNAVAILABLE);
+    }
+    let terminal: { terminalAt: number; outcome: ActionsReleaseOutcomeV1 };
+    try {
+      terminal = parseActionsReleaseLogText(
+        logResponse.bodyText,
+        execution,
+        request,
+      );
+    } catch {
+      return portError("unavailable", ACTIONS_RELEASE_UNAVAILABLE);
+    }
+    const logDigest = await sha256Hex(logResponse.bodyText);
+    return portOk({ ...terminal, logDigest });
+  }
+
+  // -------------------------------------------------------------------------
   // Review journal operations (pending-draft lifecycle)
   // -------------------------------------------------------------------------
   // The review body is the durable operation journal; all four operations go
@@ -996,8 +1341,9 @@ export class GitHubApiClient {
     method: HttpRequestV1["method"],
     path: string,
     query: Record<string, string> = {},
+    parent?: DeadlineV1,
   ): Promise<PortResultV1<HttpResponseV1>> {
-    const sent = await this.send(method, path, query, null);
+    const sent = await this.send(method, path, query, null, parent);
     if (!sent.ok) return sent;
     if (sent.value.status >= 200 && sent.value.status < 300) return sent;
     if (sent.value.status === 404) {
@@ -1013,12 +1359,13 @@ export class GitHubApiClient {
     path: string,
     query: Record<string, string>,
     body: Record<string, unknown> | null,
+    parent?: DeadlineV1,
   ): Promise<PortResultV1<HttpResponseV1>> {
     const queryText = new URLSearchParams(query).toString();
     const url = `${this.apiBaseUrl}${path}${
       queryText.length === 0 ? "" : `?${queryText}`
     }`;
-    return this.sendCore(method, url, body).then((raw) => {
+    return this.sendCore(method, url, body, undefined, parent).then((raw) => {
       if (raw.status === "response") return portOk(raw.response);
       if (raw.status === "lost") {
         return portError("unavailable", "GitHub API request failed");
@@ -1031,11 +1378,18 @@ export class GitHubApiClient {
     method: HttpRequestV1["method"],
     url: string,
     body: Record<string, unknown> | null,
+    redirect?: "error" | "manual",
+    parent?: DeadlineV1,
   ): Promise<RawSendResult> {
     // One finite whole-operation deadline starts before authentication,
     // covers the gate reads, the HTTP request and the body read. A hung
     // injected gate or auth provider cannot block the operation beyond it.
-    const deadline = createDeadline(this.requestDeadlineMs);
+    // An optional shared parent bound (the hosted reader's whole-operation
+    // limit) is combined in without ever being disposed from here.
+    const deadline = combineDeadline(
+      createDeadline(this.requestDeadlineMs),
+      parent,
+    );
     try {
       // Durable cooldown gate before authentication: a blocked installation
       // never reaches the provider or the network, and its typed error is
@@ -1097,6 +1451,7 @@ export class GitHubApiClient {
                 ["x-github-api-version", "2022-11-28"],
               ]),
               body: body === null ? null : JSON.stringify(body),
+              redirect: redirect ?? "error",
             })
           ),
         );
@@ -1446,6 +1801,26 @@ function validateReviewOperationInput(
   return null;
 }
 
+/**
+ * Combine one request-local deadline with an optional shared parent bound.
+ * Expiry of either bound stops the operation; the shared parent is never
+ * disposed by a request that borrowed it.
+ */
+function combineDeadline(own: DeadlineV1, parent?: DeadlineV1): DeadlineV1 {
+  if (parent === undefined) return own;
+  return {
+    race<T>(promise: Promise<T>): Promise<T> {
+      return parent.race(own.race(promise));
+    },
+    fired(): boolean {
+      return own.fired() || parent.fired();
+    },
+    dispose(): void {
+      own.dispose();
+    },
+  };
+}
+
 /** Sanitized static transport-boundary failure (no status/body/URL echoed). */
 function unavailable(): RawSendResult {
   return {
@@ -1729,6 +2104,645 @@ function expectCiActor(value: unknown, path: string): void {
   ) {
     fail(`${path}.login`, "invalid_value", "unexpected run actor");
   }
+}
+
+// ---------------------------------------------------------------------------
+// Hosted read-only release evidence wire validation
+// ---------------------------------------------------------------------------
+
+interface ActionsReleaseCandidateV1 {
+  runId: number;
+  runAttempt: number;
+  event: "schedule" | "workflow_dispatch";
+}
+
+interface ActionsReleaseAttemptV1 {
+  startedAt: number;
+  finishedAt: number;
+}
+
+interface ActionsReleaseExecutionV1 {
+  runId: number;
+  runAttempt: number;
+  jobId: number;
+  startedAt: number;
+  finishedAt: number;
+  stepStartedAt: number;
+  stepFinishedAt: number;
+}
+
+interface ActionsReleaseTerminalV1 {
+  terminalAt: number;
+  outcome: ActionsReleaseOutcomeV1;
+  logDigest: string;
+}
+
+function actionsReleaseIsSelfRequest(request: ReleaseRequestV1): boolean {
+  const repository = request.target.repository;
+  return repository.installationId === 0 && repository.owner === "ubiquity" &&
+    repository.name === "sentinel" &&
+    request.target.environment === "production" &&
+    request.status === "open" &&
+    request.source.reviewReceiptId !== null;
+}
+
+/** ISO-8601 UTC timestamp with millisecond precision, as milliseconds. */
+function expectIsoMs(value: unknown, path: string): number {
+  const text = expectNonEmptyString(value, path, 64);
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(text)) {
+    fail(path, "invalid_timestamp", "expected ISO-8601 UTC timestamp");
+  }
+  const ms = Date.parse(text);
+  if (!Number.isSafeInteger(ms) || ms < 0) {
+    fail(path, "invalid_timestamp", "expected a valid timestamp");
+  }
+  return ms;
+}
+
+/** Merged self PR bound to the exact request source base/head/revision. */
+function parseActionsReleasePull(
+  value: unknown,
+  request: ReleaseRequestV1,
+): void {
+  const obj = expectRecord(value, "$");
+  if (
+    expectPositiveInt(obj.number, "$.number") !== request.source.pullRequest
+  ) {
+    fail("$.number", "invalid_value", "pull request number mismatch");
+  }
+  expectEnum(obj.state, ["closed"], "$.state");
+  if (expectBoolean(obj.merged, "$.merged") !== true) {
+    fail("$.merged", "invalid_value", "pull request is not merged");
+  }
+  if (
+    expectNonEmptyString(obj.merge_commit_sha, "$.merge_commit_sha", 40) !==
+      request.revision
+  ) {
+    fail(
+      "$.merge_commit_sha",
+      "invalid_value",
+      "merge commit does not match the request revision",
+    );
+  }
+  const head = expectRecord(obj.head, "$.head");
+  if (
+    expectNonEmptyString(head.sha, "$.head.sha", 40) !== request.source.head
+  ) {
+    fail("$.head.sha", "invalid_value", "pull request head mismatch");
+  }
+  expectSelfRepository(head.repo, "$.head.repo");
+  const base = expectRecord(obj.base, "$.base");
+  if (
+    expectNonEmptyString(base.ref, "$.base.ref", MaxText.branch) !==
+      ACTIONS_RELEASE_BRANCH
+  ) {
+    fail("$.base.ref", "invalid_value", "unexpected pull request base ref");
+  }
+  expectSelfRepository(base.repo, "$.base.repo");
+}
+
+/** Exact merge commit whose two parents are the request base and head. */
+function parseActionsReleaseCommit(
+  value: unknown,
+  request: ReleaseRequestV1,
+): void {
+  const obj = expectRecord(value, "$");
+  if (
+    expectNonEmptyString(obj.sha, "$.sha", 40) !== request.revision
+  ) {
+    fail("$.sha", "invalid_value", "commit does not match the revision");
+  }
+  const parents = expectArray(obj.parents, "$.parents", 2, (item) => item);
+  if (parents.length !== 2) {
+    fail("$.parents", "invalid_value", "merge commit requires two parents");
+  }
+  const shas = parents.map((parent, index) =>
+    expectNonEmptyString(
+      expectRecord(parent, `$.parents[${index}]`).sha,
+      `$.parents[${index}].sha`,
+      40,
+    )
+  );
+  if (
+    !shas.includes(request.source.base) ||
+    !shas.includes(request.source.head)
+  ) {
+    fail(
+      "$.parents",
+      "invalid_value",
+      "merge parents do not contain the request source",
+    );
+  }
+}
+
+/** Authority-file map (mode:type:sha) from one complete untruncated tree. */
+function parseActionsReleaseTree(value: unknown): Map<string, string> {
+  const obj = expectRecord(value, "$");
+  if (expectBoolean(obj.truncated, "$.truncated") !== false) {
+    fail("$.truncated", "bound_exceeded", "authority tree is truncated");
+  }
+  const entries = actionsReleaseTreeEntries(obj.tree, "$.tree");
+  const map = new Map<string, string>();
+  for (const [index, item] of entries.entries()) {
+    const path = `$.tree[${index}]`;
+    const entry = expectRecord(item, path);
+    const entryPath = expectNonEmptyString(
+      entry.path,
+      `${path}.path`,
+      MaxText.path,
+    );
+    if (
+      !actionsAuthorityFiles().includes(entryPath) &&
+      !actionsOptionalAuthorityFiles().includes(entryPath)
+    ) {
+      continue;
+    }
+    const mode = expectNonEmptyString(entry.mode, `${path}.mode`, 6);
+    const type = expectNonEmptyString(entry.type, `${path}.type`, 6);
+    const sha = expectNonEmptyString(entry.sha, `${path}.sha`, 40);
+    if (type !== "blob" || mode !== "100644") {
+      fail(
+        `${path}.type`,
+        "invalid_value",
+        "authority entry is not a regular blob",
+      );
+    }
+    map.set(entryPath, `${mode}:${type}:${sha}`);
+  }
+  return map;
+}
+
+/**
+ * The task-definition authority must be identical at the immutable base and
+ * the request revision; optional authority files are either absent from both
+ * trees or equal regular blobs in both.
+ */
+function actionsTreesEqual(
+  base: Map<string, string>,
+  revision: Map<string, string>,
+): boolean {
+  for (const file of actionsAuthorityFiles()) {
+    const atBase = base.get(file);
+    const atRevision = revision.get(file);
+    if (atBase === undefined || atRevision === undefined) return false;
+    if (atBase !== atRevision) return false;
+  }
+  for (const file of actionsOptionalAuthorityFiles()) {
+    const atBase = base.get(file);
+    const atRevision = revision.get(file);
+    if ((atBase === undefined) !== (atRevision === undefined)) return false;
+    if (atBase !== undefined && atBase !== atRevision) return false;
+  }
+  return true;
+}
+
+/** One list entry: exact identity, or null when it is not a success. */
+function parseActionsReleaseRun(
+  value: unknown,
+  request: ReleaseRequestV1,
+  path: string,
+): ActionsReleaseCandidateV1 | null {
+  const obj = expectRecord(value, path);
+  const runId = expectPositiveInt(obj.id, `${path}.id`);
+  const runAttempt = expectPositiveInt(obj.run_attempt, `${path}.run_attempt`);
+  if (
+    expectPositiveInt(obj.workflow_id, `${path}.workflow_id`) !==
+      ACTIONS_RELEASE_WORKFLOW_ID
+  ) {
+    fail(`${path}.workflow_id`, "invalid_value", "unexpected workflow id");
+  }
+  if (
+    expectNonEmptyString(obj.path, `${path}.path`, MaxText.path) !==
+      ACTIONS_RELEASE_WORKFLOW_PATH
+  ) {
+    fail(`${path}.path`, "invalid_value", "unexpected workflow path");
+  }
+  if (
+    expectNonEmptyString(obj.head_sha, `${path}.head_sha`, 40) !==
+      request.revision
+  ) {
+    fail(`${path}.head_sha`, "invalid_value", "run head mismatch");
+  }
+  if (
+    expectNonEmptyString(
+      obj.head_branch,
+      `${path}.head_branch`,
+      MaxText.branch,
+    ) !==
+      ACTIONS_RELEASE_BRANCH
+  ) {
+    fail(`${path}.head_branch`, "invalid_value", "run branch mismatch");
+  }
+  const event = expectEnum(
+    obj.event,
+    ["schedule", "workflow_dispatch"],
+    `${path}.event`,
+  );
+  const status = expectEnum(
+    obj.status,
+    ["queued", "in_progress", "completed", "requested", "waiting", "pending"],
+    `${path}.status`,
+  );
+  const conclusion = expectNullableString(
+    obj.conclusion,
+    `${path}.conclusion`,
+    MaxText.token,
+  );
+  expectSelfRepository(obj.repository, `${path}.repository`);
+  expectSelfRepository(obj.head_repository, `${path}.head_repository`);
+  if (status !== "completed" || conclusion !== "success") return null;
+  return { runId, runAttempt, event };
+}
+
+/** Deterministic ascending candidate list, capped at the bounded maximum. */
+function parseActionsReleaseRuns(
+  value: unknown,
+  request: ReleaseRequestV1,
+): ActionsReleaseCandidateV1[] {
+  const obj = expectRecord(value, "$");
+  const total = expectCount(obj.total_count, "$.total_count");
+  const runs = expectArray(
+    obj.workflow_runs,
+    "$.workflow_runs",
+    ACTIONS_RELEASE_RUN_MAX,
+    (item) => item,
+  );
+  if (total > ACTIONS_RELEASE_RUN_MAX || runs.length !== total) {
+    fail(
+      "$.total_count",
+      "bound_exceeded",
+      "run list is not a complete bounded page",
+    );
+  }
+  const candidates: ActionsReleaseCandidateV1[] = [];
+  for (const [index, item] of runs.entries()) {
+    const candidate = parseActionsReleaseRun(
+      item,
+      request,
+      `$.workflow_runs[${index}]`,
+    );
+    if (candidate !== null) candidates.push(candidate);
+  }
+  candidates.sort((left, right) => left.runId - right.runId);
+  return candidates.slice(0, ACTIONS_RELEASE_MAX_CANDIDATES);
+}
+
+/** Exact completed successful attempt for the selected run identity. */
+function parseActionsReleaseAttempt(
+  value: unknown,
+  candidate: ActionsReleaseCandidateV1,
+  request: ReleaseRequestV1,
+): ActionsReleaseAttemptV1 {
+  const obj = expectRecord(value, "$");
+  if (expectPositiveInt(obj.id, "$.id") !== candidate.runId) {
+    fail("$.id", "invalid_value", "attempt run id mismatch");
+  }
+  if (
+    expectPositiveInt(obj.run_attempt, "$.run_attempt") !== candidate.runAttempt
+  ) {
+    fail("$.run_attempt", "invalid_value", "attempt number mismatch");
+  }
+  if (
+    expectPositiveInt(obj.workflow_id, "$.workflow_id") !==
+      ACTIONS_RELEASE_WORKFLOW_ID
+  ) {
+    fail("$.workflow_id", "invalid_value", "unexpected workflow id");
+  }
+  if (
+    expectNonEmptyString(obj.path, "$.path", MaxText.path) !==
+      ACTIONS_RELEASE_WORKFLOW_PATH
+  ) {
+    fail("$.path", "invalid_value", "unexpected workflow path");
+  }
+  if (
+    expectNonEmptyString(obj.head_sha, "$.head_sha", 40) !== request.revision
+  ) {
+    fail("$.head_sha", "invalid_value", "attempt head mismatch");
+  }
+  if (
+    expectNonEmptyString(obj.head_branch, "$.head_branch", MaxText.branch) !==
+      ACTIONS_RELEASE_BRANCH
+  ) {
+    fail("$.head_branch", "invalid_value", "attempt branch mismatch");
+  }
+  expectEnum(
+    obj.event,
+    ["schedule", "workflow_dispatch"],
+    "$.event",
+  );
+  expectEnum(obj.status, ["completed"], "$.status");
+  if (
+    expectNullableString(obj.conclusion, "$.conclusion", MaxText.token) !==
+      "success"
+  ) {
+    fail("$.conclusion", "invalid_value", "attempt is not successful");
+  }
+  expectSelfRepository(obj.repository, "$.repository");
+  expectSelfRepository(obj.head_repository, "$.head_repository");
+  const startedAt = expectIsoMs(obj.run_started_at, "$.run_started_at");
+  const finishedAt = expectIsoMs(obj.updated_at, "$.updated_at");
+  if (startedAt > finishedAt) {
+    fail("$.updated_at", "invalid_lifecycle", "attempt times are inverted");
+  }
+  return { startedAt, finishedAt };
+}
+
+/** The single repair job and Repair polling run step, with server times. */
+function parseActionsReleaseJobs(
+  value: unknown,
+  candidate: ActionsReleaseCandidateV1,
+  request: ReleaseRequestV1,
+  attempt: ActionsReleaseAttemptV1,
+): ActionsReleaseExecutionV1 {
+  const obj = expectRecord(value, "$");
+  const total = expectCount(obj.total_count, "$.total_count");
+  const jobs = expectArray(
+    obj.jobs,
+    "$.jobs",
+    ACTIONS_RELEASE_RUN_MAX,
+    (item) => item,
+  );
+  if (total > ACTIONS_RELEASE_RUN_MAX || jobs.length !== total) {
+    fail("$.total_count", "bound_exceeded", "job list is not a bounded page");
+  }
+  const matches: Array<{ job: Record<string, unknown>; path: string }> = [];
+  for (const [index, item] of jobs.entries()) {
+    const path = `$.jobs[${index}]`;
+    const job = expectRecord(item, path);
+    if (
+      expectNonEmptyString(job.name, `${path}.name`, MaxText.label) !==
+        ACTIONS_RELEASE_JOB_NAME
+    ) {
+      continue;
+    }
+    if (
+      expectPositiveInt(job.run_id, `${path}.run_id`) !== candidate.runId ||
+      expectPositiveInt(job.run_attempt, `${path}.run_attempt`) !==
+        candidate.runAttempt ||
+      expectNonEmptyString(job.head_sha, `${path}.head_sha`, 40) !==
+        request.revision
+    ) {
+      fail(`${path}.run_id`, "invalid_value", "job identity mismatch");
+    }
+    matches.push({ job, path });
+  }
+  if (matches.length !== 1) {
+    fail("$.jobs", "invalid_value", "expected exactly one repair job");
+  }
+  const { job, path } = matches[0]!;
+  expectEnum(job.status, ["completed"], `${path}.status`);
+  if (
+    expectNullableString(
+      job.conclusion,
+      `${path}.conclusion`,
+      MaxText.token,
+    ) !==
+      "success"
+  ) {
+    fail(`${path}.conclusion`, "invalid_value", "job is not successful");
+  }
+  const jobId = expectPositiveInt(job.id, `${path}.id`);
+  const startedAt = expectIsoMs(job.started_at, `${path}.started_at`);
+  const finishedAt = expectIsoMs(job.completed_at, `${path}.completed_at`);
+  if (
+    startedAt < attempt.startedAt ||
+    finishedAt > attempt.finishedAt + ACTIONS_RELEASE_TIME_SLACK_MS ||
+    startedAt > finishedAt
+  ) {
+    fail(`${path}.started_at`, "invalid_lifecycle", "job window is invalid");
+  }
+
+  const steps = expectArray(
+    job.steps,
+    `${path}.steps`,
+    ACTIONS_RELEASE_RUN_MAX,
+    (item) => item,
+  );
+  const stepMatches: Array<{ step: Record<string, unknown>; path: string }> =
+    [];
+  for (const [index, item] of steps.entries()) {
+    const stepPath = `${path}.steps[${index}]`;
+    const step = expectRecord(item, stepPath);
+    if (
+      expectNonEmptyString(step.name, `${stepPath}.name`, MaxText.label) ===
+        ACTIONS_RELEASE_STEP_NAME
+    ) {
+      stepMatches.push({ step, path: stepPath });
+    }
+  }
+  if (stepMatches.length !== 1) {
+    fail(`${path}.steps`, "invalid_value", "expected exactly one repair step");
+  }
+  const { step, path: stepPath } = stepMatches[0]!;
+  expectEnum(step.status, ["completed"], `${stepPath}.status`);
+  if (
+    expectNullableString(
+      step.conclusion,
+      `${stepPath}.conclusion`,
+      MaxText.token,
+    ) !== "success"
+  ) {
+    fail(`${stepPath}.conclusion`, "invalid_value", "step is not successful");
+  }
+  const stepStartedAt = expectIsoMs(step.started_at, `${stepPath}.started_at`);
+  const stepFinishedAt = expectIsoMs(
+    step.completed_at,
+    `${stepPath}.completed_at`,
+  );
+  if (
+    stepStartedAt < startedAt || stepFinishedAt > finishedAt ||
+    stepStartedAt > stepFinishedAt
+  ) {
+    fail(
+      `${stepPath}.started_at`,
+      "invalid_lifecycle",
+      "step window is outside the job window",
+    );
+  }
+  return {
+    runId: candidate.runId,
+    runAttempt: candidate.runAttempt,
+    jobId,
+    startedAt,
+    finishedAt,
+    stepStartedAt,
+    stepFinishedAt,
+  };
+}
+
+/**
+ * The single terminal JSON record in the job log: only full
+ * timestamp-prefixed lines are parsed, so a quoted JSON substring can never
+ * attest. Any additional object carrying a `status` key is a duplicate.
+ */
+function parseActionsReleaseLogText(
+  text: string,
+  execution: ActionsReleaseExecutionV1,
+  request: ReleaseRequestV1,
+): { terminalAt: number; outcome: ActionsReleaseOutcomeV1 } {
+  let terminal:
+    | { terminalAt: number; outcome: ActionsReleaseOutcomeV1 }
+    | null = null;
+  for (const line of text.split(/\r?\n/)) {
+    const match = ACTIONS_RELEASE_TIMESTAMP_LINE.exec(line);
+    if (match === null) continue;
+    let value: unknown;
+    try {
+      value = JSON.parse(match[2]);
+    } catch {
+      // A malformed/truncated line that visibly begins as a terminal record is
+      // ambiguous evidence: never silently ignore it beside a valid line.
+      if (/^\{\s*"status"\s*:\s*"ran"/.test(match[2])) {
+        fail("$", "invalid_value", "malformed terminal-looking record");
+      }
+      continue;
+    }
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      continue;
+    }
+    const record = value as Record<string, unknown>;
+    if (!Object.prototype.hasOwnProperty.call(record, "status")) continue;
+    if (terminal !== null) {
+      fail("$", "invalid_lifecycle", "duplicate terminal record");
+    }
+    terminal = parseActionsReleaseTerminal(
+      record,
+      match[1],
+      execution,
+      request,
+    );
+  }
+  if (terminal === null) {
+    fail("$", "missing_field", "no terminal record found");
+  }
+  return terminal;
+}
+
+function parseActionsReleaseTerminal(
+  record: Record<string, unknown>,
+  timestamp: string,
+  execution: ActionsReleaseExecutionV1,
+  request: ReleaseRequestV1,
+): { terminalAt: number; outcome: ActionsReleaseOutcomeV1 } {
+  const allowed = [
+    "status",
+    "outcome",
+    "controllerSha",
+    "baseSha",
+    "login",
+    "startupReady",
+    "ciApproval",
+  ];
+  for (const key of Object.keys(record)) {
+    if (!allowed.includes(key)) {
+      fail(`$.${key}`, "unknown_key", "unexpected terminal key");
+    }
+  }
+  for (
+    const key of [
+      "status",
+      "outcome",
+      "controllerSha",
+      "baseSha",
+      "login",
+      "startupReady",
+    ]
+  ) {
+    if (
+      !Object.prototype.hasOwnProperty.call(record, key) ||
+      record[key] === undefined
+    ) {
+      fail(`$.${key}`, "missing_field", "missing terminal key");
+    }
+  }
+  expectEnum(record.status, ["ran"], "$.status");
+  const outcome = expectRecord(record.outcome, "$.outcome");
+  const outcomeStatus = expectEnum(
+    outcome.status,
+    ["idle", "margin", "step_limit"],
+    "$.outcome.status",
+  );
+  // The actual RepairCycleOutcomeV1 union: idle/margin carry a bounded detail,
+  // step_limit carries a bounded step count and never a detail.
+  if (outcomeStatus === "step_limit") {
+    expectExactKeys(outcome, ["status", "steps"], "$.outcome");
+    const steps = expectCount(outcome.steps, "$.outcome.steps");
+    if (steps > ACTIONS_RELEASE_MAX_STEPS) {
+      fail("$.outcome.steps", "bound_exceeded", "step count exceeds the bound");
+    }
+  } else {
+    expectExactKeys(outcome, ["status", "detail"], "$.outcome");
+    expectNonEmptyString(outcome.detail, "$.outcome.detail", MaxText.detail);
+  }
+  if (
+    expectNonEmptyString(record.controllerSha, "$.controllerSha", 40) !==
+      request.revision
+  ) {
+    fail("$.controllerSha", "invalid_value", "terminal controller mismatch");
+  }
+  if (
+    expectNonEmptyString(record.baseSha, "$.baseSha", 40) !==
+      request.revision
+  ) {
+    fail("$.baseSha", "invalid_value", "terminal base mismatch");
+  }
+  if (
+    expectNonEmptyString(record.login, "$.login", MaxText.login) !==
+      ACTIONS_RELEASE_LOGIN
+  ) {
+    fail("$.login", "invalid_value", "unexpected terminal login");
+  }
+  if (expectBoolean(record.startupReady, "$.startupReady") !== true) {
+    fail(
+      "$.startupReady",
+      "invalid_lifecycle",
+      "terminal record did not prove model startup",
+    );
+  }
+  if (Object.prototype.hasOwnProperty.call(record, "ciApproval")) {
+    actionsReleaseCiApprovalCounts(record.ciApproval, "$.ciApproval");
+  }
+  const terminalAt = Date.parse(timestamp);
+  if (!Number.isSafeInteger(terminalAt) || terminalAt < 0) {
+    fail("$", "invalid_timestamp", "invalid terminal timestamp");
+  }
+  if (
+    terminalAt < execution.stepStartedAt - ACTIONS_RELEASE_TIME_SLACK_MS ||
+    terminalAt > execution.stepFinishedAt + ACTIONS_RELEASE_TIME_SLACK_MS
+  ) {
+    fail(
+      "$",
+      "invalid_lifecycle",
+      "terminal record is outside the repair step window",
+    );
+  }
+  return { terminalAt, outcome: outcomeStatus };
+}
+
+/** Only the fixed HTTPS results host, no userinfo, no fragment, port 443. */
+function trustedActionsLogUrl(location: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(location);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "https:") return null;
+  if (url.username !== "" || url.password !== "") return null;
+  if (url.hash !== "") return null;
+  if (url.port !== "") return null;
+  if (!ACTIONS_RELEASE_LOG_HOST.test(url.hostname)) return null;
+  return url.toString();
+}
+
+async function sha256Hex(text: string): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(text),
+  );
+  return [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
 }
 
 function sameOrigin(first: string, second: string): boolean {
