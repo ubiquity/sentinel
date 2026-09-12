@@ -58,8 +58,12 @@ jobs:
           fi
       # Credential-free startup boundary check before any model reservation.
       - name: Verify isolated Codex startup
+        id: codex_preflight
         run: deno run --allow-read --allow-write --allow-run --allow-env=PATH src/host/actions-preflight.ts
+      # Deterministic bookkeeping must proceed even when model startup
+      # preflight fails; the failed diagnostic still fails the run conclusion.
       - name: Repair polling run
+        if: ${{ !cancelled() && (success() || steps.codex_preflight.outcome == 'failure') }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
           UOS_AI_TOKEN: ${{ secrets.UOS_AI_TOKEN }}

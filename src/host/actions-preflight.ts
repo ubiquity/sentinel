@@ -99,6 +99,9 @@ async function main(): Promise<void> {
   let stage = "temp_root";
   try {
     // Unique private root (0700); client/tmp/deno are private subdirectories.
+    // An independent fixture avoids loading parent repository AGENTS.md
+    // instructions. Linux synthetic mounts require host readback for
+    // outside-write protection.
     root = await Deno.makeTempDir({ prefix: "sentinel-preflight-" });
     const checkout = joinPath(root, "checkout");
     const clientHome = joinPath(root, "client");
@@ -230,13 +233,17 @@ async function main(): Promise<void> {
       "sentinel-probe",
       outsideMarker,
     ]);
-    if (write.exitCode === 0) {
-      throw new Error("sandbox outside write was not denied");
-    }
+    // Linux may accept a write into its synthetic mount; the unchanged real
+    // host marker is authoritative, not the command's exit status.
     if (await Deno.readTextFile(outsideMarker) !== OUTSIDE_MARKER) {
       throw new Error("sandbox outside marker changed");
     }
-    log({ stage, ok: true });
+    log({
+      stage,
+      ok: true,
+      hostWritePrevented: true,
+      commandExitCode: write.exitCode,
+    });
 
     passed = true;
   } catch (error) {
