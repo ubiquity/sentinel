@@ -758,7 +758,25 @@ export class GitHubCodexReviewTransport implements ReviewServiceTransportV1 {
         execution: null,
       };
     }
-    const body = this.render(journal);
+    // A validated result may still be too large for the journal's duplicated
+    // human-readable/base64 representation. Replace only that unpublished
+    // result with the bounded terminal disposition; never publish a partial
+    // rendering or leave the settled running journal behind.
+    let body = this.render(journal);
+    if (body === null) {
+      const unavailableResult: ReviewResultV1 = {
+        verdict: "unavailable",
+        summary: UNAVAILABLE_SUMMARY,
+        findings: [],
+      };
+      journal = {
+        ...journal,
+        result: unavailableResult,
+        resultDigest: await reviewResultDigest(unavailableResult),
+        execution: null,
+      };
+      body = this.render(journal);
+    }
     if (body === null) {
       op.fault = DETAIL_PUBLISH;
       return;
