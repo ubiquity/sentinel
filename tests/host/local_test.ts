@@ -92,6 +92,7 @@ Deno.test("local Codex config isolates the model client", () => {
     shellPath: "/usr/bin:/bin",
     shellTmpDir: "/private/tmp/key",
     shellDenoDir: "/private/deno/key",
+    codexExecutable: "/home/.codex/bin/codex",
     codexDistributionDir: "/home/.codex/packages/standalone",
     denoExecutable: "/bin/deno",
     writeGrants: ["/private/tmp/key", "/private/deno/key"],
@@ -104,6 +105,7 @@ Deno.test("local Codex config isolates the model client", () => {
   assert.match(text, /args = \["\/private\/clients\/key\/model\.token"\]/);
   assert.match(text, /^\[permissions\.sentinel-local\.filesystem\]$/m);
   assert.match(text, /^":minimal" = "read"$/m);
+  assert.match(text, /^"\/home\/\.codex\/bin\/codex" = "read"$/m);
   assert.match(text, /^"\/home\/\.codex\/packages\/standalone" = "read"$/m);
   assert.match(text, /^"\/bin\/deno" = "read"$/m);
   assert.match(
@@ -148,6 +150,7 @@ Deno.test("review Codex config is read-only", () => {
     shellPath: "/usr/bin:/bin",
     shellTmpDir: "/private/tmp/review",
     shellDenoDir: "/private/deno/review",
+    codexExecutable: "/home/.codex/bin/codex",
     codexDistributionDir: "/home/.codex/packages/standalone",
     denoExecutable: "/bin/deno",
     writeGrants: [],

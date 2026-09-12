@@ -215,6 +215,9 @@ export interface LocalCodexConfigInputV1 {
   shellPath: string;
   shellTmpDir: string;
   shellDenoDir: string;
+  /** Exact executable launched by the trusted host; sandbox helpers must be
+   * able to execute this path when loading project instructions. */
+  codexExecutable: string;
   codexDistributionDir: string;
   denoExecutable: string;
   /** Exact extra writable grants outside the checkout (empty for review). */
@@ -268,6 +271,7 @@ export function renderLocalCodexConfig(input: LocalCodexConfigInputV1): string {
     '":minimal" = "read"',
     `${toml(COMMAND_LINE_TOOLS_GIT_CORE)} = "read"`,
     `${toml(COMMAND_LINE_TOOLS_BIN)} = "read"`,
+    `${toml(input.codexExecutable)} = "read"`,
     `${toml(input.codexDistributionDir)} = "read"`,
     `${toml(input.denoExecutable)} = "read"`,
   ];
@@ -1369,6 +1373,7 @@ export async function ensureTaskClient(input: {
       shellPath: input.trustedPath,
       shellTmpDir: input.tmpDir,
       shellDenoDir: input.denoDir,
+      codexExecutable: input.codexExecutable,
       codexDistributionDir: codexDistributionDir(input.codexExecutable),
       denoExecutable: input.denoExecutable,
       writeGrants: [input.tmpDir, input.denoDir],
@@ -1404,6 +1409,7 @@ export async function ensureReviewClient(input: {
       shellPath: input.trustedPath,
       shellTmpDir: input.reviewTmpDir,
       shellDenoDir: input.reviewDenoDir,
+      codexExecutable: input.codexExecutable,
       codexDistributionDir: codexDistributionDir(input.codexExecutable),
       denoExecutable: input.denoExecutable,
       writeGrants: [],
