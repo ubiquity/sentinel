@@ -34,6 +34,7 @@ import {
   expectCount,
   expectEnum,
   expectNonEmptyString,
+  expectNullableString,
   expectPositiveInt,
   expectRecord,
   fail,
@@ -73,6 +74,25 @@ import type {
 
 export const MAX_OPEN_ISSUES = 10_000;
 export const MAX_OPEN_ISSUE_PAGES = 500;
+
+/**
+ * Exact self-target CI approval identity. The approval endpoint is exercised
+ * only for the scope-0 `ubiquity/sentinel` repository (explicit no-App local
+ * credential scope); every identity below is revalidated before any POST.
+ */
+const CI_REPOSITORY_FULL_NAME = "ubiquity/sentinel";
+const CI_REPOSITORY_API_URL = "https://api.github.com/repos/ubiquity/sentinel";
+const CI_WORKFLOW_FILE = "ci.yml";
+const CI_WORKFLOW_PATH = ".github/workflows/ci.yml";
+const CI_BASE_REF = "development";
+const CI_APPROVER_LOGIN = "github-actions[bot]";
+/** One page only: a longer or truncated list is never partially approved. */
+const CI_APPROVAL_MAX_RUNS = 100;
+const CI_APPROVAL_SCOPE =
+  "CI approval is restricted to the scope-0 self-target repository";
+const CI_APPROVAL_AMBIGUOUS = "CI approval found more than one matching run";
+const CI_APPROVAL_BOUND = "CI approval run list exceeded its bound";
+const CI_APPROVAL_RECONCILE = "CI approval outcome could not be reconciled";
 
 const REVIEW_DECISION_QUERY = `
   query SentinelPullReviewDecision($owner: String!, $name: String!, $number: Int!) {
@@ -167,6 +187,23 @@ export type MergePutWireV1 =
 export type ReviewMutationOutcomeV1 =
   | { status: "applied"; review: GitHubReviewWireV1 }
   | { status: "ambiguous" };
+
+/** Exact candidate identity for one self-target CI approval. */
+export interface ApproveExactCiRunInputV1 {
+  number: number;
+  head: GitSha;
+  headRef: string;
+}
+
+/**
+ * Exact approval outcome. `approved` means the approval POST was submitted
+ * (201) or an ambiguous response reconciled to a run that is no longer
+ * awaiting approval — never that CI passed. `pending` means no qualifying
+ * `action_required` run currently exists; nothing was submitted.
+ */
+export type CiApprovalOutcomeV1 =
+  | { status: "approved"; runId: number }
+  | { status: "pending" };
 
 /**
  * Raw transport outcome: `lost` means no response reached the caller at all
@@ -658,6 +695,180 @@ export class GitHubApiClient {
       return portOk(parsed.value.issue);
     }
     return portError(...this.mapError(response.value));
+  }
+
+  // -------------------------------------------------------------------------
+  // Exact self-target CI approval
+  // -------------------------------------------------------------------------
+
+  /**
+   * Approve the ONE exact `action_required` CI run for a durable self-target
+   * pull request candidate. Read-only until a single POST: the actual PR is
+   * read raw (head repository identity included) and the workflow run list is
+   * bound to one page. Immediately before the POST the exact run and PR are
+   * re-read and every identity is revalidated; an ambiguous or mismatched
+   * candidate never submits. A lost response is reconciled by re-reading the
+   * same run — this method never issues a second POST. A 201 reports the
+   * approval as submitted, never that CI passed.
+   */
+  async approveExactCiRun(
+    input: ApproveExactCiRunInputV1,
+  ): Promise<PortResultV1<CiApprovalOutcomeV1>> {
+    if (
+      this.repository.owner !== "ubiquity" ||
+      this.repository.name !== "sentinel" ||
+      this.repository.installationId !== 0
+    ) {
+      return portError("invalid", CI_APPROVAL_SCOPE);
+    }
+    const invalid = validateCiApprovalInput(input);
+    if (invalid !== null) return invalid;
+    const repo = repoPath(this.repository);
+    const pullPath = `/repos/${repo}/pulls/${input.number}`;
+
+    const firstPull = await this.readExactCiPull(pullPath, input);
+    if (!firstPull.ok) return firstPull;
+    const repositoryId = firstPull.value.repositoryId;
+
+    const listed = await this.listExactCiRuns(repo, input, repositoryId);
+    if (!listed.ok) return listed;
+    if (listed.value.length === 0) return portOk({ status: "pending" });
+    if (listed.value.length > 1) {
+      return portError("unavailable", CI_APPROVAL_AMBIGUOUS);
+    }
+    const target = listed.value[0]!;
+    const runPath = `/repos/${repo}/actions/runs/${target.id}`;
+
+    // Re-read the exact run and PR immediately before the single POST: both
+    // must still match the passed identity — including the selected run id and
+    // attempt — and the run must still be awaiting approval. A transitioned or
+    // changed run is observed, never re-approved here.
+    const current = await this.readExactCiRun(
+      runPath,
+      input,
+      target,
+      repositoryId,
+    );
+    if (!current.ok) return current;
+    if (!current.value.actionRequired) return portOk({ status: "pending" });
+    const currentPull = await this.readExactCiPull(pullPath, input);
+    if (!currentPull.ok) return currentPull;
+
+    const raw = await this.sendCore(
+      "POST",
+      `${this.apiBaseUrl}${runPath}/approve`,
+      null,
+    );
+    if (raw.status === "error") {
+      return portError(raw.error.kind, raw.error.detail, raw.error.rateLimit);
+    }
+    if (raw.status === "lost") {
+      // The approval may have applied. Reconcile against the SAME run id and
+      // attempt; no second POST is ever submitted by this invocation.
+      const observed = await this.readExactCiRun(
+        runPath,
+        input,
+        target,
+        repositoryId,
+      );
+      if (observed.ok && !observed.value.actionRequired) {
+        return portOk({ status: "approved", runId: target.id });
+      }
+      return portError("unavailable", CI_APPROVAL_RECONCILE);
+    }
+    if (raw.response.status === 201) {
+      return portOk({ status: "approved", runId: target.id });
+    }
+    return portError(...this.mapError(raw.response));
+  }
+
+  private async readExactCiPull(
+    path: string,
+    input: ApproveExactCiRunInputV1,
+  ): Promise<PortResultV1<ExactCiPullIdentityV1>> {
+    const response = await this.request("GET", path);
+    if (!response.ok) return response;
+    if (response.value.status !== 200) {
+      return portError(...this.mapError(response.value));
+    }
+    return parseWire(response.value, (value) => parseExactCiPull(value, input));
+  }
+
+  private async readExactCiRun(
+    path: string,
+    input: ApproveExactCiRunInputV1,
+    expected: ExactCiRunIdentityV1,
+    repositoryId: number,
+  ): Promise<PortResultV1<{ actionRequired: boolean }>> {
+    const response = await this.request("GET", path);
+    if (!response.ok) return response;
+    if (response.value.status !== 200) {
+      return portError(...this.mapError(response.value));
+    }
+    return parseWire(response.value, (value) => {
+      const run = parseExactCiRun(value, input, repositoryId);
+      // Every exact-run read (including lost-response reconciliation) must be
+      // the selected run and attempt: a wrong id or changed attempt is never
+      // approved and never reported as an approval.
+      if (run.id !== expected.id || run.attempt !== expected.attempt) {
+        fail("$.id", "invalid_value", "CI run identity mismatch");
+      }
+      return { actionRequired: run.actionRequired };
+    });
+  }
+
+  private async listExactCiRuns(
+    repo: string,
+    input: ApproveExactCiRunInputV1,
+    repositoryId: number,
+  ): Promise<PortResultV1<ExactCiRunIdentityV1[]>> {
+    const response = await this.request(
+      "GET",
+      `/repos/${repo}/actions/workflows/${CI_WORKFLOW_FILE}/runs`,
+      {
+        event: "pull_request",
+        head_sha: input.head,
+        status: "action_required",
+        per_page: String(CI_APPROVAL_MAX_RUNS),
+      },
+    );
+    if (!response.ok) return response;
+    if (response.value.status !== 200) {
+      return portError(...this.mapError(response.value));
+    }
+    // A next-page link is a hard truncation signal: the approval never
+    // continues pagination toward a write.
+    if (nextLinkUrl(response.value.headers) !== null) {
+      return portError("unavailable", CI_APPROVAL_BOUND);
+    }
+    return parseWire(response.value, (value) => {
+      const obj = expectRecord(value, "$");
+      const total = expectCount(obj.total_count, "$.total_count");
+      const page = expectArray(
+        obj.workflow_runs,
+        "$.workflow_runs",
+        CI_APPROVAL_MAX_RUNS,
+        (item) => item,
+      );
+      if (total > CI_APPROVAL_MAX_RUNS || page.length !== total) {
+        fail(
+          "$.total_count",
+          "bound_exceeded",
+          "CI run list is not a complete bounded page",
+        );
+      }
+      const runs: ExactCiRunIdentityV1[] = [];
+      for (const item of page) {
+        // Identity mismatches anywhere in the page fail the whole read via
+        // the strict parser; only a still-awaiting run is a candidate, and its
+        // exact id and attempt are retained for the later exact reads.
+        const run = parseExactCiRun(item, input, repositoryId);
+        if (run.actionRequired) {
+          runs.push({ id: run.id, attempt: run.attempt });
+        }
+      }
+      return runs;
+    });
   }
 
   // -------------------------------------------------------------------------
@@ -1276,6 +1487,248 @@ function parseWith<T>(
     return portError("invalid", "GitHub API response is malformed");
   }
   return portOk(parsed.value);
+}
+
+// ---------------------------------------------------------------------------
+// Exact self-target CI approval wire validation
+// ---------------------------------------------------------------------------
+
+/** Selected run identity retained from the bounded list and revalidated. */
+interface ExactCiRunIdentityV1 {
+  id: number;
+  attempt: number;
+}
+
+interface ExactCiRunV1 {
+  id: number;
+  attempt: number;
+  actionRequired: boolean;
+}
+
+/** Raw PR repository identity bound into every run association. */
+interface ExactCiPullIdentityV1 {
+  repositoryId: number;
+}
+
+function validateCiApprovalInput(
+  input: ApproveExactCiRunInputV1,
+): PortResultV1<never> | null {
+  if (!Number.isSafeInteger(input.number) || input.number < 1) {
+    return portError("invalid", "invalid pull request number");
+  }
+  if (typeof input.head !== "string" || !isGitSha(input.head)) {
+    return portError("invalid", "invalid candidate head");
+  }
+  if (
+    typeof input.headRef !== "string" || input.headRef.length === 0 ||
+    input.headRef.length > MaxText.branch || /[\r\n]/.test(input.headRef)
+  ) {
+    return portError("invalid", "invalid candidate head ref");
+  }
+  return null;
+}
+
+/**
+ * Raw PR identity: open, trusted author, exact head/base ref and repository.
+ * The authenticated self repository is bound by its real numeric id (never
+ * hard-coded): head/base repository ids must agree.
+ */
+function parseExactCiPull(
+  value: unknown,
+  input: ApproveExactCiRunInputV1,
+): ExactCiPullIdentityV1 {
+  const obj = expectRecord(value, "$");
+  const number = expectPositiveInt(obj.number, "$.number");
+  if (number !== input.number) {
+    fail("$.number", "invalid_value", "pull request number mismatch");
+  }
+  expectEnum(obj.state, ["open"], "$.state");
+  const user = expectRecord(obj.user, "$.user");
+  if (
+    expectNonEmptyString(user.login, "$.user.login", MaxText.login) !==
+      CI_APPROVER_LOGIN
+  ) {
+    fail("$.user.login", "invalid_value", "unexpected pull request author");
+  }
+  const head = expectRecord(obj.head, "$.head");
+  expectExactCiHead(head, input, "$.head");
+  const headRepositoryId = parsePullRepository(head.repo, "$.head.repo");
+  const base = expectRecord(obj.base, "$.base");
+  if (
+    expectNonEmptyString(base.ref, "$.base.ref", MaxText.branch) !== CI_BASE_REF
+  ) {
+    fail("$.base.ref", "invalid_value", "unexpected pull request base ref");
+  }
+  const baseRepositoryId = parsePullRepository(base.repo, "$.base.repo");
+  if (headRepositoryId !== baseRepositoryId) {
+    fail(
+      "$.head.repo.id",
+      "invalid_value",
+      "pull request repository identity disagrees",
+    );
+  }
+  return { repositoryId: headRepositoryId };
+}
+
+/**
+ * Raw PR repository: full repository object, exact self full name plus the
+ * numeric id the run associations are bound to.
+ */
+function parsePullRepository(value: unknown, path: string): number {
+  const repo = expectRecord(value, path);
+  if (
+    expectNonEmptyString(
+      repo.full_name,
+      `${path}.full_name`,
+      MaxText.owner + 1 + MaxText.name,
+    ) !== CI_REPOSITORY_FULL_NAME
+  ) {
+    fail(`${path}.full_name`, "invalid_value", "unexpected repository");
+  }
+  return expectPositiveInt(repo.id, `${path}.id`);
+}
+
+/** One workflow run: exact identity plus whether it still needs approval. */
+function parseExactCiRun(
+  value: unknown,
+  input: ApproveExactCiRunInputV1,
+  repositoryId: number,
+): ExactCiRunV1 {
+  const obj = expectRecord(value, "$");
+  const id = expectPositiveInt(obj.id, "$.id");
+  const attempt = expectPositiveInt(obj.run_attempt, "$.run_attempt");
+  expectEnum(obj.event, ["pull_request"], "$.event");
+  if (
+    expectNonEmptyString(obj.path, "$.path", MaxText.path) !== CI_WORKFLOW_PATH
+  ) {
+    fail("$.path", "invalid_value", "unexpected workflow path");
+  }
+  expectExactCiHead(
+    { sha: obj.head_sha, ref: obj.head_branch },
+    input,
+    "$",
+  );
+  expectSelfRepository(obj.head_repository, "$.head_repository");
+  expectCiActor(obj.actor, "$.actor");
+  expectCiActor(obj.triggering_actor, "$.triggering_actor");
+  const status = expectEnum(
+    obj.status,
+    ["queued", "in_progress", "completed", "requested", "waiting", "pending"],
+    "$.status",
+  );
+  const conclusion = expectNullableString(
+    obj.conclusion,
+    "$.conclusion",
+    MaxText.token,
+  );
+  const actionRequired = status === "completed" &&
+    conclusion === "action_required";
+  const pulls = expectArray(
+    obj.pull_requests,
+    "$.pull_requests",
+    1,
+    (item) => item,
+  );
+  if (pulls.length !== 1) {
+    fail(
+      "$.pull_requests",
+      "invalid_value",
+      "expected exactly one associated pull request",
+    );
+  }
+  const pullPath = "$.pull_requests[0]";
+  const pull = expectRecord(pulls[0], pullPath);
+  const number = expectPositiveInt(pull.number, `${pullPath}.number`);
+  if (number !== input.number) {
+    fail(`${pullPath}.number`, "invalid_value", "run PR association mismatch");
+  }
+  const head = expectRecord(pull.head, `${pullPath}.head`);
+  expectExactCiHead(head, input, `${pullPath}.head`);
+  expectAssociationRepository(
+    head.repo,
+    `${pullPath}.head.repo`,
+    repositoryId,
+  );
+  const base = expectRecord(pull.base, `${pullPath}.base`);
+  if (
+    expectNonEmptyString(base.ref, `${pullPath}.base.ref`, MaxText.branch) !==
+      CI_BASE_REF
+  ) {
+    fail(`${pullPath}.base.ref`, "invalid_value", "unexpected run base ref");
+  }
+  expectAssociationRepository(
+    base.repo,
+    `${pullPath}.base.repo`,
+    repositoryId,
+  );
+  return { id, attempt, actionRequired };
+}
+
+function expectExactCiHead(
+  value: Record<string, unknown>,
+  input: ApproveExactCiRunInputV1,
+  path: string,
+): void {
+  const sha = expectNonEmptyString(value.sha, `${path}.sha`, 40);
+  if (!isGitSha(sha) || sha !== input.head) {
+    fail(`${path}.sha`, "invalid_value", "head SHA mismatch");
+  }
+  if (
+    expectNonEmptyString(value.ref, `${path}.ref`, MaxText.branch) !==
+      input.headRef
+  ) {
+    fail(`${path}.ref`, "invalid_value", "head ref mismatch");
+  }
+}
+
+function expectSelfRepository(value: unknown, path: string): void {
+  const repo = expectRecord(value, path);
+  if (
+    expectNonEmptyString(
+      repo.full_name,
+      `${path}.full_name`,
+      MaxText.owner + 1 + MaxText.name,
+    ) !== CI_REPOSITORY_FULL_NAME
+  ) {
+    fail(`${path}.full_name`, "invalid_value", "unexpected repository");
+  }
+}
+
+/**
+ * Workflow-run PR association repository: the real minimal API shape
+ * (`{ id, name, url }`), bound to the raw PR's authenticated repository id.
+ */
+function expectAssociationRepository(
+  value: unknown,
+  path: string,
+  repositoryId: number,
+): void {
+  const repo = expectRecord(value, path);
+  const id = expectPositiveInt(repo.id, `${path}.id`);
+  if (id !== repositoryId) {
+    fail(`${path}.id`, "invalid_value", "repository ID mismatch");
+  }
+  if (
+    expectNonEmptyString(repo.name, `${path}.name`, MaxText.name) !== "sentinel"
+  ) {
+    fail(`${path}.name`, "invalid_value", "unexpected repository name");
+  }
+  if (
+    expectNonEmptyString(repo.url, `${path}.url`, MaxText.url) !==
+      CI_REPOSITORY_API_URL
+  ) {
+    fail(`${path}.url`, "invalid_value", "unexpected repository URL");
+  }
+}
+
+function expectCiActor(value: unknown, path: string): void {
+  const actor = expectRecord(value, path);
+  if (
+    expectNonEmptyString(actor.login, `${path}.login`, MaxText.login) !==
+      CI_APPROVER_LOGIN
+  ) {
+    fail(`${path}.login`, "invalid_value", "unexpected run actor");
+  }
 }
 
 function sameOrigin(first: string, second: string): boolean {

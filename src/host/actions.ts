@@ -19,6 +19,10 @@ import { DurableGitHubCooldownGate } from "../repair/github-cooldown.ts";
 import { fetchHttpTransport } from "../github/http.ts";
 import { runRepairEntrypoint } from "../main.ts";
 import { runActionsPreflight } from "./actions-preflight.ts";
+import {
+  type ActionsCiApprovalSummaryV1,
+  runActionsCiApproval,
+} from "./actions-ci.ts";
 import { createRepairStateStore, DenoGitRunner } from "../state/mod.ts";
 import {
   composeLocalGitHub,
@@ -60,6 +64,8 @@ export interface ActionsRepairHostResultV1 {
   login: string;
   /** False when the model startup diagnostic failed for this run. */
   startupReady: boolean;
+  /** Bounded deterministic CI approval counts for this run. */
+  ciApproval: ActionsCiApprovalSummaryV1;
 }
 
 /** Run one hosted repair pass through the actual production entrypoint. */
@@ -216,6 +222,18 @@ export async function runActionsRepairHost(): Promise<
   if (failure !== null) throw failure;
   if (outcome === null) throw new Error(STATIC_RUNNER);
 
+  // Deterministic CI approval for durable self-target candidates runs after
+  // the loop and the tracker drain, even when model startup was unavailable.
+  // The helper is bounded and never throws, so an approval failure cannot
+  // prevent deterministic bookkeeping or change the original error semantics.
+  const ciApproval = await runActionsCiApproval({
+    state,
+    gate,
+    http,
+    token: githubToken,
+    clock,
+  });
+
   const result: ActionsRepairHostResultV1 = {
     status: "ran",
     outcome,
@@ -223,6 +241,7 @@ export async function runActionsRepairHost(): Promise<
     baseSha,
     login: ACTIONS_LOGIN,
     startupReady,
+    ciApproval,
   };
   console.log(JSON.stringify(result));
   // The deterministic pass and its drain completed and were logged above; the
