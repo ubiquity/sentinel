@@ -80,7 +80,8 @@ const LOCAL_REPOSITORY: RepositoryIdentityV1 = {
 const REMOTE_URL = "https://github.com/ubiquity/sentinel.git";
 const API_BASE_URL = "https://api.github.com";
 const API_USER_URL = "https://api.github.com/user";
-const UOS_BASE_URL = "http://127.0.0.1:8000/v1";
+/** Local default; hosted Actions supplies the public UOS gateway explicitly. */
+export const DEFAULT_UOS_BASE_URL = "http://127.0.0.1:8000/v1";
 
 const GIT_TIMEOUT_MS = 120_000;
 const GIT_MAX_OUTPUT_BYTES = 1024 * 1024;
@@ -218,6 +219,8 @@ export interface LocalCodexConfigInputV1 {
   denoExecutable: string;
   /** Exact extra writable grants outside the checkout (empty for review). */
   writeGrants: string[];
+  /** Trusted provider endpoint; local callers use the loopback default. */
+  baseUrl?: string;
 }
 
 /**
@@ -248,7 +251,7 @@ export function renderLocalCodexConfig(input: LocalCodexConfigInputV1): string {
     "",
     "[model_providers.uos]",
     'name = "uos"',
-    `base_url = "${UOS_BASE_URL}"`,
+    `base_url = "${input.baseUrl ?? DEFAULT_UOS_BASE_URL}"`,
     'wire_api = "responses"',
     "",
     "[model_providers.uos.auth]",
@@ -741,7 +744,7 @@ function unavailable<Value>(): PortResultV1<Value> {
   return portError("unavailable", UNAVAILABLE_DETAIL);
 }
 
-const unavailableIncidents: IncidentAdapter = {
+export const unavailableIncidents: IncidentAdapter = {
   listUnresolvedIncidents: (_cursor, _limit) =>
     Promise.resolve(unavailable<IncidentPageV1>()),
   readIncident: (_incidentId) =>
@@ -750,7 +753,7 @@ const unavailableIncidents: IncidentAdapter = {
     Promise.resolve(unavailable<EncryptedArtifactV1 | null>()),
 };
 
-const unavailableReplay: ReplayPort = {
+export const unavailableReplay: ReplayPort = {
   runReplay: (_request: ReplayRunRequestV1) =>
     Promise.resolve(unavailable<IsolatedReplayResultV1>()),
 };
@@ -759,7 +762,7 @@ const unavailableReplay: ReplayPort = {
 // GitHub composition (one client, one gate, one actor)
 // ---------------------------------------------------------------------------
 
-interface LocalGitHubInputV1 {
+export interface LocalGitHubInputV1 {
   clock: Clock;
   state: StateReadView & RepairStateWriter;
   gate: GitHubCooldownGateV1;
@@ -776,10 +779,12 @@ interface LocalGitHubInputV1 {
   trustedPath: string;
   codexExecutable: string;
   tracker: LocalSessionTracker;
+  /** Provider endpoint used by the isolated reviewer client. */
+  modelBaseUrl?: string;
 }
 
 /** Compose the one authenticated GitHub port over the shared cooldown gate. */
-function composeLocalGitHub(input: LocalGitHubInputV1): GitHubPort {
+export function composeLocalGitHub(input: LocalGitHubInputV1): GitHubPort {
   const repository = { ...LOCAL_REPOSITORY };
   const auth: GitHubAuthProviderV1 = {
     authorizationHeader: () => Promise.resolve(portOk(`Bearer ${input.token}`)),
@@ -903,7 +908,7 @@ function isLocalRepairIssue(issue: GitHubIssueV1): boolean {
 }
 
 /** Scoped Basic auth for trusted git only; never in a URL or config file. */
-function githubGitAuthEnv(token: string): Record<string, string> {
+export function githubGitAuthEnv(token: string): Record<string, string> {
   const basic = btoa(`x-access-token:${token}`);
   return {
     GIT_CONFIG_COUNT: "1",
@@ -958,7 +963,7 @@ export async function readAuthenticatedLogin(
   }
   if (
     typeof login !== "string" ||
-    !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(login)
+    !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:\[bot\])?$/.test(login)
   ) {
     throw new Error(STATIC_GITHUB_LOGIN);
   }
@@ -969,7 +974,7 @@ export async function readAuthenticatedLogin(
 // Implementation port: one persistent isolated checkout per task
 // ---------------------------------------------------------------------------
 
-interface LocalModelInputV1 {
+export interface LocalModelInputV1 {
   stateRoot: string;
   sourcePath: string;
   scratch: string;
@@ -979,6 +984,8 @@ interface LocalModelInputV1 {
   modelToken: string;
   tracker: LocalSessionTracker;
   clock: Clock;
+  /** Provider endpoint used by the isolated implementation client. */
+  modelBaseUrl?: string;
 }
 
 /**
@@ -988,7 +995,7 @@ interface LocalModelInputV1 {
  * receipt, and imports the exact candidate head into the trusted source
  * object repository before returning.
  */
-class LocalCheckoutModelPort implements ImplementationPort {
+export class LocalCheckoutModelPort implements ImplementationPort {
   constructor(private readonly input: LocalModelInputV1) {}
 
   async runModel(
@@ -1023,6 +1030,7 @@ class LocalCheckoutModelPort implements ImplementationPort {
       codexExecutable: this.input.codexExecutable,
       denoExecutable: this.input.denoExecutable,
       trustedPath: this.input.trustedPath,
+      baseUrl: this.input.modelBaseUrl,
     });
 
     const commitBase = prepared.commitBase;
@@ -1336,7 +1344,7 @@ async function importCandidate(input: {
 }
 
 /** Write the isolated client home, token file and config for one task. */
-async function ensureTaskClient(input: {
+export async function ensureTaskClient(input: {
   clientHome: string;
   tmpDir: string;
   denoDir: string;
@@ -1345,6 +1353,7 @@ async function ensureTaskClient(input: {
   codexExecutable: string;
   denoExecutable: string;
   trustedPath: string;
+  baseUrl?: string;
 }): Promise<void> {
   await ensurePrivateDir(input.clientHome);
   await ensurePrivateDir(input.tmpDir);
@@ -1363,12 +1372,13 @@ async function ensureTaskClient(input: {
       codexDistributionDir: codexDistributionDir(input.codexExecutable),
       denoExecutable: input.denoExecutable,
       writeGrants: [input.tmpDir, input.denoDir],
+      baseUrl: input.baseUrl,
     }),
   );
 }
 
 /** Isolated read-only review client home, token file and profile config. */
-async function ensureReviewClient(input: {
+export async function ensureReviewClient(input: {
   reviewCheckout: string;
   reviewClientHome: string;
   reviewTmpDir: string;
@@ -1377,6 +1387,7 @@ async function ensureReviewClient(input: {
   codexExecutable: string;
   denoExecutable: string;
   trustedPath: string;
+  baseUrl?: string;
 }): Promise<void> {
   await ensurePrivateDir(input.reviewCheckout);
   await ensurePrivateDir(input.reviewClientHome);
@@ -1396,6 +1407,7 @@ async function ensureReviewClient(input: {
       codexDistributionDir: codexDistributionDir(input.codexExecutable),
       denoExecutable: input.denoExecutable,
       writeGrants: [],
+      baseUrl: input.baseUrl,
     }),
   );
 }
@@ -1421,7 +1433,7 @@ function codexChildEnv(
 // ---------------------------------------------------------------------------
 
 /** Every session this run opened, so close/settlement is verified once. */
-class LocalSessionTracker {
+export class LocalSessionTracker {
   private readonly sessions = new Set<CodexSessionV1>();
 
   open<Session extends CodexSessionV1>(factory: () => Session): Session {
@@ -1788,6 +1800,15 @@ function trustedGitPath(trustedPath: string): string {
 
 /** Installed Codex distribution directory derived from the executable path. */
 function codexDistributionDir(codexExecutable: string): string {
+  // npm's pinned @openai/codex package resolves its launcher through a
+  // node_modules tree rather than the owner's ~/.codex/packages layout. The
+  // trusted global node_modules root is the smallest read-only grant that
+  // lets the launcher load its optional platform binary and package files.
+  const nodeModules = "/node_modules/";
+  const nodeModulesIndex = codexExecutable.indexOf(nodeModules);
+  if (nodeModulesIndex >= 0) {
+    return codexExecutable.slice(0, nodeModulesIndex + nodeModules.length - 1);
+  }
   return joinPath(
     dirnamePath(dirnamePath(codexExecutable)),
     "packages",
@@ -1795,7 +1816,7 @@ function codexDistributionDir(codexExecutable: string): string {
   );
 }
 
-async function ensurePrivateDir(path: string): Promise<void> {
+export async function ensurePrivateDir(path: string): Promise<void> {
   await Deno.mkdir(path, { recursive: true, mode: 0o700 });
   await Deno.chmod(path, 0o700);
 }
@@ -1842,7 +1863,7 @@ function toml(value: string): string {
   return JSON.stringify(value);
 }
 
-function joinPath(base: string, ...parts: string[]): string {
+export function joinPath(base: string, ...parts: string[]): string {
   let out = base.replace(/\/+$/, "");
   for (const part of parts) {
     out += "/" + part.replace(/^\/+|\/+$/g, "");

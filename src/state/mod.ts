@@ -134,9 +134,14 @@ export interface GitStateStoreOptions {
  */
 export class DenoGitRunner implements GitRunnerV1 {
   private readonly path: string;
+  private readonly extraEnv: Readonly<Record<string, string>>;
 
-  constructor(private readonly gitHome: string) {
+  constructor(
+    private readonly gitHome: string,
+    extraEnv: Readonly<Record<string, string>> = {},
+  ) {
     this.path = Deno.env.get("PATH") ?? "/usr/bin:/bin";
+    this.extraEnv = { ...extraEnv };
   }
 
   async runGit(
@@ -153,6 +158,7 @@ export class DenoGitRunner implements GitRunnerV1 {
         GIT_CONFIG_GLOBAL: "/dev/null",
         GIT_CONFIG_SYSTEM: "/dev/null",
         GIT_TERMINAL_PROMPT: "0",
+        ...this.extraEnv,
         ...opts.env,
       },
       stdout: "piped",
