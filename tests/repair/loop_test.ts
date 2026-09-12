@@ -16,13 +16,18 @@ import {
 } from "../../src/state/mod.ts";
 import { asWorkItemId } from "../../src/contracts/brands.ts";
 import type { GitSha } from "../../src/contracts/brands.ts";
-import type { GitHubIssueV1 } from "../../src/contracts/ports.ts";
-import { portOk } from "../../src/contracts/ports.ts";
+import type { GitHubIssueV1, PortResultV1 } from "../../src/contracts/ports.ts";
+import { portError, portOk } from "../../src/contracts/ports.ts";
 import { parseReviewReceiptV1 } from "../../src/contracts/review-receipt.ts";
+import { parseLocalReleaseReceiptV1 } from "../../src/contracts/local-release.ts";
+import type { LocalReleaseReceiptV1 } from "../../src/contracts/local-release.ts";
 import type { ReviewReceiptV1 } from "../../src/contracts/review-receipt.ts";
+import type { ReleaseRequestV1 } from "../../src/contracts/release.ts";
 import type { RepairStateSnapshotV1 } from "../../src/contracts/state-snapshots.ts";
 import type { ReleaseStateSnapshotV1 } from "../../src/contracts/state-snapshots.ts";
 import type { WorkRecordV1 } from "../../src/contracts/work-record.ts";
+import { parseRepositoryConfigV1 } from "../../src/contracts/repository-config.ts";
+import type { RepositoryConfigV1 } from "../../src/contracts/repository-config.ts";
 import { candidateBranch, pushIntentKey } from "../../src/repair/keys.ts";
 import { DurableGitHubCooldownGate } from "../../src/repair/github-cooldown.ts";
 import { runRepairCycle } from "../../src/repair/loop.ts";
@@ -34,6 +39,8 @@ import {
   makeRemoteCtx,
   monitoredReleaseRecord,
   releaseRequest,
+  REPO,
+  reviewReceipt,
   SHA1,
   SHA2,
   SHA3,
@@ -135,6 +142,11 @@ async function makeRig(
     replay?: ConstructorParameters<typeof FakeReplay>[0];
     incidents?: ConstructorParameters<typeof FakeIncidents>[0];
     configOverrides?: Record<string, unknown>;
+    /**
+     * Also configure the explicit local Sentinel scope (installationId 0), so
+     * local-scope delivery records are eligible and their consumer is real.
+     */
+    localScope?: boolean;
   } = {},
 ): Promise<RigV1> {
   const ctx = await makeCtx(prefix);
@@ -152,6 +164,9 @@ async function makeRig(
     sessionBound: { maxDurationMs: 240_000, maxOutputChars: 200_000 },
     ...options.configOverrides,
   });
+  if (options.localScope === true) {
+    configs.push(localScopeConfig(configs[0]));
+  }
   const budget = new RollingStartBudget({ clock, state: store, configs });
   const github = options.githubPort ??
     new FakeGithub({ baseSha: SHA1, ...options.github });
@@ -1796,3 +1811,783 @@ Deno.test("existing-PR corrections are not blocked by the unfinished-PR cap", as
     await rig.ctx.cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// Local activation branch: the explicit local Sentinel scope (installationId
+// 0) reads only the private local receipt capability. The hosted Deno release
+// path is never a fallback for local work, and the nonlocal gateway path is
+// unchanged.
+// ---------------------------------------------------------------------------
+
+const LOCAL_SENTINEL_REPO = {
+  owner: "ubiquity",
+  name: "sentinel",
+  installationId: 0,
+} as const;
+
+/**
+ * Another repository that also uses the explicit no-App credential scope
+ * (installationId 0) but is not `ubiquity/sentinel`. It is not the local
+ * Sentinel scope, so it must never consult or consume the Sentinel local
+ * receipt.
+ */
+const OTHER_SCOPE_ZERO_REPO = {
+  owner: "ubiquity",
+  name: "sentinel-fork",
+  installationId: 0,
+} as const;
+
+/**
+ * The local scope (installationId 0) configuration: the explicit no-App local
+ * credential scope uses the github adapter, so the same synthetic command
+ * registry is reused with only the repository identity and adapter kind
+ * changed. Built through the frozen parser, never a cast.
+ */
+function localScopeConfig(
+  base: RepositoryConfigV1,
+): RepositoryConfigV1 {
+  return parseRepositoryConfigV1({
+    ...base,
+    repository: LOCAL_SENTINEL_REPO,
+    adapter: { kind: "github" },
+  });
+}
+
+/** One local production request bound to the delivery record below. */
+function localDeliveryRequest(
+  id: string,
+  revision: GitSha,
+): ReleaseRequestV1 {
+  return releaseRequest(id, {
+    target: { repository: LOCAL_SENTINEL_REPO, environment: "production" },
+    revision,
+    source: {
+      pullRequest: 12,
+      reviewRequestId: `review-req-${id}`,
+      reviewReceiptId: `review-receipt-${id}`,
+      head: SHA1,
+      base: SHA2,
+    },
+    createdAt: T0,
+  });
+}
+
+/** A local production request for the same PR/head with a different base. */
+function wrongBaseLocalRequest(id: string): ReleaseRequestV1 {
+  return releaseRequest(id, {
+    target: { repository: LOCAL_SENTINEL_REPO, environment: "production" },
+    revision: SHA3,
+    source: {
+      pullRequest: 12,
+      reviewRequestId: `review-req-${id}`,
+      reviewReceiptId: `review-receipt-${id}`,
+      head: SHA1,
+      base: SHA3,
+    },
+    createdAt: T0,
+  });
+}
+
+/** A strict accepted local receipt for one exact request. */
+function localAcceptedReceipt(request: ReleaseRequestV1) {
+  return parseLocalReleaseReceiptV1({
+    version: "v1",
+    kind: "local_release_receipt",
+    request,
+    priorRevision: SHA2,
+    phase: "accepted",
+    candidateProof: {
+      invocationId: "inv-candidate",
+      controllerSha: request.revision,
+      startedAt: T0 + 1000,
+      finishedAt: T0 + 2000,
+      outcome: "idle",
+    },
+    priorProof: {
+      invocationId: "inv-prior",
+      controllerSha: SHA2,
+      startedAt: T0,
+      finishedAt: T0 + 500,
+      outcome: "idle",
+    },
+    createdAt: T0,
+    updatedAt: T0 + 2000,
+  });
+}
+
+/**
+ * The default local delivery issue: a valid positive number with a coherent
+ * issue source id. Issue tasks never carry a null `related.issueNumber`.
+ */
+const LOCAL_DELIVERY_ISSUE = 42;
+
+/**
+ * A local-scope delivery record: it targets the configured local
+ * (installationId 0) repository scope and carries a coherent issue source, so
+ * the frozen parser accepts it and the real local consumer is exercised.
+ */
+function localDeliveryRecord(
+  issueNumber: number = LOCAL_DELIVERY_ISSUE,
+): WorkRecordV1 {
+  return workRecord("local-delivery-1", {
+    repository: LOCAL_SENTINEL_REPO,
+    source: { kind: "issue", id: String(issueNumber), revision: SHA1 },
+    related: { incidentId: null, issueNumber },
+    target: { base: SHA2, branch: null, checkpoint: null, head: SHA1, pr: 12 },
+    nextStep: "delivery",
+    updatedAt: T0 + 1000,
+  });
+}
+
+/** The explicit nonlocal control record: ai.ubq.fi under installation 7. */
+function gatewayDeliveryRecord(): WorkRecordV1 {
+  return workRecord("local-delivery-1", {
+    repository: REPO,
+    source: { kind: "issue", id: String(LOCAL_DELIVERY_ISSUE), revision: SHA1 },
+    related: { incidentId: null, issueNumber: LOCAL_DELIVERY_ISSUE },
+    target: { base: SHA2, branch: null, checkpoint: null, head: SHA1, pr: 12 },
+    nextStep: "delivery",
+    updatedAt: T0 + 1000,
+  });
+}
+
+Deno.test(
+  "local release: accepted local receipt closes the delivery record",
+  async () => {
+    const rig = await makeRig("localaccept", {
+      summaries: false,
+      localScope: true,
+    });
+    try {
+      const request = localDeliveryRequest("release-local-1", SHA3);
+      const seeded = await rig.store.writeRepair(
+        seededSnapshot([localDeliveryRecord()], { releaseRequests: [request] }),
+        null,
+      );
+      assert.ok(seeded.ok && seeded.value.status === "applied");
+      let reads = 0;
+      Object.assign(rig.store, {
+        readLocalRelease: () => {
+          reads++;
+          return Promise.resolve(portOk(localAcceptedReceipt(request)));
+        },
+      });
+      const run = await rig.run();
+      assert.equal(run.status, "idle", JSON.stringify(run));
+      const state = await rig.snapshot();
+      assert.equal(state.work[0].nextStep, "done");
+      assert.equal(reads, 1, "the local capability was consulted exactly once");
+    } finally {
+      await rig.ctx.cleanup();
+    }
+  },
+);
+
+/**
+ * Matching-request accepted receipts whose proof is missing, failed or bound
+ * to the wrong revision: cast values an injected reader may return and that
+ * the consumer must reject before any accepted/closure/blocked transition.
+ */
+function malformedAcceptedReceipts(request: ReleaseRequestV1): unknown[] {
+  const valid = localAcceptedReceipt(request);
+  return [
+    { ...valid, candidateProof: null },
+    {
+      ...valid,
+      candidateProof: {
+        invocationId: "inv-candidate-failed",
+        controllerSha: request.revision,
+        startedAt: T0 + 1000,
+        finishedAt: T0 + 2000,
+        outcome: "state_error",
+      },
+    },
+    {
+      ...valid,
+      candidateProof: {
+        invocationId: "inv-candidate-wrong",
+        controllerSha: SHA2,
+        startedAt: T0 + 1000,
+        finishedAt: T0 + 2000,
+        outcome: "idle",
+      },
+    },
+  ];
+}
+
+Deno.test(
+  "local release: malformed matching-request receipts never close the delivery record",
+  async () => {
+    const request = localDeliveryRequest("release-local-1", SHA3);
+    const variants = malformedAcceptedReceipts(request);
+    for (let index = 0; index < variants.length; index++) {
+      const rig = await makeRig(`localmalformed${index}`, {
+        summaries: false,
+        localScope: true,
+      });
+      try {
+        const seeded = await rig.store.writeRepair(
+          seededSnapshot([localDeliveryRecord(42)], {
+            releaseRequests: [request],
+          }),
+          null,
+        );
+        assert.ok(seeded.ok && seeded.value.status === "applied");
+        Object.assign(rig.store, {
+          readLocalRelease: () =>
+            Promise.resolve(portOk(variants[index] as LocalReleaseReceiptV1)),
+        });
+        const run = await rig.run();
+        assert.equal(run.status, "idle", JSON.stringify(run));
+        const state = await rig.snapshot();
+        assert.equal(
+          state.work[0].nextStep,
+          "delivery",
+          `variant ${index}: no closure transition`,
+        );
+        assert.equal(state.work[0].wait?.reason, "unavailable");
+        assert.equal(
+          rig.github.calls.filter((call) => call.startsWith("closeIssue"))
+            .length,
+          0,
+          `variant ${index}: zero closure calls`,
+        );
+      } finally {
+        await rig.ctx.cleanup();
+      }
+    }
+  },
+);
+
+Deno.test(
+  "local release: mismatched local receipt waits and never accepts",
+  async () => {
+    const rig = await makeRig("localmismatch", {
+      summaries: false,
+      localScope: true,
+    });
+    try {
+      const request = localDeliveryRequest("release-local-1", SHA3);
+      const seeded = await rig.store.writeRepair(
+        seededSnapshot([localDeliveryRecord()], { releaseRequests: [request] }),
+        null,
+      );
+      assert.ok(seeded.ok && seeded.value.status === "applied");
+      // A valid receipt for a DIFFERENT request: the consumer-side binding
+      // check must reject it even though the port returned success.
+      const other = localDeliveryRequest("release-local-other", SHA3);
+      Object.assign(rig.store, {
+        readLocalRelease: () =>
+          Promise.resolve(portOk(localAcceptedReceipt(other))),
+      });
+      const run = await rig.run();
+      assert.equal(run.status, "idle", JSON.stringify(run));
+      const state = await rig.snapshot();
+      assert.equal(state.work[0].nextStep, "delivery");
+      assert.equal(state.work[0].wait?.reason, "unavailable");
+    } finally {
+      await rig.ctx.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "local release: unavailable local receipt waits",
+  async () => {
+    const rig = await makeRig("localunavailable", {
+      summaries: false,
+      localScope: true,
+    });
+    try {
+      const request = localDeliveryRequest("release-local-1", SHA3);
+      const seeded = await rig.store.writeRepair(
+        seededSnapshot([localDeliveryRecord()], { releaseRequests: [request] }),
+        null,
+      );
+      assert.ok(seeded.ok && seeded.value.status === "applied");
+      Object.assign(rig.store, {
+        readLocalRelease: () =>
+          Promise.resolve(
+            portError("unavailable", "local release receipt is unavailable"),
+          ),
+      });
+      const run = await rig.run();
+      assert.equal(run.status, "idle", JSON.stringify(run));
+      const state = await rig.snapshot();
+      assert.equal(state.work[0].nextStep, "delivery");
+      assert.equal(state.work[0].wait?.reason, "unavailable");
+    } finally {
+      await rig.ctx.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "local release: wrong-scope or wrong-base request cannot close the delivery record",
+  async () => {
+    // Case 1: the request matches PR/head but targets the ai.ubq.fi gateway
+    // scope (installation 7) while the record is local scope 0. A hosted
+    // acceptance for that request must never close the local record.
+    const wrongScope = await makeRig("localwrongscope", {
+      summaries: false,
+      localScope: true,
+    });
+    try {
+      const request = releaseRequest("release-wrong-scope", {
+        revision: SHA3,
+        source: {
+          pullRequest: 12,
+          reviewRequestId: "review-req-wrong-scope",
+          reviewReceiptId: "review-receipt-wrong-scope",
+          head: SHA1,
+          base: SHA2,
+        },
+        createdAt: T0,
+      });
+      const seeded = await wrongScope.store.writeRepair(
+        seededSnapshot([localDeliveryRecord()], { releaseRequests: [request] }),
+        null,
+      );
+      assert.ok(seeded.ok && seeded.value.status === "applied");
+      await wrongScope.acceptRelease(request.id);
+      const run = await wrongScope.run();
+      const state = await wrongScope.snapshot();
+      assert.equal(
+        state.work[0].nextStep,
+        "delivery",
+        `wrong scope: no closure transition (${JSON.stringify(run)})`,
+      );
+      assert.equal(
+        wrongScope.github.calls.filter((call) => call.startsWith("closeIssue"))
+          .length,
+        0,
+        "wrong scope: zero closure calls",
+      );
+    } finally {
+      await wrongScope.ctx.cleanup();
+    }
+
+    // Case 2: same local scope and PR/head, but the request's reviewed base
+    // differs from the record base. A valid accepted local receipt for that
+    // other request must never close this record either.
+    const wrongBase = await makeRig("localwrongbase", {
+      summaries: false,
+      localScope: true,
+    });
+    try {
+      const request = wrongBaseLocalRequest("release-wrong-base");
+      const seeded = await wrongBase.store.writeRepair(
+        seededSnapshot([localDeliveryRecord()], { releaseRequests: [request] }),
+        null,
+      );
+      assert.ok(seeded.ok && seeded.value.status === "applied");
+      let reads = 0;
+      Object.assign(wrongBase.store, {
+        readLocalRelease: () => {
+          reads++;
+          return Promise.resolve(portOk(localAcceptedReceipt(request)));
+        },
+      });
+      const run = await wrongBase.run();
+      const state = await wrongBase.snapshot();
+      assert.equal(
+        state.work[0].nextStep,
+        "delivery",
+        `wrong base: no closure transition (${JSON.stringify(run)})`,
+      );
+      assert.equal(
+        reads,
+        0,
+        "wrong base: the wrong request is never observed by the local consumer",
+      );
+      assert.equal(
+        wrongBase.github.calls.filter((call) => call.startsWith("closeIssue"))
+          .length,
+        0,
+        "wrong base: zero closure calls",
+      );
+    } finally {
+      await wrongBase.ctx.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "local release: local scope cannot consume a fake hosted acceptance",
+  async () => {
+    const rig = await makeRig("localnofallback", {
+      summaries: false,
+      localScope: true,
+    });
+    try {
+      const request = localDeliveryRequest("release-local-1", SHA3);
+      const seeded = await rig.store.writeRepair(
+        seededSnapshot([localDeliveryRecord()], { releaseRequests: [request] }),
+        null,
+      );
+      assert.ok(seeded.ok && seeded.value.status === "applied");
+      // A hosted Deno release record reports acceptance for the same request
+      // id, but local scope has no local receipt: it must wait, never accept.
+      await rig.acceptRelease(request.id);
+      Object.assign(rig.store, {
+        readLocalRelease: () => Promise.resolve(portOk(null)),
+      });
+      const run = await rig.run();
+      assert.equal(run.status, "idle", JSON.stringify(run));
+      const state = await rig.snapshot();
+      assert.equal(state.work[0].nextStep, "delivery");
+      assert.equal(state.work[0].wait?.reason, "unavailable");
+    } finally {
+      await rig.ctx.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "local release: nonlocal delivery still consumes the hosted release gateway",
+  async () => {
+    const rig = await makeRig("localgateway", { summaries: false });
+    try {
+      const request = releaseRequest("release-gateway-1", {
+        revision: SHA3,
+        source: {
+          pullRequest: 12,
+          reviewRequestId: "review-req-gateway",
+          reviewReceiptId: "review-receipt-gateway",
+          head: SHA1,
+          base: SHA2,
+        },
+        createdAt: T0,
+      });
+      const seeded = await rig.store.writeRepair(
+        seededSnapshot([gatewayDeliveryRecord()], {
+          releaseRequests: [request],
+        }),
+        null,
+      );
+      assert.ok(seeded.ok && seeded.value.status === "applied");
+      await rig.acceptRelease(request.id);
+      let reads = 0;
+      Object.assign(rig.store, {
+        readLocalRelease: () => {
+          reads++;
+          return Promise.resolve(
+            portOk(
+              localAcceptedReceipt(
+                localDeliveryRequest("release-local-1", SHA3),
+              ),
+            ),
+          );
+        },
+      });
+      const run = await rig.run();
+      assert.equal(run.status, "idle", JSON.stringify(run));
+      const state = await rig.snapshot();
+      assert.equal(
+        state.work[0].nextStep,
+        "done",
+        "the hosted gateway path is unchanged for nonlocal targets",
+      );
+      assert.equal(reads, 0, "the local capability is never consulted");
+    } finally {
+      await rig.ctx.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "local release: another scope-0 repository cannot consume the Sentinel local receipt",
+  async () => {
+    // The explicit local Sentinel scope is exactly ubiquity/sentinel at
+    // installation 0. A different repository that also uses scope 0 is not
+    // local: its delivery record must take the hosted path and never even
+    // consult the Sentinel local receipt capability, let alone consume an
+    // accepted Sentinel receipt returned by it.
+    const rig = await makeRig("localotherscope", {
+      summaries: false,
+      configOverrides: {
+        repository: OTHER_SCOPE_ZERO_REPO,
+        adapter: { kind: "github" },
+      },
+    });
+    try {
+      const request = releaseRequest("release-other-scope-1", {
+        target: {
+          repository: OTHER_SCOPE_ZERO_REPO,
+          environment: "production",
+        },
+        revision: SHA3,
+        source: {
+          pullRequest: 12,
+          reviewRequestId: "review-req-other-scope-1",
+          reviewReceiptId: "review-receipt-other-scope-1",
+          head: SHA1,
+          base: SHA2,
+        },
+        createdAt: T0,
+      });
+      const record = workRecord("other-scope-delivery-1", {
+        repository: OTHER_SCOPE_ZERO_REPO,
+        source: {
+          kind: "issue",
+          id: String(LOCAL_DELIVERY_ISSUE),
+          revision: SHA1,
+        },
+        related: { incidentId: null, issueNumber: LOCAL_DELIVERY_ISSUE },
+        target: {
+          base: SHA2,
+          branch: null,
+          checkpoint: null,
+          head: SHA1,
+          pr: 12,
+        },
+        nextStep: "delivery",
+        updatedAt: T0 + 1000,
+      });
+      const seeded = await rig.store.writeRepair(
+        seededSnapshot([record], { releaseRequests: [request] }),
+        null,
+      );
+      assert.ok(seeded.ok && seeded.value.status === "applied");
+      // The capability offers the accepted SENTINEL local receipt for a
+      // Sentinel request; the other scope-0 repository must not be its
+      // consumer.
+      let reads = 0;
+      Object.assign(rig.store, {
+        readLocalRelease: () => {
+          reads++;
+          return Promise.resolve(
+            portOk(
+              localAcceptedReceipt(
+                localDeliveryRequest("release-local-1", SHA3),
+              ),
+            ),
+          );
+        },
+      });
+      const run = await rig.run();
+      assert.equal(run.status, "idle", JSON.stringify(run));
+      const state = await rig.snapshot();
+      assert.equal(
+        state.work[0].nextStep,
+        "delivery",
+        "another scope-0 repository never closes through the local receipt",
+      );
+      assert.equal(
+        reads,
+        0,
+        "the Sentinel local receipt capability is never consulted",
+      );
+      assert.equal(
+        rig.github.calls.filter((call) => call.startsWith("closeIssue"))
+          .length,
+        0,
+        "zero closure calls",
+      );
+    } finally {
+      await rig.ctx.cleanup();
+    }
+  },
+);
+
+/**
+ * Known-eligible issue source whose configured development ref read fails (no
+ * fresh base): the native relations resolve, so the run reaches the base read
+ * instead of stopping at the prerequisite read.
+ */
+class BaseRefUnavailableGithub extends RelationsFakeGithub {
+  override readRef(
+    ref: string,
+  ): Promise<PortResultV1<{ ref: string; sha: GitSha } | null>> {
+    if (ref.endsWith("refs/heads/development")) {
+      this.calls.push(`readRef:${ref}`);
+      return Promise.resolve(
+        portError("unavailable", "development ref read failed"),
+      );
+    }
+    return super.readRef(ref);
+  }
+}
+
+Deno.test(
+  "queued issue base: stale target base is refreshed before admission and history survives",
+  async () => {
+    const sourceIssue = issueRecord(1, {
+      title: "queued repair",
+      body: "body",
+      relations: { openBlockers: [], subIssueCount: 0 },
+    });
+    const github = new RelationsFakeGithub({ baseSha: SHA2 });
+    github.listed = [sourceIssue];
+    github.latest.set(1, sourceIssue);
+    const rig = makeMemoryRig(github);
+    const queued = workRecord("issue-1", {
+      source: { kind: "issue", id: "1", revision: SHA3 },
+      counters: { attempts: 2, retries: 2, reviewRounds: 3 },
+      firstSeenAt: T0 - 10_000,
+      createdAt: T0 - 9_000,
+      // The deterministic branch identity is already recorded: the first work
+      // step of the loop assigns a candidate branch when it is null, so seeding
+      // it is what lets the first single step reach the intended queued-base
+      // refresh instead of stopping at branch assignment.
+      target: {
+        base: SHA1,
+        branch: "sentinel/repair/issue-1",
+        checkpoint: null,
+        head: null,
+        pr: null,
+      },
+    });
+    const written = await rig.state.writeRepair(
+      seededSnapshot([queued]),
+      null,
+    );
+    assert.ok(written.ok && written.value.status === "applied");
+
+    // One step: only the base refresh is persisted; nothing is reserved yet.
+    const first = await rig.run(1);
+    assert.equal(first.status, "step_limit", JSON.stringify(first));
+    let state = await rig.snapshot();
+    assert.equal(state.work[0].target.base, SHA2);
+    assert.equal(state.work[0].source.revision, SHA3, "source revision kept");
+    assert.deepEqual(state.work[0].counters, {
+      attempts: 2,
+      retries: 2,
+      reviewRounds: 3,
+    });
+    assert.equal(state.work[0].id, queued.id);
+    assert.equal(state.work[0].createdAt, T0 - 9_000);
+    assert.equal(state.work[0].firstSeenAt, T0 - 10_000);
+    assert.equal(rig.model.requests.length, 0, "refresh never starts a model");
+    assert.equal(state.reservations.length, 0, "refresh reserves nothing");
+
+    // The next admission charges and runs against the refreshed base.
+    await rig.run(1);
+    assert.equal(rig.model.requests.length, 1);
+    assert.equal(rig.model.requests[0].base, SHA2);
+    state = await rig.snapshot();
+    assert.equal(state.reservations.length, 1);
+    assert.equal(state.reservations[0].head, SHA2);
+    // The third implementation start is admitted (the cap is three attempts).
+    assert.equal(state.work[0].counters.attempts, 3);
+    assert.equal(state.work[0].source.revision, SHA3);
+  },
+);
+
+Deno.test(
+  "queued issue base: an unavailable development ref reserves nothing",
+  async () => {
+    const sourceIssue = issueRecord(1, {
+      title: "queued repair",
+      body: "body",
+      relations: { openBlockers: [], subIssueCount: 0 },
+    });
+    const github = new BaseRefUnavailableGithub();
+    github.listed = [sourceIssue];
+    github.latest.set(1, sourceIssue);
+    const rig = makeMemoryRig(github);
+    const written = await rig.state.writeRepair(
+      seededSnapshot([
+        workRecord("issue-1", {
+          source: { kind: "issue", id: "1", revision: SHA1 },
+        }),
+      ]),
+      null,
+    );
+    assert.ok(written.ok && written.value.status === "applied");
+
+    const outcome = await rig.run();
+    assert.equal(outcome.status, "idle", JSON.stringify(outcome));
+    const state = await rig.snapshot();
+    assert.ok(
+      github.calls.includes("readRef:refs/heads/development"),
+      "the eligible issue reaches the unavailable base read",
+    );
+    assert.equal(rig.model.requests.length, 0);
+    assert.equal(state.reservations.length, 0);
+    assert.equal(state.work[0].target.base, SHA1, "base stays as recorded");
+    assert.equal(state.work[0].wait?.reason, "unavailable");
+    assert.equal(state.work[0].wait?.until, T0 + 60 * 60_000);
+    assert.deepEqual(state.work[0].counters, {
+      attempts: 0,
+      retries: 0,
+      reviewRounds: 0,
+    });
+  },
+);
+
+Deno.test(
+  "queued issue base: a saved candidate keeps its recorded base on the correction path",
+  async () => {
+    const sourceIssue = issueRecord(1, {
+      title: "queued repair",
+      body: "body",
+      relations: { openBlockers: [], subIssueCount: 0 },
+    });
+    const github = new RelationsFakeGithub({ baseSha: SHA2 });
+    github.listed = [sourceIssue];
+    github.latest.set(1, sourceIssue);
+    const rig = makeMemoryRig(github);
+    const correction = workRecord("issue-1", {
+      source: { kind: "issue", id: "1", revision: SHA1 },
+      target: {
+        base: SHA1,
+        branch: "sentinel/repair/issue-1",
+        checkpoint: null,
+        head: SHA3,
+        pr: 7,
+      },
+      nextStep: "work",
+      counters: { attempts: 1, retries: 0, reviewRounds: 1 },
+    });
+    // Without a completed, finding-bearing receipt for the CURRENT head the
+    // work step would wait on the existing review. The receipt binds the exact
+    // repository/PR/head/base and one unresolved P1 finding, so the run must
+    // actually correct the rejected candidate.
+    const rejected = reviewReceipt("review-receipt-1", {
+      repository: REPO,
+      pullRequest: { number: 7, head: SHA3, base: SHA1 },
+      outcome: "completed",
+      resultId: "result-1",
+      observedReviewer: "chatgpt-codex-connector[bot]",
+      submittedAt: T0,
+      completedAt: T0 + 1000,
+      observedAt: T0 + 1001,
+      findings: [{
+        id: "finding-1",
+        severity: "P1",
+        path: "src/app.ts",
+        message: "required fix",
+        fingerprint: "a".repeat(64),
+        resolved: false,
+        resolutionEvidence: null,
+      }],
+      unresolvedSeverities: ["P1"],
+    });
+    const written = await rig.state.writeRepair(
+      seededSnapshot([correction], { reviews: [rejected] }),
+      null,
+    );
+    assert.ok(written.ok && written.value.status === "applied");
+
+    // Exactly ONE step: this test asserts the one correction operation for the
+    // seeded rejected head. The fake always returns SHA3, the same head the
+    // review rejected, so any further step would "correct" that unchanged
+    // rejected fake head again and inflate the model/reservation counts; the
+    // single step exercises the correction path being asserted here.
+    await rig.run(1);
+    const state = await rig.snapshot();
+    assert.equal(rig.model.requests.length, 1);
+    assert.equal(
+      rig.model.requests[0].base,
+      SHA1,
+      "candidate correction is never rebased",
+    );
+    assert.equal(state.reservations[0].head, SHA1);
+    assert.equal(state.work[0].target.base, SHA1);
+    assert.ok(
+      !github.calls.includes("readRef:refs/heads/development"),
+      "saved-candidate work never reads the development ref",
+    );
+  },
+);

@@ -4,8 +4,11 @@ import assert from "node:assert/strict";
 
 import {
   createLocalRepositoryConfig,
+  ensureBareStateRepository,
+  ensureTaskCheckout,
   localCheckoutKey,
   type LocalRepairHostOptionsV1,
+  prepareSourceRepository,
   readAuthenticatedLogin,
   refreshDevelopment,
   renderLocalCodexConfig,
@@ -14,6 +17,7 @@ import {
   writeLocalModelResult,
 } from "../../src/host/local.ts";
 import { asWorkItemId } from "../../src/contracts/brands.ts";
+import type { GitSha } from "../../src/contracts/brands.ts";
 import { portError, portOk } from "../../src/contracts/ports.ts";
 import type {
   GitHubCooldownGateV1,
@@ -31,6 +35,7 @@ import { DurableGitHubCooldownGate } from "../../src/repair/github-cooldown.ts";
 import { LOOP_STOP_MARKER } from "../../src/repair/model-port.ts";
 import { FakeClock, FakeGithub, MemoryState } from "../repair/helpers.ts";
 import { REPO, SHA1, SHA3, T0 } from "../state/helpers.ts";
+import { gitRun, testGitEnv } from "../state/helpers.ts";
 
 Deno.test("local repository config parses with fixed local scope", () => {
   const config = createLocalRepositoryConfig();
@@ -46,13 +51,16 @@ Deno.test("local repository config parses with fixed local scope", () => {
   assert.equal(config.liveStartLimits?.perHour, 1);
   assert.equal(config.liveStartLimits?.perSevenDays, 168);
   assert.equal(config.sessionBound?.maxDurationMs, 1_200_000);
-  assert.equal(config.sessionBound?.maxOutputChars, 400_000);
+  assert.equal(config.sessionBound?.maxOutputChars, 4_000_000);
   assert.equal(config.retention, null);
   assert.equal(config.stabilityPolicy, null);
   assert.equal(config.build.projectId, null);
   assert.equal(config.build.acceptance, null);
   assert.equal(config.secretRef, "secret://host/injected/sentinel-local-owner");
   assert.ok(config.protectedPaths.includes("src/host/local.ts"));
+  assert.ok(config.protectedPaths.includes("src/contracts/local-release.ts"));
+  assert.ok(config.protectedPaths.includes("src/host/local-release.ts"));
+  assert.ok(config.protectedPaths.includes("src/host/local-supervisor.ts"));
   assert.ok(config.protectedPaths.includes("src/budget/"));
   assert.ok(!config.protectedPaths.includes("src/"));
   const specs = Object.values(config.commandRegistry.commands);
@@ -64,6 +72,17 @@ Deno.test("local repository config parses with fixed local scope", () => {
   assert.ok(replay !== undefined);
   assert.deepEqual(replay.args, ["task", "replay:capture"]);
 });
+
+/** Expected model shell PATH on this host: CommandLineTools Git when present. */
+function expectedShellPath(fallback: string): string {
+  const bin = "/Library/Developer/CommandLineTools/usr/bin";
+  try {
+    Deno.statSync(`${bin}/git`);
+  } catch {
+    return fallback;
+  }
+  return `${bin}:${fallback}`;
+}
 
 Deno.test("local Codex config isolates the model client", () => {
   const text = renderLocalCodexConfig({
@@ -87,6 +106,14 @@ Deno.test("local Codex config isolates the model client", () => {
   assert.match(text, /^":minimal" = "read"$/m);
   assert.match(text, /^"\/home\/\.codex\/packages\/standalone" = "read"$/m);
   assert.match(text, /^"\/bin\/deno" = "read"$/m);
+  assert.match(
+    text,
+    /^"\/Library\/Developer\/CommandLineTools\/usr\/share\/git-core" = "read"$/m,
+  );
+  assert.match(
+    text,
+    /^"\/Library\/Developer\/CommandLineTools\/usr\/bin" = "read"$/m,
+  );
   assert.match(text, /^"\/private\/tmp\/key" = "write"$/m);
   assert.match(text, /^"\/private\/deno\/key" = "write"$/m);
   assert.match(
@@ -100,6 +127,7 @@ Deno.test("local Codex config isolates the model client", () => {
   assert.match(text, /^enabled = false$/m);
   assert.match(text, /^inherit = "none"$/m);
   assert.match(text, /HOME = "\/private\/checkouts\/key"/);
+  assert.ok(text.includes(`PATH = "${expectedShellPath("/usr/bin:/bin")}"`));
   // allow_login_shell is top level, never nested in the shell policy table.
   const shell = text.slice(text.indexOf("[shell_environment_policy]"));
   assert.ok(!shell.includes("allow_login_shell"));
@@ -130,11 +158,20 @@ Deno.test("review Codex config is read-only", () => {
   assert.match(text, /^"\/bin\/deno" = "read"$/m);
   assert.match(
     text,
+    /^"\/Library\/Developer\/CommandLineTools\/usr\/share\/git-core" = "read"$/m,
+  );
+  assert.match(
+    text,
+    /^"\/Library\/Developer\/CommandLineTools\/usr\/bin" = "read"$/m,
+  );
+  assert.match(
+    text,
     /^\[permissions\.sentinel-review\.filesystem\.":workspace_roots"\]$/m,
   );
   assert.match(text, /^"\." = "read"$/m);
   assert.match(text, /^\[permissions\.sentinel-review\.network\]$/m);
   assert.match(text, /^enabled = false$/m);
+  assert.ok(text.includes(`PATH = "${expectedShellPath("/usr/bin:/bin")}"`));
   assert.ok(!text.includes('= "write"'));
   assert.ok(!text.includes("sentinel-local"));
 });
@@ -843,5 +880,441 @@ Deno.test(
     assert.ok(ref.ok, "an unrelated class method still works");
     assert.equal(ref.ok ? ref.value?.sha : null, SHA1);
     assert.deepEqual(other.calls, ["readRef:refs/heads/development"]);
+  },
+);
+
+/**
+ * Real temporary Git fixture for the checkout base tests: a source repository
+ * with two linear development commits plus an unrelated (divergent) root commit
+ * and a candidate commit, and a clean private state root. Credential-free local
+ * commands only; testGitEnv pins Git configuration and identity.
+ */
+async function checkoutFixture() {
+  const root = await Deno.makeTempDir({
+    dir: Deno.cwd(),
+    prefix: "sentinel-checkout-",
+  });
+  try {
+    const env = testGitEnv(`${root}/git-home`);
+    await Deno.mkdir(`${root}/git-home`, { recursive: true });
+    await Deno.mkdir(`${root}/scratch`, { recursive: true });
+    const source = `${root}/source`;
+    await Deno.mkdir(source, { recursive: true });
+    const git = (cwd: string, args: string[]) => gitRun(cwd, args, env);
+    const must = async (cwd: string, args: string[]) => {
+      const result = await git(cwd, args);
+      assert.ok(result.ok, `${args.join(" ")}: ${result.stderr}`);
+      return result.stdout.trim();
+    };
+    await must(source, ["init", "-q"]);
+    await Deno.writeTextFile(`${source}/file.txt`, "one\n");
+    await must(source, ["add", "file.txt"]);
+    await must(source, ["commit", "-qm", "one"]);
+    const oldBase = await must(source, ["rev-parse", "HEAD"]);
+    const branch = await must(source, ["rev-parse", "--abbrev-ref", "HEAD"]);
+    await Deno.writeTextFile(`${source}/file.txt`, "one\ntwo\n");
+    await must(source, ["commit", "-qam", "two"]);
+    const newBase = await must(source, ["rev-parse", "HEAD"]);
+    await must(source, ["checkout", "-q", "-b", "candidate", oldBase]);
+    await Deno.writeTextFile(`${source}/file.txt`, "candidate\n");
+    await must(source, ["commit", "-qam", "candidate"]);
+    const candidate = await must(source, ["rev-parse", "HEAD"]);
+    await must(source, ["checkout", "-q", "--orphan", "divergent"]);
+    await must(source, ["rm", "-q", "-rf", "."]);
+    await Deno.writeTextFile(`${source}/other.txt`, "divergent\n");
+    await must(source, ["add", "other.txt"]);
+    await must(source, ["commit", "-qm", "divergent"]);
+    const divergent = await must(source, ["rev-parse", "HEAD"]);
+    await must(source, ["checkout", "-q", branch]);
+    return {
+      root,
+      env,
+      git,
+      must,
+      source,
+      oldBase,
+      newBase,
+      candidate,
+      divergent,
+      key: await localCheckoutKey("issue-1"),
+      stateRoot: `${root}/state`,
+      scratch: `${root}/scratch`,
+      trustedPath: env.PATH ?? "/usr/bin:/bin",
+    };
+  } catch (error) {
+    await Deno.remove(root, { recursive: true }).catch(() => {});
+    throw error;
+  }
+}
+
+type CheckoutFixture = Awaited<ReturnType<typeof checkoutFixture>>;
+
+/** Request the checkout for the fixture key at the given exact base. */
+function requestCheckout(fixture: CheckoutFixture, base: string) {
+  return ensureTaskCheckout({
+    taskId: "issue-1",
+    base: base as GitSha,
+    key: fixture.key,
+    stateRoot: fixture.stateRoot,
+    sourcePath: fixture.source,
+    scratch: fixture.scratch,
+    trustedPath: fixture.trustedPath,
+  });
+}
+
+/** Exact revision of `rev` inside the fixture checkout. */
+async function checkoutRev(
+  fixture: CheckoutFixture,
+  rev: string,
+): Promise<string> {
+  return await fixture.must(
+    `${fixture.stateRoot}/checkouts/${fixture.key}`,
+    ["rev-parse", rev],
+  );
+}
+
+Deno.test(
+  "local checkout base: clean base movement advances the exact mapping",
+  async () => {
+    const fixture = await checkoutFixture();
+    try {
+      const checkout = `${fixture.stateRoot}/checkouts/${fixture.key}`;
+      const mappingPath = `${checkout}.json`;
+      const first = await requestCheckout(fixture, fixture.oldBase);
+      assert.ok(first.ok);
+      assert.equal(first.ok ? first.commitBase : null, fixture.oldBase);
+      // An extra ref proves the SAME object store/history is reused.
+      await fixture.must(checkout, [
+        "update-ref",
+        "refs/sentinel/probe",
+        fixture.oldBase,
+      ]);
+
+      const second = await requestCheckout(fixture, fixture.newBase);
+      assert.ok(second.ok);
+      assert.equal(second.ok ? second.commitBase : null, fixture.newBase);
+      assert.equal(await checkoutRev(fixture, "HEAD"), fixture.newBase);
+      assert.equal(
+        await checkoutRev(fixture, "refs/sentinel/probe"),
+        fixture.oldBase,
+      );
+      const status = await fixture.git(checkout, [
+        "status",
+        "--porcelain",
+        "--untracked-files=all",
+      ]);
+      assert.ok(status.ok, status.stderr);
+      assert.equal(status.stdout.trim(), "", "checkout stays clean");
+
+      const mapping = JSON.parse(await Deno.readTextFile(mappingPath)) as {
+        version: string;
+        kind: string;
+        taskId: string;
+        base: string;
+        key: string;
+      };
+      assert.equal(mapping.base, fixture.newBase);
+      assert.equal(mapping.taskId, "issue-1");
+      assert.equal(mapping.version, "v1");
+      assert.equal(mapping.kind, "local_checkout");
+      assert.equal(mapping.key, fixture.key);
+    } finally {
+      await Deno.remove(fixture.root, { recursive: true }).catch(() => {});
+    }
+  },
+);
+
+Deno.test(
+  "local checkout base: crash after movement before mapping publication recovers",
+  async () => {
+    const fixture = await checkoutFixture();
+    try {
+      const checkout = `${fixture.stateRoot}/checkouts/${fixture.key}`;
+      const mappingPath = `${checkout}.json`;
+      const first = await requestCheckout(fixture, fixture.oldBase);
+      assert.ok(first.ok);
+      await fixture.must(checkout, [
+        "update-ref",
+        "refs/sentinel/probe",
+        fixture.oldBase,
+      ]);
+      // Simulate the crash: the clean detached movement happened, the mapping
+      // publication did not.
+      await fixture.must(checkout, [
+        "checkout",
+        "-q",
+        "--detach",
+        fixture.newBase,
+      ]);
+      const stale = JSON.parse(await Deno.readTextFile(mappingPath)) as {
+        base: string;
+      };
+      assert.equal(stale.base, fixture.oldBase);
+
+      const recovered = await requestCheckout(fixture, fixture.newBase);
+      assert.ok(recovered.ok);
+      assert.equal(recovered.ok ? recovered.commitBase : null, fixture.newBase);
+      assert.equal(await checkoutRev(fixture, "HEAD"), fixture.newBase);
+      assert.equal(
+        await checkoutRev(fixture, "refs/sentinel/probe"),
+        fixture.oldBase,
+      );
+      const mapping = JSON.parse(await Deno.readTextFile(mappingPath)) as {
+        base: string;
+      };
+      assert.equal(mapping.base, fixture.newBase);
+    } finally {
+      await Deno.remove(fixture.root, { recursive: true }).catch(() => {});
+    }
+  },
+);
+
+Deno.test(
+  "local checkout base: untracked and dirty work refuses and is preserved",
+  async () => {
+    const fixture = await checkoutFixture();
+    try {
+      const checkout = `${fixture.stateRoot}/checkouts/${fixture.key}`;
+      const mappingPath = `${checkout}.json`;
+      const first = await requestCheckout(fixture, fixture.oldBase);
+      assert.ok(first.ok);
+
+      await Deno.writeTextFile(`${checkout}/untracked.txt`, "work\n");
+      const untracked = await requestCheckout(fixture, fixture.newBase);
+      assert.equal(untracked.ok, false, "untracked work refuses the movement");
+      assert.equal(await checkoutRev(fixture, "HEAD"), fixture.oldBase);
+      assert.equal(
+        (JSON.parse(await Deno.readTextFile(mappingPath)) as { base: string })
+          .base,
+        fixture.oldBase,
+      );
+      assert.equal(
+        await Deno.readTextFile(`${checkout}/untracked.txt`),
+        "work\n",
+      );
+
+      await Deno.remove(`${checkout}/untracked.txt`);
+      await Deno.writeTextFile(`${checkout}/file.txt`, "modified\n");
+      const dirty = await requestCheckout(fixture, fixture.newBase);
+      assert.equal(dirty.ok, false, "dirty work refuses the movement");
+      assert.equal(await checkoutRev(fixture, "HEAD"), fixture.oldBase);
+      assert.equal(
+        (JSON.parse(await Deno.readTextFile(mappingPath)) as { base: string })
+          .base,
+        fixture.oldBase,
+      );
+      assert.equal(
+        await Deno.readTextFile(`${checkout}/file.txt`),
+        "modified\n",
+      );
+    } finally {
+      await Deno.remove(fixture.root, { recursive: true }).catch(() => {});
+    }
+  },
+);
+
+Deno.test(
+  "local checkout base: saved candidate, divergent base and malformed mapping refuse",
+  async () => {
+    const fixture = await checkoutFixture();
+    try {
+      const checkout = `${fixture.stateRoot}/checkouts/${fixture.key}`;
+      const mappingPath = `${checkout}.json`;
+      const first = await requestCheckout(fixture, fixture.oldBase);
+      assert.ok(first.ok);
+
+      // A saved candidate head is never moved onto a new base.
+      await fixture.must(checkout, [
+        "fetch",
+        "--no-tags",
+        fixture.source,
+        fixture.candidate,
+      ]);
+      await fixture.must(checkout, [
+        "checkout",
+        "-q",
+        "--detach",
+        fixture.candidate,
+      ]);
+      const candidateRefused = await requestCheckout(fixture, fixture.newBase);
+      assert.equal(candidateRefused.ok, false);
+      assert.equal(await checkoutRev(fixture, "HEAD"), fixture.candidate);
+      assert.equal(
+        (JSON.parse(await Deno.readTextFile(mappingPath)) as { base: string })
+          .base,
+        fixture.oldBase,
+      );
+
+      // An unrelated (non-ancestor) requested base is refused untouched.
+      await fixture.must(checkout, [
+        "checkout",
+        "-q",
+        "--detach",
+        fixture.oldBase,
+      ]);
+      const divergentRefused = await requestCheckout(
+        fixture,
+        fixture.divergent,
+      );
+      assert.equal(divergentRefused.ok, false);
+      assert.equal(await checkoutRev(fixture, "HEAD"), fixture.oldBase);
+      assert.equal(
+        (JSON.parse(await Deno.readTextFile(mappingPath)) as { base: string })
+          .base,
+        fixture.oldBase,
+      );
+
+      // A malformed mapping preserves every byte and the checkout itself.
+      await Deno.writeTextFile(mappingPath, "{not json\n");
+      const malformedRefused = await requestCheckout(fixture, fixture.newBase);
+      assert.equal(malformedRefused.ok, false);
+      assert.equal(await Deno.readTextFile(mappingPath), "{not json\n");
+      assert.equal(await checkoutRev(fixture, "HEAD"), fixture.oldBase);
+    } finally {
+      await Deno.remove(fixture.root, { recursive: true }).catch(() => {});
+    }
+  },
+);
+
+async function localTestPathExists(path: string): Promise<boolean> {
+  try {
+    await Deno.lstat(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function localTestDirEntries(path: string): Promise<string[]> {
+  const names: string[] = [];
+  for await (const entry of Deno.readDir(path)) names.push(entry.name);
+  return names;
+}
+
+Deno.test(
+  "local durable git: absent and empty paths initialize, nonempty paths and symlinks are preserved",
+  async () => {
+    const fixture = await checkoutFixture();
+    try {
+      await Deno.mkdir(fixture.stateRoot, { recursive: true });
+      const options: LocalRepairHostOptionsV1 = {
+        stateRoot: fixture.stateRoot,
+        sourceDir: fixture.source,
+        controllerSha: SHA1,
+        githubToken: "dummy-token",
+        modelToken: "dummy-token",
+        codexExecutable: "/nonexistent/sentinel-test-codex",
+        denoExecutable: Deno.execPath(),
+        trustedPath: fixture.trustedPath,
+      };
+
+      // An absent bare state path is initialized in place.
+      const absentGit = `${fixture.root}/state.git`;
+      await ensureBareStateRepository(absentGit, options, fixture.scratch);
+      const absentBare = await fixture.git(absentGit, [
+        "rev-parse",
+        "--is-bare-repository",
+      ]);
+      assert.ok(absentBare.ok, absentBare.stderr);
+      assert.equal(absentBare.stdout.trim(), "true");
+
+      // An existing EMPTY state directory is still initialized, never skipped.
+      const emptyGit = `${fixture.root}/empty.git`;
+      await Deno.mkdir(emptyGit);
+      await ensureBareStateRepository(emptyGit, options, fixture.scratch);
+      const emptyBare = await fixture.git(emptyGit, [
+        "rev-parse",
+        "--is-bare-repository",
+      ]);
+      assert.ok(emptyBare.ok, emptyBare.stderr);
+      assert.equal(emptyBare.stdout.trim(), "true");
+
+      // An existing nonempty user directory is preserved exactly: no init and
+      // no reset of user files.
+      const keptGit = `${fixture.root}/kept.git`;
+      await Deno.mkdir(keptGit);
+      await Deno.writeTextFile(`${keptGit}/keep.txt`, "user work\n");
+      await ensureBareStateRepository(keptGit, options, fixture.scratch);
+      assert.equal(
+        await Deno.readTextFile(`${keptGit}/keep.txt`),
+        "user work\n",
+      );
+      assert.equal(
+        await localTestPathExists(`${keptGit}/HEAD`),
+        false,
+        "a nonempty path is never initialized over user files",
+      );
+
+      // A symlink is refused before any Git runs and its target is untouched.
+      const gitLinkTarget = `${fixture.root}/git-link-target`;
+      await Deno.mkdir(gitLinkTarget);
+      const gitLink = `${fixture.root}/git-link`;
+      const gitLinked = await new Deno.Command("/bin/ln", {
+        args: ["-s", gitLinkTarget, gitLink],
+        stdout: "null",
+        stderr: "null",
+      }).output();
+      assert.equal(gitLinked.code, 0, "the fixture symlink must be created");
+      await assert.rejects(
+        ensureBareStateRepository(gitLink, options, fixture.scratch),
+        (error: unknown) =>
+          error instanceof Error && error.message.includes(GIT_FAILED_TEXT),
+      );
+      assert.deepEqual(
+        await localTestDirEntries(gitLinkTarget),
+        [],
+        "a refused symlink never initializes its target",
+      );
+
+      // The source clone helper follows the same absent/empty/preserved rules.
+      const absentSource = `${fixture.root}/source-clone`;
+      await prepareSourceRepository(absentSource, options, fixture.scratch);
+      const absentHead = await fixture.git(absentSource, ["rev-parse", "HEAD"]);
+      assert.ok(absentHead.ok, absentHead.stderr);
+      assert.equal(absentHead.stdout.trim(), fixture.newBase);
+
+      const emptySource = `${fixture.root}/empty-source`;
+      await Deno.mkdir(emptySource);
+      await prepareSourceRepository(emptySource, options, fixture.scratch);
+      const emptyHead = await fixture.git(emptySource, ["rev-parse", "HEAD"]);
+      assert.ok(emptyHead.ok, emptyHead.stderr);
+      assert.equal(emptyHead.stdout.trim(), fixture.newBase);
+
+      const keptSource = `${fixture.root}/kept-source`;
+      await Deno.mkdir(keptSource);
+      await Deno.writeTextFile(`${keptSource}/keep.txt`, "user work\n");
+      await prepareSourceRepository(keptSource, options, fixture.scratch);
+      assert.equal(
+        await Deno.readTextFile(`${keptSource}/keep.txt`),
+        "user work\n",
+      );
+      assert.equal(
+        await localTestPathExists(`${keptSource}/.git`),
+        false,
+        "a nonempty source path is preserved, never reset by a clone",
+      );
+
+      const sourceLinkTarget = `${fixture.root}/source-link-target`;
+      await Deno.mkdir(sourceLinkTarget);
+      const sourceLink = `${fixture.root}/source-link`;
+      const sourceLinked = await new Deno.Command("/bin/ln", {
+        args: ["-s", sourceLinkTarget, sourceLink],
+        stdout: "null",
+        stderr: "null",
+      }).output();
+      assert.equal(sourceLinked.code, 0, "the fixture symlink must be created");
+      await assert.rejects(
+        prepareSourceRepository(sourceLink, options, fixture.scratch),
+        (error: unknown) =>
+          error instanceof Error && error.message.includes(GIT_FAILED_TEXT),
+      );
+      assert.deepEqual(
+        await localTestDirEntries(sourceLinkTarget),
+        [],
+        "a refused symlink never clones into its target",
+      );
+    } finally {
+      await Deno.remove(fixture.root, { recursive: true }).catch(() => {});
+    }
   },
 );

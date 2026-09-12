@@ -1,25 +1,23 @@
-# Sentinel repair polling workflow (Wave C wiring).
+# Sentinel repair polling workflow.
 #
-# Schedule: 7, 22, 37, 52 minutes past the hour (plan §4 / runtime tree).
-# Concurrency: one fixed non-cancelling group — concurrent repair runs are
-# never started, and a running job is never cancelled by a new schedule tick.
-#
-# Activation boundary: this runner is inert until the trusted host wiring for
-# src/main.ts exists. The entrypoint receives every capability (state store,
-# GitHub/Incident/Replay/Implementation ports, RollingStartBudget) from the
-# host; without that wiring `deno task repair:run` fails closed and no model,
-# GitHub, Deno or target action can occur. No credential, secret or
-# environment surface is defined here; the owner supplies those only at
-# authorized activation.
+# One serialized hourly pass uses the trusted hosted host in
+# src/host/actions.ts. The host persists its repair state on the dedicated
+# sentinel-state/repair ref, admits at most one gpt-5.6-luna/max start per
+# rolling hour (and 168 per rolling seven days), and keeps credentials out of
+# model children. Manual dispatch uses the same path.
 name: sentinel-repair
 
 on:
   schedule:
-    - cron: "7,22,37,52 * * * *"
+    - cron: "0 * * * *"
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
+  checks: read
+  statuses: read
+  issues: write
+  pull-requests: write
 
 concurrency:
   group: sentinel-repair
@@ -37,5 +35,13 @@ jobs:
       - uses: denoland/setup-deno@v2
         with:
           deno-version: v2.x
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install pinned Codex app-server
+        run: npm install --global @openai/codex@0.154.0
       - name: Repair polling run
-        run: deno task repair:run
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          UOS_AI_TOKEN: ${{ secrets.UOS_AI_TOKEN }}
+        run: deno task repair:actions

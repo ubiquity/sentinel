@@ -44,6 +44,7 @@ import { parseRepositoryConfigV1 } from "../contracts/repository-config.ts";
 import type { RepositoryConfigV1 } from "../contracts/repository-config.ts";
 import type { RepositoryIdentityV1 } from "../contracts/shared.ts";
 import { createRepairStateStore } from "../state/mod.ts";
+import { composeLocalReleaseReader } from "./local-release.ts";
 import { RollingStartBudget } from "../budget/mod.ts";
 import type { GitHubAuthProviderV1 } from "../github/auth.ts";
 import { GitHubApiClient } from "../github/client.ts";
@@ -79,7 +80,8 @@ const LOCAL_REPOSITORY: RepositoryIdentityV1 = {
 const REMOTE_URL = "https://github.com/ubiquity/sentinel.git";
 const API_BASE_URL = "https://api.github.com";
 const API_USER_URL = "https://api.github.com/user";
-const UOS_BASE_URL = "http://127.0.0.1:8000/v1";
+/** Local default; hosted Actions supplies the public UOS gateway explicitly. */
+export const DEFAULT_UOS_BASE_URL = "http://127.0.0.1:8000/v1";
 
 const GIT_TIMEOUT_MS = 120_000;
 const GIT_MAX_OUTPUT_BYTES = 1024 * 1024;
@@ -188,14 +190,16 @@ export function createLocalRepositoryConfig(): RepositoryConfigV1 {
       "AGENTS.md",
       "MASTER-PLAN.md",
       "docs/build-status.md",
-      "src/host/local.ts",
+      "src/contracts/local-release.ts",
+      "src/host/local-release.ts",
       "src/host/local-supervisor.ts",
+      "src/host/local.ts",
       "src/budget/",
     ],
     build: { projectId: null, acceptance: null },
     secretRef: "secret://host/injected/sentinel-local-owner",
     liveStartLimits: { perHour: 1, perSevenDays: 168 },
-    sessionBound: { maxDurationMs: 1_200_000, maxOutputChars: 400_000 },
+    sessionBound: { maxDurationMs: 1_200_000, maxOutputChars: 4_000_000 },
     retention: null,
     stabilityPolicy: null,
   });
@@ -215,7 +219,19 @@ export interface LocalCodexConfigInputV1 {
   denoExecutable: string;
   /** Exact extra writable grants outside the checkout (empty for review). */
   writeGrants: string[];
+  /** Trusted provider endpoint; local callers use the loopback default. */
+  baseUrl?: string;
 }
+
+/**
+ * Installed CommandLineTools Git directory. It precedes `/usr/bin` in the model
+ * shell PATH when present, avoiding the macOS xcrun shim.
+ */
+const COMMAND_LINE_TOOLS_BIN = "/Library/Developer/CommandLineTools/usr/bin";
+
+/** Read-only Git system configuration of that exact installed Git. */
+const COMMAND_LINE_TOOLS_GIT_CORE =
+  "/Library/Developer/CommandLineTools/usr/share/git-core";
 
 /**
  * Render the per-client Codex configuration: provider uos over the local
@@ -235,7 +251,7 @@ export function renderLocalCodexConfig(input: LocalCodexConfigInputV1): string {
     "",
     "[model_providers.uos]",
     'name = "uos"',
-    `base_url = "${UOS_BASE_URL}"`,
+    `base_url = "${input.baseUrl ?? DEFAULT_UOS_BASE_URL}"`,
     'wire_api = "responses"',
     "",
     "[model_providers.uos.auth]",
@@ -250,6 +266,8 @@ export function renderLocalCodexConfig(input: LocalCodexConfigInputV1): string {
     "",
     `[permissions.${profile}.filesystem]`,
     '":minimal" = "read"',
+    `${toml(COMMAND_LINE_TOOLS_GIT_CORE)} = "read"`,
+    `${toml(COMMAND_LINE_TOOLS_BIN)} = "read"`,
     `${toml(input.codexDistributionDir)} = "read"`,
     `${toml(input.denoExecutable)} = "read"`,
   ];
@@ -280,7 +298,7 @@ export function renderLocalCodexConfig(input: LocalCodexConfigInputV1): string {
     'inherit = "none"',
     "",
     "[shell_environment_policy.set]",
-    `PATH = ${toml(input.shellPath)}`,
+    `PATH = ${toml(localClientShellPath(input.shellPath))}`,
     `HOME = ${toml(input.shellHome)}`,
     `TMPDIR = ${toml(input.shellTmpDir)}`,
     `DENO_DIR = ${toml(input.shellDenoDir)}`,
@@ -526,6 +544,10 @@ export async function runLocalRepairHost(
       scratchDir: scratch,
       remoteUrl: stateGitPath,
     });
+    // The optional local-activation read capability is composed only here, on
+    // the privately owned facade: no other host receives it and no repair
+    // process ever writes these receipts.
+    Object.assign(state, composeLocalReleaseReader(input.stateRoot));
 
     // One durable gate for the remote refresh, the login read, the API client
     // and the port. It is constructed BEFORE the first remote Git fetch, so a
@@ -593,6 +615,26 @@ export async function runLocalRepairHost(
       tracker,
       clock,
     });
+    github.pushHead = () =>
+      Promise.resolve(portError(
+        "unavailable",
+        "Owner local-only iteration: publication and reviews are paused",
+      ));
+    github.createPullRequest = () =>
+      Promise.resolve(portError(
+        "unavailable",
+        "Owner local-only iteration: publication and reviews are paused",
+      ));
+    github.requestReview = () =>
+      Promise.resolve(portError(
+        "unavailable",
+        "Owner local-only iteration: publication and reviews are paused",
+      ));
+    github.mergePullRequest = () =>
+      Promise.resolve(portError(
+        "unavailable",
+        "Owner local-only iteration: publication and reviews are paused",
+      ));
     outcome = await runRepairEntrypoint({
       clock,
       state,
@@ -702,7 +744,7 @@ function unavailable<Value>(): PortResultV1<Value> {
   return portError("unavailable", UNAVAILABLE_DETAIL);
 }
 
-const unavailableIncidents: IncidentAdapter = {
+export const unavailableIncidents: IncidentAdapter = {
   listUnresolvedIncidents: (_cursor, _limit) =>
     Promise.resolve(unavailable<IncidentPageV1>()),
   readIncident: (_incidentId) =>
@@ -711,7 +753,7 @@ const unavailableIncidents: IncidentAdapter = {
     Promise.resolve(unavailable<EncryptedArtifactV1 | null>()),
 };
 
-const unavailableReplay: ReplayPort = {
+export const unavailableReplay: ReplayPort = {
   runReplay: (_request: ReplayRunRequestV1) =>
     Promise.resolve(unavailable<IsolatedReplayResultV1>()),
 };
@@ -720,7 +762,7 @@ const unavailableReplay: ReplayPort = {
 // GitHub composition (one client, one gate, one actor)
 // ---------------------------------------------------------------------------
 
-interface LocalGitHubInputV1 {
+export interface LocalGitHubInputV1 {
   clock: Clock;
   state: StateReadView & RepairStateWriter;
   gate: GitHubCooldownGateV1;
@@ -737,10 +779,12 @@ interface LocalGitHubInputV1 {
   trustedPath: string;
   codexExecutable: string;
   tracker: LocalSessionTracker;
+  /** Provider endpoint used by the isolated reviewer client. */
+  modelBaseUrl?: string;
 }
 
 /** Compose the one authenticated GitHub port over the shared cooldown gate. */
-function composeLocalGitHub(input: LocalGitHubInputV1): GitHubPort {
+export function composeLocalGitHub(input: LocalGitHubInputV1): GitHubPort {
   const repository = { ...LOCAL_REPOSITORY };
   const auth: GitHubAuthProviderV1 = {
     authorizationHeader: () => Promise.resolve(portOk(`Bearer ${input.token}`)),
@@ -864,7 +908,7 @@ function isLocalRepairIssue(issue: GitHubIssueV1): boolean {
 }
 
 /** Scoped Basic auth for trusted git only; never in a URL or config file. */
-function githubGitAuthEnv(token: string): Record<string, string> {
+export function githubGitAuthEnv(token: string): Record<string, string> {
   const basic = btoa(`x-access-token:${token}`);
   return {
     GIT_CONFIG_COUNT: "1",
@@ -919,7 +963,7 @@ export async function readAuthenticatedLogin(
   }
   if (
     typeof login !== "string" ||
-    !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(login)
+    !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:\[bot\])?$/.test(login)
   ) {
     throw new Error(STATIC_GITHUB_LOGIN);
   }
@@ -930,7 +974,7 @@ export async function readAuthenticatedLogin(
 // Implementation port: one persistent isolated checkout per task
 // ---------------------------------------------------------------------------
 
-interface LocalModelInputV1 {
+export interface LocalModelInputV1 {
   stateRoot: string;
   sourcePath: string;
   scratch: string;
@@ -940,6 +984,8 @@ interface LocalModelInputV1 {
   modelToken: string;
   tracker: LocalSessionTracker;
   clock: Clock;
+  /** Provider endpoint used by the isolated implementation client. */
+  modelBaseUrl?: string;
 }
 
 /**
@@ -949,7 +995,7 @@ interface LocalModelInputV1 {
  * receipt, and imports the exact candidate head into the trusted source
  * object repository before returning.
  */
-class LocalCheckoutModelPort implements ImplementationPort {
+export class LocalCheckoutModelPort implements ImplementationPort {
   constructor(private readonly input: LocalModelInputV1) {}
 
   async runModel(
@@ -984,6 +1030,7 @@ class LocalCheckoutModelPort implements ImplementationPort {
       codexExecutable: this.input.codexExecutable,
       denoExecutable: this.input.denoExecutable,
       trustedPath: this.input.trustedPath,
+      baseUrl: this.input.modelBaseUrl,
     });
 
     const commitBase = prepared.commitBase;
@@ -1049,7 +1096,7 @@ class LocalCheckoutModelPort implements ImplementationPort {
 }
 
 /** Create the one-time checkout at the exact base; reuse is exact-match only. */
-async function ensureTaskCheckout(input: {
+export async function ensureTaskCheckout(input: {
   taskId: string;
   base: GitSha;
   key: string;
@@ -1065,11 +1112,26 @@ async function ensureTaskCheckout(input: {
   const mappingPath = joinPath(checkoutsDir, `${input.key}.json`);
   if (await pathExists(checkout)) {
     const mapping = await readCheckoutMapping(mappingPath);
-    if (
-      mapping === null || mapping.taskId !== input.taskId ||
-      mapping.base !== input.base
-    ) {
+    if (mapping === null || mapping.taskId !== input.taskId) {
       return { ok: false };
+    }
+    if (mapping.base !== input.base) {
+      // Only the durable base advanced (queued issue work): reuse this exact
+      // checkout with a clean, verified movement instead of refusing the work.
+      // Any other divergence (saved candidate head, dirty worktree, non-ancestor
+      // base) is refused without touching the checkout or the mapping.
+      const advanced = await advanceTaskCheckout({
+        checkout,
+        mappingPath,
+        mapped: mapping,
+        base: input.base,
+        key: input.key,
+        sourcePath: input.sourcePath,
+        stateRoot: input.stateRoot,
+        scratch: input.scratch,
+        trustedPath: input.trustedPath,
+      });
+      if (!advanced) return { ok: false };
     }
   } else {
     if (await pathExists(mappingPath)) return { ok: false };
@@ -1146,6 +1208,108 @@ async function ensureTaskCheckout(input: {
   return { ok: true, checkout, commitBase: head };
 }
 
+/**
+ * Advance one reusable checkout from its mapped base to the newly requested
+ * base. Movement is allowed only when the mapped base is a real Git SHA and an
+ * ancestor of the requested base, the checkout is clean with no untracked work,
+ * and HEAD is exactly the mapped base (normal case) or exactly the requested
+ * base (crash between the clean checkout movement and the mapping publication).
+ * The requested exact SHA is fetched from the already-refreshed local source
+ * (never the network) and moved with an ordinary detached checkout — no force,
+ * reset or clean. The resulting exact HEAD and clean state are verified before
+ * the mapping is published atomically; prior objects and history are kept and
+ * nothing is recloned.
+ */
+async function advanceTaskCheckout(input: {
+  checkout: string;
+  mappingPath: string;
+  mapped: { taskId: string; base: string; version: string; kind: string };
+  base: GitSha;
+  key: string;
+  sourcePath: string;
+  stateRoot: string;
+  scratch: string;
+  trustedPath: string;
+}): Promise<boolean> {
+  const git = (args: string[]) =>
+    runTrustedGitResult({
+      args,
+      cwd: input.stateRoot,
+      scratch: input.scratch,
+      trustedPath: input.trustedPath,
+    });
+  const clean = async (): Promise<boolean> => {
+    const status = await git([
+      "-C",
+      input.checkout,
+      "status",
+      "--porcelain",
+      "--untracked-files=all",
+    ]);
+    return status.code === 0 && status.stdout.trim().length === 0;
+  };
+  // The mapped base is durable state: validate it as a SHA before any Git use.
+  if (!isGitSha(input.mapped.base)) return false;
+  if (!(await clean())) return false;
+  const headRead = await git(["-C", input.checkout, "rev-parse", "HEAD"]);
+  const head = headRead.code === 0 ? headRead.stdout.trim() : "";
+  if (!isGitSha(head)) return false;
+  // A saved candidate/checkpoint head is never moved.
+  const recovered = head === input.base;
+  if (!recovered && head !== input.mapped.base) return false;
+  // Prove ancestry read-only in the refreshed local source before writing any
+  // object into the checkout: a divergent requested base is refused untouched.
+  const ancestor = await git([
+    "-C",
+    input.sourcePath,
+    "merge-base",
+    "--is-ancestor",
+    input.mapped.base,
+    input.base,
+  ]);
+  if (ancestor.code !== 0) return false;
+  if (!recovered) {
+    const fetched = await git([
+      "-C",
+      input.checkout,
+      "fetch",
+      "--no-tags",
+      input.sourcePath,
+      input.base,
+    ]);
+    if (fetched.code !== 0) return false;
+    const detached = await git([
+      "-C",
+      input.checkout,
+      "-c",
+      "advice.detachedHead=false",
+      "checkout",
+      "--detach",
+      input.base,
+    ]);
+    if (detached.code !== 0) return false;
+  }
+  const movedHead = await git(["-C", input.checkout, "rev-parse", "HEAD"]);
+  if (movedHead.code !== 0 || movedHead.stdout.trim() !== input.base) {
+    return false;
+  }
+  if (!(await clean())) return false;
+  // Publish the updated mapping only after the verified move, atomically.
+  const temporary = `${input.mappingPath}.tmp`;
+  await writePrivateFile(
+    temporary,
+    JSON.stringify({
+      version: input.mapped.version,
+      kind: input.mapped.kind,
+      taskId: input.mapped.taskId,
+      base: input.base,
+      key: input.key,
+    }) + "\n",
+  );
+  await Deno.rename(temporary, input.mappingPath);
+  return true;
+}
+
 /** Fetch the exact candidate head into the trusted source object repo. */
 async function importCandidate(input: {
   sourcePath: string;
@@ -1180,7 +1344,7 @@ async function importCandidate(input: {
 }
 
 /** Write the isolated client home, token file and config for one task. */
-async function ensureTaskClient(input: {
+export async function ensureTaskClient(input: {
   clientHome: string;
   tmpDir: string;
   denoDir: string;
@@ -1189,6 +1353,7 @@ async function ensureTaskClient(input: {
   codexExecutable: string;
   denoExecutable: string;
   trustedPath: string;
+  baseUrl?: string;
 }): Promise<void> {
   await ensurePrivateDir(input.clientHome);
   await ensurePrivateDir(input.tmpDir);
@@ -1207,12 +1372,13 @@ async function ensureTaskClient(input: {
       codexDistributionDir: codexDistributionDir(input.codexExecutable),
       denoExecutable: input.denoExecutable,
       writeGrants: [input.tmpDir, input.denoDir],
+      baseUrl: input.baseUrl,
     }),
   );
 }
 
 /** Isolated read-only review client home, token file and profile config. */
-async function ensureReviewClient(input: {
+export async function ensureReviewClient(input: {
   reviewCheckout: string;
   reviewClientHome: string;
   reviewTmpDir: string;
@@ -1221,6 +1387,7 @@ async function ensureReviewClient(input: {
   codexExecutable: string;
   denoExecutable: string;
   trustedPath: string;
+  baseUrl?: string;
 }): Promise<void> {
   await ensurePrivateDir(input.reviewCheckout);
   await ensurePrivateDir(input.reviewClientHome);
@@ -1240,6 +1407,7 @@ async function ensureReviewClient(input: {
       codexDistributionDir: codexDistributionDir(input.codexExecutable),
       denoExecutable: input.denoExecutable,
       writeGrants: [],
+      baseUrl: input.baseUrl,
     }),
   );
 }
@@ -1265,7 +1433,7 @@ function codexChildEnv(
 // ---------------------------------------------------------------------------
 
 /** Every session this run opened, so close/settlement is verified once. */
-class LocalSessionTracker {
+export class LocalSessionTracker {
   private readonly sessions = new Set<CodexSessionV1>();
 
   open<Session extends CodexSessionV1>(factory: () => Session): Session {
@@ -1297,13 +1465,19 @@ class LocalSessionTracker {
 // Durable Git and filesystem helpers
 // ---------------------------------------------------------------------------
 
-/** Initialize the private bare state repository once; never clear it. */
-async function ensureBareStateRepository(
+/**
+ * Initialize the private bare state repository when it is absent or an empty
+ * directory; an existing nonempty path is preserved and its existing later
+ * validation still refuses it. Nothing is ever deleted or reset.
+ */
+export async function ensureBareStateRepository(
   stateGitPath: string,
   input: LocalRepairHostOptionsV1,
   scratch: string,
 ): Promise<void> {
-  if (await pathExists(stateGitPath)) return;
+  const existing = await durableGitPathState(stateGitPath);
+  if (existing === "symlink") throw new Error(STATIC_GIT_FAILED);
+  if (existing === "present") return;
   const result = await runTrustedGitResult({
     args: ["init", "--bare", stateGitPath],
     cwd: input.stateRoot,
@@ -1313,13 +1487,19 @@ async function ensureBareStateRepository(
   if (result.code !== 0) throw new Error(STATIC_GIT_FAILED);
 }
 
-/** Clone the trusted source object repository once; no hardlinks, no creds. */
-async function prepareSourceRepository(
+/**
+ * Clone the trusted source object repository when it is absent or an empty
+ * directory; no hardlinks, no creds. An existing nonempty path is preserved
+ * and its existing later validation still refuses it.
+ */
+export async function prepareSourceRepository(
   sourcePath: string,
   input: LocalRepairHostOptionsV1,
   scratch: string,
 ): Promise<void> {
-  if (await pathExists(sourcePath)) return;
+  const existing = await durableGitPathState(sourcePath);
+  if (existing === "symlink") throw new Error(STATIC_GIT_FAILED);
+  if (existing === "present") return;
   const result = await runTrustedGitResult({
     args: ["clone", "--no-hardlinks", input.sourceDir, sourcePath],
     cwd: input.stateRoot,
@@ -1327,6 +1507,31 @@ async function prepareSourceRepository(
     scratch,
   });
   if (result.code !== 0) throw new Error(STATIC_GIT_FAILED);
+}
+
+/**
+ * Classify a durable Git path before initialization: an absent path and an
+ * existing EMPTY directory are initialized in place, an existing nonempty
+ * directory or plain file is preserved (its existing later validation still
+ * refuses it), and a symlink is refused before any Git runs so initialization
+ * can never follow it outside the private state root. Nothing is deleted.
+ */
+async function durableGitPathState(
+  path: string,
+): Promise<"absent" | "empty" | "present" | "symlink"> {
+  let info: Deno.FileInfo;
+  try {
+    info = await Deno.lstat(path);
+  } catch (error) {
+    if (error instanceof Deno.errors.NotFound) return "absent";
+    throw error;
+  }
+  if (info.isSymlink) return "symlink";
+  if (!info.isDirectory) return "present";
+  for await (const _entry of Deno.readDir(path)) {
+    return "present";
+  }
+  return "empty";
 }
 
 /** Refresh the exact remote development ref through trusted authenticated git. */
@@ -1428,16 +1633,25 @@ async function runTrustedGitResult(
 
 async function readCheckoutMapping(
   mappingPath: string,
-): Promise<{ taskId: string; base: string } | null> {
+): Promise<
+  { taskId: string; base: string; version: string; kind: string } | null
+> {
   try {
     const parsed = JSON.parse(await Deno.readTextFile(mappingPath)) as {
       taskId?: unknown;
       base?: unknown;
+      version?: unknown;
+      kind?: unknown;
     };
     if (typeof parsed.taskId !== "string" || typeof parsed.base !== "string") {
       return null;
     }
-    return { taskId: parsed.taskId, base: parsed.base };
+    return {
+      taskId: parsed.taskId,
+      base: parsed.base,
+      version: typeof parsed.version === "string" ? parsed.version : "v1",
+      kind: typeof parsed.kind === "string" ? parsed.kind : "local_checkout",
+    };
   } catch {
     return null;
   }
@@ -1586,6 +1800,15 @@ function trustedGitPath(trustedPath: string): string {
 
 /** Installed Codex distribution directory derived from the executable path. */
 function codexDistributionDir(codexExecutable: string): string {
+  // npm's pinned @openai/codex package resolves its launcher through a
+  // node_modules tree rather than the owner's ~/.codex/packages layout. The
+  // trusted global node_modules root is the smallest read-only grant that
+  // lets the launcher load its optional platform binary and package files.
+  const nodeModules = "/node_modules/";
+  const nodeModulesIndex = codexExecutable.indexOf(nodeModules);
+  if (nodeModulesIndex >= 0) {
+    return codexExecutable.slice(0, nodeModulesIndex + nodeModules.length - 1);
+  }
   return joinPath(
     dirnamePath(dirnamePath(codexExecutable)),
     "packages",
@@ -1593,7 +1816,7 @@ function codexDistributionDir(codexExecutable: string): string {
   );
 }
 
-async function ensurePrivateDir(path: string): Promise<void> {
+export async function ensurePrivateDir(path: string): Promise<void> {
   await Deno.mkdir(path, { recursive: true, mode: 0o700 });
   await Deno.chmod(path, 0o700);
 }
@@ -1621,11 +1844,26 @@ function pathExistsSync(path: string): boolean {
   }
 }
 
+/**
+ * Model shell PATH: when this host actually has the installed CommandLineTools
+ * Git executable, its directory precedes `/usr/bin`, which on macOS is only an
+ * xcrun shim. The given PATH remains the fallback everywhere else.
+ */
+function localClientShellPath(trustedPath: string): string {
+  if (!pathExistsSync(joinPath(COMMAND_LINE_TOOLS_BIN, "git"))) {
+    return trustedPath;
+  }
+  const rest = trustedPath
+    .split(":")
+    .filter((dir) => dir !== COMMAND_LINE_TOOLS_BIN);
+  return [COMMAND_LINE_TOOLS_BIN, ...rest].join(":");
+}
+
 function toml(value: string): string {
   return JSON.stringify(value);
 }
 
-function joinPath(base: string, ...parts: string[]): string {
+export function joinPath(base: string, ...parts: string[]): string {
   let out = base.replace(/\/+$/, "");
   for (const part of parts) {
     out += "/" + part.replace(/^\/+|\/+$/g, "");
