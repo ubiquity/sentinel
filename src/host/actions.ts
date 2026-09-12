@@ -24,6 +24,7 @@ import {
   runActionsCiApproval,
 } from "./actions-ci.ts";
 import { readActionsReleaseReceipt } from "./actions-release.ts";
+import { createActionsCandidateRestorer } from "./actions-candidates.ts";
 import type { ReleaseRequestV1 } from "../contracts/release.ts";
 import { createRepairStateStore, DenoGitRunner } from "../state/mod.ts";
 import {
@@ -141,6 +142,21 @@ export async function runActionsRepairHost(): Promise<
 
   const tracker = new LocalSessionTracker();
   const http = fetchHttpTransport();
+  // Lazy candidate restoration for a fresh Actions clone: the exact durable
+  // candidate objects are fetched only when a review snapshot or an ancestry
+  // check actually needs them (never before the repair loop).
+  const gitExecutable = await resolveExecutable("git", trustedPath);
+  const candidates = createActionsCandidateRestorer({
+    state,
+    gate,
+    token: githubToken,
+    http,
+    clock,
+    sourcePath,
+    scratch,
+    trustedPath,
+    gitExecutable,
+  });
   const github = scopeLocalRepairIssues(composeLocalGitHub({
     clock,
     state,
@@ -158,6 +174,7 @@ export async function runActionsRepairHost(): Promise<
     trustedPath,
     codexExecutable,
     tracker,
+    ensureCandidateObjects: candidates.ensure,
     modelBaseUrl: ACTIONS_UOS_BASE_URL,
   }));
   const model = new LocalCheckoutModelPort({

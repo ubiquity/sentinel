@@ -197,6 +197,7 @@ export function createLocalRepositoryConfig(): RepositoryConfigV1 {
       "src/github/client.ts",
       "src/github/http.ts",
       "src/host/actions-ci.ts",
+      "src/host/actions-candidates.ts",
       "src/host/actions-preflight.ts",
       "src/host/actions-release.ts",
       "src/host/actions.ts",
@@ -795,6 +796,14 @@ export interface LocalGitHubInputV1 {
   trustedPath: string;
   codexExecutable: string;
   tracker: LocalSessionTracker;
+  /**
+   * Optional trusted capability: ensure the exact candidate base/head objects
+   * exist in the private source repository before a review snapshot capture or
+   * an ancestry check. Ordinary local callers omit it (behavior unchanged).
+   */
+  ensureCandidateObjects?: (
+    input: { base: GitSha; head: GitSha },
+  ) => Promise<PortResultV1<void>>;
   /** Provider endpoint used by the isolated reviewer client. */
   modelBaseUrl?: string;
 }
@@ -820,6 +829,17 @@ export function composeLocalGitHub(input: LocalGitHubInputV1): GitHubPort {
     repositoryDir: input.sourcePath,
     gitExecutable: trustedGitPath(input.trustedPath),
   });
+  const ensureCandidateObjects = input.ensureCandidateObjects;
+  // Lazy restore: the actual snapshot producer runs only after the exact
+  // durable candidate objects are available; a failed restore propagates as
+  // this operation's unavailability, never a host-wide exception.
+  const snapshotSource = ensureCandidateObjects === undefined ? snapshot : {
+    capture: async (value: { base: GitSha; head: GitSha }) => {
+      const ensured = await ensureCandidateObjects(value);
+      if (!ensured.ok) return ensured;
+      return await snapshot.capture(value);
+    },
+  };
   const reviewer = new CodexStructuredReviewer({
     provider: "uos",
     sessionCwd: input.reviewCheckout,
@@ -845,7 +865,7 @@ export function composeLocalGitHub(input: LocalGitHubInputV1): GitHubPort {
     publisher: input.login,
     clock: input.clock,
     ownerRunId: input.invocationId,
-    snapshot,
+    snapshot: snapshotSource,
     reviewer,
     maxActiveReviews: 1,
   });
@@ -870,6 +890,19 @@ export function composeLocalGitHub(input: LocalGitHubInputV1): GitHubPort {
     },
     includeIssueRelations: true,
   });
+  if (ensureCandidateObjects !== undefined) {
+    // Wrap the SAME executor instance the port holds (never a parallel one):
+    // a resumed merge proves ancestry only after the exact objects exist.
+    const originalIsAncestor = host.git.isAncestor.bind(host.git);
+    host.git.isAncestor = async (ancestor, descendant) => {
+      const ensured = await ensureCandidateObjects({
+        base: ancestor,
+        head: descendant,
+      });
+      if (!ensured.ok) return ensured;
+      return await originalIsAncestor(ancestor, descendant);
+    };
+  }
   return scopeLocalRepairIssues(host.port);
 }
 

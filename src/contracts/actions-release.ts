@@ -298,6 +298,7 @@ export function actionsOptionalAuthorityFiles(): readonly string[] {
     "src/host/actions-release.ts",
     "src/contracts/actions-release.ts",
     "src/host/actions-ci.ts",
+    "src/host/actions-candidates.ts",
   ];
 }
 

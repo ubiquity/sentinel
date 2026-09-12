@@ -302,7 +302,12 @@ export class GitHubPortImpl implements GitHubPort {
         return portError("conflict", "head ref moved");
       }
     }
-    // 2. Ordinary fast-forward only: the candidate must descend from the
+    // 2. The authenticated remote already advertises exactly this candidate:
+    // the prior publication is proven by that observation alone. No local
+    // ancestry check, no push and no model work; a conflicting or absent ref
+    // was already rejected above.
+    if (current.value === sha) return portOk("applied");
+    // 3. Ordinary fast-forward only: the candidate must descend from the
     // current head when the branch exists.
     if (current.value !== null) {
       const ancestor = await this.git.isAncestor(current.value, sha);
@@ -311,7 +316,7 @@ export class GitHubPortImpl implements GitHubPort {
         return portError("conflict", "push would not be a fast-forward");
       }
     }
-    // 3. Publish through the trusted executor (never forced). The executor
+    // 4. Publish through the trusted executor (never forced). The executor
     // atomically guards the exact advertised ref inside the push transaction;
     // a remote movement after this precheck is rejected, never applied.
     const pushed = await this.gatedRemoteCall(() =>
