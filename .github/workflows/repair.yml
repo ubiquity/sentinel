@@ -40,6 +40,26 @@ jobs:
           node-version: 22
       - name: Install pinned Codex app-server
         run: npm install --global @openai/codex@0.154.0
+      # GitHub-hosted Linux runners need unprivileged user namespaces for
+      # bubblewrap; same handling as openai/codex-action action.yml 289-315:
+      # https://github.com/openai/codex-action/blob/main/action.yml
+      # Ephemeral runner only; no model profile or host setting changes.
+      # Optional remediation: the in-process startup proof decides model
+      # availability, so a setup failure must not suppress deterministic
+      # bookkeeping; the host proof fails red when startup is unavailable.
+      - name: Enable Linux user namespaces for bubblewrap
+        continue-on-error: true
+        if: runner.os == 'Linux' && runner.environment == 'github-hosted'
+        run: |
+          set -euo pipefail
+          current_userns=$(sysctl -n kernel.unprivileged_userns_clone 2>/dev/null || true)
+          if [ -n "$current_userns" ] && [ "$current_userns" != "1" ]; then
+            sudo sysctl -w kernel.unprivileged_userns_clone=1
+          fi
+          current_apparmor=$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || true)
+          if [ -n "$current_apparmor" ] && [ "$current_apparmor" != "0" ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
       - name: Repair polling run
         env:
           GITHUB_TOKEN: ${{ github.token }}

@@ -23,6 +23,7 @@ import {
   REPAIR_RUN_CEILING_MS,
   runRepairCycle,
 } from "../../src/repair/loop.ts";
+import { runRepairEntrypoint } from "../../src/main.ts";
 import { DurableGitHubCooldownGate } from "../../src/repair/github-cooldown.ts";
 import type { FakeGithubOptionsV1, FakeReplayOptionsV1 } from "./helpers.ts";
 import {
@@ -104,6 +105,10 @@ function makeRig(
     readPrAdvanceMs?: number;
     /** Incident summary/evidence source for intake-created records. */
     incidents?: boolean;
+    /** Exercise the trusted option through the actual entrypoint. */
+    viaEntrypoint?: boolean;
+    /** Trusted host startup result; false refuses every NEW model start. */
+    modelStartsEnabled?: boolean;
   } = {},
 ): RigV1 {
   const clock = new FakeClock(T0);
@@ -133,19 +138,28 @@ function makeRig(
     ? new AdvancingFakeReplay(clock, options.replayAdvanceMs, options.replay)
     : new FakeReplay(options.replay);
   const model = new FakeModel({ head: SHA3, changedPaths: ["src/app.ts"] });
-  const run = (deadlineMs = 3 * 60 * MINUTE) =>
-    runRepairCycle({
-      clock,
-      state,
-      configs,
-      controllerSha: SHA1,
-      github,
-      githubCooldown,
-      incidents,
-      replay,
-      model,
-      budget,
-    }, { deadline: clock.now() + deadlineMs, stepLimit: 32 });
+  const deps = {
+    clock,
+    state,
+    configs,
+    controllerSha: SHA1,
+    github,
+    githubCooldown,
+    incidents,
+    replay,
+    model,
+    budget,
+  };
+  const run = (deadlineMs = 3 * 60 * MINUTE) => {
+    const deadline = clock.now() + deadlineMs;
+    return options.viaEntrypoint === true
+      ? runRepairEntrypoint(deps, {
+        deadline,
+        stepLimit: 32,
+        modelStartsEnabled: options.modelStartsEnabled,
+      })
+      : runRepairCycle(deps, { deadline, stepLimit: 32 });
+  };
   const snapshot = async (): Promise<RepairStateSnapshotV1> => {
     const read = await state.readRepair();
     assert.ok(read.ok && read.value.status === "found");
@@ -966,5 +980,128 @@ Deno.test(
     assert.equal(state.work[0]!.intent, null);
     assert.equal(state.releaseRequests.length, 1);
     assert.equal(state.work[0]!.nextStep, "delivery");
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Deterministic-only runs (trusted host preflight failed): the option is
+// forwarded through the ACTUAL entrypoint, every NEW model start is refused by
+// the existing pre-admission guards without a reservation, and deterministic
+// bookkeeping/observation/publication still runs. No model call, no network.
+// ---------------------------------------------------------------------------
+
+Deno.test(
+  "deterministic-only: refused model start keeps an eligible implementation record unblocked and still observes a pending review",
+  async () => {
+    const rig = makeRig({
+      incidents: false,
+      viaEntrypoint: true,
+      modelStartsEnabled: false,
+    });
+    const implementing = workRecord("issue-1", {
+      source: { kind: "issue", id: "1", revision: SHA1 },
+      related: { incidentId: null, issueNumber: 1 },
+      classification: { severity: "P1", priority: null },
+      target: {
+        base: SHA1,
+        branch: "sentinel/repair/issue-1",
+        checkpoint: null,
+        head: null,
+        pr: null,
+      },
+      nextStep: "work",
+    });
+    const observing = workRecord("issue-3", {
+      source: { kind: "issue", id: "3", revision: SHA1 },
+      related: { incidentId: null, issueNumber: 3 },
+      classification: { severity: "P3", priority: 9 },
+      target: {
+        base: SHA1,
+        branch: "sentinel/repair/issue-3",
+        checkpoint: null,
+        head: SHA3,
+        pr: 8,
+      },
+      nextStep: "review",
+      wait: {
+        reason: "review_pending",
+        since: T0,
+        until: T0 + MINUTE,
+      },
+      counters: { attempts: 1, retries: 0, reviewRounds: 1 },
+    });
+    await seed(rig, seededSnapshot([implementing, observing]));
+    // Deterministic fake-clock progress only: the pending review wait elapses.
+    rig.clock.advance(2 * MINUTE);
+    const outcome = await rig.run(30 * MINUTE);
+    assert.equal(outcome.status, "margin", JSON.stringify(outcome));
+    assert.equal(
+      rig.model.requests.length,
+      0,
+      "no model start or review request",
+    );
+    const state = await rig.snapshot();
+    assert.equal(
+      state.reservations.length,
+      0,
+      "disabled starts charge nothing",
+    );
+    assert.ok(
+      rig.github.calls.includes("observeReview"),
+      "deterministic review observation still ran",
+    );
+    const blocked = state.work.find((work) => work.id === implementing.id)!;
+    assert.equal(blocked.nextStep, "work", "the record stays unblocked");
+    assert.equal(blocked.target.head, null);
+    assert.equal(blocked.intent, null);
+    assert.equal(blocked.blocker, null);
+    assert.equal(blocked.counters.attempts, 0, "counters are unchanged");
+    const observed = state.work.find((work) => work.id === observing.id)!;
+    assert.equal(observed.nextStep, "review");
+    assert.equal(observed.wait?.reason, "review_pending");
+  },
+);
+
+Deno.test(
+  "deterministic-only: candidate publication still runs while the review request is never started or reserved",
+  async () => {
+    const rig = makeRig({
+      incidents: false,
+      viaEntrypoint: true,
+      modelStartsEnabled: false,
+    });
+    // Already-published issue candidate whose deterministic publication runs
+    // before the review request is refused by the disabled model start.
+    const record = workRecord("issue-1", {
+      source: { kind: "issue", id: "1", revision: SHA1 },
+      related: { incidentId: null, issueNumber: 1 },
+      target: {
+        base: SHA1,
+        branch: "sentinel/repair/issue-1",
+        checkpoint: null,
+        head: SHA3,
+        pr: 7,
+      },
+      nextStep: "work",
+      counters: { attempts: 1, retries: 0, reviewRounds: 1 },
+    });
+    await seed(rig, seededSnapshot([record]));
+    const outcome = await rig.run(30 * MINUTE);
+    assert.equal(outcome.status, "margin", JSON.stringify(outcome));
+    assert.equal(rig.github.pushes.length, 1, "deterministic publication ran");
+    assert.ok(
+      !rig.github.calls.includes("requestReview"),
+      "the review request never started",
+    );
+    assert.equal(
+      rig.github.calls.filter((call) => call === "createPr").length,
+      0,
+      "no duplicate PR",
+    );
+    assert.equal(rig.model.requests.length, 0);
+    const state = await rig.snapshot();
+    assert.equal(state.reservations.length, 0, "no review reservation");
+    assert.equal(state.work[0]!.nextStep, "work");
+    assert.equal(state.work[0]!.target.head, SHA3);
   },
 );
