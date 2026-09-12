@@ -158,6 +158,7 @@ export async function runActionsRepairHost(): Promise<
     tracker,
     clock,
     modelBaseUrl: ACTIONS_UOS_BASE_URL,
+    localIteration: false,
   });
   const config = createLocalRepositoryConfig();
 

@@ -713,6 +713,11 @@ export interface CodexImplementationPortOptionsV1 {
   openSession(): Promise<CodexSessionV1>;
   /** Absolute path of the secret-free model checkout. */
   checkoutDir: string;
+  /**
+   * Trusted host mode for the owner-only local iteration pause. Repository
+   * identity is not a mode because hosted repair also operates on Sentinel.
+   */
+  localIteration?: boolean;
   /** Local checkout identity resolver (injectable for tests). */
   checkout?: CheckoutResolverV1;
   /**
@@ -761,6 +766,8 @@ export class CodexImplementationPort implements ImplementationPort {
   private readonly graceMs: number;
   /** Trusted configured named permission profile; null when omitted. */
   private readonly permissionProfile: string | null;
+  /** Whether this session is the explicitly paused owner-local iteration. */
+  private readonly localIteration: boolean;
 
   constructor(options: CodexImplementationPortOptionsV1) {
     this.options = options;
@@ -775,6 +782,7 @@ export class CodexImplementationPort implements ImplementationPort {
     this.graceMs = options.interruptSettlementGraceMs ??
       DEFAULT_INTERRUPT_SETTLEMENT_GRACE_MS;
     this.permissionProfile = options.permissionProfile ?? null;
+    this.localIteration = options.localIteration === true;
   }
 
   async runModel(
@@ -814,7 +822,7 @@ export class CodexImplementationPort implements ImplementationPort {
       // opened concrete session is accepted because open() is idempotent.
       session.open?.();
       await this.initialize(session);
-      const prompt = buildPrompt(request);
+      const prompt = buildPrompt(request, this.localIteration);
       const thread = await this.startThread(session, request, prompt);
       const turn = await this.startTurn(
         session,
@@ -2123,10 +2131,10 @@ function requireRecord(
   return value as Record<string, unknown>;
 }
 
-function buildPrompt(request: ModelRunRequestV1): string {
-  const localIteration = request.repository.owner === "ubiquity" &&
-    request.repository.name === "sentinel" &&
-    request.repository.installationId === 0;
+function buildPrompt(
+  request: ModelRunRequestV1,
+  localIteration: boolean,
+): string {
   const parts: string[] = [
     `Repository: ${request.repository.owner}/${request.repository.name}`,
     `Base revision: ${request.base}`,
