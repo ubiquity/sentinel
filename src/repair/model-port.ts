@@ -2172,7 +2172,8 @@ function buildPrompt(request: ModelRunRequestV1): string {
       "and check the actual failure instead of retrying the same failing " +
       "command unchanged. Stop broad source surveying once the target " +
       "behavior is understood and make the smallest edit; reserve most of " +
-      "the allowance for implementation and observed runtime behavior." +
+      "the allowance for implementation and focused validation of observed " +
+      "runtime behavior." +
       (localIteration
         ? " No tests or reviews are allowed in this local pass."
         : FOCUSED_TESTS_ALLOWED) +
