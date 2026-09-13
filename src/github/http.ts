@@ -27,6 +27,12 @@ export interface HttpRequestV1 {
   headers: ReadonlyMap<string, string>;
   /** UTF-8 request body; null when no body is sent. */
   body: string | null;
+  /**
+   * Redirect policy for this exact request. Omitted keeps the fail-closed
+   * default (`"error"`); `"manual"` is used only by the fixed job-log reader
+   * that must observe the provider's signed-log redirect itself.
+   */
+  redirect?: "error" | "manual";
 }
 
 export interface HttpResponseV1 {
@@ -84,7 +90,7 @@ export type FetchLikeV1 = (
     method?: string;
     headers?: Record<string, string>;
     body?: string;
-    redirect?: "error";
+    redirect?: "error" | "manual";
     signal?: AbortSignal;
   },
 ) => Promise<HttpResponseLikeV1>;
@@ -174,7 +180,7 @@ export function fromFetch(
         method: request.method,
         headers: Object.fromEntries(request.headers),
         body: request.body ?? undefined,
-        redirect: "error",
+        redirect: request.redirect ?? "error",
         signal: controller.signal,
       });
       // A fetch that settles after the deadline fired must release its body

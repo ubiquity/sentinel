@@ -1028,6 +1028,35 @@ Deno.test(
 );
 
 Deno.test(
+  "local checkout base: a fresh correction checkout starts at the rejected head",
+  async () => {
+    const fixture = await checkoutFixture();
+    try {
+      const prepared = await requestCheckout(fixture, fixture.candidate);
+      assert.ok(prepared.ok);
+      assert.equal(
+        prepared.ok ? prepared.commitBase : null,
+        fixture.candidate,
+        "the correction checkout is rooted at the rejected candidate",
+      );
+      assert.equal(await checkoutRev(fixture, "HEAD"), fixture.candidate);
+      const status = await fixture.git(
+        `${fixture.stateRoot}/checkouts/${fixture.key}`,
+        ["status", "--porcelain", "--untracked-files=all"],
+      );
+      assert.ok(status.ok, status.stderr);
+      assert.equal(
+        status.stdout.trim(),
+        "",
+        "fresh correction checkout is clean",
+      );
+    } finally {
+      await Deno.remove(fixture.root, { recursive: true }).catch(() => {});
+    }
+  },
+);
+
+Deno.test(
   "local checkout base: crash after movement before mapping publication recovers",
   async () => {
     const fixture = await checkoutFixture();

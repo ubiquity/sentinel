@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 import type { PortResultV1 } from "../../src/contracts/ports.ts";
 import { parseReviewReceiptV1 } from "../../src/contracts/review-receipt.ts";
 import type { ReviewReceiptV1 } from "../../src/contracts/review-receipt.ts";
+import { reviewOperationKey, reviewReceiptId } from "../../src/repair/keys.ts";
 import { GitHubInstallationTokenProvider } from "../../src/github/auth.ts";
 import type { GitHubAuthProviderV1 } from "../../src/github/auth.ts";
 import { fromFetch } from "../../src/github/http.ts";
@@ -110,11 +111,15 @@ function pullEntry(
   );
 }
 
+/** Canonical PR/head operation key and its opaque loop receipt id. */
+const CLEAN_OPERATION_KEY = reviewOperationKey(1, SHA1);
+const CLEAN_RECEIPT_ID = await reviewReceiptId(CLEAN_OPERATION_KEY, SHA1);
+
 function completedReceipt(): ReviewReceiptV1 {
   return parseReviewReceiptV1({
     version: "v1",
     kind: "review_receipt",
-    id: "review-review:work-1",
+    id: CLEAN_RECEIPT_ID,
     requestId: "req-1",
     expectedReviewer: REVIEWER,
     observedReviewer: REVIEWER,
@@ -293,7 +298,9 @@ Deno.test("client: auth provider throws or hangs returns a sanitized typed failu
 });
 
 Deno.test("client: write submitted into a lost response stays ambiguous", async () => {
-  const fixture = await structuredCompletedFixture();
+  const fixture = await structuredCompletedFixture({
+    operationKey: CLEAN_OPERATION_KEY,
+  });
   const script = mergeHappyScript(fixture);
   const service = new FakeReviewService();
   service.readResult = fixture.service;

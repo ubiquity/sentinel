@@ -189,11 +189,23 @@ export function createLocalRepositoryConfig(): RepositoryConfigV1 {
       ".github/workflows/",
       "AGENTS.md",
       "MASTER-PLAN.md",
+      "deno.json",
       "docs/build-status.md",
+      "src/contracts/actions-release.ts",
       "src/contracts/local-release.ts",
+      "src/contracts/ports.ts",
+      "src/github/client.ts",
+      "src/github/http.ts",
+      "src/host/actions-ci.ts",
+      "src/host/actions-candidates.ts",
+      "src/host/actions-preflight.ts",
+      "src/host/actions-release.ts",
+      "src/host/actions.ts",
       "src/host/local-release.ts",
       "src/host/local-supervisor.ts",
       "src/host/local.ts",
+      "src/main.ts",
+      "src/repair/loop.ts",
       "src/budget/",
     ],
     build: { projectId: null, acceptance: null },
@@ -784,6 +796,14 @@ export interface LocalGitHubInputV1 {
   trustedPath: string;
   codexExecutable: string;
   tracker: LocalSessionTracker;
+  /**
+   * Optional trusted capability: ensure the exact candidate base/head objects
+   * exist in the private source repository before a review snapshot capture or
+   * an ancestry check. Ordinary local callers omit it (behavior unchanged).
+   */
+  ensureCandidateObjects?: (
+    input: { base: GitSha; head: GitSha },
+  ) => Promise<PortResultV1<void>>;
   /** Provider endpoint used by the isolated reviewer client. */
   modelBaseUrl?: string;
 }
@@ -809,6 +829,17 @@ export function composeLocalGitHub(input: LocalGitHubInputV1): GitHubPort {
     repositoryDir: input.sourcePath,
     gitExecutable: trustedGitPath(input.trustedPath),
   });
+  const ensureCandidateObjects = input.ensureCandidateObjects;
+  // Lazy restore: the actual snapshot producer runs only after the exact
+  // durable candidate objects are available; a failed restore propagates as
+  // this operation's unavailability, never a host-wide exception.
+  const snapshotSource = ensureCandidateObjects === undefined ? snapshot : {
+    capture: async (value: { base: GitSha; head: GitSha }) => {
+      const ensured = await ensureCandidateObjects(value);
+      if (!ensured.ok) return ensured;
+      return await snapshot.capture(value);
+    },
+  };
   const reviewer = new CodexStructuredReviewer({
     provider: "uos",
     sessionCwd: input.reviewCheckout,
@@ -834,7 +865,7 @@ export function composeLocalGitHub(input: LocalGitHubInputV1): GitHubPort {
     publisher: input.login,
     clock: input.clock,
     ownerRunId: input.invocationId,
-    snapshot,
+    snapshot: snapshotSource,
     reviewer,
     maxActiveReviews: 1,
   });
@@ -859,6 +890,19 @@ export function composeLocalGitHub(input: LocalGitHubInputV1): GitHubPort {
     },
     includeIssueRelations: true,
   });
+  if (ensureCandidateObjects !== undefined) {
+    // Wrap the SAME executor instance the port holds (never a parallel one):
+    // a resumed merge proves ancestry only after the exact objects exist.
+    const originalIsAncestor = host.git.isAncestor.bind(host.git);
+    host.git.isAncestor = async (ancestor, descendant) => {
+      const ensured = await ensureCandidateObjects({
+        base: ancestor,
+        head: descendant,
+      });
+      if (!ensured.ok) return ensured;
+      return await originalIsAncestor(ancestor, descendant);
+    };
+  }
   return scopeLocalRepairIssues(host.port);
 }
 
@@ -993,6 +1037,14 @@ export interface LocalModelInputV1 {
   modelBaseUrl?: string;
   /** Explicit owner-local pause; hosted Actions must leave this false. */
   localIteration?: boolean;
+  /**
+   * Hosted capability that restores an exact durable candidate before a fresh
+   * correction checkout is created. Local callers omit it because their
+   * persistent source object repository already imports candidates.
+   */
+  ensureCandidateObjects?: (
+    input: { base: GitSha; head: GitSha },
+  ) => Promise<PortResultV1<void>>;
 }
 
 /**
@@ -1013,10 +1065,35 @@ export class LocalCheckoutModelPort implements ImplementationPort {
     ) {
       return portError("unavailable", STATIC_MODEL_INPUT);
     }
+    if (
+      request.checkoutBase !== undefined &&
+      !isGitSha(request.checkoutBase)
+    ) {
+      return portError("unavailable", STATIC_MODEL_INPUT);
+    }
+    const checkoutBase = request.checkoutBase ?? request.base;
+    if (!isGitSha(checkoutBase)) {
+      return portError("unavailable", STATIC_MODEL_INPUT);
+    }
+    if (
+      checkoutBase !== request.base &&
+      this.input.ensureCandidateObjects !== undefined
+    ) {
+      let restored: PortResultV1<void>;
+      try {
+        restored = await this.input.ensureCandidateObjects({
+          base: request.base,
+          head: checkoutBase,
+        });
+      } catch {
+        return portError("unavailable", STATIC_CHECKOUT);
+      }
+      if (!restored.ok) return portError("unavailable", STATIC_CHECKOUT);
+    }
     const key = await localCheckoutKey(request.taskId);
     const prepared = await ensureTaskCheckout({
       taskId: request.taskId,
-      base: request.base,
+      base: checkoutBase,
       key,
       stateRoot: this.input.stateRoot,
       sourcePath: this.input.sourcePath,
@@ -1071,7 +1148,13 @@ export class LocalCheckoutModelPort implements ImplementationPort {
       commitCandidate: committer,
     });
 
-    const result = await port.runModel(request);
+    // The durable request keeps the reviewed development base for state
+    // evidence, while the implementation port receives the exact rejected
+    // head so its committer and resolver continue that candidate's history.
+    const modelRequest = checkoutBase === request.base
+      ? request
+      : { ...request, base: checkoutBase };
+    const result = await port.runModel(modelRequest);
     if (!result.ok) {
       // The port detail is a bounded static diagnostic (never model output or
       // a credential). Hosted runs otherwise only expose the generic blocked

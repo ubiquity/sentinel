@@ -31,6 +31,8 @@ import type { RepositoryConfigV1 } from "../../src/contracts/repository-config.t
 import { candidateBranch, pushIntentKey } from "../../src/repair/keys.ts";
 import { DurableGitHubCooldownGate } from "../../src/repair/github-cooldown.ts";
 import { runRepairCycle } from "../../src/repair/loop.ts";
+import { runRepairEntrypoint } from "../../src/main.ts";
+import { parseActionsReleaseReceiptV1 } from "../../src/contracts/actions-release.ts";
 import {
   DEP_0,
   DEP_2,
@@ -126,6 +128,9 @@ interface RigV1 {
   replay: FakeReplay;
   model: FakeModel;
   run(deadlineMs?: number): Promise<Awaited<ReturnType<typeof runRepairCycle>>>;
+  entry(
+    deadlineMs?: number,
+  ): Promise<Awaited<ReturnType<typeof runRepairEntrypoint>>>;
   snapshot(): Promise<RepairStateSnapshotV1>;
   sequence(): Promise<number>;
   acceptRelease(requestId: string): Promise<void>;
@@ -188,6 +193,21 @@ async function makeRig(
   // this costs no real time.
   const run = (deadlineMs = 60 * 60_000) =>
     runRepairCycle({
+      clock,
+      state: store,
+      configs,
+      controllerSha: SHA1,
+      github,
+      githubCooldown,
+      incidents,
+      replay,
+      model,
+      budget,
+    }, { deadline: clock.now() + deadlineMs, stepLimit: 16 });
+  // The actual production entrypoint: the hosted receipt capability is only
+  // reachable through this path, exactly as the hosted Actions host wires it.
+  const entry = (deadlineMs = 60 * 60_000) =>
+    runRepairEntrypoint({
       clock,
       state: store,
       configs,
@@ -282,6 +302,7 @@ async function makeRig(
     replay,
     model,
     run,
+    entry,
     snapshot,
     sequence,
     acceptRelease,
@@ -1056,6 +1077,16 @@ Deno.test("P1 findings trigger a fresh bounded implementation/candidate/replay p
       rig.model.requests.length,
       2,
       "a P1 finding opens exactly one fresh implementation",
+    );
+    assert.equal(
+      rig.model.requests[1]?.base,
+      SHA1,
+      "correction preserves the reviewed development base in the request",
+    );
+    assert.equal(
+      rig.model.requests[1]?.checkoutBase,
+      SHA3,
+      "correction starts from the rejected candidate head",
     );
     state = await rig.snapshot();
     const work = state.work[0];
@@ -2589,5 +2620,240 @@ Deno.test(
       !github.calls.includes("readRef:refs/heads/development"),
       "saved-candidate work never reads the development ref",
     );
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Hosted Actions release receipt consumption (self scope 0). These cases run
+// through the actual runRepairEntrypoint with a real temporary Git state.
+// ---------------------------------------------------------------------------
+
+/** A strict hosted receipt for one exact self production request. */
+function actionsReceipt(request: ReleaseRequestV1) {
+  return parseActionsReleaseReceiptV1({
+    version: "v1",
+    kind: "actions_release_receipt",
+    request,
+    proof: {
+      repository: "ubiquity/sentinel",
+      workflowId: 353743354,
+      workflowPath: ".github/workflows/repair.yml",
+      branch: "development",
+      event: "schedule",
+      controllerSha: request.revision,
+      baseSha: request.revision,
+      runId: 34_722_408_066,
+      runAttempt: 1,
+      jobId: 103_628_114_113,
+      startedAt: T0 + 1000,
+      finishedAt: T0 + 3000,
+      terminalAt: T0 + 2000,
+      observedAt: T0 + 4000,
+      outcome: "idle",
+      startupReady: true,
+      settled: true,
+      login: "github-actions[bot]",
+      logDigest: "a".repeat(64),
+    },
+  });
+}
+
+/** Seed one delivery record + matching open request through the entry. */
+async function seedActionsDelivery(
+  rig: RigV1,
+  request: ReleaseRequestV1,
+  record: WorkRecordV1 = localDeliveryRecord(),
+): Promise<void> {
+  const seeded = await rig.store.writeRepair(
+    seededSnapshot([record], { releaseRequests: [request] }),
+    null,
+  );
+  assert.ok(seeded.ok && seeded.value.status === "applied");
+}
+
+Deno.test(
+  "actions release: a valid hosted receipt stays pending without supervisor proof",
+  async () => {
+    const rig = await makeRig("actionsaccept", {
+      summaries: false,
+      localScope: true,
+    });
+    try {
+      const request = localDeliveryRequest("release-actions-1", SHA3);
+      await seedActionsDelivery(rig, request);
+      let reads = 0;
+      Object.assign(rig.store, {
+        readActionsRelease: () => {
+          reads++;
+          return Promise.resolve(portOk(actionsReceipt(request)));
+        },
+      });
+      const run = await rig.entry();
+      assert.equal(run.status, "idle", JSON.stringify(run));
+      const state = await rig.snapshot();
+      assert.equal(state.work[0].nextStep, "delivery");
+      assert.equal(state.work[0].wait?.reason, "unavailable");
+      assert.equal(state.work[0].intent, null, "no closure intent");
+      assert.equal(
+        rig.github.calls.filter((call) => call.startsWith("closeIssue"))
+          .length,
+        0,
+        "zero closeIssue calls without supervisor proof",
+      );
+      assert.equal(reads, 1, "the hosted capability was consulted once");
+    } finally {
+      await rig.ctx.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "actions release: missing, error, throwing, malformed and wrong receipts wait",
+  async () => {
+    const cases: Array<{
+      name: string;
+      reader: () => Promise<PortResultV1<unknown>>;
+    }> = [
+      { name: "missing", reader: () => Promise.resolve(portOk(null)) },
+      {
+        name: "error",
+        reader: () => Promise.resolve(portError("unavailable", "down")),
+      },
+      { name: "throwing", reader: () => Promise.reject(new Error("boom")) },
+      {
+        name: "malformed",
+        reader: () =>
+          Promise.resolve(portOk({
+            version: "v1",
+            kind: "actions_release_receipt",
+          })),
+      },
+    ];
+    for (const testCase of cases) {
+      const rig = await makeRig(`actions-${testCase.name}`, {
+        summaries: false,
+        localScope: true,
+      });
+      try {
+        const request = localDeliveryRequest("release-actions-1", SHA3);
+        await seedActionsDelivery(rig, request);
+        Object.assign(rig.store, { readActionsRelease: testCase.reader });
+        const run = await rig.entry();
+        assert.ok(
+          run.status === "idle" || run.status === "margin",
+          `${testCase.name}: ${JSON.stringify(run)}`,
+        );
+        const state = await rig.snapshot();
+        assert.equal(state.work[0].nextStep, "delivery");
+        assert.equal(state.work[0].wait?.reason, "unavailable");
+      } finally {
+        await rig.ctx.cleanup();
+      }
+    }
+
+    const wrong = await makeRig("actions-wrong", {
+      summaries: false,
+      localScope: true,
+    });
+    try {
+      const request = localDeliveryRequest("release-actions-1", SHA3);
+      await seedActionsDelivery(wrong, request);
+      const other = localDeliveryRequest("release-actions-2", SHA3);
+      Object.assign(wrong.store, {
+        readActionsRelease: () =>
+          Promise.resolve(portOk(actionsReceipt(other))),
+      });
+      await wrong.entry();
+      const state = await wrong.snapshot();
+      assert.equal(state.work[0].nextStep, "delivery");
+    } finally {
+      await wrong.ctx.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "actions release: two self receipt authorities wait without consulting either",
+  async () => {
+    const rig = await makeRig("actions-dual", {
+      summaries: false,
+      localScope: true,
+    });
+    try {
+      const request = localDeliveryRequest("release-actions-1", SHA3);
+      await seedActionsDelivery(rig, request);
+      let localReads = 0;
+      let actionsReads = 0;
+      Object.assign(rig.store, {
+        readLocalRelease: () => {
+          localReads++;
+          return Promise.resolve(portOk(localAcceptedReceipt(request)));
+        },
+        readActionsRelease: () => {
+          actionsReads++;
+          return Promise.resolve(portOk(actionsReceipt(request)));
+        },
+      });
+      const run = await rig.entry();
+      assert.ok(run.status === "idle" || run.status === "margin");
+      const state = await rig.snapshot();
+      assert.equal(state.work[0].nextStep, "delivery");
+      assert.equal(localReads, 0, "no receipt authority is guessed");
+      assert.equal(actionsReads, 0, "no receipt authority is guessed");
+    } finally {
+      await rig.ctx.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "actions release: a foreign scope never reaches the hosted capability",
+  async () => {
+    const rig = await makeRig("actions-foreign", {
+      summaries: false,
+      localScope: true,
+    });
+    try {
+      const request = releaseRequest("release-gateway-1", {
+        target: { repository: REPO, environment: "production" },
+        revision: SHA3,
+        source: {
+          pullRequest: 12,
+          reviewRequestId: "review-req-gateway-1",
+          reviewReceiptId: "review-receipt-gateway-1",
+          head: SHA1,
+          base: SHA2,
+        },
+        createdAt: T0,
+      });
+      // The matching FOREIGN work record: repository REPO (installation 7),
+      // not the Sentinel local scope, so the Deno release path applies.
+      await seedActionsDelivery(rig, request, gatewayDeliveryRecord());
+      let actionsReads = 0;
+      Object.assign(rig.store, {
+        readActionsRelease: () => {
+          actionsReads++;
+          return Promise.resolve(portOk(null));
+        },
+      });
+      const run = await rig.entry();
+      assert.equal(run.status, "idle", JSON.stringify(run));
+      const state = await rig.snapshot();
+      assert.equal(state.work[0].nextStep, "delivery");
+      assert.equal(state.work[0].wait?.reason, "unavailable");
+      assert.equal(
+        actionsReads,
+        0,
+        "the hosted capability never attests another scope",
+      );
+      assert.equal(
+        rig.github.calls.filter((call) => call.startsWith("closeIssue"))
+          .length,
+        0,
+        "no closure for a foreign scope",
+      );
+    } finally {
+      await rig.ctx.cleanup();
+    }
   },
 );

@@ -498,13 +498,6 @@ export function reviewRecordId(operationKey: string): string {
   return `review-${operationKey}`.slice(0, 256);
 }
 
-/** Map a derived receipt id back to the operation key it was derived from. */
-export function operationKeyOfReceiptId(recordId: string): string {
-  return recordId.startsWith("review-")
-    ? recordId.slice("review-".length)
-    : recordId;
-}
-
 /**
  * Derive the strict `ReviewReceiptV1` for an observation. The receipt is
  * validated by the frozen parser, which is the only authority on lifecycle

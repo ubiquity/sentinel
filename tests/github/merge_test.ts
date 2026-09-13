@@ -51,10 +51,17 @@ import {
   T0,
 } from "./helpers.ts";
 import type { ScriptEntry } from "./helpers.ts";
+import { reviewOperationKey, reviewReceiptId } from "../../src/repair/keys.ts";
 
 const CLOCK = new FakeClock(T0 + 200_000);
+/** The canonical PR/head operation key the durable repair loop derives. */
+const CLEAN_OPERATION_KEY = reviewOperationKey(1, SHA1);
+/** The opaque canonical loop receipt id for that exact PR/head. */
+const CLEAN_RECEIPT_ID = await reviewReceiptId(CLEAN_OPERATION_KEY, SHA1);
 /** The canonical structured completion every positive merge fixture binds. */
-const CLEAN_COMPLETION = await structuredCompletedFixture();
+const CLEAN_COMPLETION = await structuredCompletedFixture({
+  operationKey: CLEAN_OPERATION_KEY,
+});
 const RULES_PATH =
   "/repos/ubiquity/sentinel/rules/branches/development?per_page=100&page=1";
 const RULESETS_PATH =
@@ -70,8 +77,8 @@ function completedCleanReceipt(
   return parseReviewReceiptV1({
     version: "v1",
     kind: "review_receipt",
-    // The receipt id is derived from the submission operation key.
-    id: "review-review:work-1",
+    // The canonical opaque loop receipt id for the exact PR/head operation.
+    id: CLEAN_RECEIPT_ID,
     requestId: "req-1",
     expectedReviewer: REVIEWER,
     observedReviewer: REVIEWER,
@@ -379,6 +386,7 @@ Deno.test("mergePullRequest: authoritative review must be current and match exac
   // The service reports the request as pending: blocking, not merging.
   const service = new FakeReviewService();
   service.readResult = completedServiceRead({
+    operationKey: CLEAN_OPERATION_KEY,
     status: "pending",
     resultId: null,
     completedAt: null,
@@ -443,7 +451,7 @@ Deno.test("mergePullRequest: wrong service receipt binding never authorizes", as
   }[] = [
     {
       name: "wrong-operation-key",
-      override: { operationKey: "review:work-2" },
+      override: { operationKey: reviewOperationKey(1, SHA2) },
     },
     { name: "wrong-pr", override: { prNumber: 2 } },
     { name: "wrong-head", override: { expectedHead: SHA3 } },
@@ -463,7 +471,10 @@ Deno.test("mergePullRequest: wrong service receipt binding never authorizes", as
   ];
   for (const item of cases) {
     const service = new FakeReviewService();
-    service.readResult = completedServiceRead(item.override);
+    service.readResult = completedServiceRead({
+      operationKey: CLEAN_OPERATION_KEY,
+      ...item.override,
+    });
     const { port, transport } = makePort({
       clock: CLOCK,
       script: happyScript(),
@@ -473,6 +484,46 @@ Deno.test("mergePullRequest: wrong service receipt binding never authorizes", as
     assert.equal(blockedReason(result), "review_required", item.name);
     assert.equal(putCount(transport), 0, item.name);
   }
+});
+
+Deno.test("mergePullRequest: the opaque canonical receipt id is not the operation key", async () => {
+  // The loop receipt id is an opaque digest, not a reversible encoding of the
+  // operation key; the exact PR/head key must still authorize the real merge.
+  assert.match(CLEAN_RECEIPT_ID, /^review-receipt:[0-9a-f]{64}$/);
+  assert.ok(!CLEAN_RECEIPT_ID.includes(CLEAN_OPERATION_KEY));
+  const { port, transport } = mergedPort(happyScript({
+    extra: [
+      httpRespond(
+        "PUT",
+        "/repos/ubiquity/sentinel/pulls/1/merge",
+        200,
+        mergeResponseWire(SHA3),
+      ),
+    ],
+  }));
+  const merged = await mergeCall(port);
+  assert.ok(merged.ok);
+  if (!merged.ok) return;
+  assert.equal(merged.value.outcome, "merged");
+  assert.equal(
+    putCount(transport),
+    1,
+    "the exact operation authorized one PUT",
+  );
+
+  // A different operation key never authorizes, with zero merge writes.
+  const wrongService = new FakeReviewService();
+  wrongService.readResult = completedServiceRead({
+    operationKey: reviewOperationKey(1, SHA2),
+  });
+  const wrong = makePort({
+    clock: CLOCK,
+    script: happyScript(),
+    review: wrongService,
+  });
+  const blocked = await mergeCall(wrong.port);
+  assert.equal(blockedReason(blocked), "review_required");
+  assert.equal(putCount(wrong.transport), 0);
 });
 
 Deno.test("mergePullRequest: human resolution requires the trusted authenticated resolver", async () => {
@@ -492,6 +543,7 @@ Deno.test("mergePullRequest: human resolution requires the trusted authenticated
   };
   const evidenceFixture = await structuredCompletedFixture({
     result: evidenceResult,
+    operationKey: CLEAN_OPERATION_KEY,
   });
   const findingBase = {
     id: "github-review-100-finding-0",

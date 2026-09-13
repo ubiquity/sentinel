@@ -19,6 +19,13 @@ import { DurableGitHubCooldownGate } from "../repair/github-cooldown.ts";
 import { fetchHttpTransport } from "../github/http.ts";
 import { runRepairEntrypoint } from "../main.ts";
 import { runActionsPreflight } from "./actions-preflight.ts";
+import {
+  type ActionsCiApprovalSummaryV1,
+  runActionsCiApproval,
+} from "./actions-ci.ts";
+import { readActionsReleaseReceipt } from "./actions-release.ts";
+import { createActionsCandidateRestorer } from "./actions-candidates.ts";
+import type { ReleaseRequestV1 } from "../contracts/release.ts";
 import { createRepairStateStore, DenoGitRunner } from "../state/mod.ts";
 import {
   composeLocalGitHub,
@@ -60,6 +67,8 @@ export interface ActionsRepairHostResultV1 {
   login: string;
   /** False when the model startup diagnostic failed for this run. */
   startupReady: boolean;
+  /** Bounded deterministic CI approval counts for this run. */
+  ciApproval: ActionsCiApprovalSummaryV1;
 }
 
 /** Run one hosted repair pass through the actual production entrypoint. */
@@ -133,6 +142,22 @@ export async function runActionsRepairHost(): Promise<
 
   const tracker = new LocalSessionTracker();
   const http = fetchHttpTransport();
+  // Lazy candidate restoration for a fresh Actions clone: the exact durable
+  // candidate objects are fetched only when a review snapshot, an ancestry
+  // check, or a correction checkout actually needs them (never before the
+  // repair loop).
+  const gitExecutable = await resolveExecutable("git", trustedPath);
+  const candidates = createActionsCandidateRestorer({
+    state,
+    gate,
+    token: githubToken,
+    http,
+    clock,
+    sourcePath,
+    scratch,
+    trustedPath,
+    gitExecutable,
+  });
   const github = scopeLocalRepairIssues(composeLocalGitHub({
     clock,
     state,
@@ -150,6 +175,7 @@ export async function runActionsRepairHost(): Promise<
     trustedPath,
     codexExecutable,
     tracker,
+    ensureCandidateObjects: candidates.ensure,
     modelBaseUrl: ACTIONS_UOS_BASE_URL,
   }));
   const model = new LocalCheckoutModelPort({
@@ -164,8 +190,20 @@ export async function runActionsRepairHost(): Promise<
     clock,
     modelBaseUrl: ACTIONS_UOS_BASE_URL,
     localIteration: false,
+    ensureCandidateObjects: candidates.ensure,
   });
   const config = createLocalRepositoryConfig();
+
+  // The hosted self release path reads its read-only Actions receipt through
+  // this exact capability, using the same token/http/gate/clock as every other
+  // authenticated request. No durable schema change and no writes.
+  Object.assign(state, {
+    readActionsRelease: (request: ReleaseRequestV1) =>
+      readActionsReleaseReceipt(
+        { gate, http, token: githubToken, clock },
+        request,
+      ),
+  });
 
   // Model startup availability is proved once, in-process, before the
   // deterministic pass. The probe already logs its bounded dummy-only failure;
@@ -216,6 +254,18 @@ export async function runActionsRepairHost(): Promise<
   if (failure !== null) throw failure;
   if (outcome === null) throw new Error(STATIC_RUNNER);
 
+  // Deterministic CI approval for durable self-target candidates runs after
+  // the loop and the tracker drain, even when model startup was unavailable.
+  // The helper is bounded and never throws, so an approval failure cannot
+  // prevent deterministic bookkeeping or change the original error semantics.
+  const ciApproval = await runActionsCiApproval({
+    state,
+    gate,
+    http,
+    token: githubToken,
+    clock,
+  });
+
   const result: ActionsRepairHostResultV1 = {
     status: "ran",
     outcome,
@@ -223,6 +273,7 @@ export async function runActionsRepairHost(): Promise<
     baseSha,
     login: ACTIONS_LOGIN,
     startupReady,
+    ciApproval,
   };
   console.log(JSON.stringify(result));
   // The deterministic pass and its drain completed and were logged above; the

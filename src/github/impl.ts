@@ -68,8 +68,8 @@ import { sanitizeAutoCloseKeywords } from "./text.ts";
 import {
   completedReviewMatchesReceipt,
   normalizeReviewObservation,
-  operationKeyOfReceiptId,
 } from "./review-normalize.ts";
+import { reviewOperationKey } from "../repair/keys.ts";
 import type { ReviewNormalizationV1 } from "./review-normalize.ts";
 import type {
   HumanResolutionVerifierV1,
@@ -302,7 +302,12 @@ export class GitHubPortImpl implements GitHubPort {
         return portError("conflict", "head ref moved");
       }
     }
-    // 2. Ordinary fast-forward only: the candidate must descend from the
+    // 2. The authenticated remote already advertises exactly this candidate:
+    // the prior publication is proven by that observation alone. No local
+    // ancestry check, no push and no model work; a conflicting or absent ref
+    // was already rejected above.
+    if (current.value === sha) return portOk("applied");
+    // 3. Ordinary fast-forward only: the candidate must descend from the
     // current head when the branch exists.
     if (current.value !== null) {
       const ancestor = await this.git.isAncestor(current.value, sha);
@@ -311,7 +316,7 @@ export class GitHubPortImpl implements GitHubPort {
         return portError("conflict", "push would not be a fast-forward");
       }
     }
-    // 3. Publish through the trusted executor (never forced). The executor
+    // 4. Publish through the trusted executor (never forced). The executor
     // atomically guards the exact advertised ref inside the push transaction;
     // a remote movement after this precheck is rejected, never applied.
     const pushed = await this.gatedRemoteCall(() =>
@@ -689,8 +694,28 @@ export class GitHubPortImpl implements GitHubPort {
     // alone never proves effective server-enforced strict checks. Unreadable,
     // unsupported, merge-queue or bypassable policies block.
     const protections = await this.readEffectiveProtections(pull.value.baseRef);
-    if (!protections.ok) return blocked("protection_required", pull.value.head);
-    if (!evaluateEffectiveProtections(protections.value).ok) {
+    if (!protections.ok) {
+      // Bounded operational diagnostic: the PR number and the typed error kind
+      // only; never a message, body, URL or credential.
+      console.error(JSON.stringify({
+        event: "sentinel_merge_protection_unavailable",
+        prNumber: merge.pullRequestNumber,
+        errorKind: protections.error.kind,
+      }));
+      return blocked("protection_required", pull.value.head);
+    }
+    const protectionEvaluation = evaluateEffectiveProtections(
+      protections.value,
+    );
+    if (!protectionEvaluation.ok) {
+      // Bounded operational diagnostic: the evaluator's own reason plus the
+      // normalized protections record; never raw API bodies or messages.
+      console.error(JSON.stringify({
+        event: "sentinel_merge_protection_blocked",
+        prNumber: merge.pullRequestNumber,
+        reason: protectionEvaluation.reason,
+        protections: protections.value,
+      }));
       return blocked("protection_required", pull.value.head);
     }
     // 5. Required checks all passing on the exact head.
@@ -915,10 +940,10 @@ export class GitHubPortImpl implements GitHubPort {
     if (!comments.ok) {
       return { ok: false, error: comments.error };
     }
-    // The service must answer for the EXACT submission the receipt records:
-    // the receipt id is derived from the operation key (`review-{key}`), so
-    // a same-head result for a different operation fails the binding.
-    const operationKey = operationKeyOfReceiptId(merge.review.id);
+    // The service must answer for the EXACT submission this receipt records:
+    // derive the operation key from the exact PR/head, never by reversing the
+    // opaque storage receipt id (which does not encode the operation key).
+    const operationKey = reviewOperationKey(prNumber, merge.expectedHead);
     const observation = await normalizeReviewObservation({
       request: {
         operationKey,
@@ -1132,6 +1157,12 @@ export class GitHubPortImpl implements GitHubPort {
         if (evidence === null) {
           const fetched = await this.client.readRepositoryRuleSet(ruleSetId);
           if (!fetched.ok) {
+            // Same event, ruleset id and typed error kind only.
+            console.error(JSON.stringify({
+              event: "sentinel_ruleset_policy_unavailable",
+              rulesetId: ruleSetId,
+              errorKind: fetched.error.kind,
+            }));
             bypassUnknown = true;
             continue;
           }
@@ -1147,6 +1178,23 @@ export class GitHubPortImpl implements GitHubPort {
         // binding and active enforcement; anything else is contradictory.
         bypassUnknown = true;
         continue;
+      }
+      // Bounded operational diagnostic on the FINAL evidence (fetched detail
+      // or detail cache) that passed the exact identity/enforcement checks:
+      // exact ruleset identity plus which bypass fields were omitted (the
+      // hosted token authority boundary). Never pre-fetch list evidence.
+      if (
+        evidence.bypassActors === null ||
+        evidence.currentUserCanBypass === null
+      ) {
+        console.error(JSON.stringify({
+          event: "sentinel_ruleset_policy_unavailable",
+          rulesetId: ruleSetId,
+          sourceType,
+          source,
+          bypassActorsPresent: evidence.bypassActors !== null,
+          currentUserCanBypassPresent: evidence.currentUserCanBypass !== null,
+        }));
       }
       if (evidence.bypassActors === null) {
         // Omitted without adequate permissions: the policy is unknown.
@@ -1321,5 +1369,12 @@ function blocked(
   reason: Extract<MergeOutcomeV1, { outcome: "blocked" }>["reason"],
   head: GitSha | null,
 ): PortResultV1<MergeOutcomeV1> {
+  // Bounded operational diagnostic: a fixed enum reason and an exact Git SHA
+  // (or null) only; the returned outcome is unchanged.
+  console.error(JSON.stringify({
+    event: "sentinel_merge_blocked",
+    reason,
+    head,
+  }));
   return portOk({ outcome: "blocked", reason, head });
 }
