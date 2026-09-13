@@ -1078,6 +1078,16 @@ Deno.test("P1 findings trigger a fresh bounded implementation/candidate/replay p
       2,
       "a P1 finding opens exactly one fresh implementation",
     );
+    assert.equal(
+      rig.model.requests[1]?.base,
+      SHA1,
+      "correction preserves the reviewed development base in the request",
+    );
+    assert.equal(
+      rig.model.requests[1]?.checkoutBase,
+      SHA3,
+      "correction starts from the rejected candidate head",
+    );
     state = await rig.snapshot();
     const work = state.work[0];
     assert.equal(work.nextStep, "review");

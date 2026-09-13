@@ -143,8 +143,9 @@ export async function runActionsRepairHost(): Promise<
   const tracker = new LocalSessionTracker();
   const http = fetchHttpTransport();
   // Lazy candidate restoration for a fresh Actions clone: the exact durable
-  // candidate objects are fetched only when a review snapshot or an ancestry
-  // check actually needs them (never before the repair loop).
+  // candidate objects are fetched only when a review snapshot, an ancestry
+  // check, or a correction checkout actually needs them (never before the
+  // repair loop).
   const gitExecutable = await resolveExecutable("git", trustedPath);
   const candidates = createActionsCandidateRestorer({
     state,
@@ -189,6 +190,7 @@ export async function runActionsRepairHost(): Promise<
     clock,
     modelBaseUrl: ACTIONS_UOS_BASE_URL,
     localIteration: false,
+    ensureCandidateObjects: candidates.ensure,
   });
   const config = createLocalRepositoryConfig();
 

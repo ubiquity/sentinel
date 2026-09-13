@@ -2200,10 +2200,14 @@ async function executeImplementationStep(
     };
   }
 
+  const rejectedHead = headRejectedByReview(context.snapshot, withIntent);
   const receipt = await deps.model.runModel({
     taskId: withIntent.id,
     repository: withIntent.repository,
     base: withIntent.target.base,
+    ...(rejectedHead && withIntent.target.head !== null
+      ? { checkoutBase: withIntent.target.head }
+      : {}),
     issue,
     evidence: withIntent.evidence,
     model: MODEL_ID,

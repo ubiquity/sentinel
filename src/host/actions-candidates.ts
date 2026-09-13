@@ -6,7 +6,8 @@
  * resumed review snapshot or a later merge-ancestry check would fail against
  * an absent object. This helper lazily restores exactly the durable candidate
  * bound to an existing nonterminal scope-0 work record, immediately before the
- * snapshot capture or the ancestry check that needs it. It performs at most
+ * snapshot capture, ancestry check, or correction checkout that needs it. It
+ * performs at most
  * one exact fetch, never mutates work/budget state, never starts a model and
  * never runs before deterministic bookkeeping.
  */

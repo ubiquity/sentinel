@@ -1037,6 +1037,14 @@ export interface LocalModelInputV1 {
   modelBaseUrl?: string;
   /** Explicit owner-local pause; hosted Actions must leave this false. */
   localIteration?: boolean;
+  /**
+   * Hosted capability that restores an exact durable candidate before a fresh
+   * correction checkout is created. Local callers omit it because their
+   * persistent source object repository already imports candidates.
+   */
+  ensureCandidateObjects?: (
+    input: { base: GitSha; head: GitSha },
+  ) => Promise<PortResultV1<void>>;
 }
 
 /**
@@ -1057,10 +1065,35 @@ export class LocalCheckoutModelPort implements ImplementationPort {
     ) {
       return portError("unavailable", STATIC_MODEL_INPUT);
     }
+    if (
+      request.checkoutBase !== undefined &&
+      !isGitSha(request.checkoutBase)
+    ) {
+      return portError("unavailable", STATIC_MODEL_INPUT);
+    }
+    const checkoutBase = request.checkoutBase ?? request.base;
+    if (!isGitSha(checkoutBase)) {
+      return portError("unavailable", STATIC_MODEL_INPUT);
+    }
+    if (
+      checkoutBase !== request.base &&
+      this.input.ensureCandidateObjects !== undefined
+    ) {
+      let restored: PortResultV1<void>;
+      try {
+        restored = await this.input.ensureCandidateObjects({
+          base: request.base,
+          head: checkoutBase,
+        });
+      } catch {
+        return portError("unavailable", STATIC_CHECKOUT);
+      }
+      if (!restored.ok) return portError("unavailable", STATIC_CHECKOUT);
+    }
     const key = await localCheckoutKey(request.taskId);
     const prepared = await ensureTaskCheckout({
       taskId: request.taskId,
-      base: request.base,
+      base: checkoutBase,
       key,
       stateRoot: this.input.stateRoot,
       sourcePath: this.input.sourcePath,
@@ -1115,7 +1148,13 @@ export class LocalCheckoutModelPort implements ImplementationPort {
       commitCandidate: committer,
     });
 
-    const result = await port.runModel(request);
+    // The durable request keeps the reviewed development base for state
+    // evidence, while the implementation port receives the exact rejected
+    // head so its committer and resolver continue that candidate's history.
+    const modelRequest = checkoutBase === request.base
+      ? request
+      : { ...request, base: checkoutBase };
+    const result = await port.runModel(modelRequest);
     if (!result.ok) {
       // The port detail is a bounded static diagnostic (never model output or
       // a credential). Hosted runs otherwise only expose the generic blocked

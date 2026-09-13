@@ -529,6 +529,12 @@ export interface ModelRunRequestV1 {
   repository: RepositoryIdentityV1;
   /** Secret-free checkout base; no credential or state-write fields exist. */
   base: GitSha;
+  /**
+   * Exact rejected candidate head to use as the checkout base for a review
+   * correction. The durable reviewed base remains in `base`; this field is
+   * present only when the correction must continue from that candidate.
+   */
+  checkoutBase?: GitSha;
   issue: { number: number; title: string; body: string } | null;
   evidence: EvidenceRefV1[];
   model: ModelIdV1;
