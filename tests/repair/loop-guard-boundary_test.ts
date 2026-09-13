@@ -379,8 +379,15 @@ async function probe(mode: Mode, fault: Fault | null = null) {
     ) {
       assert.equal(steers, 1, mode);
       assert.equal(interrupts, 1, mode);
+      assert.equal(result.value.outcome, "interrupted", mode);
       assert.equal(result.value.error, "failed_command_loop");
       assert.equal(result.value.candidate, null);
+      assert.equal(result.value.actual.terminalOrigin, "runtime", mode);
+      assert.equal(
+        result.value.actual.observedTerminalStatus,
+        mode === "stop-race" ? "completed" : "interrupted",
+        mode,
+      );
     } else if (mode === "output" || mode === "wrong-terminal") {
       assert.equal(interrupts, 1);
       assert.equal(result.value.candidate, null);
