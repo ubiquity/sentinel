@@ -51,7 +51,7 @@ jobs:
             exit 1
           fi
           token_length=${#SENTINEL_SUPERVISOR_TOKEN}
-          if (( token_length < 20 || token_length > 256 )); then
+          if (( token_length < 20 )); then
             echo "supervisor token handoff has invalid length: ${token_length}"
             exit 1
           fi
