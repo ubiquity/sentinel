@@ -41,6 +41,7 @@ jobs:
           private-key: ${{ secrets.SENTINEL_SUPERVISOR_APP_PRIVATE_KEY }}
           owner: ubiquity
           repositories: sentinel
+          permission-contents: write
       - name: Seed release state through the supervisor
         env:
           SENTINEL_SUPERVISOR_TOKEN: ${{ steps.app-token.outputs.token }}
