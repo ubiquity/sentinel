@@ -62,6 +62,7 @@ const steps: { name: string; args: string[] }[] = [
       "src/host/repair.ts",
       "src/host/release.ts",
       "src/host/run.ts",
+      "src/host/actions-supervisor.ts",
       "src/main.ts",
       "src/release-main.ts",
       "src/observe-main.ts",
