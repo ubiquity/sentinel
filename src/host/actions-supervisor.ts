@@ -105,7 +105,7 @@ function emptyReleaseState(now: number): ReleaseStateSnapshotV1 {
 
 function isToken(value: unknown): value is string {
   return typeof value === "string" && value.length >= 20 &&
-    value.length <= 256 && !/[\p{Cc}]/u.test(value);
+    !/[\p{Cc}]/u.test(value);
 }
 
 async function main(): Promise<void> {
