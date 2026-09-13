@@ -1,0 +1,32 @@
+# Deterministic dispatcher for the protected hosted supervisor.
+#
+# Scheduled runs execute from the default branch, so they dispatch the fixed
+# supervisor workflow explicitly at its protected source ref. This job has no
+# App key and cannot read the supervisor environment secret.
+name: sentinel-supervisor-dispatch
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+
+concurrency:
+  group: sentinel-supervisor-dispatch
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Dispatch the exact protected supervisor ref
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh api
+          --method POST
+          repos/ubiquity/sentinel/actions/workflows/supervisor.yml/dispatches
+          -f ref=sentinel-supervisor

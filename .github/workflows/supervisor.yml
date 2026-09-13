@@ -1,0 +1,46 @@
+# Fixed hosted Sentinel supervisor.
+#
+# This workflow is dispatched at the immutable protected source ref by
+# supervisor-dispatch.yml. The environment branch policy permits the App key
+# only for this ref. No candidate checkout, repair token or model credential
+# enters this job.
+name: sentinel-supervisor
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sentinel-supervisor
+  cancel-in-progress: false
+
+jobs:
+  bootstrap:
+    if: github.ref == 'refs/heads/sentinel-supervisor'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: sentinel-supervisor
+    steps:
+      - name: Checkout protected supervisor source
+        uses: actions/checkout@v4
+        with:
+          ref: sentinel-supervisor
+          fetch-depth: 1
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - name: Mint the scoped supervisor installation token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: 4926599
+          private-key: ${{ secrets.SENTINEL_SUPERVISOR_APP_PRIVATE_KEY }}
+          owner: ubiquity
+          repositories: sentinel
+      - name: Seed release state through the supervisor
+        env:
+          SENTINEL_SUPERVISOR_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: deno task supervisor:run
