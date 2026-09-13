@@ -618,7 +618,11 @@ export class GitStateStore implements StateStore {
         return portError("invalid", transitionMessage);
       }
 
-      let candidate: { pushed: boolean; head: GitSha };
+      let candidate: {
+        pushed: boolean;
+        head: GitSha;
+        pushFailureKind: PortErrorV1["kind"] | null;
+      };
       try {
         candidate = await this.buildAndPush(
           op,
@@ -647,6 +651,16 @@ export class GitStateStore implements StateStore {
       const verifyParsed = !verify.ok
         ? ({ status: "invalid" } as const)
         : this.parseLsRemote(verify.stdout, ref);
+      if (verifyParsed.status === "absent" && !candidate.pushed) {
+        // A successful authoritative reread proves that a failed push did not
+        // create the ref. Preserve the safe transport category so a trusted
+        // caller can distinguish authentication from local availability
+        // failure without exposing Git's raw stderr.
+        return portError(
+          candidate.pushFailureKind ?? "unavailable",
+          "state push was not applied; the remote ref remains absent",
+        );
+      }
       if (verifyParsed.status !== "found") {
         return portOk({ status: "ambiguous", currentHead: priorHead });
       }
@@ -679,7 +693,7 @@ export class GitStateStore implements StateStore {
    * Forms the candidate commit — parent pinned to the exact expected head
    * (no checkout/reset is ever performed; plumbing only) — with a unique
    * trusted write nonce in the commit message, then pushes without force.
-   * Returns the actual commit identity and whether the push reported success;
+   * Returns the actual commit identity, push result and safe failure category;
    * reconciliation (applied/conflict/ambiguous) happens in the caller.
    */
   private async buildAndPush(
@@ -688,7 +702,11 @@ export class GitStateStore implements StateStore {
     expectedHead: GitSha | null,
     kind: StateKind,
     ref: string,
-  ): Promise<{ pushed: boolean; head: GitSha }> {
+  ): Promise<{
+    pushed: boolean;
+    head: GitSha;
+    pushFailureKind: PortErrorV1["kind"] | null;
+  }> {
     const manifest: StateManifestV1 = {
       version: "v1",
       kind: MANIFEST_KIND[kind],
@@ -745,7 +763,11 @@ export class GitStateStore implements StateStore {
       "origin",
       `${ourHead}:${ref}`,
     ]);
-    return { pushed: push.ok, head: ourHead as GitSha };
+    return {
+      pushed: push.ok,
+      head: ourHead as GitSha,
+      pushFailureKind: push.ok ? null : this.classifyGitError(push),
+    };
   }
 
   private recordFiles(

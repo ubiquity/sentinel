@@ -28,6 +28,7 @@ import type { GitRunnerV1 } from "../../src/state/mod.ts";
 import {
   BarrierRunner,
   DEP_2,
+  FailedPushRunner,
   FakeLsRemoteRunner,
   gitRun,
   incidentEvidence,
@@ -910,6 +911,33 @@ Deno.test("state: successful push with lost response reconciles to applied", asy
     } else {
       assert.fail("expected a found snapshot");
     }
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+Deno.test("state: rejected push with an absent ref reports auth failure", async () => {
+  const ctx = await makeCtx("rejected-push");
+  try {
+    const runner = new FailedPushRunner(
+      new DenoGitRunner(`${ctx.tmp}/git-home`),
+    );
+    const store = storeAt(ctx, "a", "repair", runner);
+    const result = await store.writeRepair(
+      repairSnapshot({ work: [workRecord("w:rejected")] }),
+      null,
+    );
+    assert.ok(!result.ok);
+    if (!result.ok) {
+      assert.equal(result.error.kind, "auth_failed");
+      assert.equal(
+        result.error.detail,
+        "state push was not applied; the remote ref remains absent",
+      );
+    }
+    assert.equal(runner.pushAttempts, 1);
+    const read = await storeAt(ctx, "b", "repair").readRepair();
+    assert.ok(read.ok && read.value.status === "absent");
   } finally {
     await ctx.cleanup();
   }

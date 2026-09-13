@@ -54,7 +54,7 @@ export async function ensureHostedReleaseStateSeed(
     ),
   });
   const current = await state.readRelease();
-  if (!current.ok) throw new Error(STATIC_STATE);
+  if (!current.ok) throw new Error(`${STATIC_STATE} (${current.error.kind})`);
   if (current.value.status === "found") {
     return {
       status: "already_present",
@@ -65,7 +65,7 @@ export async function ensureHostedReleaseStateSeed(
 
   const seed = emptyReleaseState(now);
   const written = await state.writeRelease(seed, null);
-  if (!written.ok) throw new Error(STATIC_SEED);
+  if (!written.ok) throw new Error(`${STATIC_SEED} (${written.error.kind})`);
   if (written.value.status === "applied") {
     const afterWrite = await state.readRelease();
     if (!afterWrite.ok || afterWrite.value.status !== "found") {
@@ -105,7 +105,7 @@ function emptyReleaseState(now: number): ReleaseStateSnapshotV1 {
 
 function isToken(value: unknown): value is string {
   return typeof value === "string" && value.length >= 20 &&
-    value.length <= 256 && !/[\p{Cc}]/u.test(value);
+    !/[\p{Cc}]/u.test(value);
 }
 
 async function main(): Promise<void> {
@@ -130,8 +130,21 @@ async function main(): Promise<void> {
 if (import.meta.main) {
   try {
     await main();
-  } catch {
-    console.error(STATIC_SEED);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "";
+    if (
+      message === STATIC_TOKEN ||
+      message === STATIC_STATE ||
+      message === STATIC_SEED ||
+      /^hosted supervisor release state (?:is unavailable|could not be seeded) \((?:unavailable|auth_failed|rate_limited|not_found|conflict|invalid)\)$/
+        .test(
+          message,
+        )
+    ) {
+      console.error(message);
+    } else {
+      console.error(STATIC_SEED);
+    }
     Deno.exit(1);
   }
 }
