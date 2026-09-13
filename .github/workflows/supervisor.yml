@@ -42,6 +42,20 @@ jobs:
           owner: ubiquity
           repositories: sentinel
           permission-contents: write
+      - name: Verify scoped token handoff
+        env:
+          SENTINEL_SUPERVISOR_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          if [[ -z "$SENTINEL_SUPERVISOR_TOKEN" ]]; then
+            echo "supervisor token handoff is missing"
+            exit 1
+          fi
+          token_length=${#SENTINEL_SUPERVISOR_TOKEN}
+          if (( token_length < 20 || token_length > 256 )); then
+            echo "supervisor token handoff has invalid length: ${token_length}"
+            exit 1
+          fi
+          echo "supervisor token handoff present (length ${token_length})"
       - name: Seed release state through the supervisor
         env:
           SENTINEL_SUPERVISOR_TOKEN: ${{ steps.app-token.outputs.token }}
