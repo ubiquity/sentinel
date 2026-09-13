@@ -2,11 +2,12 @@
  * ActionsReleaseReceiptV1: the hosted, read-only release receipt for the
  * explicit self scope (`ubiquity/sentinel`, installationId 0).
  *
- * It attests that an exact merged release request was already accepted by a
- * successful real runtime execution of the trusted repair host: the exact
+ * It attests only that an exact merged release request has an exact successful
+ * real runtime execution of the trusted repair host: the exact
  * scheduled/dispatched workflow attempt, its `repair` job and
  * `Repair polling run` step, and that step's single terminal JSON record.
- * The receipt never carries raw logs, signed URLs or credentials — only the
+ * That is execution evidence, never supervised promotion/rollback proof, and
+ * the receipt never carries raw logs, signed URLs or credentials — only the
  * strict identity and a SHA-256 digest of the downloaded log text.
  */
 

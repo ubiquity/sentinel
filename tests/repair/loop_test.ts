@@ -2662,7 +2662,7 @@ async function seedActionsDelivery(
 }
 
 Deno.test(
-  "actions release: a bound hosted receipt closes the delivery record",
+  "actions release: a valid hosted receipt stays pending without supervisor proof",
   async () => {
     const rig = await makeRig("actionsaccept", {
       summaries: false,
@@ -2681,7 +2681,15 @@ Deno.test(
       const run = await rig.entry();
       assert.equal(run.status, "idle", JSON.stringify(run));
       const state = await rig.snapshot();
-      assert.equal(state.work[0].nextStep, "done");
+      assert.equal(state.work[0].nextStep, "delivery");
+      assert.equal(state.work[0].wait?.reason, "unavailable");
+      assert.equal(state.work[0].intent, null, "no closure intent");
+      assert.equal(
+        rig.github.calls.filter((call) => call.startsWith("closeIssue"))
+          .length,
+        0,
+        "zero closeIssue calls without supervisor proof",
+      );
       assert.equal(reads, 1, "the hosted capability was consulted once");
     } finally {
       await rig.ctx.cleanup();

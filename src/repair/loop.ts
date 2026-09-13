@@ -3797,9 +3797,11 @@ async function observeLocalReleaseAcceptance(
 /**
  * Hosted acceptance reads only the strict read-only Actions receipt for the
  * exact self production request. A missing, thrown, error, malformed or
- * differently-bound receipt waits; a valid receipt uses the existing accepted
- * closure intent logic. There is never a local or Deno fallback, and no
- * Actions proof exists for another repository or scope.
+ * differently-bound receipt waits; even a valid exactly bound receipt is only
+ * execution evidence, and without a separate hosted supervisor proving the
+ * durable candidate/prior/promotion/rollback chain it must remain pending.
+ * There is never a local or Deno fallback, and no Actions proof exists for
+ * another repository or scope.
  */
 async function observeActionsReleaseAcceptance(
   deps: RepairCycleDepsV1,
@@ -3830,7 +3832,9 @@ async function observeActionsReleaseAcceptance(
   if (!actionsReceiptBindsRequest(receipt, request)) {
     return waitRelease(deps, context, record, now);
   }
-  return await acceptRelease(deps, context, record, request.id, now);
+  // Raw successful execution is NOT supervised promotion/rollback proof: the
+  // delivery stays pending until a separate hosted supervisor exists.
+  return waitRelease(deps, context, record, now);
 }
 
 /** Existing accepted behavior: closure intent when an issue is attached. */
