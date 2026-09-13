@@ -68,8 +68,8 @@ import { sanitizeAutoCloseKeywords } from "./text.ts";
 import {
   completedReviewMatchesReceipt,
   normalizeReviewObservation,
-  operationKeyOfReceiptId,
 } from "./review-normalize.ts";
+import { reviewOperationKey } from "../repair/keys.ts";
 import type { ReviewNormalizationV1 } from "./review-normalize.ts";
 import type {
   HumanResolutionVerifierV1,
@@ -920,10 +920,10 @@ export class GitHubPortImpl implements GitHubPort {
     if (!comments.ok) {
       return { ok: false, error: comments.error };
     }
-    // The service must answer for the EXACT submission the receipt records:
-    // the receipt id is derived from the operation key (`review-{key}`), so
-    // a same-head result for a different operation fails the binding.
-    const operationKey = operationKeyOfReceiptId(merge.review.id);
+    // The service must answer for the EXACT submission this receipt records:
+    // derive the operation key from the exact PR/head, never by reversing the
+    // opaque storage receipt id (which does not encode the operation key).
+    const operationKey = reviewOperationKey(prNumber, merge.expectedHead);
     const observation = await normalizeReviewObservation({
       request: {
         operationKey,
