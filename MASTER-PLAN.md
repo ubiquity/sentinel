@@ -4,6 +4,15 @@ Owner planning session: 2026-09-06 America/New_York; created across 2026-09-07 0
 
 ## 1. Outcome and scope
 
+Owner clarification, 2026-09-14 12:39 UTC: GitHub Actions is the runtime, and
+the immediate repair target is ubiquity/sentinel itself. This supersedes the
+immediately preceding suggestion to target ai.ubq.fi for this execution. Use
+the working hosted supervisor and existing self-repair path. Gateway-specific
+release, retention and activation choices do not block this self-repair work.
+Preserve the current Luna/max rolling limits, reviewed PRs, exclusive runtime
+writer and protected authority surfaces. Gateway acceptance remains separate;
+do not count Sentinel receipts as gateway delivery evidence.
+
 Owner scope update, 2026-09-11: the immediate authorized outcome is to make
 Sentinel repair its own GitHub backlog, launch it locally, and monitor real
 autonomous work. This supersedes the first-version exclusions on self-repair
