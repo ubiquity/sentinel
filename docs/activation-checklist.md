@@ -1,14 +1,62 @@
 # Sentinel activation checklist
 
-Status corrected 2026-09-09: Sentinel PR #2 is merged at head `0d85c3a` and
-scheduled workflows run, but observation fails for missing authentication and
-repair/release fail for missing trusted host wiring. No standalone live repair
-or release acceptance is proved. The authoritative task states, owners and
+Current authority, 2026-09-14: hosted Sentinel has one accepted autonomous
+delivery, PR #30 / issue #18, at runtime `989af8a`; the separate gateway phase
+remains unaccepted. The authoritative task states, exact evidence, owners and
 next actions are in [build-status.md](build-status.md#active-task-register--astra-owned);
 only Astra may change that register. This document supplies activation details,
 not another task list. It is subordinate to
 [MASTER-PLAN.md](../MASTER-PLAN.md) and records the boundary between local
 proof and external activation.
+
+## Current gateway contract boundary
+
+The gateway repository's current instructions retire Deno hosting and require
+the existing VPS deployment path. The Deno-specific activation steps below are
+historical; they are not commands to execute against the current target. This
+continuation does not authorize a new target owner, secret interface, isolated
+service, or stability threshold.
+
+Read-only target inventory at 2026-09-14 09:12 UTC bound the local gateway source
+and `.data/current/.uos-release.json` to
+`4a65e8f9fc8d9d955b211f9cdc42b9d0d198c1b3`, archive digest
+`72fb81eae9e94fafebed893f8017bd027b95e4bcbfa7964b5946855e939b0dd7`.
+GitHub development was `e6501a44646c29d099ad901fb343e95960536576`.
+These are inventory snapshots, not a deployment lease or HTTP acceptance.
+
+The current target contract must preserve:
+
+- The existing trusted `deploy:vps` path, exclusive `.data/deploy.lock`, immutable
+  `.data/releases/<full-sha>` directories and the `current` symlink.
+- Exact source and archive identity, the configured service, persistent KV and
+  `.env`, and the existing separation between trusted deployment and model work.
+- The target's health SHA and `vps-<sha>` body/header identity checks, plus its
+  required authenticated direct Mac-to-VPS inference acceptance.
+- One repair writer and one trusted promotion owner, with current ownership and
+  any active work reconciled before transfer.
+
+The proposed replacement for the obsolete Deno release phase must save an exact
+healthy prior identity and promotion intent before switching, verify the exact
+candidate, and record interrupted monitoring and exact rollback. It must refuse
+to overwrite a newer unrelated revision. The existing VPS deployment command
+alone does not provide those Sentinel release receipts.
+
+Owner decisions still needed for that separate phase:
+
+- The disposable isolated VPS target: endpoint, service, storage and rollback
+  boundary, including which existing trusted operator owns its promotion.
+- Approval of the exact VPS release/receipt and ownership contract before
+  implementing or activating its replacement for Deno promotion.
+- Finite evidence retention and storage limits with an existing scoped key
+  source, adequate for the approved admission wait and evidence lifetime.
+- Objective telemetry: metrics, denominator, baseline, minimum samples and
+  failure thresholds. Preserve the required 30-minute continuous acceptance
+  with 30-second samples; missing coverage cannot pass.
+
+No qualifying final six-hour observation window is established. It can begin
+only after the required target activation and receipt gates. At least six
+observed hours remain after that point; hosted Actions history is separate
+evidence and cannot fill gateway sampling gaps.
 
 ## Historical evidence before the current task register
 

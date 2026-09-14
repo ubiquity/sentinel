@@ -1,10 +1,9 @@
 # Sentinel local run report.
 #
-# Reporting only: the runtime, state and gateway stay on the owner Mac. The
-# existing launchd job dispatches this workflow after each local pass, so there
-# is no schedule here and no self-hosted runner. The workflow makes no GitHub
-# write and no model or network call; it only records the sanitized status that
-# the local pass handed to workflow_dispatch.
+# Reporting only: this workflow renders the sanitized status a local Sentinel
+# execution produces. It makes no GitHub write and no model or network call,
+# and it is independent of where the local execution runs. An installed local
+# dispatcher may invoke it after a pass; no dispatcher is required here.
 name: Sentinel local run report
 
 on:
@@ -36,35 +35,62 @@ jobs:
           // never interpolated into shell text or into this code. Only fixed
           // sanitized fields are printed and written to GITHUB_STEP_SUMMARY.
           const MAX_INPUT_CHARS = 50000;
+          const MAX_INPUT_BYTES = 50000;
           const MAX_ITEMS = 200;
           const MAX_AGE_MS = 2 * 60 * 60 * 1000;
           const FUTURE_SKEW_MS = 5 * 60 * 1000;
           const MAX_TIME_MS = 8640000000000000;
           const SHA_RE = /^[0-9a-f]{40}$/;
           const KNOWN_STEPS = ["work", "review", "delivery", "blocked", "done"];
+          const KNOWN_SOURCE_KINDS = ["issue", "incident", "review_backlog"];
           const KNOWN_OUTCOMES = ["idle", "margin", "step_limit", "state_error", "source_error"];
           const ERROR_OUTCOMES = ["state_error", "source_error"];
+          const KNOWN_PURPOSES = ["implementation", "continuation", "retry", "review_request"];
+          const KNOWN_RESERVATION_OUTCOMES = ["reserved", "submitted", "ambiguous", "confirmed_not_submitted"];
+          const REPORT_VERSION = "v2";
+          const MAX_RECORD_ID_CHARS = 256;
+          const MAX_LOGIN_CHARS = 128;
+          const LIMIT_PER_HOUR = 1;
+          const LIMIT_PER_SEVEN_DAYS = 168;
+          const HOUR_WINDOW_MS = 3600000;
+          const WEEK_WINDOW_MS = 604800000;
           const HEADING = "# Sentinel local run report";
-          const PROVENANCE = "Execution is on the owner Mac; GitHub Actions records the repair-pass result. A green report alone does not prove delivery or a runtime update.";
+          const PROVENANCE = "Execution is a local Sentinel run and GitHub Actions records its sanitized result. A green report alone does not prove issue delivery or a runtime update.";
           const BUDGET_NOTE = "Waiting for the rolling-hour budget is normal and does not mean work was delivered.";
 
           const summaryPath = Deno.env.get("GITHUB_STEP_SUMMARY");
           const eventPath = Deno.env.get("GITHUB_EVENT_PATH");
+          const encoder = new TextEncoder();
 
           function isObject(value) {
             return typeof value === "object" && value !== null && !Array.isArray(value);
+          }
+          function hasOnlyKeys(value, keys) {
+            const names = Object.keys(value);
+            if (names.length !== keys.length) return false;
+            for (const name of names) if (!keys.includes(name)) return false;
+            return true;
           }
           function isSha(value) {
             return typeof value === "string" && SHA_RE.test(value);
           }
           function isTime(value) {
-            return typeof value === "number" && Number.isFinite(value) && Math.abs(value) <= MAX_TIME_MS;
+            return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= MAX_TIME_MS;
+          }
+          function isCount(value) {
+            return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+          }
+          function isPositiveInt(value) {
+            return typeof value === "number" && Number.isSafeInteger(value) && value >= 1;
+          }
+          function isBoundedString(value, max) {
+            return typeof value === "string" && value.length > 0 && value.length <= max;
           }
           function isIssueId(value) {
             return typeof value === "number" && Number.isSafeInteger(value) && value >= 1 && value <= 999999999;
           }
-          function isStepCount(value) {
-            return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+          function utf8Bytes(text) {
+            return encoder.encode(text).length;
           }
           function utc(ms) {
             return new Date(ms).toISOString().replace(".000Z", "Z");
@@ -100,10 +126,27 @@ jobs:
               "Result: NOT RECORDED - malformed local status (" + reason + ")",
               [
                 "No Sentinel local result was recorded for this dispatch.",
-                "The local launchd job dispatches this workflow after each pass, so the next pass reports again.",
+                "The report workflow is invoked again after a later local pass.",
               ],
               1,
             );
+          }
+          function unavailableDetails(status, ageMs) {
+            const details = [];
+            if (isTime(status.startedAt) && isTime(status.finishedAt)) {
+              details.push("- Local run window (UTC): " + utc(status.startedAt) + " to " + utc(status.finishedAt) + " (" + elapsed(status.finishedAt - status.startedAt) + ")");
+            } else {
+              details.push("- Local run window (UTC): not recorded");
+            }
+            details.push("- Dispatch age: " + (ageMs === null ? "not recorded" : elapsed(ageMs) + " (stale beyond 2 hours)"));
+            details.push("- Controller SHA: " + (isSha(status.controllerSha) ? status.controllerSha : "not recorded"));
+            details.push("- Outcome: " + status.outcome.status);
+            details.push("- Work items: not reported");
+            details.push("- Reservations: not reported");
+            details.push("- Next eligible local start (UTC): not reported (an unavailable report is not a permission statement)");
+            details.push("- Local state: unavailable (the local state read or projection failed, so no complete counts exist)");
+            details.push("- " + BUDGET_NOTE);
+            return details;
           }
 
           function main() {
@@ -118,6 +161,7 @@ jobs:
             }
             if (typeof raw !== "string" || raw.length === 0) reject("status input is missing");
             if (raw.length > MAX_INPUT_CHARS) reject("status input exceeds 50000 characters");
+            if (utf8Bytes(raw) > MAX_INPUT_BYTES) reject("status input exceeds 50000 UTF-8 bytes");
 
             let status;
             try {
@@ -128,92 +172,276 @@ jobs:
             if (!isObject(status)) reject("status input is not a JSON object");
             if (status.kind !== "sentinel_local_status") reject("kind is not sentinel_local_status");
             if (status.version !== "v1") reject("version is not v1");
+            if (status.reportVersion !== REPORT_VERSION) reject("reportVersion is not v2");
             if (status.model !== "gpt-5.6-luna" || status.reasoning !== "max") {
               reject("model policy is not gpt-5.6-luna with max reasoning");
             }
-            if (!isObject(status.limits) || status.limits.perHour !== 1 || status.limits.perSevenDays !== 168) {
+            if (!isObject(status.limits) || status.limits.perHour !== LIMIT_PER_HOUR || status.limits.perSevenDays !== LIMIT_PER_SEVEN_DAYS) {
               reject("admission limits are not 1 per hour and 168 per seven days");
             }
-            if (!isTime(status.startedAt) || !isTime(status.finishedAt)) {
-              reject("startedAt and finishedAt are not finite times");
+            if (!isBoundedString(status.invocationId, MAX_RECORD_ID_CHARS)) {
+              reject("invocationId is not a bounded non-empty string");
             }
-            if (status.finishedAt < status.startedAt) reject("finishedAt precedes startedAt");
-            if (!isSha(status.controllerSha)) reject("controller SHA is not 40 lowercase hex characters");
-            if (status.targetBaseSha !== null && !isSha(status.targetBaseSha)) {
-              reject("target base SHA is not null or 40 lowercase hex characters");
+            if (status.login !== null && !isBoundedString(status.login, MAX_LOGIN_CHARS)) {
+              reject("login is not null or a bounded non-empty string");
             }
             if (!isObject(status.outcome) || !KNOWN_OUTCOMES.includes(status.outcome.status)) {
               reject("outcome status is not a known value");
             }
+            if (status.outcome.status === "step_limit") {
+              if (!hasOnlyKeys(status.outcome, ["status", "steps"]) || !isCount(status.outcome.steps)) {
+                reject("step_limit outcome must carry only a nonnegative step count");
+              }
+            } else if (!hasOnlyKeys(status.outcome, ["status"])) {
+              reject("outcome status must not carry arbitrary detail");
+            }
             if (status.state !== undefined && status.state !== "unavailable") {
               reject("state marker is not a known value");
             }
-            if (status.nextEligibleStartAt !== undefined && status.nextEligibleStartAt !== null && !isTime(status.nextEligibleStartAt)) {
-              reject("nextEligibleStartAt is not a finite time");
+            const stateAvailable = status.state === undefined;
+            if (stateAvailable) {
+              if (!isSha(status.controllerSha)) reject("controller SHA is not 40 lowercase hex characters");
+            } else if (status.controllerSha !== null && !isSha(status.controllerSha)) {
+              reject("controller SHA is not null or 40 lowercase hex characters");
             }
-            if (status.work !== undefined && !Array.isArray(status.work)) reject("work is not an array");
-            if (status.reservations !== undefined && !Array.isArray(status.reservations)) {
-              reject("reservations is not an array");
+            if (status.targetBaseSha !== null && !isSha(status.targetBaseSha)) {
+              reject("target base SHA is not null or 40 lowercase hex characters");
             }
-            const work = status.work === undefined ? [] : status.work;
-            const reservations = status.reservations === undefined ? [] : status.reservations;
+            if (stateAvailable) {
+              if (!isTime(status.startedAt) || !isTime(status.finishedAt)) {
+                reject("startedAt and finishedAt are not valid observation times");
+              }
+            } else {
+              if (status.startedAt !== null && !isTime(status.startedAt)) {
+                reject("startedAt is not null or a valid time");
+              }
+              if (status.finishedAt !== null && !isTime(status.finishedAt)) {
+                reject("finishedAt is not null or a valid time");
+              }
+            }
+            const timesRecorded = isTime(status.startedAt) && isTime(status.finishedAt);
+            if (timesRecorded && status.finishedAt < status.startedAt) {
+              reject("finishedAt precedes startedAt");
+            }
+            if (!Array.isArray(status.work)) reject("work is not an array");
+            if (!Array.isArray(status.reservations)) reject("reservations is not an array");
+            const work = status.work;
+            const reservations = status.reservations;
             if (work.length > MAX_ITEMS || reservations.length > MAX_ITEMS) {
               reject("work or reservations exceed 200 items");
             }
-            for (const record of work) {
-              if (!isObject(record)) reject("a work entry is not an object");
-            }
-            for (const entry of reservations) {
-              if (!isObject(entry)) reject("a reservation entry is not an object");
+
+            let ageMs = null;
+            if (timesRecorded) {
+              const now = Date.now();
+              if (status.finishedAt > now + FUTURE_SKEW_MS) reject("finishedAt is in the future");
+              ageMs = Math.max(0, now - status.finishedAt);
+              if (ageMs > MAX_AGE_MS) {
+                report(
+                  "Result: NOT RECORDED - stale local status (finished more than 2 hours before dispatch)",
+                  [
+                    "- Local pass finished (UTC): " + utc(status.finishedAt),
+                    "- Dispatch age: " + elapsed(ageMs),
+                    "The report workflow is invoked again after a later local pass.",
+                  ],
+                  1,
+                );
+              }
             }
 
-            const now = Date.now();
-            if (status.finishedAt > now + FUTURE_SKEW_MS) reject("finishedAt is in the future");
-            const ageMs = Math.max(0, now - status.finishedAt);
-            if (ageMs > MAX_AGE_MS) {
+            if (!stateAvailable) {
+              if (status.aggregates !== null) reject("unavailable status must carry null aggregates");
+              if (status.summary !== "unavailable") reject("unavailable status must carry the unavailable summary marker");
+              if (work.length !== 0 || reservations.length !== 0) {
+                reject("unavailable status must carry empty work and reservation arrays");
+              }
+              if (status.nextEligibleStartAt !== null) {
+                reject("unavailable status must carry a null next eligible start");
+              }
               report(
-                "Result: NOT RECORDED - stale local status (finished more than 2 hours before dispatch)",
-                [
-                  "- Local pass finished (UTC): " + utc(status.finishedAt),
-                  "- Dispatch age: " + elapsed(ageMs),
-                  "The local launchd job dispatches this workflow after each pass, so the next pass reports again.",
-                ],
+                "Result: RECORDED - RED (the local status is unavailable)",
+                unavailableDetails(status, ageMs),
                 1,
               );
             }
 
-            const stepCounts = {};
-            for (const step of KNOWN_STEPS) stepCounts[step] = 0;
-            let unrecognizedSteps = 0;
+            // Complete aggregates are the authority; the lists below are bounded
+            // display detail. Truncation alone is not a failure.
+            if (!isObject(status.aggregates)) reject("aggregates are missing");
+            const W = status.aggregates.work;
+            const R = status.aggregates.reservations;
+            if (!isObject(W) || !isObject(R)) reject("aggregate sections are missing");
+            if (!isObject(W.byNextStep)) reject("work.byNextStep is missing");
+            for (const step of KNOWN_STEPS) {
+              if (!isCount(W.byNextStep[step])) reject("work.byNextStep." + step + " is not a nonnegative integer");
+            }
+            if (!isCount(W.total) || !isCount(W.unknownSteps) || !isCount(W.blocked) || !isCount(W.omitted) || !isCount(W.omittedBlocked)) {
+              reject("work aggregate counts are not nonnegative integers");
+            }
+            let stepSum = 0;
+            for (const step of KNOWN_STEPS) stepSum += W.byNextStep[step];
+            if (W.total !== stepSum + W.unknownSteps) reject("work.total does not match the reported step counts");
+            if (W.blocked !== W.byNextStep.blocked) reject("work.blocked does not match byNextStep.blocked");
+            if (work.length > W.total) reject("work detail exceeds the complete work total");
+            if (W.omitted !== W.total - work.length) reject("work.omitted is inconsistent with the complete total");
+
+            const detailStepCounts = { work: 0, review: 0, delivery: 0, blocked: 0, done: 0, unknown: 0 };
             const issueIds = new Set();
             const blockedIssueIds = new Set();
+            const workIds = new Set();
             let blockedWithoutIssueId = 0;
             for (const record of work) {
-              if (KNOWN_STEPS.includes(record.nextStep)) stepCounts[record.nextStep] += 1;
-              else unrecognizedSteps += 1;
+              if (!isObject(record)) reject("a work entry is not an object");
+              if (!isBoundedString(record.id, MAX_RECORD_ID_CHARS)) {
+                reject("a work id is not a bounded non-empty string");
+              }
+              if (workIds.has(record.id)) reject("work detail repeats a work identity");
+              workIds.add(record.id);
+              if (!KNOWN_SOURCE_KINDS.includes(record.sourceKind)) {
+                reject("a work source kind is not a known value");
+              }
+              if (record.issueNumber !== null && !isPositiveInt(record.issueNumber)) {
+                reject("a work issue number is not null or a positive safe integer");
+              }
+              if (record.pr !== null && !isPositiveInt(record.pr)) {
+                reject("a work PR number is not null or a positive safe integer");
+              }
+              if (record.head !== null && !isSha(record.head)) {
+                reject("a work head is not null or 40 lowercase hex characters");
+              }
+              if (!isTime(record.updatedAt)) reject("a work updatedAt is not a valid time");
+              if (record.updatedAt > status.finishedAt) {
+                reject("a work updatedAt is after the observation time");
+              }
+              if (record.nextStep === "unknown") detailStepCounts.unknown += 1;
+              else if (KNOWN_STEPS.includes(record.nextStep)) detailStepCounts[record.nextStep] += 1;
+              else reject("a work entry has an unrecognized next step");
               if (isIssueId(record.issueNumber)) issueIds.add(record.issueNumber);
               if (record.nextStep === "blocked") {
                 if (isIssueId(record.issueNumber)) blockedIssueIds.add(record.issueNumber);
                 else blockedWithoutIssueId += 1;
               }
             }
-            let openReservations = 0;
-            for (const entry of reservations) {
-              if (!isTime(entry.settledAt)) openReservations += 1;
+            for (const step of KNOWN_STEPS) {
+              if (detailStepCounts[step] > W.byNextStep[step]) {
+                reject("work detail exceeds the complete " + step + " count");
+              }
             }
+            if (detailStepCounts.unknown > W.unknownSteps) {
+              reject("work detail exceeds the complete unknown step count");
+            }
+            if (W.omittedBlocked !== W.blocked - detailStepCounts.blocked) {
+              reject("work.omittedBlocked is inconsistent with the complete blocked total");
+            }
+
+            for (const key of ["total", "open", "settled", "chargedHour", "chargedSevenDays", "omitted"]) {
+              if (!isCount(R[key])) reject("reservations." + key + " is not a nonnegative integer");
+            }
+            if (R.total !== R.open + R.settled) reject("reservation totals do not match open and settled counts");
+            if (R.chargedHour > R.chargedSevenDays || R.chargedSevenDays > R.total) {
+              reject("rolling charged usage is inconsistent");
+            }
+            if (reservations.length > R.total) reject("reservation detail exceeds the complete total");
+            if (R.omitted !== R.total - reservations.length) {
+              reject("reservations.omitted is inconsistent with the complete total");
+            }
+            let detailOpen = 0;
+            let detailSettled = 0;
+            let detailChargedHour = 0;
+            let detailChargedSevenDays = 0;
+            const chargedDetailTimes = [];
+            for (const entry of reservations) {
+              if (!isObject(entry)) reject("a reservation entry is not an object");
+              if (!isBoundedString(entry.taskId, MAX_RECORD_ID_CHARS)) reject("a reservation taskId is not bounded");
+              if (!KNOWN_PURPOSES.includes(entry.purpose)) reject("a reservation purpose is not a known value");
+              if (!isTime(entry.createdAt)) reject("a reservation createdAt is not a valid time");
+              if (entry.createdAt > status.finishedAt) reject("a reservation createdAt is after the observation time");
+              if (!KNOWN_RESERVATION_OUTCOMES.includes(entry.outcome)) {
+                reject("a reservation outcome is not a known value");
+              }
+              if (entry.outcome === "reserved") {
+                if (entry.settledAt !== null) reject("a reserved reservation carries a settlement time");
+                detailOpen += 1;
+              } else {
+                if (!isTime(entry.settledAt)) reject("a settled reservation is missing a valid settlement time");
+                if (entry.settledAt < entry.createdAt) reject("a reservation settled before it was created");
+                if (entry.settledAt > status.finishedAt) reject("a reservation settled after the observation time");
+                detailSettled += 1;
+              }
+              // Charging is by outcome only; intervals are (finishedAt - window, finishedAt].
+              if (entry.outcome !== "confirmed_not_submitted") {
+                chargedDetailTimes.push(entry.createdAt);
+                if (entry.createdAt > status.finishedAt - HOUR_WINDOW_MS) detailChargedHour += 1;
+                if (entry.createdAt > status.finishedAt - WEEK_WINDOW_MS) detailChargedSevenDays += 1;
+              }
+            }
+            // The retained detail is a subset of the complete aggregates, so
+            // each complete count is bounded by the visible count plus omissions.
+            if (detailOpen > R.open || R.open > detailOpen + R.omitted) {
+              reject("reservation open counts are inconsistent with the bounded detail");
+            }
+            if (detailSettled > R.settled || R.settled > detailSettled + R.omitted) {
+              reject("reservation settled counts are inconsistent with the bounded detail");
+            }
+            if (detailChargedHour > R.chargedHour || R.chargedHour > detailChargedHour + R.omitted) {
+              reject("rolling hour usage is inconsistent with the bounded detail");
+            }
+            if (detailChargedSevenDays > R.chargedSevenDays || R.chargedSevenDays > detailChargedSevenDays + R.omitted) {
+              reject("rolling seven-day usage is inconsistent with the bounded detail");
+            }
+            // Every charge inside the rolling hour is also inside the rolling
+            // seven days, so omitted hourly charges cannot outnumber omitted
+            // seven-day charges.
+            if (R.chargedHour - detailChargedHour > R.chargedSevenDays - detailChargedSevenDays) {
+              reject("omitted rolling usage is inconsistent: every omitted hourly charge is also an omitted seven-day charge");
+            }
+
+            const expectedSummary = W.omitted === 0 && R.omitted === 0 ? "complete" : "truncated";
+            if (status.summary !== expectedSummary) reject("summary marker is inconsistent with the omission counts");
+            const atCap = R.chargedHour >= LIMIT_PER_HOUR || R.chargedSevenDays >= LIMIT_PER_SEVEN_DAYS;
+            if (atCap) {
+              if (!isTime(status.nextEligibleStartAt)) {
+                reject("next eligible start is missing while a rolling cap is reached");
+              }
+              if (status.nextEligibleStartAt <= status.finishedAt) {
+                reject("next eligible start is not after the observation time");
+              }
+            } else if (status.nextEligibleStartAt !== null) {
+              reject("next eligible start is set while both rolling caps have room");
+            }
+            // The cap retry is exact when every reservation is visible; a
+            // truncated list can still prove a lower bound from visible charges.
+            chargedDetailTimes.sort((a, b) => b - a);
+            const hourCandidate = chargedDetailTimes.length >= LIMIT_PER_HOUR
+              ? chargedDetailTimes[LIMIT_PER_HOUR - 1] + HOUR_WINDOW_MS
+              : status.finishedAt;
+            const weekCandidate = chargedDetailTimes.length >= LIMIT_PER_SEVEN_DAYS
+              ? chargedDetailTimes[LIMIT_PER_SEVEN_DAYS - 1] + WEEK_WINDOW_MS
+              : status.finishedAt;
+            if (!Number.isSafeInteger(hourCandidate) || !Number.isSafeInteger(weekCandidate)) {
+              reject("rolling retry timestamps are not representable");
+            }
+            if (R.omitted === 0) {
+              const exactRetry = Math.max(status.finishedAt, hourCandidate, weekCandidate);
+              const expectedRetry = exactRetry > status.finishedAt ? exactRetry : null;
+              if (status.nextEligibleStartAt !== expectedRetry) {
+                reject("next eligible start is not the exact retry under both rolling caps");
+              }
+            } else if (atCap) {
+              const lowerBound = Math.max(status.finishedAt, hourCandidate, weekCandidate);
+              if (status.nextEligibleStartAt < lowerBound) {
+                reject("next eligible start is earlier than the charged detail proves");
+              }
+            }
+
+            const blocked = W.blocked > 0;
+            const unknownSteps = W.unknownSteps > 0;
+            const outcomeStatus = status.outcome.status;
+            const errorOutcome = ERROR_OUTCOMES.includes(outcomeStatus);
+            const red = blocked || unknownSteps || errorOutcome;
 
             const issues = Array.from(issueIds).sort((a, b) => a - b);
             const blockedIssues = Array.from(blockedIssueIds).sort((a, b) => a - b);
-            const blocked = stepCounts.blocked > 0;
-            const outcomeStatus = status.outcome.status;
-            const errorOutcome = ERROR_OUTCOMES.includes(outcomeStatus);
-            const budgetWaiting = isTime(status.nextEligibleStartAt);
-            const incompleteState = status.state === "unavailable" ||
-              status.work === undefined ||
-              status.reservations === undefined ||
-              unrecognizedSteps > 0;
-            const red = blocked || errorOutcome || incompleteState;
-
             const details = [];
             details.push("- Local run window (UTC): " + utc(status.startedAt) + " to " + utc(status.finishedAt) + " (" + elapsed(status.finishedAt - status.startedAt) + ")");
             details.push("- Dispatch age: " + elapsed(ageMs) + " (stale beyond 2 hours)");
@@ -221,31 +449,31 @@ jobs:
             details.push("- Target base SHA: " + (isSha(status.targetBaseSha) ? status.targetBaseSha : "none recorded"));
             details.push("- Implementation model: gpt-5.6-luna with max reasoning (matches the required runtime policy)");
             details.push("- Admission limits: 1 start per rolling hour, 168 per rolling seven days");
-            details.push("- Outcome: " + outcomeStatus + (outcomeStatus === "step_limit" && isStepCount(status.outcome.steps) ? " after " + status.outcome.steps + " steps" : ""));
-            details.push("- Work items: " + (status.work === undefined ? "not reported" : String(work.length)));
-            details.push("- Work by next step: " + KNOWN_STEPS.map((step) => step + " " + stepCounts[step]).join(", ") + (unrecognizedSteps > 0 ? ", unrecognized " + unrecognizedSteps : ""));
+            details.push("- Outcome: " + outcomeStatus + (outcomeStatus === "step_limit" ? " after " + status.outcome.steps + " steps" : ""));
+            details.push("- Work items: " + W.total + (W.omitted > 0 ? " (" + work.length + " in bounded detail, " + W.omitted + " omitted)" : ""));
+            details.push("- Work by next step: " + KNOWN_STEPS.map((step) => step + " " + W.byNextStep[step]).join(", ") + (W.unknownSteps > 0 ? ", unknown " + W.unknownSteps : ""));
             details.push("- Blocked work: " + (blocked
-              ? (blockedIssues.length > 0
-                ? "issue " + blockedIssues.map((id) => "#" + id).join(", ")
-                : "present without a numeric issue id") +
-                (blockedIssues.length > 0 && blockedWithoutIssueId > 0 ? " plus " + blockedWithoutIssueId + " item(s) without a numeric issue id" : "")
+              ? W.blocked + " total" +
+                (W.omittedBlocked > 0 ? ", " + W.omittedBlocked + " omitted from the bounded detail" : "") +
+                (blockedIssues.length > 0 ? "; visible issue IDs " + blockedIssues.map((id) => "#" + id).join(", ") : "") +
+                (blockedWithoutIssueId > 0 ? "; " + blockedWithoutIssueId + " visible item(s) without a bounded numeric issue id" : "")
               : "none"));
-            details.push("- Numeric issue IDs in view: " + (issues.length > 0 ? issues.map((id) => "#" + id).join(", ") : "none"));
-            details.push("- Reservations: " + (status.reservations === undefined
-              ? "not reported"
-              : reservations.length + " total, " + openReservations + " open, " + (reservations.length - openReservations) + " settled"));
-            details.push("- Next eligible local start (UTC): " + (budgetWaiting ? utc(status.nextEligibleStartAt) : "none recorded"));
-            details.push("- Local state: " + (status.state === "unavailable" ? "unavailable (the local state read failed, so work and reservation lists may be incomplete)" : "available"));
+            details.push("- Numeric issue IDs in bounded detail: " + (issues.length > 0 ? issues.map((id) => "#" + id).join(", ") : "none"));
+            details.push("- Reservations: " + R.total + " total, " + R.open + " open, " + R.settled + " settled" + (R.omitted > 0 ? " (" + reservations.length + " in bounded detail, " + R.omitted + " omitted)" : ""));
+            details.push("- Rolling usage: " + R.chargedHour + " of " + LIMIT_PER_HOUR + " in the last hour, " + R.chargedSevenDays + " of " + LIMIT_PER_SEVEN_DAYS + " in the last seven days");
+            details.push("- Next eligible local start (UTC): " + (status.nextEligibleStartAt === null ? "none recorded (both rolling caps have room)" : utc(status.nextEligibleStartAt)));
+            details.push("- Local state: available");
+            details.push("- Report detail: " + (status.summary === "truncated" ? "truncated (aggregates remain complete)" : "complete"));
             details.push("- " + BUDGET_NOTE);
 
+            let reason = "";
+            if (blocked) reason = "blocked work is present";
+            else if (unknownSteps) reason = "unrecognized work steps are present";
+            else if (errorOutcome) reason = "the local run ended with " + outcomeStatus;
             report(
               red
-                ? "Result: RECORDED - RED (" + (blocked
-                  ? "blocked work is present"
-                  : incompleteState
-                  ? "the local status is incomplete: state unavailable, work or reservations missing, or unrecognized work steps"
-                  : "the local run ended with " + outcomeStatus) + ")"
-                : "Result: RECORDED - GREEN (no blocked work in this pass)",
+                ? "Result: RECORDED - RED (" + reason + ")"
+                : "Result: RECORDED - GREEN (no blocked, unknown or error state in this pass)",
               details,
               red ? 1 : 0,
             );
