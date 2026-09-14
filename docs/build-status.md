@@ -2,6 +2,135 @@
 
 ## Active task register — Astra owned
 
+09:08 UTC execution takeover: the user issued the continuation goal. Astra
+orchestrator owns this register and all Git, evidence and live acceptance;
+the prior planning-only checkpoint is superseded for work authority. Canonical
+lane verified clean at 5a234c9154db7e8de6ddfa6fc906784ac9d03bdf, with only
+the expected planning delta from development bd8065d. All heads/tags fetched;
+no open PR and no live local DSH writer were found. Previous checkpoint is
+classified as progress: committed handoff and evidence changed the next action.
+Repair ref c9be3e3360d75523009d109d4d8591d519ffa264 is unchanged, including
+issue18 done, issue21 blocked and all six reservation blobs. Release ref
+0337173c97692e17d8775e83dc45b9e07fd9e49b preserves runtime989af8a generation2,
+no active execution; latest ordinary proof34822559921:1:repair is healthy and
+settled at08:26:32UTC, job103907304640. Supervisor remains2a24c4d; next ordinary
+eligibility09:24:45.037UTC is preserved. No second eligible unblocked issue.
+
+Current bounded task: reporting projection in local.ts/local-status.yml and a
+focused tests/host/local-status_test.ts; all other source, runtime authority
+and state remain outside worker ownership. Read-only Astra backlog_evidence_audit
+owns issue/acceptance inspection; report_contract_audit checks retained consumers.
+Source reconciliation found readLocalRunStatus in local-release.ts also consumes
+the local receipt's v1 identity and arrays. Proposed report-only shape marker
+reportVersion v2 permits a hard renderer cutover while preserving that frozen
+receipt envelope and the separate hosted terminal protocol; audit pending.
+DSH playbook2026-09-12.1 read in full, SHA256
+7e237d6002069b085f0ee1879972b18e6c8466a8c138fcbef508499b66291149.
+The later project/owner deepseek-flash V4.1/max decision supersedes its older
+model name. Current settings are deepseek-official/deepseek-flash/max and
+workspace-write; launch credential is present in this exact VPS login shell.
+Fresh report_contract_audit supports the reportVersion v2 cutover while keeping
+the v1 local receipt envelope, no explicit available state and both arrays.
+It requires actual producer output passed to readLocalRunStatus; that assertion
+is included in the immutable assignment /tmp/sentinel-reporting-v1.txt.
+Launch09:09:56UTC exec60755/PID1859658 verified live cwd and NODE_ENV=production;
+persisted session3b391c41-be16-4738-8d8e-dab7956a85f5 header12 records
+deepseek-official/deepseek-flash/max and workspace-write/ask. Stream worker ID
+ca2ece9b-9c19-4802-af02-384756f4957d, /tmp/sentinel-reporting-v1.jsonl.
+Audit found no active VPS wrapper or local runtime; outcome status remains the
+repair loop status even when reporting is RED. No live local-dispatch claim.
+Sole DSH reporting writer is authorized to launch in this canonical lane;
+feedback is the next settled assignment, no print-mode live stdin. First useful
+diff10min/handback30min; diagnose repeated failure or stalled useful progress,
+then bounded task-owned stop if needed. No children/background jobs, no tests;
+one final scoped formatter. GPT registered local-status-projection through the
+installed evidence tool; DSH will return checks NOT RUN. Acceptance must invoke
+the actual producer and embedded workflow with large parsed private temp state.
+
+09:15 UTC read-only fresh backlog_evidence_audit returned accepted evidence
+mapping. All16 handoff artifact hashes match. Prior evidence reads, not fresh
+execution: cooldown2626bbb7 (9passed), later cooldown8d236736 (9passed),
+persisted receipt consumer5118668f (55passed), all in VPS namespace459acb17ad9ea6b3117a31ea7e3934ee42910852ebdd735c5b0a8110d8083e59.
+Issue32's obsolete scan path is removed by integratedb066585; current exact
+persisted consumer rejects absent/malformed/foreign evidence. Disposition:
+superseded and ready for evidence-backed GitHub closure. Issue5's fixed policy
+and current hosted receipts satisfy configuration delivery; ready for closure,
+not an additional autonomous receipt. Issue40's shared REST-client gate is
+implemented, but App token minting, checkout and authenticated Git state transport
+are outside it; keep open with that precise coverage qualification. Issues8/9/10
+have completed hosted self-scope portions and pending gateway capabilities.
+Issue11 remains closed; issue12 reconciles after this candidate's acceptance.
+Issues6/7/13/14/15/16 and parent3 remain open. Never retry/reset issue21.
+
+Gateway current contract and exact inventory are recorded in the subordinate
+activation checklist. Existing VPS deployment lacks saved prior/intent and
+supervised rollback receipts; isolated target, retention/storage/key scope,
+metrics/thresholds and exclusive ownership still require concrete owner decisions.
+The gateway's own Mac-origin inference gate was not superseded by relocating
+Sentinel development. No gateway write or probe was performed. No qualifying
+six-hour observation window exists; at least six observed hours remain after
+target activation/receipt prerequisites. Current hosted health cannot fill this
+gap, prove a captured regression or establish review-wait overlap.
+
+09:20 UTC reporting checkpoint: V1 DSH settled exit0/completed; exact process
+and parent have exited with no remaining children. Three owned source/test
+files changed, one formatter; no tests/Git/network/children. Actual-call audit
+found unassigned Deno environment probes and YAML/indentation checks, so the run
+is not unqualified procedure compliance; the next assignment prohibits those
+probes explicitly. Focused GPT evidence e9448b0b-abb7-4847-a06b-d0287c7ab9a9
+in the same VPS namespace executed in5.73s:13passed/2failed. Full output retained.
+The omission oracle ignored byte-based trimming, the combined weekly oracle
+ignored two newer charges, and the later simultaneous199+ charge oracle also
+needs a weekly wait. Do not rerun unchanged. Fresh report_acceptance_audit
+confirms renderer reservation detail can contradict usage and chronology yet
+render GREEN; work detail shape validation is also incomplete. Source remains
+frozen while that auditor completes one consolidated correction. No full suite
+or Codex review started. Actual producer/renderer and retained receipt paths
+passed the other focused cases; this is partial local evidence, not acceptance.
+Issue32 closed09:16:12(comment5661713644); issue5 closed09:16:14(comment5661714141).
+Issue40 remains open with coverage comment5661714656. Gateway missing-policy
+question is pending; no target activation or inferred approval.
+
+09:23 UTC fresh report_acceptance_audit requires one bounded correction before
+acceptance: reservation chronology/category/retry consistency, work detail shape,
+blocked-before-reservation byte trimming, three independent test-oracle repairs,
+week/now boundary cases, error-outcome RED and serialized temporary-state
+composition. V1 changes preserved; immutable correction /tmp/sentinel-reporting-v2.txt
+owns the same three source/test files in the canonical lane. One DSH writer,
+first diff3min/handback10min, next-settled-assignment feedback, no children,
+explicitly no probe/check executions and one final formatter then handback.
+Ten-thousand-record evidence is synthetic record-parsed stress; real snapshot
+parser caps2048. Normal parsed file composition will prove the real read surface;
+no frozen contract limit change is authorized or needed for this report fix.
+
+09:32 UTC V2 settled exit0/completed; PID1865077 and parent1865054 exited and
+no children remain. Launch exec97747 persistedc7081ba5-d331-4cac-aa86-6e0ba27d30bb
+header12 and live cwd/NODE_ENV attested Flash/max/workspace-write/ask. Actual
+calls used only reads/edits and one final formatter. Fresh focused7da49697-f95b-43bf-8a92-69456a7fd7ff
+executed4.886s,19passed/1failed. Source behavior and real-file composition pass;
+the only failure expects the settled-count message after changing both open and
+settled counts, but the existing open-count guard correctly rejects first.
+One-line V3 test-message correction owns only local-status_test.ts, no formatting,
+tests or other source; immutable /tmp/sentinel-reporting-v3.txt. Previous failures
+are corrected; no unchanged rerun or evidence-output retry. All code stays frozen.
+
+09:34 UTC focused reporting acceptance: fresh76ee241e-c677-46ef-b07b-eb121028e492
+passed all20 tests in5.029s, childexit0/executed on VPS arch in canonical lane.
+Actual producer -> embedded workflow, normal serialized parsed-state read,
+unchanged state bytes and retained local receipt reader pass. V3 settled
+exit0/completed with exactly the assigned expectation change, no formatter,
+tests or children; persisted31316520-9903-4ab8-920c-98d350a17195 header12 confirms
+Flash/max/workspace-write/ask. Its fast exit preceded independent live env
+inspection; the launch command included NODE_ENV=production, but this last
+one-line run is qualified on that procedural evidence rather than rerun.
+Final source hashes: local.ts77a010b220e3c73b769cbc7dea1aec83fae65d82c8cca783da3b469f89d85425,
+workflowf7c45c9b12aa11a5fa03e4b082ff8ef93995dede0c7d3a7a538335104860bcc3,
+testac1233148440aa4d93df63f83fdb6165de9a77741ca58f4989a8b7f3bba0e784.
+All reporting changes are on the canonical lane; no worker branch or extra lane
+was created. Freeze this combined candidate for reporting-integrated/test:local
+(expected about7min) and current-candidate audit/review. No live local wrapper
+identified; these are local producer/workflow results, not installation proof.
+
 Latest verified state, 2026-09-14 07:33 UTC: both VPS checkouts were clean at
 bd8065d28bd5a822988a8085e6c75674ee88a575 before this planning-only update;
 PR45 merged and merged CI34813379853 passed. Active runtime remains
