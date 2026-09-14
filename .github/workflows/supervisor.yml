@@ -82,7 +82,9 @@ jobs:
         with:
           ref: ${{ needs.prepare.outputs.revision }}
           path: runtime
-          fetch-depth: 1
+          # Full history: a depth-1 checkout keeps a shallow boundary through
+          # the local copy and makes the base-refresh merge see no ancestor.
+          fetch-depth: 0
           persist-credentials: false
       - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
         with:

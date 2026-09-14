@@ -536,3 +536,216 @@ Deno.test(
     }
   },
 );
+
+/**
+ * Hosted shallow-checkout regression: a depth-1 selected-runtime checkout keeps
+ * its shallow boundary through the prepareSourceRepository copy and the
+ * candidate/base fetch, so the REAL executor cannot find the shared ancestor
+ * and refuses. The exact fetch-depth declared in supervisor.yml (required to be
+ * full history) produces the real two-parent refresh instead.
+ */
+interface ShallowCtxV1 {
+  tmp: string;
+  env: Record<string, string>;
+  origin: string;
+  candidate: GitSha;
+  base: GitSha;
+  cleanup(): Promise<void>;
+}
+
+async function makeShallowCtx(): Promise<ShallowCtxV1> {
+  const tmp = await Deno.makeTempDir({
+    prefix: "sentinel-base-refresh-shallow-",
+    dir: ROOT,
+  });
+  try {
+    const env = gitEnv(`${tmp}/home`);
+    await Deno.mkdir(`${tmp}/home`, { recursive: true });
+    const origin = `${tmp}/origin`;
+    assert.ok((await gitRun(tmp, ["init", "-q", origin], env)).ok);
+    assert.ok(
+      (await gitRun(origin, ["checkout", "-q", "-b", BASE_BRANCH], env)).ok,
+    );
+    const parent = await commitIn(origin, env, "shared.txt", "shared\n");
+    assert.ok(
+      (await gitRun(origin, ["checkout", "-q", "-b", "candidate", parent], env))
+        .ok,
+    );
+    const candidate = await commitIn(
+      origin,
+      env,
+      "candidate.txt",
+      "candidate\n",
+    );
+    assert.ok((await gitRun(origin, ["checkout", "-q", BASE_BRANCH], env)).ok);
+    const base = await commitIn(origin, env, "base.txt", "base\n");
+    return {
+      tmp,
+      env,
+      origin,
+      candidate,
+      base,
+      cleanup: async () => {
+        await Deno.remove(tmp, { recursive: true }).catch(() => {});
+      },
+    };
+  } catch (error) {
+    await Deno.remove(tmp, { recursive: true }).catch(() => {});
+    throw error;
+  }
+}
+
+/** The selected-runtime checkout fetch-depth declared in supervisor.yml. */
+function selectedRuntimeFetchDepth(workflow: string): number {
+  const marker = "- name: Checkout selected runtime source";
+  const start = workflow.indexOf(marker);
+  if (start < 0) throw new Error("selected runtime checkout step is missing");
+  const rest = workflow.slice(start + marker.length);
+  const next = rest.indexOf("\n      - ");
+  const block = next < 0 ? rest : rest.slice(0, next);
+  const match = /fetch-depth:\s*(\d+)/.exec(block);
+  if (match === null) {
+    throw new Error("selected runtime fetch-depth is missing");
+  }
+  return Number(match[1]);
+}
+
+/** actions/checkout-equivalent clone, local copy and candidate/base fetch. */
+async function stagedCheckout(
+  ctx: ShallowCtxV1,
+  depth: number,
+  name: string,
+): Promise<string> {
+  const source = `${ctx.tmp}/${name}-source`;
+  const copy = `${ctx.tmp}/${name}-copy`;
+  const cloneArgs = ["clone", "-q"];
+  if (depth > 0) cloneArgs.push(`--depth=${depth}`);
+  // The initial hosted source is the development runtime base, not the
+  // candidate; the candidate arrives through the later normal fetch.
+  cloneArgs.push("--branch", BASE_BRANCH, `file://${ctx.origin}`, source);
+  assert.ok((await gitRun(ctx.tmp, cloneArgs, ctx.env)).ok);
+  // prepareSourceRepository copies the staged checkout with --no-hardlinks,
+  // preserving any existing shallow boundary.
+  assert.ok(
+    (await gitRun(
+      ctx.tmp,
+      ["clone", "-q", "--no-hardlinks", source, copy],
+      ctx.env,
+    )).ok,
+  );
+  // The production refresh fetch carries no depth flag of its own.
+  assert.ok(
+    (await gitRun(
+      copy,
+      [
+        "fetch",
+        "-q",
+        `file://${ctx.origin}`,
+        "candidate:refs/remotes/origin/candidate",
+        `${BASE_BRANCH}:refs/remotes/origin/${BASE_BRANCH}`,
+      ],
+      ctx.env,
+    )).ok,
+  );
+  assert.ok(
+    (await gitRun(
+      copy,
+      ["rev-parse", "--verify", `${ctx.candidate}^{commit}`],
+      ctx.env,
+    )).ok,
+  );
+  assert.ok(
+    (await gitRun(
+      copy,
+      ["rev-parse", "--verify", `${ctx.base}^{commit}`],
+      ctx.env,
+    )).ok,
+  );
+  return copy;
+}
+
+Deno.test(
+  "base refresh executor: a depth-1 selected-runtime checkout stays shallow while the declared depth refreshes exactly",
+  async () => {
+    const ctx = await makeShallowCtx();
+    try {
+      const workflow = await Deno.readTextFile(
+        `${ROOT}/.github/workflows/supervisor.yml`,
+      );
+      const depth = selectedRuntimeFetchDepth(workflow);
+      assert.equal(
+        depth,
+        0,
+        "the selected runtime checkout must request full history",
+      );
+
+      // Depth 1 reproduces the hosted boundary: the copied checkout still
+      // cannot see the shared ancestor, so the real executor refuses.
+      const shallowDir = await stagedCheckout(ctx, 1, "shallow");
+      // Both exact commits exist, yet the copied checkout is still shallow and
+      // exposes no merge base: the shared ancestor stayed behind the boundary.
+      const shallowFlag = await gitRun(
+        shallowDir,
+        ["rev-parse", "--is-shallow-repository"],
+        ctx.env,
+      );
+      assert.equal(shallowFlag.stdout.trim(), "true", "the copy stays shallow");
+      const noAncestor = await gitRun(
+        shallowDir,
+        ["merge-base", ctx.candidate, ctx.base],
+        ctx.env,
+      );
+      assert.equal(
+        noAncestor.ok,
+        false,
+        "the shared ancestor stays unreachable",
+      );
+      const shallow = await new DenoGitExecutor({
+        localDir: shallowDir,
+        remoteUrl: `file://${ctx.origin}`,
+        gitHome: `${ctx.tmp}/home`,
+      }).integrateBase(ctx.candidate, ctx.base);
+      assert.equal(shallow.ok, false, JSON.stringify(shallow));
+      if (!shallow.ok) assert.equal(shallow.error.kind, "unavailable");
+
+      // The declared depth (full history) refreshes with both exact parents
+      // and preserves the candidate and base file changes.
+      const fullDir = await stagedCheckout(ctx, depth, "full");
+      const git = new DenoGitExecutor({
+        localDir: fullDir,
+        remoteUrl: `file://${ctx.origin}`,
+        gitHome: `${ctx.tmp}/home`,
+      });
+      const refreshed = await git.integrateBase(ctx.candidate, ctx.base);
+      assert.ok(refreshed.ok, JSON.stringify(refreshed));
+      const parents = await gitRun(
+        fullDir,
+        ["rev-list", "--parents", "-n", "1", refreshed.value],
+        ctx.env,
+      );
+      const parts = parents.stdout.trim().split(" ");
+      assert.equal(parts.length, 3, "exactly two parents");
+      assert.equal(parts[0], refreshed.value);
+      assert.equal(parts[1], ctx.candidate, "candidate is the first parent");
+      assert.equal(parts[2], ctx.base, "base is the second parent");
+      assert.equal(
+        (await gitRun(
+          fullDir,
+          ["show", `${refreshed.value}:candidate.txt`],
+          ctx.env,
+        )).stdout,
+        "candidate\n",
+      );
+      assert.equal(
+        (await gitRun(
+          fullDir,
+          ["show", `${refreshed.value}:base.txt`],
+          ctx.env,
+        )).stdout,
+        "base\n",
+      );
+    } finally {
+      await ctx.cleanup();
+    }
+  },
+);
