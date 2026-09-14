@@ -28,12 +28,48 @@ historical and superseded by the owner's current end-to-end Actions instruction.
 DeepSeek official catalog and pricing documentation identify `deepseek-flash`
 as V4.1 Flash. This owner's explicit latest-model instruction supersedes the old
 API-name rule for development workers; max/workspace-write and separate runtime
-Luna policy remain. No DSH writer launched yet. Primary re-read playbook2026-09-12.1,
-git-coordination, project-workflow, test-evidence and Deno instructions. Fresh
-read-only Astra audit hosted_acceptance_audit is checking the next correction;
+Luna policy remain. Current worker and validation checkpoints appear newest
+first below. Primary re-read playbook2026-09-12.1, git-coordination,
+project-workflow, test-evidence and Deno instructions. Read-only Astra audit
+hosted_acceptance_audit has returned its foundation and composition findings;
 it has no write or test authority. Primary alone owns this register and plan.
 
 ### Historical checkpoints
+
+02:01 UTC: reader accepted with direct fresh evidence
+39f5d4cd-565e-4daa-b02e-00cebe8c90e3 at ad22083+draft. V2/V3 settled exit0;
+V3 PID1277270 live cwd/NODE_ENVproduction and header428008 FlashV4.1/max verified.
+Primary corrected its own specification after live compare API read proved
+head_commit absent: real keys base_commit/merge_base_commit/status/counters now
+drive ancestry. Exact development556dee88 returned identical at01:58UTC.
+V2 fixes truncated/contradictory terminal handling and skipped/time metadata;
+V3 fixes real compare shape. Both repeated prohibited shell searches; preserve
+that qualification, no worker tests/network/Git, one formatter each. New work
+must use supplied file locations and read tool without shell search. Reader
+tests pass; live composition/installation remains unperformed.
+
+01:57 UTC: reader V1 settled, direct testcf689ac6-f10b-46c0-8345-6ddf0138d5f4
+passed10/failed1 because the log regex required a closing brace and ignored a
+truncated terminal. Primary also found healthy-terminal/failed-job evidence was
+being rewritten to failed, which could wrongly trigger rollback. Sole V2 fixes
+both and missing skipped-step/timestamp guards; exec23104/PID1276327, live exact
+cwd/NODE_ENVproduction and header414043 FlashV4.1/max verified. Reader V1 actual
+calls included three prohibited malformed shell searches despite read-tool
+guidance; no tests/network/Git, one formatter. V2 explicitly repeats no shell
+searches. Preserve useful draft, verify actual calls and focused evidence before
+acceptance. No hosted source installation or live delivery claim.
+
+01:52 UTC: core committed/pushed ad2208362a07dd8c7ab04c8dded125da8a757a57.
+Sole reader assignment /tmp/sentinel-hosted-reader-v1.txt owns client.ts, new
+hosted-execution terminal contract and focused reader test. Exec64705/PID1274880
+live cwd/NODE_ENVproduction verified; header368457 confirms FlashV4.1/max.
+No checks/network/Git/children, one final formatter; primary registered
+hosted-execution-reader. Expected8min/65calls checkpoint, settled-turn feedback.
+Audit recommends release-owned githubCooldowns using existing strict cooldown
+records and shared pure calculation, with both hosted gates reading both refs
+but writing only their role. Fixed launcher must capture candidate output and
+verify process-group settlement before emitting its terminal; existing
+DenoReplayRuntime provides the bounded owned-group execution mechanism.
 
 01:49 UTC: corrected core passed direct fresh evidence
 1634e241-c809-43b9-936a-06234dad604c on VPS canonical13402f0+draft, including
