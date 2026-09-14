@@ -98,6 +98,9 @@ function releaseSnapshot(
     sequence: 1,
     updatedAt: T0 + 1000,
     releases: [],
+    hostedRuntimes: [],
+    hostedReleases: [],
+    githubCooldowns: [],
     ...overrides,
   };
 }

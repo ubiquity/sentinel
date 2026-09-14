@@ -746,6 +746,39 @@ Deno.test("readEffectiveProtections: omitted bypass policy is unknown and detail
   );
   assert.ok(detail !== undefined, "ruleset detail was not fetched");
 
+  // Exact detail that omits the actor list but explicitly reports never for
+  // this same credential: non-bypassable, with no invented actor entries.
+  const omittedNever = makePort({
+    script: [
+      httpRespond(
+        "GET",
+        `${base}/rules/branches/development?per_page=100&page=1`,
+        200,
+        [statusChecksRuleWire(), pullRequestRuleWire()],
+      ),
+      httpRespond(
+        "GET",
+        `${base}/rulesets?includes_parents=true&per_page=100&page=1`,
+        200,
+        [rulesetWire({
+          bypass_actors: null,
+          current_user_can_bypass: "never",
+        })],
+      ),
+      httpRespond(
+        "GET",
+        `${base}/rulesets/10`,
+        200,
+        rulesetWire({ bypass_actors: null, current_user_can_bypass: "never" }),
+      ),
+    ],
+  });
+  const never = await omittedNever.port.readEffectiveProtections("development");
+  assert.ok(never.ok);
+  if (!never.ok) return;
+  assert.equal(never.value.bypassUnknown, false);
+  assert.deepEqual(never.value.bypassActors, []);
+
   // Detail denied: the omitted policy is provably unknown and blocks.
   const denied = makePort({
     script: [

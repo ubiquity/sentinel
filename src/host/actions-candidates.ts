@@ -6,8 +6,14 @@
  * resumed review snapshot or a later merge-ancestry check would fail against
  * an absent object. This helper lazily restores exactly the durable candidate
  * bound to an existing nonterminal scope-0 work record, immediately before the
- * snapshot capture, ancestry check, or correction checkout that needs it. It
- * performs at most
+ * snapshot capture, ancestry check, or correction checkout that needs it. For
+ * one exact persisted `base_refresh` intent the durable record still points at
+ * the OLD candidate: the remote ref must carry either that old candidate (the
+ * prepared result was persisted before a push that never happened) or the
+ * exact persisted intent result (the push succeeded but its state response was
+ * lost). Exactly the observed commit is accepted, fetched and verified to
+ * contain the requested old base/head objects. The durable record is never
+ * altered. It performs at most
  * one exact fetch, never mutates work/budget state, never starts a model and
  * never runs before deterministic bookkeeping.
  */
@@ -98,6 +104,34 @@ function isDurableCandidateBranch(branch: unknown): branch is string {
     part.length > 0 && !part.startsWith(".") && !part.startsWith("-") &&
     !part.endsWith(".lock")
   );
+}
+
+/**
+ * Exact persisted base-refresh recovery binding.
+ *
+ * After the prepared result was persisted, the push may or may not have
+ * happened: the durable record still points at the OLD candidate while its
+ * intent carries the exact deterministic `resultId` (the remote ref then
+ * carries either the old candidate or that exact prepared commit). This
+ * helper returns that exact commit ONLY when every old binding still matches
+ * (branch, PR, expected head, non-null observed base and no request id), so a
+ * remote head is accepted solely for that one exact persisted operation. The
+ * durable record is never altered here, and the base-refresh adapter separately
+ * recomputes the deterministic commit and requires equality with the persisted
+ * result, so an unrelated head is never adopted.
+ */
+function baseRefreshRestoreTarget(record: WorkRecordV1): GitSha | null {
+  const intent = record.intent;
+  if (intent === null || intent.kind !== "base_refresh") return null;
+  if (intent.resultId === null || !isGitSha(intent.resultId)) return null;
+  if (intent.requestId !== null) return null;
+  if (intent.branch === null || intent.pr === null) return null;
+  if (record.target.branch === null || record.target.pr === null) return null;
+  if (intent.branch !== record.target.branch) return null;
+  if (intent.pr !== record.target.pr) return null;
+  if (intent.expectedHead !== record.target.head) return null;
+  if (intent.observedBase === null) return null;
+  return intent.resultId;
 }
 
 export function createActionsCandidateRestorer(
@@ -200,9 +234,25 @@ export function createActionsCandidateRestorer(
       }
       const branch = record.target.branch!;
       const ref = `refs/heads/${branch}`;
+      const preparedTarget = baseRefreshRestoreTarget(record);
       // Authenticated exact remote identity through the SAME client/gate path.
+      // The remote is observed ONCE and the accepted identity is selected from
+      // that observation: the durable candidate head, or — only for the exact
+      // validated base_refresh binding — the exact persisted prepared result.
+      // A crash after the prepared result was persisted but BEFORE any push
+      // leaves the OLD head on the ref (equally recoverable); a successful push
+      // with a lost state response leaves the exact prepared result. Every
+      // other head refuses.
       const before = await github().readRef(ref);
-      if (!before.ok || before.value === null || before.value.sha !== head) {
+      if (!before.ok || before.value === null) {
+        return portError("unavailable", STATIC_REMOTE);
+      }
+      const restoreTarget = before.value.sha === head
+        ? head
+        : preparedTarget !== null && before.value.sha === preparedTarget
+        ? preparedTarget
+        : null;
+      if (restoreTarget === null) {
         return portError("unavailable", STATIC_REMOTE);
       }
       // Durable cooldown immediately before the one authenticated fetch.
@@ -228,16 +278,21 @@ export function createActionsCandidateRestorer(
       ]);
       if (
         fetchedHead === null || fetchedHead.code !== 0 ||
-        fetchedHead.stdout.trim() !== head
+        fetchedHead.stdout.trim() !== restoreTarget
       ) {
         return portError("unavailable", STATIC_FETCH);
       }
+      // The requested old candidate parents must exist after the exact fetch
+      // (the prepared commit contains both the old head and the new base).
       if (!(await hasCommit(base)) || !(await hasCommit(head))) {
         return portError("unavailable", STATIC_FETCH);
       }
       // Re-read the authenticated remote after the fetch: drift refuses.
       const after = await github().readRef(ref);
-      if (!after.ok || after.value === null || after.value.sha !== head) {
+      if (
+        !after.ok || after.value === null ||
+        after.value.sha !== restoreTarget
+      ) {
         return portError("unavailable", STATIC_REMOTE);
       }
       return portOk(undefined);

@@ -5,7 +5,7 @@
  * injected through these interfaces; product logic never lives in test fakes.
  */
 
-import type { ActionsReleaseReceiptV1 } from "./actions-release.ts";
+import type { HostedReleaseRecordV1 } from "./hosted-supervisor.ts";
 import type {
   CommandId,
   EncryptedArtifactDigest,
@@ -198,6 +198,39 @@ export interface GitHubRefV1 {
   sha: GitSha;
 }
 
+/**
+ * Trusted deterministic candidate-base integration request.
+ *
+ * `expectedHead`/`previousBase` are the exact durable candidate bindings that
+ * still stand while the refreshed candidate is being prepared (`target` is
+ * never advanced before the external publication succeeded); `expectedBase` is
+ * the exact current configured base the candidate must be integrated with.
+ * `preparedHead` is present ONLY on recovery of an already persisted intent:
+ * the remote head may then already be that exact deterministic commit, and a
+ * regenerated commit must be byte-identical to it.
+ */
+export interface PrepareBaseRefreshRequestV1 {
+  pullRequestNumber: number;
+  /** Exact deterministic candidate branch the trusted PR must carry. */
+  branch: string;
+  /** Exact candidate head the prepared commit must contain as first parent. */
+  expectedHead: GitSha;
+  /** Candidate base the durable record still points at (restore binding). */
+  previousBase: GitSha;
+  /** Exact current configured base the prepared commit must contain. */
+  expectedBase: GitSha;
+  /** Exact previously persisted prepared commit; recovery only. */
+  preparedHead?: GitSha;
+}
+
+/**
+ * Bounded static detail of a KNOWN deterministic integration conflict (the
+ * two exact commits cannot be merged). It is the only base-refresh failure
+ * that is a durable blocker; every other failure (identity mismatch, moved
+ * base, bounds, missing object) keeps the intent and waits bounded.
+ */
+export const BASE_REFRESH_CONFLICT_DETAIL = "base refresh contains conflicts";
+
 export interface PullRequestCreateV1 {
   title: string;
   headRef: string;
@@ -380,6 +413,24 @@ export interface GitHubPort {
   ): Promise<PortResultV1<GitHubBranchProtectionsV1>>;
   /** Observe the current head of a ref (exact identity, not list order). */
   readRef(ref: string): Promise<PortResultV1<GitHubRefV1 | null>>;
+  /**
+   * Optional trusted deterministic candidate-base integration capability.
+   *
+   * When present, it re-observes the exact open trusted-author PR (state,
+   * author, head branch, base branch), requires the current configured base ref
+   * to equal `expectedBase` and the PR head to equal `expectedHead` (or, on
+   * recovery only, the exact persisted `preparedHead`), ensures the candidate
+   * ancestors exist through the SAME trusted restore capability the port uses,
+   * and returns one deterministic prepared commit containing both the old
+   * candidate and the new base. It never merges the PR, never publishes and
+   * never spends model work. Optional is capability availability: a host
+   * without it leaves the method absent, and a durable base-refresh intent then
+   * waits bounded (never a deprecated-path fallback and never a silent
+   * success). A wrong/foreign head, author, branch or moved base fails closed.
+   */
+  prepareBaseRefresh?(
+    request: PrepareBaseRefreshRequestV1,
+  ): Promise<PortResultV1<GitSha>>;
   /** Pushes the trusted candidate commit; the model never publishes itself. */
   pushHead(
     ref: string,
@@ -752,16 +803,17 @@ export interface StateReadView {
     request: ReleaseRequestV1,
   ): Promise<PortResultV1<LocalReleaseReceiptV1 | null>>;
   /**
-   * Optional hosted-Actions capability, owned only by the trusted hosted host
-   * for the explicit self scope-0 repository. It returns the exact strict
-   * read-only receipt for one self production release request: a missing
-   * successful exact run is an explicit null, while a foreign, malformed,
-   * mismatched or inaccessible proof is unavailable. No durable schema
-   * changes; hosts without the capability leave it absent.
+   * Optional hosted-supervisor capability, owned only by the trusted hosted
+   * host for the explicit self scope-0 repository. It reads the protected
+   * supervisor's PERSISTED receipt for one self production release request: a
+   * missing record is an explicit null, while a corrupt, unreadable, malformed
+   * or differently-bound receipt is unavailable (never null, and never a raw
+   * workflow-green run or local fallback). Hosts without the capability leave
+   * the method absent.
    */
-  readActionsRelease?(
+  readHostedRelease?(
     request: ReleaseRequestV1,
-  ): Promise<PortResultV1<ActionsReleaseReceiptV1 | null>>;
+  ): Promise<PortResultV1<HostedReleaseRecordV1 | null>>;
 }
 
 export interface RepairStateWriter {

@@ -214,6 +214,9 @@ export class ReleaseController {
         sequence: 0,
         updatedAt: this.clock.now(),
         releases: [],
+        hostedRuntimes: [],
+        hostedReleases: [],
+        githubCooldowns: [],
       };
     const repairSnapshot = repair.value.status === "found"
       ? repair.value.snapshot
@@ -1439,6 +1442,9 @@ export class ReleaseController {
         sequence: 0,
         updatedAt: this.clock.now(),
         releases: [],
+        hostedRuntimes: [],
+        hostedReleases: [],
+        githubCooldowns: [],
       };
     const nextRecords = priorSnapshot.releases
       .filter((record) => record.id !== updated.id)
@@ -1450,6 +1456,9 @@ export class ReleaseController {
       sequence: priorSnapshot.sequence + 1,
       updatedAt: this.clock.now(),
       releases: nextRecords,
+      hostedRuntimes: priorSnapshot.hostedRuntimes,
+      hostedReleases: priorSnapshot.hostedReleases,
+      githubCooldowns: priorSnapshot.githubCooldowns,
     };
     const expectedHead = read.value.status === "found" ? read.value.head : null;
     const write = await this.stateWrite.writeRelease(next, expectedHead);

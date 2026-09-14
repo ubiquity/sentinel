@@ -23,6 +23,8 @@ import type {
   GitHubCooldownGateV1,
   GitHubIssueV1,
   GitHubPort,
+  GitHubPullRequestV1,
+  GitHubRefV1,
   ImplementationPort,
   IncidentAdapter,
   IncidentPageV1,
@@ -32,6 +34,7 @@ import type {
   ModelRunRequestV1,
   PortErrorKindV1,
   PortResultV1,
+  PrepareBaseRefreshRequestV1,
   ReasoningEffortV1,
   RepairStateWriter,
   ReplayPort,
@@ -43,11 +46,13 @@ import type { IncidentEvidenceV1 } from "../contracts/incident.ts";
 import { parseRepositoryConfigV1 } from "../contracts/repository-config.ts";
 import type { RepositoryConfigV1 } from "../contracts/repository-config.ts";
 import type { RepositoryIdentityV1 } from "../contracts/shared.ts";
+import { MaxText } from "../contracts/validation.ts";
 import { createRepairStateStore } from "../state/mod.ts";
 import { composeLocalReleaseReader } from "./local-release.ts";
 import { RollingStartBudget } from "../budget/mod.ts";
 import type { GitHubAuthProviderV1 } from "../github/auth.ts";
 import { GitHubApiClient } from "../github/client.ts";
+import type { GitExecutorV1 } from "../github/git-executor.ts";
 import { fetchHttpTransport, headerMap } from "../github/http.ts";
 import type { HttpTransportV1 } from "../github/http.ts";
 import { classifyGitHubRateLimit } from "../github/rate-limit.ts";
@@ -80,6 +85,8 @@ const LOCAL_REPOSITORY: RepositoryIdentityV1 = {
 const REMOTE_URL = "https://github.com/ubiquity/sentinel.git";
 const API_BASE_URL = "https://api.github.com";
 const API_USER_URL = "https://api.github.com/user";
+/** The one fixed base branch of the local repository configuration. */
+const LOCAL_BASE_BRANCH = "development";
 /** Local default; hosted Actions supplies the public UOS gateway explicitly. */
 export const DEFAULT_UOS_BASE_URL = "http://127.0.0.1:8000/v1";
 
@@ -165,7 +172,7 @@ export function createLocalRepositoryConfig(): RepositoryConfigV1 {
     version: "v1",
     kind: "repository_config",
     repository: { ...LOCAL_REPOSITORY },
-    baseBranch: "development",
+    baseBranch: LOCAL_BASE_BRANCH,
     adapter: { kind: "github" },
     commands: { replay: "replay_capture", test: "test_ci" },
     commandRegistry: {
@@ -191,21 +198,29 @@ export function createLocalRepositoryConfig(): RepositoryConfigV1 {
       "MASTER-PLAN.md",
       "deno.json",
       "docs/build-status.md",
-      "src/contracts/actions-release.ts",
+      "src/contracts/github-cooldown.ts",
+      "src/contracts/hosted-execution.ts",
+      "src/contracts/hosted-supervisor.ts",
       "src/contracts/local-release.ts",
       "src/contracts/ports.ts",
+      "src/contracts/state-snapshots.ts",
       "src/github/client.ts",
       "src/github/http.ts",
       "src/host/actions-ci.ts",
       "src/host/actions-candidates.ts",
       "src/host/actions-preflight.ts",
       "src/host/actions-release.ts",
+      "src/host/actions-supervisor.ts",
       "src/host/actions.ts",
+      "src/host/hosted-cooldown.ts",
+      "src/host/hosted-runtime.ts",
       "src/host/local-release.ts",
       "src/host/local-supervisor.ts",
       "src/host/local.ts",
       "src/main.ts",
+      "src/repair/github-cooldown.ts",
       "src/repair/loop.ts",
+      "src/state/",
       "src/budget/",
     ],
     build: { projectId: null, acceptance: null },
@@ -808,6 +823,166 @@ export interface LocalGitHubInputV1 {
   modelBaseUrl?: string;
 }
 
+// ---------------------------------------------------------------------------
+// Deterministic candidate-base refresh adapter (optional port capability)
+// ---------------------------------------------------------------------------
+
+/** Narrow read-only observation the base-refresh adapter needs from the port. */
+export interface BaseRefreshObserverV1 {
+  readPullRequest(
+    number: number,
+  ): Promise<PortResultV1<GitHubPullRequestV1 | null>>;
+  readRef(ref: string): Promise<PortResultV1<GitHubRefV1 | null>>;
+}
+
+export interface PrepareBaseRefreshAdapterInputV1 {
+  /** THE same trusted executor instance the port publishes through. */
+  git: GitExecutorV1;
+  /** The exact port instance (or any exact observer over it). */
+  observer: BaseRefreshObserverV1;
+  /** Exact configured base branch the PR must target. */
+  baseBranch: string;
+  /** Trusted PR author login for this scope. */
+  trustedPrAuthor: string;
+  /**
+   * Existing hosted exact-object restore capability. The local host omits it
+   * because its persistent private source repository already owns the
+   * candidate objects.
+   */
+  ensureCandidateObjects?: (
+    input: { base: GitSha; head: GitSha },
+  ) => Promise<PortResultV1<void>>;
+}
+
+export type PrepareBaseRefreshV1 = (
+  request: PrepareBaseRefreshRequestV1,
+) => Promise<PortResultV1<GitSha>>;
+
+const STATIC_BASE_REFRESH_INPUT = "base refresh request is invalid";
+const STATIC_BASE_REFRESH_PR =
+  "base refresh requires the exact open trusted-author PR";
+const STATIC_BASE_REFRESH_AUTHOR = "base refresh PR author is not trusted";
+const STATIC_BASE_REFRESH_HEAD_REF = "base refresh head branch is not exact";
+const STATIC_BASE_REFRESH_BASE_REF = "base refresh base branch is not exact";
+const STATIC_BASE_REFRESH_HEAD = "base refresh PR head is not exact";
+const STATIC_BASE_REFRESH_BASE_MOVED = "base refresh configured base moved";
+const STATIC_BASE_REFRESH_RESTORE =
+  "base refresh candidate objects are unavailable";
+const STATIC_BASE_REFRESH_UNSUPPORTED =
+  "base refresh local integration is unavailable";
+const STATIC_BASE_REFRESH_PREPARED = "base refresh prepared identity mismatch";
+
+/**
+ * Trusted deterministic candidate-base generation over ONE executor instance.
+ *
+ * Every identity is re-observed immediately before generation: the PR must be
+ * open, authored by the trusted login, carry the exact head branch and target
+ * the exact configured base branch, the PR head must be the exact old
+ * candidate (or, on recovery only, the exact persisted prepared commit), and
+ * the current configured base ref must equal `expectedBase`. The old candidate
+ * parents are ensured through the SAME restore capability the port uses before
+ * the local integration runs. Nothing is merged or published here; a wrong,
+ * foreign or moved identity fails closed with a bounded static error.
+ */
+export function createPrepareBaseRefresh(
+  input: PrepareBaseRefreshAdapterInputV1,
+): PrepareBaseRefreshV1 {
+  const baseBranch = input.baseBranch;
+  const trustedPrAuthor = input.trustedPrAuthor;
+  return async (request) => {
+    if (
+      request === null || typeof request !== "object" ||
+      !Number.isSafeInteger(request.pullRequestNumber) ||
+      request.pullRequestNumber <= 0 ||
+      typeof request.branch !== "string" ||
+      request.branch.length === 0 ||
+      request.branch.length > MaxText.branch ||
+      !isGitSha(request.expectedHead) ||
+      !isGitSha(request.previousBase) ||
+      !isGitSha(request.expectedBase) ||
+      (request.preparedHead !== undefined && !isGitSha(request.preparedHead))
+    ) {
+      return portError("invalid", STATIC_BASE_REFRESH_INPUT);
+    }
+    const observed = await input.observer.readPullRequest(
+      request.pullRequestNumber,
+    );
+    if (!observed.ok) return observed;
+    if (observed.value === null) {
+      return portError("not_found", STATIC_BASE_REFRESH_PR);
+    }
+    const pull = observed.value;
+    if (pull.state !== "open") {
+      return portError("conflict", STATIC_BASE_REFRESH_PR);
+    }
+    if (pull.author !== trustedPrAuthor) {
+      return portError("conflict", STATIC_BASE_REFRESH_AUTHOR);
+    }
+    if (pull.headRef !== request.branch) {
+      return portError("conflict", STATIC_BASE_REFRESH_HEAD_REF);
+    }
+    if (pull.baseRef !== baseBranch) {
+      return portError("conflict", STATIC_BASE_REFRESH_BASE_REF);
+    }
+    // The head must be the exact old candidate, or on recovery exactly the
+    // already persisted prepared commit. Nothing else is ever adopted.
+    if (
+      pull.head !== request.expectedHead &&
+      pull.head !== request.preparedHead
+    ) {
+      return portError("conflict", STATIC_BASE_REFRESH_HEAD);
+    }
+    const base = await input.observer.readRef(`refs/heads/${baseBranch}`);
+    if (!base.ok) return base;
+    if (base.value === null) {
+      return portError("conflict", STATIC_BASE_REFRESH_BASE_MOVED);
+    }
+    // An UNPREPARED refresh requires the exact current base. A prepared
+    // recovery (exact preparedHead supplied) publishes the already frozen
+    // deterministic candidate even if the configured base has since advanced:
+    // the regeneration below still has to equal the saved prepared commit, and
+    // the saved observed base is never rewritten. This is publication of an
+    // existing candidate, not merge approval.
+    if (
+      base.value.sha !== request.expectedBase &&
+      request.preparedHead === undefined
+    ) {
+      return portError("conflict", STATIC_BASE_REFRESH_BASE_MOVED);
+    }
+    if (input.ensureCandidateObjects !== undefined) {
+      let ensured: PortResultV1<void>;
+      try {
+        ensured = await input.ensureCandidateObjects({
+          base: request.previousBase,
+          head: request.expectedHead,
+        });
+      } catch {
+        return portError("unavailable", STATIC_BASE_REFRESH_RESTORE);
+      }
+      if (!ensured.ok) return ensured;
+    }
+    const integrateBase = input.git.integrateBase?.bind(input.git);
+    if (integrateBase === undefined) {
+      return portError("unavailable", STATIC_BASE_REFRESH_UNSUPPORTED);
+    }
+    const integrated = await integrateBase(
+      request.expectedHead,
+      request.expectedBase,
+    );
+    if (!integrated.ok) return integrated;
+    // The regenerated deterministic commit is byte-identical to the persisted
+    // recovery identity or the request is refused: an unrelated head can never
+    // be adopted through this capability.
+    if (
+      request.preparedHead !== undefined &&
+      integrated.value !== request.preparedHead
+    ) {
+      return portError("invalid", STATIC_BASE_REFRESH_PREPARED);
+    }
+    return integrated;
+  };
+}
+
 /** Compose the one authenticated GitHub port over the shared cooldown gate. */
 export function composeLocalGitHub(input: LocalGitHubInputV1): GitHubPort {
   const repository = { ...LOCAL_REPOSITORY };
@@ -903,6 +1078,17 @@ export function composeLocalGitHub(input: LocalGitHubInputV1): GitHubPort {
       return await originalIsAncestor(ancestor, descendant);
     };
   }
+  // The optional deterministic base-refresh capability is composed HERE on the
+  // SAME port + executor identities: it re-observes through this exact port and
+  // integrates through this exact executor, so host reconciliation and port
+  // publication can never drift to a parallel instance.
+  host.port.prepareBaseRefresh = createPrepareBaseRefresh({
+    git: host.git,
+    observer: host.port,
+    baseBranch: LOCAL_BASE_BRANCH,
+    trustedPrAuthor: input.login,
+    ensureCandidateObjects,
+  });
   return scopeLocalRepairIssues(host.port);
 }
 

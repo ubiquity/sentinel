@@ -11,27 +11,29 @@
  * response body, URL, header or token value is ever echoed into `detail`.
  */
 
-import {
-  ACTIONS_RELEASE_BRANCH,
-  ACTIONS_RELEASE_JOB_NAME,
-  ACTIONS_RELEASE_LOG_MAX_BYTES,
-  ACTIONS_RELEASE_LOGIN,
-  ACTIONS_RELEASE_REPOSITORY,
-  ACTIONS_RELEASE_RUN_MAX,
-  ACTIONS_RELEASE_STEP_NAME,
-  ACTIONS_RELEASE_TIME_SLACK_MS,
-  ACTIONS_RELEASE_WORKFLOW_ID,
-  ACTIONS_RELEASE_WORKFLOW_PATH,
-  actionsAuthorityFiles,
-  actionsOptionalAuthorityFiles,
-  actionsReleaseCiApprovalCounts,
-  type ActionsReleaseOutcomeV1,
-  type ActionsReleaseReceiptV1,
-  actionsReleaseTreeEntries,
-  parseActionsReleaseReceiptV1,
-} from "../contracts/actions-release.ts";
 import type { GitSha } from "../contracts/brands.ts";
 import { isGitSha } from "../contracts/brands.ts";
+import { canonicalStringify } from "../contracts/canonical.ts";
+import {
+  HOSTED_RUNTIME_STEP_NAME,
+  parseHostedRuntimeTerminalV1,
+} from "../contracts/hosted-execution.ts";
+import type { HostedRuntimeTerminalV1 } from "../contracts/hosted-execution.ts";
+import {
+  HOSTED_ACTIONS_CLOCK_TOLERANCE_MS,
+  HOSTED_SUPERVISOR_REF,
+  HOSTED_SUPERVISOR_REPOSITORY,
+  HOSTED_SUPERVISOR_WORKFLOW_ID,
+  HOSTED_SUPERVISOR_WORKFLOW_PATH,
+  parseHostedExecutionIntentV1,
+  parseHostedNotStartedProofV1,
+  parseHostedRunProofV1,
+} from "../contracts/hosted-supervisor.ts";
+import type {
+  HostedExecutionIntentV1,
+  HostedExecutionSettlementV1,
+  HostedNotStartedProofV1,
+} from "../contracts/hosted-supervisor.ts";
 import type { GitHubRateLimitV1 } from "../contracts/github-cooldown.ts";
 import type {
   Clock,
@@ -47,6 +49,7 @@ import type {
   PortResultV1,
 } from "../contracts/ports.ts";
 import { portError, portOk } from "../contracts/ports.ts";
+import { parseReleaseRequestV1 } from "../contracts/release.ts";
 import type { ReleaseRequestV1 } from "../contracts/release.ts";
 import type { RepositoryIdentityV1 } from "../contracts/shared.ts";
 import {
@@ -54,8 +57,9 @@ import {
   expectBoolean,
   expectCount,
   expectEnum,
-  expectExactKeys,
+  expectGitSha,
   expectNonEmptyString,
+  expectNullable,
   expectNullableString,
   expectPositiveInt,
   expectRecord,
@@ -116,19 +120,30 @@ const CI_APPROVAL_AMBIGUOUS = "CI approval found more than one matching run";
 const CI_APPROVAL_BOUND = "CI approval run list exceeded its bound";
 const CI_APPROVAL_RECONCILE = "CI approval outcome could not be reconciled";
 
-/** Whole hosted release-reader bound: no new request starts after this. */
-const ACTIONS_RELEASE_READ_DEADLINE_MS = 120_000;
-const ACTIONS_RELEASE_MAX_CANDIDATES = 3;
-/** Safe upper bound on a terminal step_limit count. */
-const ACTIONS_RELEASE_MAX_STEPS = 10_000;
-const ACTIONS_RELEASE_UNAVAILABLE = "hosted release evidence is unavailable";
-const ACTIONS_RELEASE_SCOPE =
-  "hosted release evidence is restricted to the scope-0 self request";
-const ACTIONS_RELEASE_REDIRECT = "hosted release log redirect is not trusted";
+/** Development ref compared by the hosted supervisor evidence reads. */
+const ACTIONS_RELEASE_BRANCH = "development";
+/** Bounded signed job-log read for the hosted runtime terminal. */
+const ACTIONS_RELEASE_LOG_MAX_BYTES = 8 * 1024 * 1024;
 const ACTIONS_RELEASE_LOG_HOST =
   /^productionresultssa[0-9]+\.blob\.core\.windows\.net$/;
-const ACTIONS_RELEASE_TIMESTAMP_LINE =
-  /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z) (\{.*\})$/;
+
+/** Hosted supervisor execution reader: one bounded whole-operation window. */
+const HOSTED_EXECUTION_READ_DEADLINE_MS = 120_000;
+const HOSTED_EXECUTION_MAX_JOBS = 100;
+const HOSTED_EXECUTION_BRANCH = "sentinel-supervisor";
+const HOSTED_EXECUTION_UNAVAILABLE = "hosted execution evidence is unavailable";
+const HOSTED_EXECUTION_SCOPE =
+  "hosted execution evidence is restricted to the scope-0 self repository";
+const HOSTED_EXECUTION_REDIRECT =
+  "hosted execution log redirect is not trusted";
+const HOSTED_EXECUTION_METADATA = "hosted execution metadata is invalid";
+const HOSTED_EXECUTION_TERMINAL = "hosted runtime terminal evidence is invalid";
+/** Full timestamp-prefixed line; the whole remainder is captured. */
+const HOSTED_EXECUTION_TERMINAL_LINE =
+  /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z) (.*)$/;
+/** Truncated terminal text still names the trusted record kind anywhere. */
+const HOSTED_EXECUTION_TERMINAL_LOOKING =
+  /"kind"\s*:\s*"hosted_runtime_terminal"/;
 
 const REVIEW_DECISION_QUERY = `
   query SentinelPullReviewDecision($owner: String!, $name: String!, $number: Int!) {
@@ -907,88 +922,7 @@ export class GitHubApiClient {
     });
   }
 
-  // -------------------------------------------------------------------------
-  // Hosted read-only release evidence (fixed self scope)
-  // -------------------------------------------------------------------------
-
-  /**
-   * Read the exact hosted release receipt for one scope-0 self production
-   * request. Every authority is re-derived from the authenticated API before
-   * the log can attest: the merged PR, the merge commit parents, the immutable
-   * base/revision task-definition trees, the exact completed workflow attempt,
-   * its single `repair` job / `Repair polling run` step and that step's single
-   * terminal JSON record. A missing successful run is `null`; every foreign,
-   * malformed, truncated, mismatched or inaccessible proof is unavailable.
-   * No raw log, URL or credential is ever returned.
-   */
-  async readActionsRelease(
-    request: ReleaseRequestV1,
-  ): Promise<PortResultV1<ActionsReleaseReceiptV1 | null>> {
-    if (!actionsReleaseIsSelfRequest(request)) {
-      return portError("invalid", ACTIONS_RELEASE_SCOPE);
-    }
-    const deadline = createDeadline(ACTIONS_RELEASE_READ_DEADLINE_MS);
-    try {
-      const source = await this.readActionsReleaseSource(request, deadline);
-      if (!source.ok) return source;
-      const candidates = await this.findActionsReleaseCandidates(
-        request,
-        deadline,
-      );
-      if (!candidates.ok) return candidates;
-      for (const candidate of candidates.value) {
-        if (deadline.fired()) return this.actionsReleaseTimeout();
-        const execution = await this.readActionsReleaseExecution(
-          candidate,
-          request,
-          deadline,
-        );
-        if (!execution.ok) return execution;
-        const terminal = await this.readActionsReleaseTerminal(
-          execution.value,
-          request,
-          deadline,
-        );
-        if (!terminal.ok) return terminal;
-        const raw = {
-          version: "v1" as const,
-          kind: "actions_release_receipt" as const,
-          request,
-          proof: {
-            repository: ACTIONS_RELEASE_REPOSITORY,
-            workflowId: ACTIONS_RELEASE_WORKFLOW_ID,
-            workflowPath: ACTIONS_RELEASE_WORKFLOW_PATH,
-            branch: ACTIONS_RELEASE_BRANCH,
-            event: candidate.event,
-            controllerSha: request.revision,
-            baseSha: request.revision,
-            runId: execution.value.runId,
-            runAttempt: execution.value.runAttempt,
-            jobId: execution.value.jobId,
-            startedAt: execution.value.startedAt,
-            finishedAt: execution.value.finishedAt,
-            terminalAt: terminal.value.terminalAt,
-            observedAt: this.options.clock.now(),
-            outcome: terminal.value.outcome,
-            startupReady: true,
-            settled: true,
-            login: ACTIONS_RELEASE_LOGIN,
-            logDigest: terminal.value.logDigest,
-          },
-        };
-        return parseWith(raw, (value) => parseActionsReleaseReceiptV1(value));
-      }
-      return portOk(null);
-    } catch {
-      return portError("unavailable", ACTIONS_RELEASE_UNAVAILABLE);
-    } finally {
-      deadline.dispose();
-    }
-  }
-
-  private actionsReleaseTimeout(): PortResultV1<never> {
-    return portError("unavailable", ACTIONS_RELEASE_UNAVAILABLE);
-  }
+  /** Authenticated JSON GET used by the hosted supervisor evidence reads. */
 
   private async actionsReleaseGet(
     path: string,
@@ -1007,82 +941,294 @@ export class GitHubApiClient {
     }
   }
 
-  private async readActionsReleaseSource(
-    request: ReleaseRequestV1,
-    deadline: DeadlineV1,
-  ): Promise<PortResultV1<void>> {
-    if (deadline.fired()) return this.actionsReleaseTimeout();
-    const repo = repoPath(this.repository);
-    const pull = await this.actionsReleaseGet(
-      `/repos/${repo}/pulls/${request.source.pullRequest}`,
-      {},
-      deadline,
-    );
-    if (!pull.ok) return pull;
-    const parsedPull = parseWith(
-      pull.value,
-      (value) => parseActionsReleasePull(value, request),
-    );
-    if (!parsedPull.ok) return parsedPull;
+  // -------------------------------------------------------------------------
+  // Hosted supervisor execution evidence (read-only, scope-0 self only)
+  // -------------------------------------------------------------------------
 
-    if (deadline.fired()) return this.actionsReleaseTimeout();
-    const commit = await this.actionsReleaseGet(
-      `/repos/${repo}/commits/${request.revision}`,
-      {},
-      deadline,
-    );
-    if (!commit.ok) return commit;
-    const parsedCommit = parseWith(
-      commit.value,
-      (value) => parseActionsReleaseCommit(value, request),
-    );
-    if (!parsedCommit.ok) return parsedCommit;
+  private isHostedSelfScope(): boolean {
+    const repository = this.repository;
+    return repository.installationId === 0 && repository.owner === "ubiquity" &&
+      repository.name === "sentinel";
+  }
 
-    const baseTree = await this.readActionsReleaseTree(
-      request.source.base,
-      deadline,
-    );
-    if (!baseTree.ok) return baseTree;
-    const revisionTree = await this.readActionsReleaseTree(
-      request.revision,
-      deadline,
-    );
-    if (!revisionTree.ok) return revisionTree;
-    if (!actionsTreesEqual(baseTree.value, revisionTree.value)) {
-      return portError("unavailable", ACTIONS_RELEASE_UNAVAILABLE);
+  private hostedExecutionTimeout(): PortResultV1<never> {
+    return portError("unavailable", HOSTED_EXECUTION_UNAVAILABLE);
+  }
+
+  /**
+   * Ancestry check for one exact revision against the moving development ref:
+   * the ref is never selected as an execution. Only an ahead/identical compare
+   * whose base and merge base are the requested SHA is accepted.
+   */
+  async verifyHostedRevision(
+    revision: GitSha,
+  ): Promise<PortResultV1<boolean>> {
+    if (!this.isHostedSelfScope() || !isGitSha(revision)) {
+      return portError("invalid", HOSTED_EXECUTION_SCOPE);
     }
-    return portOk(undefined);
+    const deadline = createDeadline(HOSTED_EXECUTION_READ_DEADLINE_MS);
+    try {
+      const response = await this.request(
+        "GET",
+        `/repos/${
+          repoPath(this.repository)
+        }/compare/${revision}...${ACTIONS_RELEASE_BRANCH}`,
+        {},
+        deadline,
+      );
+      if (!response.ok) return response;
+      if (response.value.status !== 200) {
+        return portError(...this.mapError(response.value));
+      }
+      return parseWire(
+        response.value,
+        (value) => parseHostedCompare(value, revision),
+      );
+    } catch {
+      return portError("unavailable", HOSTED_EXECUTION_UNAVAILABLE);
+    } finally {
+      deadline.dispose();
+    }
   }
 
-  private async readActionsReleaseTree(
-    sha: GitSha,
-    deadline: DeadlineV1,
-  ): Promise<PortResultV1<Map<string, string>>> {
-    if (deadline.fired()) return this.actionsReleaseTimeout();
-    const response = await this.actionsReleaseGet(
-      `/repos/${repoPath(this.repository)}/git/trees/${sha}`,
-      { recursive: "1" },
-      deadline,
-    );
-    if (!response.ok) return response;
-    return parseWith(response.value, parseActionsReleaseTree);
-  }
-
-  private async findActionsReleaseCandidates(
+  /**
+   * Exact self production open request: the merged PR and its two-parent merge
+   * commit are revalidated, then the requested revision must be an ancestor of
+   * the current development ref within the SAME deadline. No workflow listing
+   * and no authority-tree comparison.
+   */
+  async verifyHostedReleaseRequest(
     request: ReleaseRequestV1,
+  ): Promise<PortResultV1<boolean>> {
+    if (!this.isHostedSelfScope()) {
+      return portError("invalid", HOSTED_EXECUTION_SCOPE);
+    }
+    const parsed = tryParse(parseReleaseRequestV1, request);
+    if (!parsed.ok || !hostedSelfRequest(parsed.value)) return portOk(false);
+    const frozen = parsed.value;
+    const deadline = createDeadline(HOSTED_EXECUTION_READ_DEADLINE_MS);
+    try {
+      const repo = repoPath(this.repository);
+      const pull = await this.actionsReleaseGet(
+        `/repos/${repo}/pulls/${frozen.source.pullRequest}`,
+        {},
+        deadline,
+      );
+      if (!pull.ok) return pull;
+      const parsedPull = tryParse(
+        (value) => parseActionsReleasePull(value, frozen),
+        pull.value,
+      );
+      if (!parsedPull.ok) return portOk(false);
+      if (deadline.fired()) return this.hostedExecutionTimeout();
+      const commit = await this.actionsReleaseGet(
+        `/repos/${repo}/commits/${frozen.revision}`,
+        {},
+        deadline,
+      );
+      if (!commit.ok) return commit;
+      const parsedCommit = tryParse(
+        (value) => parseActionsReleaseCommit(value, frozen),
+        commit.value,
+      );
+      if (!parsedCommit.ok) return portOk(false);
+      if (deadline.fired()) return this.hostedExecutionTimeout();
+      const compare = await this.request(
+        "GET",
+        `/repos/${repo}/compare/${frozen.revision}...${ACTIONS_RELEASE_BRANCH}`,
+        {},
+        deadline,
+      );
+      if (!compare.ok) return compare;
+      if (compare.value.status !== 200) {
+        return portError(...this.mapError(compare.value));
+      }
+      return parseWire(
+        compare.value,
+        (value) => parseHostedCompare(value, frozen.revision),
+      );
+    } catch {
+      return portError("unavailable", HOSTED_EXECUTION_UNAVAILABLE);
+    } finally {
+      deadline.dispose();
+    }
+  }
+
+  /**
+   * Exact authenticated settlement of one saved hosted execution intent:
+   * attempt + complete one-page jobs listing + (for a completed runtime step)
+   * the trusted signed job log carrying exactly one runtime terminal. A missing
+   * or not-yet-complete repair job is `null` (pending); an exact completed
+   * skip/absence is an explicit not_started settlement. Nothing is inferred
+   * from a green workflow alone.
+   */
+  async readHostedExecution(
+    intent: HostedExecutionIntentV1,
+  ): Promise<PortResultV1<HostedExecutionSettlementV1 | null>> {
+    if (!this.isHostedSelfScope()) {
+      return portError("invalid", HOSTED_EXECUTION_SCOPE);
+    }
+    const parsedIntent = tryParse(parseHostedExecutionIntentV1, intent);
+    if (!parsedIntent.ok) return portError("invalid", HOSTED_EXECUTION_SCOPE);
+    const saved = parsedIntent.value;
+    const deadline = createDeadline(HOSTED_EXECUTION_READ_DEADLINE_MS);
+    try {
+      const repo = repoPath(this.repository);
+      const attemptRaw = await this.actionsReleaseGet(
+        `/repos/${repo}/actions/runs/${saved.runId}/attempts/${saved.runAttempt}`,
+        {},
+        deadline,
+      );
+      if (!attemptRaw.ok) return attemptRaw;
+      const observedAt = this.options.clock.now();
+      const attempt = parseWith(
+        attemptRaw.value,
+        (value) => parseHostedAttempt(value, saved, observedAt),
+      );
+      if (!attempt.ok) return attempt;
+      const jobs = await this.readHostedAttemptJobs(saved, deadline);
+      if (!jobs.ok) return jobs;
+      const evidenceDigest = await sha256Hex(
+        canonicalStringify({
+          attempt: attemptRaw.value,
+          jobs: jobs.value.raw,
+        }),
+      );
+      const repair = jobs.value.repair;
+      if (repair === null) {
+        if (
+          attempt.value.status !== "completed" ||
+          attempt.value.completedAt === null
+        ) {
+          return portOk(null);
+        }
+        return this.hostedNotStarted(
+          saved,
+          null,
+          attempt.value.completedAt,
+          evidenceDigest,
+        );
+      }
+      if (repair.status !== "completed" || repair.completedAt === null) {
+        return portOk(null);
+      }
+      if (repair.conclusion === "skipped") {
+        return this.hostedNotStarted(
+          saved,
+          repair.id,
+          repair.completedAt,
+          evidenceDigest,
+        );
+      }
+      const step = repair.runtimeStep;
+      if (step === null) {
+        return portError("unavailable", HOSTED_EXECUTION_METADATA);
+      }
+      if (step.status === "completed" && step.conclusion === "skipped") {
+        return this.hostedNotStarted(
+          saved,
+          repair.id,
+          repair.completedAt,
+          evidenceDigest,
+        );
+      }
+      if (repair.conclusion !== "success" && repair.conclusion !== "failure") {
+        return portError("unavailable", HOSTED_EXECUTION_METADATA);
+      }
+      if (
+        step.status !== "completed" ||
+        (step.conclusion !== "success" && step.conclusion !== "failure") ||
+        repair.startedAt === null || step.startedAt === null ||
+        step.completedAt === null
+      ) {
+        return portError("unavailable", HOSTED_EXECUTION_METADATA);
+      }
+      // Actual (non-skipped) metadata must be coherent and not future.
+      const tolerance = HOSTED_ACTIONS_CLOCK_TOLERANCE_MS;
+      if (
+        step.startedAt + tolerance < repair.startedAt ||
+        step.completedAt > repair.completedAt + tolerance ||
+        repair.completedAt > observedAt + tolerance ||
+        step.completedAt > observedAt + tolerance
+      ) {
+        return portError("unavailable", HOSTED_EXECUTION_METADATA);
+      }
+      const log = await this.readHostedRuntimeLog(repair.id, deadline);
+      if (!log.ok) return log;
+      const parsedTerminal = parseHostedRuntimeTerminalLog(
+        log.value,
+        saved,
+        repair,
+        step,
+        observedAt,
+      );
+      if (!parsedTerminal.ok) return parsedTerminal;
+      const terminal = parsedTerminal.value.terminal;
+      // A healthy terminal with a failed job or runtime step is contradictory:
+      // it is never rewritten into a failed proof.
+      if (
+        terminal.outcome === "healthy" &&
+        (repair.conclusion !== "success" || step.conclusion !== "success")
+      ) {
+        return portError("unavailable", HOSTED_EXECUTION_METADATA);
+      }
+      return parseWith({
+        execution: saved,
+        workflowId: HOSTED_SUPERVISOR_WORKFLOW_ID,
+        workflowPath: HOSTED_SUPERVISOR_WORKFLOW_PATH,
+        repository: HOSTED_SUPERVISOR_REPOSITORY,
+        ref: HOSTED_SUPERVISOR_REF,
+        jobId: repair.id,
+        startedAt: repair.startedAt,
+        finishedAt: repair.completedAt,
+        observedAt,
+        outcome: terminal.outcome === "healthy" ? "healthy" : "failed",
+        startupReady: terminal.startupReady,
+        settled: true,
+        baseSha: terminal.baseSha,
+        terminalAt: parsedTerminal.value.terminalAt,
+        logDigest: await sha256Hex(log.value),
+      }, parseHostedRunProofV1);
+    } catch {
+      return portError("unavailable", HOSTED_EXECUTION_UNAVAILABLE);
+    } finally {
+      deadline.dispose();
+    }
+  }
+
+  private hostedNotStarted(
+    intent: HostedExecutionIntentV1,
+    jobId: number | null,
+    finishedAt: number,
+    evidenceDigest: string,
+  ): PortResultV1<HostedNotStartedProofV1> {
+    return parseWith({
+      execution: intent,
+      workflowId: HOSTED_SUPERVISOR_WORKFLOW_ID,
+      workflowPath: HOSTED_SUPERVISOR_WORKFLOW_PATH,
+      repository: HOSTED_SUPERVISOR_REPOSITORY,
+      ref: HOSTED_SUPERVISOR_REF,
+      jobId,
+      finishedAt,
+      observedAt: this.options.clock.now(),
+      outcome: "not_started",
+      evidenceDigest,
+    }, parseHostedNotStartedProofV1);
+  }
+
+  /** One complete bounded jobs page; duplicates/identity mismatches fail. */
+  private async readHostedAttemptJobs(
+    intent: HostedExecutionIntentV1,
     deadline: DeadlineV1,
-  ): Promise<PortResultV1<ActionsReleaseCandidateV1[]>> {
-    if (deadline.fired()) return this.actionsReleaseTimeout();
+  ): Promise<
+    PortResultV1<{ raw: unknown; repair: HostedRepairJobV1 | null }>
+  > {
+    if (deadline.fired()) return this.hostedExecutionTimeout();
+    const repo = repoPath(this.repository);
     const response = await this.request(
       "GET",
-      `/repos/${repoPath(this.repository)}/actions/workflows/${
-        String(ACTIONS_RELEASE_WORKFLOW_ID)
-      }/runs`,
-      {
-        head_sha: request.revision,
-        branch: ACTIONS_RELEASE_BRANCH,
-        per_page: String(ACTIONS_RELEASE_RUN_MAX),
-      },
+      `/repos/${repo}/actions/runs/${intent.runId}/attempts/${intent.runAttempt}/jobs`,
+      { per_page: String(HOSTED_EXECUTION_MAX_JOBS) },
       deadline,
     );
     if (!response.ok) return response;
@@ -1090,69 +1236,33 @@ export class GitHubApiClient {
       return portError(...this.mapError(response.value));
     }
     if (nextLinkUrl(response.value.headers) !== null) {
-      return portError("unavailable", ACTIONS_RELEASE_UNAVAILABLE);
+      return portError("unavailable", HOSTED_EXECUTION_METADATA);
     }
-    return parseWire(
-      response.value,
-      (value) => parseActionsReleaseRuns(value, request),
+    let raw: unknown;
+    try {
+      raw = JSON.parse(response.value.bodyText);
+    } catch {
+      return portError("invalid", "GitHub API response is malformed");
+    }
+    const parsed = parseWith(
+      raw,
+      (value) => parseHostedJobs(value, intent),
     );
+    if (!parsed.ok) return parsed;
+    return portOk({ raw, repair: parsed.value.repair });
   }
 
-  private async readActionsReleaseExecution(
-    candidate: ActionsReleaseCandidateV1,
-    request: ReleaseRequestV1,
+  /** Trusted signed job log, bounded and read without any credential. */
+  private async readHostedRuntimeLog(
+    jobId: number,
     deadline: DeadlineV1,
-  ): Promise<PortResultV1<ActionsReleaseExecutionV1>> {
-    if (deadline.fired()) return this.actionsReleaseTimeout();
-    const repo = repoPath(this.repository);
-    const attemptResponse = await this.request(
-      "GET",
-      `/repos/${repo}/actions/runs/${candidate.runId}/attempts/${candidate.runAttempt}`,
-      {},
-      deadline,
-    );
-    if (!attemptResponse.ok) return attemptResponse;
-    if (attemptResponse.value.status !== 200) {
-      return portError(...this.mapError(attemptResponse.value));
-    }
-    const attempt = parseWire(
-      attemptResponse.value,
-      (value) => parseActionsReleaseAttempt(value, candidate, request),
-    );
-    if (!attempt.ok) return attempt;
-
-    if (deadline.fired()) return this.actionsReleaseTimeout();
-    const jobsResponse = await this.request(
-      "GET",
-      `/repos/${repo}/actions/runs/${candidate.runId}/attempts/${candidate.runAttempt}/jobs`,
-      { per_page: String(ACTIONS_RELEASE_RUN_MAX) },
-      deadline,
-    );
-    if (!jobsResponse.ok) return jobsResponse;
-    if (jobsResponse.value.status !== 200) {
-      return portError(...this.mapError(jobsResponse.value));
-    }
-    if (nextLinkUrl(jobsResponse.value.headers) !== null) {
-      return portError("unavailable", ACTIONS_RELEASE_UNAVAILABLE);
-    }
-    return parseWire(
-      jobsResponse.value,
-      (value) =>
-        parseActionsReleaseJobs(value, candidate, request, attempt.value),
-    );
-  }
-
-  private async readActionsReleaseTerminal(
-    execution: ActionsReleaseExecutionV1,
-    request: ReleaseRequestV1,
-    deadline: DeadlineV1,
-  ): Promise<PortResultV1<ActionsReleaseTerminalV1>> {
-    if (deadline.fired()) return this.actionsReleaseTimeout();
+  ): Promise<PortResultV1<string>> {
+    if (deadline.fired()) return this.hostedExecutionTimeout();
     const raw = await this.sendCore(
       "GET",
       `${this.apiBaseUrl}/repos/${
         repoPath(this.repository)
-      }/actions/jobs/${execution.jobId}/logs`,
+      }/actions/jobs/${jobId}/logs`,
       null,
       "manual",
       deadline,
@@ -1161,28 +1271,26 @@ export class GitHubApiClient {
       return portError(raw.error.kind, raw.error.detail, raw.error.rateLimit);
     }
     if (raw.status === "lost") {
-      return portError("unavailable", ACTIONS_RELEASE_UNAVAILABLE);
+      return portError("unavailable", HOSTED_EXECUTION_UNAVAILABLE);
     }
     if (raw.response.status !== 302) {
-      return portError("unavailable", ACTIONS_RELEASE_UNAVAILABLE);
+      return portError("unavailable", HOSTED_EXECUTION_UNAVAILABLE);
     }
     const location = raw.response.headers.get("location");
     if (location === null) {
-      return portError("unavailable", ACTIONS_RELEASE_REDIRECT);
+      return portError("unavailable", HOSTED_EXECUTION_REDIRECT);
     }
     const signedUrl = trustedActionsLogUrl(location);
     if (signedUrl === null) {
-      return portError("unavailable", ACTIONS_RELEASE_REDIRECT);
+      return portError("unavailable", HOSTED_EXECUTION_REDIRECT);
     }
-    if (deadline.fired()) return this.actionsReleaseTimeout();
+    if (deadline.fired()) return this.hostedExecutionTimeout();
     let logResponse: HttpResponseV1;
     try {
       const signedCall = Promise.resolve().then(() =>
         this.options.http({
           method: "GET",
           url: signedUrl,
-          // The signed URL is pre-authenticated: never send the API token,
-          // never follow a redirect and never reuse the gate for it.
           headers: new Map<string, string>(),
           body: null,
           redirect: "error",
@@ -1191,29 +1299,18 @@ export class GitHubApiClient {
       signedCall.catch(() => {});
       logResponse = await deadline.race(signedCall);
     } catch {
-      return portError("unavailable", ACTIONS_RELEASE_UNAVAILABLE);
+      return portError("unavailable", HOSTED_EXECUTION_UNAVAILABLE);
     }
     if (logResponse.status !== 200) {
-      return portError("unavailable", ACTIONS_RELEASE_UNAVAILABLE);
+      return portError("unavailable", HOSTED_EXECUTION_UNAVAILABLE);
     }
     if (
       new TextEncoder().encode(logResponse.bodyText).length >
         ACTIONS_RELEASE_LOG_MAX_BYTES
     ) {
-      return portError("unavailable", ACTIONS_RELEASE_UNAVAILABLE);
+      return portError("unavailable", HOSTED_EXECUTION_UNAVAILABLE);
     }
-    let terminal: { terminalAt: number; outcome: ActionsReleaseOutcomeV1 };
-    try {
-      terminal = parseActionsReleaseLogText(
-        logResponse.bodyText,
-        execution,
-        request,
-      );
-    } catch {
-      return portError("unavailable", ACTIONS_RELEASE_UNAVAILABLE);
-    }
-    const logDigest = await sha256Hex(logResponse.bodyText);
-    return portOk({ ...terminal, logDigest });
+    return portOk(logResponse.bodyText);
   }
 
   // -------------------------------------------------------------------------
@@ -2106,46 +2203,6 @@ function expectCiActor(value: unknown, path: string): void {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Hosted read-only release evidence wire validation
-// ---------------------------------------------------------------------------
-
-interface ActionsReleaseCandidateV1 {
-  runId: number;
-  runAttempt: number;
-  event: "schedule" | "workflow_dispatch";
-}
-
-interface ActionsReleaseAttemptV1 {
-  startedAt: number;
-  finishedAt: number;
-}
-
-interface ActionsReleaseExecutionV1 {
-  runId: number;
-  runAttempt: number;
-  jobId: number;
-  startedAt: number;
-  finishedAt: number;
-  stepStartedAt: number;
-  stepFinishedAt: number;
-}
-
-interface ActionsReleaseTerminalV1 {
-  terminalAt: number;
-  outcome: ActionsReleaseOutcomeV1;
-  logDigest: string;
-}
-
-function actionsReleaseIsSelfRequest(request: ReleaseRequestV1): boolean {
-  const repository = request.target.repository;
-  return repository.installationId === 0 && repository.owner === "ubiquity" &&
-    repository.name === "sentinel" &&
-    request.target.environment === "production" &&
-    request.status === "open" &&
-    request.source.reviewReceiptId !== null;
-}
-
 /** ISO-8601 UTC timestamp with millisecond precision, as milliseconds. */
 function expectIsoMs(value: unknown, path: string): number {
   const text = expectNonEmptyString(value, path, 64);
@@ -2235,287 +2292,274 @@ function parseActionsReleaseCommit(
   }
 }
 
-/** Authority-file map (mode:type:sha) from one complete untruncated tree. */
-function parseActionsReleaseTree(value: unknown): Map<string, string> {
-  const obj = expectRecord(value, "$");
-  if (expectBoolean(obj.truncated, "$.truncated") !== false) {
-    fail("$.truncated", "bound_exceeded", "authority tree is truncated");
-  }
-  const entries = actionsReleaseTreeEntries(obj.tree, "$.tree");
-  const map = new Map<string, string>();
-  for (const [index, item] of entries.entries()) {
-    const path = `$.tree[${index}]`;
-    const entry = expectRecord(item, path);
-    const entryPath = expectNonEmptyString(
-      entry.path,
-      `${path}.path`,
-      MaxText.path,
-    );
-    if (
-      !actionsAuthorityFiles().includes(entryPath) &&
-      !actionsOptionalAuthorityFiles().includes(entryPath)
-    ) {
-      continue;
-    }
-    const mode = expectNonEmptyString(entry.mode, `${path}.mode`, 6);
-    const type = expectNonEmptyString(entry.type, `${path}.type`, 6);
-    const sha = expectNonEmptyString(entry.sha, `${path}.sha`, 40);
-    if (type !== "blob" || mode !== "100644") {
-      fail(
-        `${path}.type`,
-        "invalid_value",
-        "authority entry is not a regular blob",
-      );
-    }
-    map.set(entryPath, `${mode}:${type}:${sha}`);
-  }
-  return map;
+// ---------------------------------------------------------------------------
+// Hosted supervisor execution wire validation
+// ---------------------------------------------------------------------------
+
+interface HostedAttemptV1 {
+  status: string;
+  completedAt: number | null;
+}
+
+interface HostedRuntimeStepV1 {
+  status: string | null;
+  conclusion: string | null;
+  startedAt: number | null;
+  completedAt: number | null;
+}
+
+interface HostedRepairJobV1 {
+  id: number;
+  status: string;
+  conclusion: string | null;
+  startedAt: number | null;
+  completedAt: number | null;
+  runtimeStep: HostedRuntimeStepV1 | null;
+}
+
+interface HostedJobsV1 {
+  repair: HostedRepairJobV1 | null;
+}
+
+/** Exact scope-0 production open reviewed request. */
+function hostedSelfRequest(request: ReleaseRequestV1): boolean {
+  const repository = request.target.repository;
+  return repository.installationId === 0 && repository.owner === "ubiquity" &&
+    repository.name === "sentinel" &&
+    request.target.environment === "production" &&
+    request.status === "open" && request.source.reviewReceiptId !== null;
 }
 
 /**
- * The task-definition authority must be identical at the immutable base and
- * the request revision; optional authority files are either absent from both
- * trees or equal regular blobs in both.
+ * Compare wire (real GitHub shape, no head_commit): the requested SHA must be
+ * the compare base AND the merge base, counters must be consistent, and only
+ * ahead/identical are positive; behind/diverged are definitive negatives.
  */
-function actionsTreesEqual(
-  base: Map<string, string>,
-  revision: Map<string, string>,
-): boolean {
-  for (const file of actionsAuthorityFiles()) {
-    const atBase = base.get(file);
-    const atRevision = revision.get(file);
-    if (atBase === undefined || atRevision === undefined) return false;
-    if (atBase !== atRevision) return false;
-  }
-  for (const file of actionsOptionalAuthorityFiles()) {
-    const atBase = base.get(file);
-    const atRevision = revision.get(file);
-    if ((atBase === undefined) !== (atRevision === undefined)) return false;
-    if (atBase !== undefined && atBase !== atRevision) return false;
-  }
-  return true;
-}
-
-/** One list entry: exact identity, or null when it is not a success. */
-function parseActionsReleaseRun(
-  value: unknown,
-  request: ReleaseRequestV1,
-  path: string,
-): ActionsReleaseCandidateV1 | null {
-  const obj = expectRecord(value, path);
-  const runId = expectPositiveInt(obj.id, `${path}.id`);
-  const runAttempt = expectPositiveInt(obj.run_attempt, `${path}.run_attempt`);
-  if (
-    expectPositiveInt(obj.workflow_id, `${path}.workflow_id`) !==
-      ACTIONS_RELEASE_WORKFLOW_ID
-  ) {
-    fail(`${path}.workflow_id`, "invalid_value", "unexpected workflow id");
-  }
-  if (
-    expectNonEmptyString(obj.path, `${path}.path`, MaxText.path) !==
-      ACTIONS_RELEASE_WORKFLOW_PATH
-  ) {
-    fail(`${path}.path`, "invalid_value", "unexpected workflow path");
-  }
-  if (
-    expectNonEmptyString(obj.head_sha, `${path}.head_sha`, 40) !==
-      request.revision
-  ) {
-    fail(`${path}.head_sha`, "invalid_value", "run head mismatch");
-  }
-  if (
-    expectNonEmptyString(
-      obj.head_branch,
-      `${path}.head_branch`,
-      MaxText.branch,
-    ) !==
-      ACTIONS_RELEASE_BRANCH
-  ) {
-    fail(`${path}.head_branch`, "invalid_value", "run branch mismatch");
-  }
-  const event = expectEnum(
-    obj.event,
-    ["schedule", "workflow_dispatch"],
-    `${path}.event`,
-  );
+function parseHostedCompare(value: unknown, revision: GitSha): boolean {
+  const obj = expectRecord(value, "$");
   const status = expectEnum(
     obj.status,
-    ["queued", "in_progress", "completed", "requested", "waiting", "pending"],
-    `${path}.status`,
+    ["ahead", "behind", "diverged", "identical"],
+    "$.status",
   );
-  const conclusion = expectNullableString(
-    obj.conclusion,
-    `${path}.conclusion`,
-    MaxText.token,
+  const baseCommit = expectRecord(obj.base_commit, "$.base_commit");
+  const baseSha = expectGitSha(baseCommit.sha, "$.base_commit.sha");
+  const mergeCommit = expectRecord(
+    obj.merge_base_commit,
+    "$.merge_base_commit",
   );
-  expectSelfRepository(obj.repository, `${path}.repository`);
-  expectSelfRepository(obj.head_repository, `${path}.head_repository`);
-  if (status !== "completed" || conclusion !== "success") return null;
-  return { runId, runAttempt, event };
-}
-
-/** Deterministic ascending candidate list, capped at the bounded maximum. */
-function parseActionsReleaseRuns(
-  value: unknown,
-  request: ReleaseRequestV1,
-): ActionsReleaseCandidateV1[] {
-  const obj = expectRecord(value, "$");
-  const total = expectCount(obj.total_count, "$.total_count");
-  const runs = expectArray(
-    obj.workflow_runs,
-    "$.workflow_runs",
-    ACTIONS_RELEASE_RUN_MAX,
-    (item) => item,
-  );
-  if (total > ACTIONS_RELEASE_RUN_MAX || runs.length !== total) {
+  const mergeSha = expectGitSha(mergeCommit.sha, "$.merge_base_commit.sha");
+  const aheadBy = expectCount(obj.ahead_by, "$.ahead_by");
+  const behindBy = expectCount(obj.behind_by, "$.behind_by");
+  const totalCommits = expectCount(obj.total_commits, "$.total_commits");
+  if (totalCommits !== aheadBy + behindBy) {
     fail(
-      "$.total_count",
-      "bound_exceeded",
-      "run list is not a complete bounded page",
+      "$.total_commits",
+      "invalid_value",
+      "compare counters are inconsistent",
     );
   }
-  const candidates: ActionsReleaseCandidateV1[] = [];
-  for (const [index, item] of runs.entries()) {
-    const candidate = parseActionsReleaseRun(
-      item,
-      request,
-      `$.workflow_runs[${index}]`,
-    );
-    if (candidate !== null) candidates.push(candidate);
+  if (status === "identical") {
+    if (aheadBy !== 0 || behindBy !== 0 || totalCommits !== 0) {
+      fail(
+        "$.status",
+        "invalid_value",
+        "identical compare must have zero counters",
+      );
+    }
+    return baseSha === revision && mergeSha === revision;
   }
-  candidates.sort((left, right) => left.runId - right.runId);
-  return candidates.slice(0, ACTIONS_RELEASE_MAX_CANDIDATES);
+  if (status === "ahead") {
+    if (aheadBy === 0 || behindBy !== 0) {
+      fail(
+        "$.status",
+        "invalid_value",
+        "ahead compare counters are inconsistent",
+      );
+    }
+    return baseSha === revision && mergeSha === revision;
+  }
+  // behind/diverged: definitive negatives; malformed counters already failed.
+  if (behindBy === 0) {
+    fail(
+      "$.status",
+      "invalid_value",
+      "behind/diverged compare counters are inconsistent",
+    );
+  }
+  return false;
 }
 
-/** Exact completed successful attempt for the selected run identity. */
-function parseActionsReleaseAttempt(
+/** Exact attempt identity; completion instant required only when completed. */
+function parseHostedAttempt(
   value: unknown,
-  candidate: ActionsReleaseCandidateV1,
-  request: ReleaseRequestV1,
-): ActionsReleaseAttemptV1 {
+  intent: HostedExecutionIntentV1,
+  observedAt: number,
+): HostedAttemptV1 {
   const obj = expectRecord(value, "$");
-  if (expectPositiveInt(obj.id, "$.id") !== candidate.runId) {
+  if (expectPositiveInt(obj.id, "$.id") !== intent.runId) {
     fail("$.id", "invalid_value", "attempt run id mismatch");
   }
   if (
-    expectPositiveInt(obj.run_attempt, "$.run_attempt") !== candidate.runAttempt
+    expectPositiveInt(obj.run_attempt, "$.run_attempt") !== intent.runAttempt
   ) {
     fail("$.run_attempt", "invalid_value", "attempt number mismatch");
   }
   if (
     expectPositiveInt(obj.workflow_id, "$.workflow_id") !==
-      ACTIONS_RELEASE_WORKFLOW_ID
+      HOSTED_SUPERVISOR_WORKFLOW_ID
   ) {
     fail("$.workflow_id", "invalid_value", "unexpected workflow id");
   }
   if (
     expectNonEmptyString(obj.path, "$.path", MaxText.path) !==
-      ACTIONS_RELEASE_WORKFLOW_PATH
+      HOSTED_SUPERVISOR_WORKFLOW_PATH
   ) {
     fail("$.path", "invalid_value", "unexpected workflow path");
   }
-  if (
-    expectNonEmptyString(obj.head_sha, "$.head_sha", 40) !== request.revision
-  ) {
-    fail("$.head_sha", "invalid_value", "attempt head mismatch");
-  }
+  expectEnum(obj.event, ["workflow_dispatch"], "$.event");
   if (
     expectNonEmptyString(obj.head_branch, "$.head_branch", MaxText.branch) !==
-      ACTIONS_RELEASE_BRANCH
+      HOSTED_EXECUTION_BRANCH
   ) {
-    fail("$.head_branch", "invalid_value", "attempt branch mismatch");
+    fail("$.head_branch", "invalid_value", "unexpected workflow branch");
   }
-  expectEnum(
-    obj.event,
-    ["schedule", "workflow_dispatch"],
-    "$.event",
-  );
-  expectEnum(obj.status, ["completed"], "$.status");
   if (
-    expectNullableString(obj.conclusion, "$.conclusion", MaxText.token) !==
-      "success"
+    expectNonEmptyString(obj.head_sha, "$.head_sha", 40) !== intent.launcherSha
   ) {
-    fail("$.conclusion", "invalid_value", "attempt is not successful");
+    fail("$.head_sha", "invalid_value", "attempt launcher mismatch");
   }
   expectSelfRepository(obj.repository, "$.repository");
   expectSelfRepository(obj.head_repository, "$.head_repository");
-  const startedAt = expectIsoMs(obj.run_started_at, "$.run_started_at");
-  const finishedAt = expectIsoMs(obj.updated_at, "$.updated_at");
-  if (startedAt > finishedAt) {
-    fail("$.updated_at", "invalid_lifecycle", "attempt times are inverted");
+  const status = expectEnum(
+    obj.status,
+    ["queued", "in_progress", "completed", "requested", "waiting", "pending"],
+    "$.status",
+  );
+  const runStartedAt = expectNullable(
+    obj.run_started_at,
+    "$.run_started_at",
+    expectIsoMs,
+  );
+  const completedAt = expectNullable(
+    obj.updated_at,
+    "$.updated_at",
+    expectIsoMs,
+  );
+  if (
+    completedAt !== null &&
+    completedAt > observedAt + HOSTED_ACTIONS_CLOCK_TOLERANCE_MS
+  ) {
+    fail(
+      "$.updated_at",
+      "invalid_lifecycle",
+      "attempt update is after the observation time",
+    );
   }
-  return { startedAt, finishedAt };
+  if (
+    runStartedAt !== null && completedAt !== null &&
+    runStartedAt > completedAt
+  ) {
+    fail(
+      "$.updated_at",
+      "invalid_lifecycle",
+      "attempt times are inverted",
+    );
+  }
+  if (
+    status === "completed" && (runStartedAt === null || completedAt === null)
+  ) {
+    fail(
+      "$.updated_at",
+      "invalid_lifecycle",
+      "a completed attempt requires its start and completion instants",
+    );
+  }
+  return { status, completedAt };
 }
 
-/** The single repair job and Repair polling run step, with server times. */
-function parseActionsReleaseJobs(
+/** Exactly one bounded complete page with at most one total repair job. */
+function parseHostedJobs(
   value: unknown,
-  candidate: ActionsReleaseCandidateV1,
-  request: ReleaseRequestV1,
-  attempt: ActionsReleaseAttemptV1,
-): ActionsReleaseExecutionV1 {
+  intent: HostedExecutionIntentV1,
+): HostedJobsV1 {
   const obj = expectRecord(value, "$");
   const total = expectCount(obj.total_count, "$.total_count");
   const jobs = expectArray(
     obj.jobs,
     "$.jobs",
-    ACTIONS_RELEASE_RUN_MAX,
+    HOSTED_EXECUTION_MAX_JOBS,
     (item) => item,
   );
-  if (total > ACTIONS_RELEASE_RUN_MAX || jobs.length !== total) {
-    fail("$.total_count", "bound_exceeded", "job list is not a bounded page");
+  if (total > HOSTED_EXECUTION_MAX_JOBS || jobs.length !== total) {
+    fail("$.total_count", "bound_exceeded", "job list is not a complete page");
   }
   const matches: Array<{ job: Record<string, unknown>; path: string }> = [];
   for (const [index, item] of jobs.entries()) {
     const path = `$.jobs[${index}]`;
     const job = expectRecord(item, path);
     if (
-      expectNonEmptyString(job.name, `${path}.name`, MaxText.label) !==
-        ACTIONS_RELEASE_JOB_NAME
+      expectNonEmptyString(job.name, `${path}.name`, MaxText.label) !== "repair"
     ) {
       continue;
     }
-    if (
-      expectPositiveInt(job.run_id, `${path}.run_id`) !== candidate.runId ||
-      expectPositiveInt(job.run_attempt, `${path}.run_attempt`) !==
-        candidate.runAttempt ||
-      expectNonEmptyString(job.head_sha, `${path}.head_sha`, 40) !==
-        request.revision
-    ) {
-      fail(`${path}.run_id`, "invalid_value", "job identity mismatch");
-    }
     matches.push({ job, path });
   }
-  if (matches.length !== 1) {
-    fail("$.jobs", "invalid_value", "expected exactly one repair job");
+  if (matches.length > 1) {
+    fail("$.jobs", "invalid_value", "expected at most one repair job");
   }
+  if (matches.length === 0) return { repair: null };
   const { job, path } = matches[0]!;
-  expectEnum(job.status, ["completed"], `${path}.status`);
+  const id = expectPositiveInt(job.id, `${path}.id`);
   if (
-    expectNullableString(
-      job.conclusion,
-      `${path}.conclusion`,
-      MaxText.token,
-    ) !==
-      "success"
+    expectPositiveInt(job.run_id, `${path}.run_id`) !== intent.runId ||
+    expectPositiveInt(job.run_attempt, `${path}.run_attempt`) !==
+      intent.runAttempt ||
+    expectNonEmptyString(job.head_sha, `${path}.head_sha`, 40) !==
+      intent.launcherSha
   ) {
-    fail(`${path}.conclusion`, "invalid_value", "job is not successful");
+    fail(`${path}.run_id`, "invalid_value", "repair job identity mismatch");
   }
-  const jobId = expectPositiveInt(job.id, `${path}.id`);
-  const startedAt = expectIsoMs(job.started_at, `${path}.started_at`);
-  const finishedAt = expectIsoMs(job.completed_at, `${path}.completed_at`);
-  if (
-    startedAt < attempt.startedAt ||
-    finishedAt > attempt.finishedAt + ACTIONS_RELEASE_TIME_SLACK_MS ||
-    startedAt > finishedAt
-  ) {
-    fail(`${path}.started_at`, "invalid_lifecycle", "job window is invalid");
+  const status = expectEnum(
+    job.status,
+    ["queued", "in_progress", "completed", "requested", "waiting", "pending"],
+    `${path}.status`,
+  );
+  const conclusion = expectNullableString(
+    job.conclusion,
+    `${path}.conclusion`,
+    MaxText.token,
+  );
+  const startedAt = expectNullable(
+    job.started_at,
+    `${path}.started_at`,
+    expectIsoMs,
+  );
+  const completedAt = expectNullable(
+    job.completed_at,
+    `${path}.completed_at`,
+    expectIsoMs,
+  );
+  // A completed job always carries its authenticated completion instant; a
+  // skipped job may legitimately have no start timestamp.
+  if (status === "completed" && completedAt === null) {
+    fail(
+      `${path}.completed_at`,
+      "invalid_lifecycle",
+      "a completed repair job requires its completion instant",
+    );
   }
-
+  if (startedAt !== null && completedAt !== null && startedAt > completedAt) {
+    fail(
+      `${path}.completed_at`,
+      "invalid_lifecycle",
+      "repair job times are inverted",
+    );
+  }
   const steps = expectArray(
     job.steps,
     `${path}.steps`,
-    ACTIONS_RELEASE_RUN_MAX,
+    HOSTED_EXECUTION_MAX_JOBS,
     (item) => item,
   );
   const stepMatches: Array<{ step: Record<string, unknown>; path: string }> =
@@ -2525,198 +2569,149 @@ function parseActionsReleaseJobs(
     const step = expectRecord(item, stepPath);
     if (
       expectNonEmptyString(step.name, `${stepPath}.name`, MaxText.label) ===
-        ACTIONS_RELEASE_STEP_NAME
+        HOSTED_RUNTIME_STEP_NAME
     ) {
       stepMatches.push({ step, path: stepPath });
     }
   }
-  if (stepMatches.length !== 1) {
-    fail(`${path}.steps`, "invalid_value", "expected exactly one repair step");
+  if (stepMatches.length > 1) {
+    fail(`${path}.steps`, "invalid_value", "expected at most one runtime step");
   }
-  const { step, path: stepPath } = stepMatches[0]!;
-  expectEnum(step.status, ["completed"], `${stepPath}.status`);
-  if (
-    expectNullableString(
+  let runtimeStep: HostedRuntimeStepV1 | null = null;
+  if (stepMatches.length === 1) {
+    const { step, path: stepPath } = stepMatches[0]!;
+    const stepStatus = expectNullableString(
+      step.status,
+      `${stepPath}.status`,
+      MaxText.token,
+    );
+    const stepConclusion = expectNullableString(
       step.conclusion,
       `${stepPath}.conclusion`,
       MaxText.token,
-    ) !== "success"
-  ) {
-    fail(`${stepPath}.conclusion`, "invalid_value", "step is not successful");
-  }
-  const stepStartedAt = expectIsoMs(step.started_at, `${stepPath}.started_at`);
-  const stepFinishedAt = expectIsoMs(
-    step.completed_at,
-    `${stepPath}.completed_at`,
-  );
-  if (
-    stepStartedAt < startedAt || stepFinishedAt > finishedAt ||
-    stepStartedAt > stepFinishedAt
-  ) {
-    fail(
-      `${stepPath}.started_at`,
-      "invalid_lifecycle",
-      "step window is outside the job window",
     );
+    const stepStartedAt = expectNullable(
+      step.started_at,
+      `${stepPath}.started_at`,
+      expectIsoMs,
+    );
+    const stepCompletedAt = expectNullable(
+      step.completed_at,
+      `${stepPath}.completed_at`,
+      expectIsoMs,
+    );
+    // Only an actual non-skipped run needs full start/finish evidence.
+    if (
+      stepStatus === "completed" && stepConclusion !== "skipped" &&
+      (stepStartedAt === null || stepCompletedAt === null)
+    ) {
+      fail(
+        `${stepPath}.completed_at`,
+        "invalid_lifecycle",
+        "a completed non-skipped runtime step requires its timestamps",
+      );
+    }
+    if (
+      stepStartedAt !== null && stepCompletedAt !== null &&
+      stepStartedAt > stepCompletedAt
+    ) {
+      fail(
+        `${stepPath}.completed_at`,
+        "invalid_lifecycle",
+        "runtime step times are inverted",
+      );
+    }
+    runtimeStep = {
+      status: stepStatus,
+      conclusion: stepConclusion,
+      startedAt: stepStartedAt,
+      completedAt: stepCompletedAt,
+    };
   }
   return {
-    runId: candidate.runId,
-    runAttempt: candidate.runAttempt,
-    jobId,
-    startedAt,
-    finishedAt,
-    stepStartedAt,
-    stepFinishedAt,
+    repair: { id, status, conclusion, startedAt, completedAt, runtimeStep },
   };
 }
 
 /**
- * The single terminal JSON record in the job log: only full
- * timestamp-prefixed lines are parsed, so a quoted JSON substring can never
- * attest. Any additional object carrying a `status` key is a duplicate.
+ * Exactly one outer runtime terminal in the bounded raw log. Full
+ * timestamp-prefixed lines only; a malformed terminal-looking line is
+ * ambiguous evidence even beside a valid one. The terminal must bind the full
+ * saved intent and the exact controller, and its window must fit the runtime
+ * step and job boundaries.
  */
-function parseActionsReleaseLogText(
+function parseHostedRuntimeTerminalLog(
   text: string,
-  execution: ActionsReleaseExecutionV1,
-  request: ReleaseRequestV1,
-): { terminalAt: number; outcome: ActionsReleaseOutcomeV1 } {
-  let terminal:
-    | { terminalAt: number; outcome: ActionsReleaseOutcomeV1 }
-    | null = null;
+  intent: HostedExecutionIntentV1,
+  job: HostedRepairJobV1,
+  step: HostedRuntimeStepV1,
+  observedAt: number,
+): PortResultV1<{ terminal: HostedRuntimeTerminalV1; terminalAt: number }> {
+  const tolerance = HOSTED_ACTIONS_CLOCK_TOLERANCE_MS;
+  let found: { terminal: HostedRuntimeTerminalV1; terminalAt: number } | null =
+    null;
   for (const line of text.split(/\r?\n/)) {
-    const match = ACTIONS_RELEASE_TIMESTAMP_LINE.exec(line);
+    const match = HOSTED_EXECUTION_TERMINAL_LINE.exec(line);
     if (match === null) continue;
     let value: unknown;
     try {
       value = JSON.parse(match[2]);
     } catch {
-      // A malformed/truncated line that visibly begins as a terminal record is
-      // ambiguous evidence: never silently ignore it beside a valid line.
-      if (/^\{\s*"status"\s*:\s*"ran"/.test(match[2])) {
-        fail("$", "invalid_value", "malformed terminal-looking record");
+      if (HOSTED_EXECUTION_TERMINAL_LOOKING.test(match[2])) {
+        return portError("unavailable", HOSTED_EXECUTION_TERMINAL);
       }
       continue;
     }
     if (typeof value !== "object" || value === null || Array.isArray(value)) {
       continue;
     }
-    const record = value as Record<string, unknown>;
-    if (!Object.prototype.hasOwnProperty.call(record, "status")) continue;
-    if (terminal !== null) {
-      fail("$", "invalid_lifecycle", "duplicate terminal record");
+    if ((value as Record<string, unknown>).kind !== "hosted_runtime_terminal") {
+      continue;
     }
-    terminal = parseActionsReleaseTerminal(
-      record,
-      match[1],
-      execution,
-      request,
-    );
-  }
-  if (terminal === null) {
-    fail("$", "missing_field", "no terminal record found");
-  }
-  return terminal;
-}
-
-function parseActionsReleaseTerminal(
-  record: Record<string, unknown>,
-  timestamp: string,
-  execution: ActionsReleaseExecutionV1,
-  request: ReleaseRequestV1,
-): { terminalAt: number; outcome: ActionsReleaseOutcomeV1 } {
-  const allowed = [
-    "status",
-    "outcome",
-    "controllerSha",
-    "baseSha",
-    "login",
-    "startupReady",
-    "ciApproval",
-  ];
-  for (const key of Object.keys(record)) {
-    if (!allowed.includes(key)) {
-      fail(`$.${key}`, "unknown_key", "unexpected terminal key");
+    if (found !== null) {
+      return portError("unavailable", HOSTED_EXECUTION_TERMINAL);
     }
-  }
-  for (
-    const key of [
-      "status",
-      "outcome",
-      "controllerSha",
-      "baseSha",
-      "login",
-      "startupReady",
-    ]
-  ) {
+    const parsed = tryParse(parseHostedRuntimeTerminalV1, value);
+    if (!parsed.ok) {
+      return portError("unavailable", HOSTED_EXECUTION_TERMINAL);
+    }
     if (
-      !Object.prototype.hasOwnProperty.call(record, key) ||
-      record[key] === undefined
+      canonicalStringify(parsed.value.execution) !== canonicalStringify(intent)
     ) {
-      fail(`$.${key}`, "missing_field", "missing terminal key");
+      return portError("unavailable", HOSTED_EXECUTION_TERMINAL);
     }
-  }
-  expectEnum(record.status, ["ran"], "$.status");
-  const outcome = expectRecord(record.outcome, "$.outcome");
-  const outcomeStatus = expectEnum(
-    outcome.status,
-    ["idle", "margin", "step_limit"],
-    "$.outcome.status",
-  );
-  // The actual RepairCycleOutcomeV1 union: idle/margin carry a bounded detail,
-  // step_limit carries a bounded step count and never a detail.
-  if (outcomeStatus === "step_limit") {
-    expectExactKeys(outcome, ["status", "steps"], "$.outcome");
-    const steps = expectCount(outcome.steps, "$.outcome.steps");
-    if (steps > ACTIONS_RELEASE_MAX_STEPS) {
-      fail("$.outcome.steps", "bound_exceeded", "step count exceeds the bound");
+    if (parsed.value.controllerSha !== intent.revision) {
+      return portError("unavailable", HOSTED_EXECUTION_TERMINAL);
     }
-  } else {
-    expectExactKeys(outcome, ["status", "detail"], "$.outcome");
-    expectNonEmptyString(outcome.detail, "$.outcome.detail", MaxText.detail);
+    const terminalAt = Date.parse(match[1]);
+    if (!Number.isSafeInteger(terminalAt) || terminalAt < 0) {
+      return portError("unavailable", HOSTED_EXECUTION_TERMINAL);
+    }
+    found = { terminal: parsed.value, terminalAt };
+  }
+  if (found === null) {
+    return portError("unavailable", HOSTED_EXECUTION_TERMINAL);
   }
   if (
-    expectNonEmptyString(record.controllerSha, "$.controllerSha", 40) !==
-      request.revision
+    job.startedAt === null || job.completedAt === null ||
+    step.startedAt === null || step.completedAt === null
   ) {
-    fail("$.controllerSha", "invalid_value", "terminal controller mismatch");
+    return portError("unavailable", HOSTED_EXECUTION_TERMINAL);
   }
+  const terminal = found.terminal;
   if (
-    expectNonEmptyString(record.baseSha, "$.baseSha", 40) !==
-      request.revision
+    terminal.startedAt + tolerance < step.startedAt ||
+    terminal.finishedAt > step.completedAt + tolerance ||
+    terminal.startedAt + tolerance < job.startedAt ||
+    terminal.finishedAt > job.completedAt + tolerance ||
+    // The authenticated log instant must follow the terminal's own finish.
+    found.terminalAt + tolerance < terminal.finishedAt ||
+    found.terminalAt > terminal.finishedAt + tolerance ||
+    observedAt + tolerance < terminal.finishedAt
   ) {
-    fail("$.baseSha", "invalid_value", "terminal base mismatch");
+    return portError("unavailable", HOSTED_EXECUTION_TERMINAL);
   }
-  if (
-    expectNonEmptyString(record.login, "$.login", MaxText.login) !==
-      ACTIONS_RELEASE_LOGIN
-  ) {
-    fail("$.login", "invalid_value", "unexpected terminal login");
-  }
-  if (expectBoolean(record.startupReady, "$.startupReady") !== true) {
-    fail(
-      "$.startupReady",
-      "invalid_lifecycle",
-      "terminal record did not prove model startup",
-    );
-  }
-  if (Object.prototype.hasOwnProperty.call(record, "ciApproval")) {
-    actionsReleaseCiApprovalCounts(record.ciApproval, "$.ciApproval");
-  }
-  const terminalAt = Date.parse(timestamp);
-  if (!Number.isSafeInteger(terminalAt) || terminalAt < 0) {
-    fail("$", "invalid_timestamp", "invalid terminal timestamp");
-  }
-  if (
-    terminalAt < execution.stepStartedAt - ACTIONS_RELEASE_TIME_SLACK_MS ||
-    terminalAt > execution.stepFinishedAt + ACTIONS_RELEASE_TIME_SLACK_MS
-  ) {
-    fail(
-      "$",
-      "invalid_lifecycle",
-      "terminal record is outside the repair step window",
-    );
-  }
-  return { terminalAt, outcome: outcomeStatus };
+  return portOk(found);
 }
 
 /** Only the fixed HTTPS results host, no userinfo, no fragment, port 443. */

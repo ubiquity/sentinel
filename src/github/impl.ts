@@ -1059,8 +1059,12 @@ export class GitHubPortImpl implements GitHubPort {
    * Authoritative effective protections for the configured base branch from
    * the actual GitHub rules API: all active matching rules (paginated) plus
    * the per-ruleset bypass policy (list with includes_parents, exact ruleset
-   * details as needed). `bypass_actors` is omitted without adequate
-   * permissions — omitted bypass policy is unknown and blocks.
+   * details as needed). An omitted `bypass_actors` list is unknown and blocks,
+   * except when the same exact identity/source/enforcement-bound detail
+   * explicitly reports `current_user_can_bypass == "never"`: this client
+   * credential performs the merge, so an explicit never proves it cannot
+   * bypass even though the actor list is unavailable. An omitted list is
+   * never read as an empty actor list.
    */
   async readEffectiveProtections(
     branch: string,
@@ -1181,8 +1185,10 @@ export class GitHubPortImpl implements GitHubPort {
       }
       // Bounded operational diagnostic on the FINAL evidence (fetched detail
       // or detail cache) that passed the exact identity/enforcement checks:
-      // exact ruleset identity plus which bypass fields were omitted (the
-      // hosted token authority boundary). Never pre-fetch list evidence.
+      // exact ruleset identity, which bypass fields were omitted (the hosted
+      // token authority boundary) and the normalized currentUserCanBypass
+      // enum value or null (never a token or raw API body). Never pre-fetch
+      // list evidence.
       if (
         evidence.bypassActors === null ||
         evidence.currentUserCanBypass === null
@@ -1194,14 +1200,12 @@ export class GitHubPortImpl implements GitHubPort {
           source,
           bypassActorsPresent: evidence.bypassActors !== null,
           currentUserCanBypassPresent: evidence.currentUserCanBypass !== null,
+          currentUserCanBypass: evidence.currentUserCanBypass,
         }));
       }
-      if (evidence.bypassActors === null) {
-        // Omitted without adequate permissions: the policy is unknown.
-        bypassUnknown = true;
-        continue;
-      }
       if (evidence.currentUserCanBypass === null) {
+        // Missing caller-bypass evidence: the policy is unknown and blocks,
+        // even when an actor list is present.
         bypassUnknown = true;
         continue;
       }
@@ -1209,6 +1213,13 @@ export class GitHubPortImpl implements GitHubPort {
         // The caller (or an unknown actor) can bypass: server enforcement
         // cannot be relied on.
         bypassUnknown = true;
+        continue;
+      }
+      if (evidence.bypassActors === null) {
+        // Omitted actor list with an explicit `never` for this exact
+        // credential: the SAME credential performs the expected-head merge,
+        // so no listed actor can authorize it to bypass. This is
+        // explicit-never authorization, never invented empty-list evidence.
         continue;
       }
       for (const actor of evidence.bypassActors) {
@@ -1244,8 +1255,9 @@ export function createGitHubPort(options: GitHubPortOptionsV1): GitHubPort {
  * required_status_checks rule with a non-empty check list must be active,
  * no unsupported/merge-queue rule may be active, the pull_request rule must
  * not require something we cannot verify (thread resolution), and the
- * per-ruleset bypass policy must be fully read and inapplicable. Unprotected,
- * unreadable, unsupported, incomplete or bypassable policy blocks.
+ * per-ruleset bypass policy must explicitly report `never` for the merging
+ * credential with no bypass actors applied. Unprotected, unreadable,
+ * unsupported, incomplete or bypassable policy blocks.
  */
 export function evaluateEffectiveProtections(
   protections: GitHubEffectiveProtectionsV1,
