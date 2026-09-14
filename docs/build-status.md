@@ -2,6 +2,89 @@
 
 ## Active task register — Astra owned
 
+10:09 UTC final reporting checkpoint: canonical-sync CI34831118005 also passed
+on0144a6a; all four candidate/PR/merged/sync CI runs are successful. Issue21
+closed10:08:11UTC with operator-disposition comment5662330431; issue12
+closed10:08:13UTC with source-acceptance comment5662330808. Issue5 and issue32
+were closed earlier with the precise evidence below; issue40 remains open for
+its qualified coverage gap. No unresolved review finding exists for this
+reporting delivery, and no implementation/test/review worker remains active.
+
+At 10:09 UTC, canonical branch and development, local and remote, all pointed to
+0144a6a5b726e0049c5244de6167c2af802b219a. All accepted reporting source is merged.
+This documentation checkpoint preserves its final acceptance and the remaining
+live requirements. Later documentation commits do not change the tested and
+reviewed source identities. Do not rerun passed checks to recover their output.
+
+10:11 UTC continuation classified the previous turn as progress: PR46 merged,
+CI passed and issues21/12 closed. Exact Git and remote-state reconciliation
+found only this expected register delta and no admitted open issue. Fresh
+read-only Astra evidence-record check found no factual correction beyond the
+draft-status wording. Complete focused and integrated result directories were
+copied byte-for-byte into the restricted archive
+~/.local/state/sentinel-reporting/2026-09-14/acceptance-ff678b6/ under their
+original UUIDs. These copies preserve result metadata and compressed stdout/
+stderr beyond the managed tool's seven-day retention. Original result references
+and the review log remain unchanged; no test or model execution was repeated.
+
+Remaining next action requires the owner's pending gateway contract decisions:
+isolated VPS release target, endpoint/service/storage and rollback boundary,
+evidence retention/storage limits, metrics/thresholds and exclusive promotion
+owner. The prepared activation checklist records the actual inventory. No
+answer or target authority was received in this checkpoint. Preserve the
+gateway's separate required Mac-origin authenticated inference gate. No eligible
+unblocked Sentinel issue was available; do not fabricate another task. At least
+six qualifying observed hours remain after the required target prerequisites.
+Source delivery is accepted; the full goal remains active and incomplete.
+
+10:07 UTC merged development CI34831023629 passed on0144a6a. Source gateT08
+is accepted, including final local/remote identities and fresh Astra audit
+recorded below. Proceed with operator closure21 and source-delivery closure12;
+canonical-sync CI34831118005 is still running on the same merged commit.
+
+10:03 UTC reporting delivery: PR46 merged10:01:30UTC with expected head
+ff678b6c5a2fc5461adf7bb79ef5bae1eb258d58, merge
+0144a6a5b726e0049c5244de6167c2af802b219a. Both local checkouts and both remote
+source branches now point to that merge; its tree equals the reviewed candidate.
+No worker or review process remains. Implementation commits7bd810b/ff678b6
+and handoff5a234c9 are integrated; no new worker lane or competing PR exists.
+The ongoing acceptance checkpoint in this register is the only pending edit.
+
+Full fresh reporting-integrated evidence
+459acb17ad9ea6b3117a31ea7e3934ee42910852ebdd735c5b0a8110d8083e59/0e090ee4-0b19-49fe-8edc-a9f7bf53105e
+executed on exactff678b6 in371.878s, childexit0: formatting, lint and types
+passed;1093tests/84steps passed,0failed,9ignored. Local Codex review command
+codex review --base bd8065d28bd5a822988a8085e6c75674ee88a575 ran in the canonical
+lane on cleanff678b6 and completedexit0 with no actionable regressions. One of
+three available review rounds used; no correction or backlog finding remains.
+Review session01a09f54-9882-7d40-bfd3-99a723261ae8; restricted log
+~/.local/state/sentinel-reporting/2026-09-14/codex-review-ff678b6-round1.log,
+SHA25665d9fdae918a970f199ee1aa4bb42b98b29aec69948076236d875fc281467d4d.
+This is local Codex review evidence, not a GitHub review submission.
+
+Fresh Astra final_delivery_audit, without inherited worker history, independently
+confirmed PASS for reporting source and local integrated acceptance. It verified
+the evidence hashes, exact full-run commit, review verdict and all18 checked
+accepted/disposition commits as canonical ancestors. Issue1 remains closed and
+its boundary/runtime checks pass in the full harness. The audit did not rerun
+tests or alter source. Branch CI34830079561 and PR CI34830471599 passed onff678b6;
+no review threads exist. Existing required-check policy was satisfied without
+changing rules. Post-merge CI34831023629 and canonical-sync CI34831118005 are
+pending at this checkpoint; finish their existing runs before final handback.
+Issue12 source-gate closure and issue21 operator closure are pending that check.
+
+Read-only post-merge remote reconciliation preserves repair
+c9be3e3360d75523009d109d4d8591d519ffa264, release
+3375e8f1d2e10e67577a08f5f522547e39f2b320 and supervisor2a24c4d. Runtime989af8a,
+generation2, all work/reservation blobs and next ordinary eligibility remain
+unchanged. Source/reporting delivery is not an installed local producer or a
+new autonomous issue receipt. Historical issue21 remains blocked with its
+original intent and ambiguous reservation even after GitHub operator closure.
+Gateway target/retention/threshold/ownership choices remain unanswered. No
+second eligible issue, captured-regression throughput, review-wait overlap,
+isolated gateway rollback or qualifying six-hour observation is established.
+The full goal remains incomplete; no extra target authority is inferred.
+
 09:44 UTC Astra continuation: canonical lane and HEAD7bd810b verified; only
 the expected workflow/test correction and this register are dirty. No DSH or
 test writer remains. V4 settled exit0/completed, persisted session
@@ -972,7 +1055,7 @@ to keep retrying. Scope changes require an Astra entry with the reason.
 | T05 Production replay isolation | accepted locally / Astra; issue #4 | Captured callable isolation, real Linux configured target commands and read-only causal execution, malformed capability refusal and cleanup; preserved Mac behavior | Linux4/4, Mac98/98, types/format/lint and independent Astra audit passed on identical manifest-bound bytes; see issue4 acceptance below. Eight prior diagnostics preserved. Full aggregate review/merge remains issue12. |
 | T06 Trusted host wiring | in progress / Astra with serialized DSH | Real local issue intake, scoped authentication, durable state CAS, isolated model/review and supervised runtime delivery; missing capabilities fail closed | Issue-only adapter draft ready; focused acceptance running. Local host, dependency intake and delivery still required. Actions34610680968 confirms missing host assembly. |
 | T07 Activation decisions | hourly policy approved / Astra implements | Record local cadence/session bound, credential scope, protected paths and supervisor ownership; gateway retention/stability remains separate | Owner approved local self-repair, hourly Luna/max and monitoring: one shared start per rolling hour,168 per seven days. Existing local gh identity0x4007 has Sentinel access; no local App key verified. Do not mislabel personal auth as App authentication. |
-| T08 Integrated delivery | pending / Astra; depends on T01–T06 | Accepted worker tips are canonical ancestors; exact candidate passes integrated harness, current-head Codex review and required CI; resulting PR merged | Earlier source PR #2 is already merged; do not recreate it or redo fixed D6. New accepted changes require a new integrated candidate and evidence. |
+| T08 Integrated delivery | accepted source delivery / Astra | Accepted worker tips are canonical ancestors; exact candidate passes integrated harness, current-head Codex review and required CI; resulting PR merged | PR46 merged as0144a6a; exactff678b6 passed the full1093-test harness, Codex review and candidate CI. Fresh Astra audited evidence and18 accepted/disposition ancestors. Merged development CI34831023629 passed. Hosted and gateway live acceptance remain separate; see the current register. |
 | T09 Isolated release and rollback | pending / Astra; depends on T07–T08 | Exact candidate/prior revisions, real promotion, continuous acceptance and exact restoration proved in isolated environment | Perform before production promotion ownership transfer. Health alone is insufficient. |
 | T10 Production ownership and activation | pending / Astra; depends on T09 | Authorized drain and exclusive release ownership verified; trusted runtime deployed with approved capabilities | Existing gateway workflow retains promotion. Do not remove it before replacement proof or run two production writers. |
 | T11 Two autonomous deliveries | pending / Astra; depends on T10 | Two distinct eligible deliveries with exact PR/review/merge/revision/closure receipts; at least one actual captured incident with permanent regression | Discover incidents first, then priority selection. Do not assign an unrelated capture to a preselected issue. |
