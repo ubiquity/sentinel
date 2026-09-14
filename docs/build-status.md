@@ -10,7 +10,7 @@ PR30 was autonomously refreshed, reviewed clean, passed exact-head CI and merged
 by github-actions[bot]. Its exact hosted release is accepted with healthy prior
 and candidate proofs. Issue18 is still open: receipt ingestion and closure await
 the ordinary pass due 06:56:40 UTC. Issue21 remains blocked without a trusted
-receipt; preserve all six reservations. Two deliveries, six hours of observation
+receipt; preserve all six reservations. A second delivery, six hours of observation
 and separate gateway acceptance remain unproved. Owner's hard stop is 06:25 UTC.
 Pro research is blocked by revoked authentication; no new submission was made.
 The older checkpoints below retain historical evidence.
