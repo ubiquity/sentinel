@@ -35,6 +35,27 @@ it has no write or test authority. Primary alone owns this register and plan.
 
 ### Historical checkpoints
 
+01:49 UTC: corrected core passed direct fresh evidence
+1634e241-c809-43b9-936a-06234dad604c on VPS canonical13402f0+draft, including
+ordinary skipped-run retry and exact frozen promotion-source guards. Inspected
+actual worker calls: pwd, owned reads/edits, V1 file-size read, one formatter
+per assignment. No worker checks or external writes. Core is ready for commit;
+actual runtime invocation and GitHub proof transport remain unimplemented.
+
+01:48 UTC: resumed canonical13402f0 on the exact VPS lane; core V1/V2 writers
+settled exit0 in sessionaa59f724. V2 PID1270042 live cwd and NODE_ENVproduction
+verified, persisted request/header361048 confirms deepseek-official/deepseek-flash
+at max. Two owned files only, one final formatter each, no tests/Git/children.
+Core V1 direct evidence c1996b5f-67cc-4907-b9d9-e2f888ab7f7c passed8/failed1:
+the CAS fixture advanced saved time without advancing its clock. V2 fixes that
+fixture, restores ordinary due eligibility after exact not_started settlement,
+and binds promotion preflight to the full frozen request. Fresh core execution
+is running under the registered target; do not rerun to recover its output.
+Primary re-read current plan, decisions and orchestration references. The
+read-only audit is checking durable supervisor cooldown and launcher evidence
+composition; no second implementation writer. Live workflow wiring, integrated
+acceptance, review, installation and autonomous deliveries remain outstanding.
+
 01:34 UTC: hosted foundation accepted for canonical integration. V5 fixed both
 source-audit findings: full release-proof equality with the exact settlement,
 and stable execution-ID reuse rejection in parser and transitions. V6 changed
