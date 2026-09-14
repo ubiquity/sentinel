@@ -36,6 +36,48 @@ it has no write or test authority. Primary alone owns this register and plan.
 
 ### Historical checkpoints
 
+03:53 UTC owner explicitly ordered deletion of supervisor source protection,
+never adding branch protection rules to this project, and proceeding. Deleted
+ruleset23197450; refreshed repository list confirms it absent. No restoration
+is authorized. AGENTS.md and MASTER-PLAN record the replacement policy; global
+decisions log updated. The supervisor environment uses a custom named-branch
+policy rather than protected-branches-only admission. Fresh read-only Astra
+installation_audit checks installation/acceptance independently; primary owns
+all writes. Earlier pending-approval and restoration notes are superseded.
+
+03:44 UTC continuation: merged-commit CI34803318970 passed on exact
+cfe3d22694385e6273977a5a9502e8a1c5ecf2d0. Dispatcher34803319486 also passed
+and launched supervisor34803326054, completed success on old protected6987219.
+This proves the dispatch path only; the old supervisor remains seed-only.
+Current ruleset23197450 is still active, with update restriction and no bypass.
+No owner reply has authorized the requested maintenance exception. Installation,
+bootstrap, autonomous delivery and observation remain pending that decision.
+
+03:40 UTC acceptance and installation boundary: canonical source
+ddb024d2d5ec0dad095069e1381cf95ee6d90775 passed full VPS test:local,
+1068tests/84steps/0failures/9ignored, evidence36e71225-b007-4738-9cf8-2cf9e65899bd
+in the VPS namespace above. CI34802251118 and PR CI34802963799 passed.
+Local Codex review round1 session01a09df4-78e1-7813-92df-9b063acf2dd1,
+command codex review --base556dee88a4194b5e6e0e8832f885c87f5b855817,
+completed exit0/no actionable findings; /tmp/sentinel-acceptance-review-r1.log.
+PR41 merged2026-09-14T03:38:51Z as cfe3d22694385e6273977a5a9502e8a1c5ecf2d0.
+Reviewed and merged trees identical; canonical and old protected source are
+ancestors of merged development. Root development fast-forwarded cleanly to
+cfe3d22. Canonical branch retains reviewed ddb024d; this operator ledger update
+is the only pending local edit and is owned by primary.
+
+Post-merge drain queries for repair.yml queued/in_progress/waiting/pending/
+requested all returned0 at03:39UTC; /tmp/sentinel-old-repair-STATUS-0339.json.
+Latest old direct34802281510, source556dee88, completed success03:21:50UTC.
+Protected source remains6987219254760a3d153166ce6b0d9b596738f03c; refreshed
+ruleset23197450 exactly matches saved policy, active/no bypass/update restricted.
+Concrete install draft /tmp/sentinel-protected-source-installation.md binds
+cfe3d22, old-run drain, non-force update and immediate exact policy restoration.
+Owner authorization for this one-time source-rule maintenance exception is
+required before changing protection. No exception or source update has run.
+Bootstrap, autonomous issue delivery and six-hour observation remain unproved;
+preserve issue18/PR30, blockedissue21 and all charged reservations.
+
 03:20 UTC: integrated3e81df9b completed in399seconds:1067passed84steps,
 1failed9ignored. Only failure was valid JSON release snapshot missing cooldowns.
 No other failure was reported. Sole fixture/comment correction exec37128,
