@@ -50,7 +50,7 @@ jobs:
           const REPORT_VERSION = "v2";
           const MAX_RECORD_ID_CHARS = 256;
           const MAX_LOGIN_CHARS = 128;
-          const LIMIT_PER_HOUR = 1;
+          const LIMIT_PER_HOUR = 60;
           const LIMIT_PER_SEVEN_DAYS = 168;
           const HOUR_WINDOW_MS = 3600000;
           const WEEK_WINDOW_MS = 604800000;
@@ -177,7 +177,7 @@ jobs:
               reject("model policy is not gpt-5.6-luna with max reasoning");
             }
             if (!isObject(status.limits) || status.limits.perHour !== LIMIT_PER_HOUR || status.limits.perSevenDays !== LIMIT_PER_SEVEN_DAYS) {
-              reject("admission limits are not 1 per hour and 168 per seven days");
+              reject("admission limits are not 60 per hour and 168 per seven days");
             }
             if (!isBoundedString(status.invocationId, MAX_RECORD_ID_CHARS)) {
               reject("invocationId is not a bounded non-empty string");
@@ -448,7 +448,7 @@ jobs:
             details.push("- Controller SHA: " + status.controllerSha);
             details.push("- Target base SHA: " + (isSha(status.targetBaseSha) ? status.targetBaseSha : "none recorded"));
             details.push("- Implementation model: gpt-5.6-luna with max reasoning (matches the required runtime policy)");
-            details.push("- Admission limits: 1 start per rolling hour, 168 per rolling seven days");
+            details.push("- Admission limits: 60 starts per rolling hour, 168 per rolling seven days");
             details.push("- Outcome: " + outcomeStatus + (outcomeStatus === "step_limit" ? " after " + status.outcome.steps + " steps" : ""));
             details.push("- Work items: " + W.total + (W.omitted > 0 ? " (" + work.length + " in bounded detail, " + W.omitted + " omitted)" : ""));
             details.push("- Work by next step: " + KNOWN_STEPS.map((step) => step + " " + W.byNextStep[step]).join(", ") + (W.unknownSteps > 0 ? ", unknown " + W.unknownSteps : ""));

@@ -48,7 +48,7 @@ Deno.test("local repository config parses with fixed local scope", () => {
     replay: "replay_capture",
     test: "test_ci",
   });
-  assert.equal(config.liveStartLimits?.perHour, 1);
+  assert.equal(config.liveStartLimits?.perHour, 60);
   assert.equal(config.liveStartLimits?.perSevenDays, 168);
   assert.equal(config.sessionBound?.maxDurationMs, 1_200_000);
   assert.equal(config.sessionBound?.maxOutputChars, 4_000_000);
