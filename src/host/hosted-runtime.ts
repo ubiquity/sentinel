@@ -97,8 +97,6 @@ const GIT_TIMEOUT_MS = 10_000;
 const GIT_MAX_OUTPUT_BYTES = 64 * 1024;
 const MAX_DETAIL_CHARS = 4_096;
 const HOSTED_TERMINAL_LOOKING = /"kind"\s*:\s*"hosted_runtime_terminal"/;
-/** A line attempting a top-level child status record (possibly truncated). */
-const HOSTED_STATUS_LOOKING = /^\{\s*"status/;
 
 export type HostedRuntimeJobV1 = "prepare" | "repair" | "finalize";
 
@@ -403,9 +401,10 @@ type ChildStatusScanV1 =
   | { kind: "uncertain" };
 
 /**
- * A child status record is one whole JSON line carrying a string `status`.
- * More than one, or any attempted `hosted_runtime_terminal` record, is
- * uncertain: the child can never attest the wrapper's own terminal kind.
+ * A child status record is one whole JSON line carrying a `status` property.
+ * More than one, any malformed attempt at one, or any attempted
+ * `hosted_runtime_terminal` record, is uncertain: the child can never attest
+ * the wrapper's own terminal kind.
  */
 function scanChildStatusRecords(stdout: string): ChildStatusScanV1 {
   let found: unknown = null;
@@ -418,17 +417,20 @@ function scanChildStatusRecords(stdout: string): ChildStatusScanV1 {
     try {
       value = JSON.parse(line);
     } catch {
-      // A malformed attempt at a top-level status record (a truncated key or
-      // value, or a missing tail) is ambiguous, never ignored beside a valid
-      // record. Ordinary non-JSON log noise is still skipped.
-      if (HOSTED_STATUS_LOOKING.test(line)) return { kind: "uncertain" };
+      // Any object-looking line that is not COMPLETE JSON is ambiguous
+      // structured output, never ignored beside a valid record: a truncated
+      // key, value or tail may hide a second record. Plain non-object text
+      // noise is still skipped.
+      if (line.startsWith("{")) return { kind: "uncertain" };
       continue;
     }
     if (typeof value !== "object" || value === null || Array.isArray(value)) {
       continue;
     }
     const record = value as Record<string, unknown>;
-    if (typeof record.status !== "string") continue;
+    // ANY own status property is a top-level attempt: a false/null/number
+    // status is rejected by the strict child parser, never skipped as noise.
+    if (!Object.hasOwn(record, "status")) continue;
     count += 1;
     if (count === 1) found = record;
   }

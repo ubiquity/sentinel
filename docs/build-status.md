@@ -36,6 +36,50 @@ it has no write or test authority. Primary alone owns this register and plan.
 
 ### Historical checkpoints
 
+02:50 UTC: consumer accepted after V2 fixture change and V3 typing correction.
+V2 header715734/PID1329872 and V3 header757341/PID1331410 verified
+FlashV4.1/max/cwd/NODE_ENV, both settled exit0, only permitted shell mutations,
+no checks/Git/network/children. V2 receipt219066ba-64b3-4077-9a23-76f7730d204a
+failed callback typing before tests; V3 fixes exact callbacks. Fresh runtime
+f4d17527-ba96-441d-9ab6-9b3bad579cf5 PASS; consumer
+5118668f-9a04-47c5-b289-dbe2fff6a1e2 PASS55 (97seconds), real controller
+transitions generate persisted accepted/rollback receipts consumed by actual
+repair entrypoint. Obsolete raw contract/client path deleted; any malformed
+object-looking child line and any invalid status property refuses acceptance.
+Next normal source ancestry merge, then sole prepared workflow composition.
+
+02:40 UTC: sole correction DSH exec53809/PID1329872 live cwd/NODE_ENV verified;
+actual header715734 deepseek-official/deepseek-flash/max. Shared fixture scope
+adds tests/host/hosted-receipt-fixture.ts; it must use actual supervisor/core
+transitions over real Git, never insert terminal release state directly.
+Source ancestry integration and prepared workflow assignment remain pending.
+
+02:39 UTC: consumer V1 settled exit0; only pwd/one formatter, no children.
+Fresh439bac51-78d7-4a02-9696-2850983517e4 failed6/passed47 (86seconds):
+fixtures illegally seed terminal releases directly; production guard correctly
+refuses. Correction /tmp/sentinel-hosted-consumer-correction-v2.txt uses real
+supervisor transitions for shared fixture, explicitly permits obsolete contract
+deletion, removes now-unused helper and fixes audit P1 reordered/nonstring
+status ambiguity. No weakening state/parser; current draft not accepted.
+
+02:33 UTC: protected source6987219254760a3d153166ce6b0d9b596738f03c and
+canonical ancestor f0bd7a0cd17cc5604f82218459df784760a9a33d have identical tree
+c5ad78445191d4084cafa254e20c39bf01fbfc77; three protected-source merge commits
+are not canonical ancestors. After current writer acceptance, integrate source
+ancestry with normal no-ff merge before final review so exact reviewed
+development source can later fast-forward protected ref. Ruleset23197450 live
+read still active/no bypass/update restriction/one last-push approval; no waiver.
+Fresh read-only authority agent audits committed f64ac4e runtime only; current
+consumer draft excluded. Permission events remain workspace-write/ask.
+
+02:31 UTC: runtime/audit committed and pushed f64ac4e2c89a6f7d955c8c53b14512cbac503b36.
+Consumer sole DSH exec10343/PID1294132 live cwd/NODE_ENVproduction verified,
+actual header642584 FlashV4.1/max. Registered hosted-consumer and hosted-workflow.
+Prepared immutable next composition /tmp/sentinel-hosted-workflow-launch-v1.txt,
+not launched. Latest old repair34799133859 completed02:26:41 at556dee88;
+30-run sample all completed, still not post-dispatcher drain evidence. PR30
+is only open PR; preserves runtime ownership. No protected source installation.
+
 02:28 UTC: runtime and audit correction accepted. DSH47087/PID1289232
 settled exit0, actual header628037 FlashV4.1/max, live cwd/NODE_ENV verified;
 actual shell calls pwd and one formatter only, no children/background.

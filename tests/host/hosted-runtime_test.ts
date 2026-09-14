@@ -697,12 +697,42 @@ Deno.test("hosted runtime: a truncated status record is refused while legitimate
       assert.equal(result.terminal, null, stdout);
     }
 
-    // Legitimate preflight records and plain log noise carry no top-level
-    // status and must not disturb the one valid child record.
+    // An attempted status key after another key (truncated key/value/tail) and
+    // an invalid-typed top-level status are uncertain in either order.
+    const lateTruncated = '{"noise":0,"status":';
+    const lateTail = '{"noise":0,"status":"ran","outcome":{';
+    for (
+      const stdout of [
+        `${lateTruncated}\n${healthy}`,
+        `${healthy}\n${lateTruncated}`,
+        `${lateTail}\n${healthy}`,
+        `${healthy}\n${lateTail}`,
+        `{"noise":0,"status":false}\n${healthy}`,
+        `${healthy}\n{"noise":0,"status":false}`,
+        `{"noise":0,"status":null}\n${healthy}`,
+        `${healthy}\n{"noise":0,"status":null}`,
+        `{"noise":0,"status":42}\n${healthy}`,
+        `${healthy}\n{"noise":0,"status":42}`,
+        `{"noise":0,"sta\n${healthy}`,
+        `${healthy}\n{"noise":0,"sta`,
+        `{"status\n${healthy}`,
+        `${healthy}\n{"status`,
+      ]
+    ) {
+      rig.process.child = exited(stdout, 0);
+      const result = await launch(rig);
+      assert.equal(result.status, "unavailable", stdout);
+      assert.equal(result.terminal, null, stdout);
+    }
+
+    // Legitimate preflight records, nested status objects and plain log noise
+    // carry no top-level status and must not disturb the one valid record.
     const preflight =
       '{"kind":"sentinel_startup_preflight","stage":"resolve_codex","codexExecutable":"/usr/bin/codex"}';
+    const nested =
+      '{"kind":"sentinel_startup_preflight","detail":{"status":"ran"}}';
     rig.process.child = exited(
-      `${preflight}\nordinary log noise\n${healthy}\n{"kind":"sentinel_startup_preflight","pass":true}\n`,
+      `${preflight}\n${nested}\nordinary log noise\n${healthy}\n{"kind":"sentinel_startup_preflight","pass":true}\n`,
       0,
     );
     const result = await launch(rig);

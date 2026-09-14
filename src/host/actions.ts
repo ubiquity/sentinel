@@ -29,7 +29,7 @@ import {
   type ActionsCiApprovalSummaryV1,
   runActionsCiApproval,
 } from "./actions-ci.ts";
-import { readActionsReleaseReceipt } from "./actions-release.ts";
+import { readHostedReleaseReceipt } from "./actions-release.ts";
 import { createActionsCandidateRestorer } from "./actions-candidates.ts";
 import type { ReleaseRequestV1 } from "../contracts/release.ts";
 import { createRepairStateStore, DenoGitRunner } from "../state/mod.ts";
@@ -215,15 +215,13 @@ export async function runActionsRepairHost(): Promise<
   });
   const config = createLocalRepositoryConfig();
 
-  // The hosted self release path reads its read-only Actions receipt through
-  // this exact capability, using the same token/http/gate/clock as every other
-  // authenticated request. No durable schema change and no writes.
+  // The hosted self release path reads the protected supervisor's persisted
+  // strict receipt from the same release state this host already reads. No
+  // HTTP, token, client or write is involved, and the obsolete raw
+  // workflow-green path is gone.
   Object.assign(state, {
-    readActionsRelease: (request: ReleaseRequestV1) =>
-      readActionsReleaseReceipt(
-        { gate, http, token: githubToken, clock },
-        request,
-      ),
+    readHostedRelease: (request: ReleaseRequestV1) =>
+      readHostedReleaseReceipt({ state }, request),
   });
 
   // Model startup availability is proved once, in-process, before the

@@ -5,7 +5,7 @@
  * injected through these interfaces; product logic never lives in test fakes.
  */
 
-import type { ActionsReleaseReceiptV1 } from "./actions-release.ts";
+import type { HostedReleaseRecordV1 } from "./hosted-supervisor.ts";
 import type {
   CommandId,
   EncryptedArtifactDigest,
@@ -803,16 +803,17 @@ export interface StateReadView {
     request: ReleaseRequestV1,
   ): Promise<PortResultV1<LocalReleaseReceiptV1 | null>>;
   /**
-   * Optional hosted-Actions capability, owned only by the trusted hosted host
-   * for the explicit self scope-0 repository. It returns the exact strict
-   * read-only receipt for one self production release request: a missing
-   * successful exact run is an explicit null, while a foreign, malformed,
-   * mismatched or inaccessible proof is unavailable. No durable schema
-   * changes; hosts without the capability leave it absent.
+   * Optional hosted-supervisor capability, owned only by the trusted hosted
+   * host for the explicit self scope-0 repository. It reads the protected
+   * supervisor's PERSISTED receipt for one self production release request: a
+   * missing record is an explicit null, while a corrupt, unreadable, malformed
+   * or differently-bound receipt is unavailable (never null, and never a raw
+   * workflow-green run or local fallback). Hosts without the capability leave
+   * the method absent.
    */
-  readActionsRelease?(
+  readHostedRelease?(
     request: ReleaseRequestV1,
-  ): Promise<PortResultV1<ActionsReleaseReceiptV1 | null>>;
+  ): Promise<PortResultV1<HostedReleaseRecordV1 | null>>;
 }
 
 export interface RepairStateWriter {
