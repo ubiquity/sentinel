@@ -2,17 +2,32 @@
 
 ## Active task register — Astra owned
 
-Latest verified state, 2026-09-14 06:09 UTC: both VPS checkouts and the active
-runtime are at 989af8a52179702a5fd063337d09b2b376e739f1. The fixed supervisor
-remains at 2a24c4d9cb16ffcd7fec0ea75364be9fa0adf9d7. No implementation writer
-is running. Supervisor ruleset 23197450 remains absent; never recreate it.
-PR30 was autonomously refreshed, reviewed clean, passed exact-head CI and merged
-by github-actions[bot]. Its exact hosted release is accepted with healthy prior
-and candidate proofs. Issue18 is still open: receipt ingestion and closure await
-the ordinary pass due 06:56:40 UTC. Issue21 remains blocked without a trusted
-receipt; preserve all six reservations. A second delivery, six hours of observation
-and separate gateway acceptance remain unproved. Owner's hard stop is 06:25 UTC.
-Pro research is blocked by revoked authentication; no new submission was made.
+Latest verified state, 2026-09-14 07:33 UTC: both VPS checkouts were clean at
+bd8065d28bd5a822988a8085e6c75674ee88a575 before this planning-only update;
+PR45 merged and merged CI34813379853 passed. Active runtime remains
+989af8a52179702a5fd063337d09b2b376e739f1, generation2, with no active execution.
+Fixed supervisor remains 2a24c4d9cb16ffcd7fec0ea75364be9fa0adf9d7. Issue18 closed
+autonomously at07:10:03UTC; repair state now records done with no intent/wait.
+Ordinary execution34816399505:1:repair is healthy and settled at that exact
+runtime. This completes the first hosted issue delivery including closure.
+Issue21 remains blocked without a trusted receipt; all six reservations remain.
+Only issue21 has the runtime opt-in marker among the current open issues, and
+its host/workflow paths are protected. No other eligible unblocked task exists
+in this inventory; idle is not evidence of broken selection. A second delivery,
+captured regression, review-wait overlap, six observed hours and separate gateway
+acceptance remain unproved. Never recreate supervisor ruleset23197450.
+
+Owner's06:25 implementation hard stop was honored. At07:28 the owner authorized
+one further Pro attempt and a detailed plan/goal for another implementation
+agent. Current role is planning facilitator; no implementation writer launched.
+Continuation plan: docs/implementation-handoff-2026-09-14.md, preserving the
+existing master-plan-gfa795549e5 lane and this single status register.
+Pro authentication passed; one new submission used, job
+29dc3c4f-5143-4469-9ae7-192c5c689de5, completed07:40:18UTC and read in full.
+The handoff incorporates its reporting/recovery/acceptance recommendations and
+corrects its generic compatibility and active-consumer assumptions against the
+repository. No implementation or live state/policy change occurred in planning.
+The two unrelated old jobs belong to another account and remain preserved.
 The older checkpoints below retain historical evidence.
 
 Current checkpoint, 2026-09-14 00:30 UTC: owner supersedes the Mac-only canonical
@@ -48,6 +63,29 @@ hosted_acceptance_audit has returned its foundation and composition findings;
 it has no write or test authority. Primary alone owns this register and plan.
 
 ### Historical checkpoints
+
+07:33 UTC planning reconciliation: fetched all published heads/tags; repair ref
+c9be3e3360d75523009d109d4d8591d519ffa264, release ref
+e2a1ec3bc100fec389835214b886ee7fd84d580a. Pointer last healthy ordinary proof
+34816399505:1:repair, job103887938295, launcher2a24c4d/runtime989af8a/basebd8065d,
+log digest7400289b8e4f19234a172b62944b208bb88938918e5b96750845f675d1681242.
+Next ordinary eligibility1789373275647 (08:07:55.647UTC), not guaranteed launch.
+Issue18 closed07:10:03; saved nextStep done, intent/wait null. No cadence fix is
+needed. Original issue21 run34669576394 at8b413a2 has only generic blocked
+outcome and no uploaded artifacts; no exact original failure cause or trusted
+receipt was recovered. Original request67b1fd764869341a37ee4df359c37697f353b95d1816f2933c08152ad25bb7b6
+and ambiguous charge remain unchanged. Current report producer is unbounded;
+its retained local renderer rejects over200entries/50000chars. Hosted runtime
+uses a separate terminal contract, so protect that working path. Issues32/40
+need acceptance reconciliation against the removed scan path and integrated
+durable cooldown implementation, not duplicate implementation. Read-only evidence
+and SHA256 manifest saved under /home/codex/.local/state/sentinel-handoff/2026-09-14/.
+User-requested Pro job29dc3c4f-5143-4469-9ae7-192c5c689de5 submitted07:30:54UTC;
+one retrieval owner, no resubmission. Completed07:40:18UTC; answer/prompt saved
+as pro-answer.md/pro-prompt.txt in that restricted evidence directory. Read back
+the final continuation plan; it preserves lane identity, gives bounded file
+scope/tests, records original issue21 evidence limits, and separates operator
+maintenance from autonomous/gateway acceptance. No coding worker launched.
 
 06:09 UTC: first autonomous hosted release accepted. PR30 merged at 05:59:47 UTC
 by github-actions[bot] as 989af8a52179702a5fd063337d09b2b376e739f1 in ordinary
