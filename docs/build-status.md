@@ -8,7 +8,7 @@ is running. Supervisor ruleset23197450 remains absent; never recreate it.
 Healthy bootstrap proof is persisted; autonomous delivery is not yet proved.
 PR30 remains runtime-owned at d92d140 with an unprepared base_refresh intent,
 not a published refresh. Read-only installation_audit is diagnosing that
-unavailable result before the next ordinary pass due04:55:28UTC. Issue21 remains
+unavailable result before the next ordinary pass due 04:55:28 UTC. Issue21 remains
 blocked without a trusted receipt; preserve all five reservations. The older
 00:30 checkpoint below records the starting state, not current installation.
 
@@ -45,6 +45,34 @@ hosted_acceptance_audit has returned its foundation and composition findings;
 it has no write or test authority. Primary alone owns this register and plan.
 
 ### Historical checkpoints
+
+04:44 UTC: history V1 and V2 settled exit0/completed; actual Flash/max headers
+825941/836819 and live cwd/NODE_ENV verified. Only pwd/final formatter shell
+calls; formatter wrappers printed exit status despite V2 no-wrapper request.
+No tests/Git/network/children. V1 fixture cloned the wrong branch and added a
+depth flag to later fetch; primary corrected the assignment before execution.
+Real-Git regression f4f53bb0-69b9-4224-a4f3-0dbf7e41bc9b now reproduces the
+actual shallow-copy/normal-fetch ancestry failure and full-history success.
+Hosted composition0064d52a-c1ba-43f4-be55-4c219b3d1689 passed. Both are fresh
+VPS executions in namespace459acb17ad9ea6b3117a31ea7e3934ee42910852ebdd735c5b0a8110d8083e59.
+Committed sourceaf0abd44338675f66e220573862853681691a3e0, PR44 open; local
+review exit0/no actionable findings, /tmp/sentinel-runtime-history-review.log.
+CI34806850404 and34806868006 remain live. No installation yet. All issue21
+charges and blocked state remain; selection skips blocked work, so a second
+autonomous delivery needs separately justified recovery. No new task fabricated.
+
+04:35 UTC: read-only installation_audit traced the saved unprepared refresh to
+likely shallow ancestry: real bootstrap Git fetched runtime with depth1; private
+clone and subsequent fetches preserve that boundary. Full history has common
+ancestor b209de1, REST PR identity is correct. Raw child stderr was not retained;
+require real-Git reproduction before accepting the cause. Sole DSH exec95902,
+PID1767962 owns only supervisor.yml and tests/github/base-refresh_test.ts under
+/tmp/sentinel-runtime-history-v1.txt; exact cwd/NODE_ENV verified, actual request
+825941 is deepseek-official/deepseek-flash/max. Playbook2026-09-12.1 re-read.
+First edit2min, handback5min/40calls; no children/checks/Git, one final formatter,
+next-settled-assignment feedback and bounded task stop authority. Primary owns
+candidate-base-refresh fresh evidence and ledger. Prior ledger committed/pushed
+d9f8a23; source correction is pending, no live state or deadline change.
 
 04:28 UTC: step-name correction0b020d4 accepted after focused reader9b31b558,
 full CI34804852960 (1069tests/84steps/0fail), local Codex review no findings,
