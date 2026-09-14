@@ -24,7 +24,7 @@ import type {
 import { portError, portOk } from "../../src/contracts/ports.ts";
 import { parseReleaseRequestV1 } from "../../src/contracts/release.ts";
 import type { ReleaseRequestV1 } from "../../src/contracts/release.ts";
-import { tryParse } from "../../src/contracts/validation.ts";
+import { MaxText, tryParse } from "../../src/contracts/validation.ts";
 import { GitHubApiClient } from "../../src/github/client.ts";
 import type {
   HttpRequestV1,
@@ -332,6 +332,60 @@ Deno.test("hosted execution: healthy finalizer settles while the attempt is in_p
   assert.equal(signed[0].headers.size, 0);
   assert.equal(signed[0].redirect, "error");
   assert.ok(rig.gate.admissions.length >= 1);
+});
+
+/**
+ * Real GitHub post-action step names exceed the 64-char label bound; the step
+ * name alone uses the wider path bound while the job name keeps the label one.
+ */
+function postStep(name: string): Record<string, unknown> {
+  return {
+    name,
+    status: "completed",
+    conclusion: "success",
+    started_at: iso(STEP_FINISHED + 100),
+    completed_at: iso(STEP_FINISHED + 200),
+  };
+}
+
+Deno.test("hosted execution: real pinned post-action step names do not exceed the runtime step-name bound", async () => {
+  const rig = makeRig();
+  scriptAttemptAndJobs(
+    rig,
+    attemptBody({ status: "in_progress", conclusion: null }),
+    jobsBody([
+      jobBody({
+        steps: [
+          runtimeStep(),
+          postStep(
+            "Post Run actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020",
+          ),
+          postStep(
+            "Post Run denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed",
+          ),
+        ],
+      }),
+    ]),
+  );
+  scriptLog(rig, logText([terminalRecord()]));
+  const proof = settlementProof(await rig.client.readHostedExecution(intent()));
+  assert.equal(proof.outcome, "healthy");
+  assert.equal(proof.jobId, JOB_ID);
+  assert.equal(proof.terminalAt, TERM_AT);
+
+  // The bound is still enforced: one character over MaxText.path is refused.
+  const over = makeRig();
+  scriptAttemptAndJobs(
+    over,
+    attemptBody({ status: "in_progress", conclusion: null }),
+    jobsBody([
+      jobBody({
+        steps: [runtimeStep(), postStep("x".repeat(MaxText.path + 1))],
+      }),
+    ]),
+  );
+  scriptLog(over, logText([terminalRecord()]));
+  assert.equal((await over.client.readHostedExecution(intent())).ok, false);
 });
 
 Deno.test("hosted execution: an explicit failed terminal or failed job is a failed proof, never healthy", async () => {

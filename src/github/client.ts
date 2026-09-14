@@ -2568,7 +2568,7 @@ function parseHostedJobs(
     const stepPath = `${path}.steps[${index}]`;
     const step = expectRecord(item, stepPath);
     if (
-      expectNonEmptyString(step.name, `${stepPath}.name`, MaxText.label) ===
+      expectNonEmptyString(step.name, `${stepPath}.name`, MaxText.path) ===
         HOSTED_RUNTIME_STEP_NAME
     ) {
       stepMatches.push({ step, path: stepPath });
