@@ -2,6 +2,33 @@
 
 ## Active task register — Astra owned
 
+09:44 UTC Astra continuation: canonical lane and HEAD7bd810b verified; only
+the expected workflow/test correction and this register are dirty. No DSH or
+test writer remains. V4 settled exit0/completed, persisted session
+9b84862e-80c0-4ba4-9577-cedb8a737ab5 header12 and live cwd/NODE_ENV inspection
+verified Flash/max/workspace-write/ask. Its only edits are the omitted-hour
+subset guard and isolated error-outcome tests; one permitted formatter.
+Fresh focused result739126f9-0419-4a07-a5b1-a7cc83e1fd37 in VPS namespace
+459acb17ad9ea6b3117a31ea7e3934ee42910852ebdd735c5b0a8110d8083e59 passed
+22tests in5.017s, childexit0/executed. Source hashes match the inspected final
+candidate: local.ts77a010b220e3c73b769cbc7dea1aec83fae65d82c8cca783da3b469f89d85425,
+workflowe53c6fdc496c1073cca0df79d2a24c35540abfa55480eba85e6b7c97be6bfdee,
+test38a6f9b45e09e553d3284efdf881981f3836d32cb1abe565cc48771111767614.
+The read-only report_acceptance_audit confirmed PASS for its final findings
+after inspecting this diff and saved evidence; it did not rerun tests.
+Freeze the corrected commit for reporting-integrated, expected about7min;
+inspect saved progress and diagnose if it exceeds that expectation. Then run
+bounded exact-candidate Codex review. No review has yet been requested.
+
+Remote development remainsbd8065d; canonical remote5a234c9; no open PR.
+Repair refc9be3e3360d75523009d109d4d8591d519ffa264 and all six reservation
+blobs remain unchanged. Release ref3375e8f1d2e10e67577a08f5f522547e39f2b320
+records runtime989af8a generation2, execution null, supervisor2a24c4d and healthy
+settled ordinary proof34828067641:1:repair, job103924794719, finished09:29:04UTC,
+basebd8065d, log digest5070a1373cbaad44879404898e4f6885095f3d45ce699fac2760a541588daea1.
+Next ordinary eligibility10:27:49.304UTC is preserved. Gateway decisions remain
+pending; no qualifying observation window or second eligible delivery exists.
+
 09:08 UTC execution takeover: the user issued the continuation goal. Astra
 orchestrator owns this register and all Git, evidence and live acceptance;
 the prior planning-only checkpoint is superseded for work authority. Canonical
@@ -130,6 +157,20 @@ All reporting changes are on the canonical lane; no worker branch or extra lane
 was created. Freeze this combined candidate for reporting-integrated/test:local
 (expected about7min) and current-candidate audit/review. No live local wrapper
 identified; these are local producer/workflow results, not installation proof.
+
+09:37 UTC integrated candidate7bd810b4dded5961446dee00f10bef9ae6daf421 committed
+cleanly. Fresh audit identified one remaining omitted-hour subset relation and
+missing isolated state_error/source_error coverage; other findings resolved.
+The full harness could no longer establish final acceptance for this candidate,
+so Astra stopped exact verified evidence adapter1869066 through SIGTERM. Saved
+result6da29f31-4f0f-42cd-a8f5-6d54b9ad46ca is interrupted after101.078s, not failed
+or passed. Adapter, group1869075 and all known children exited; process inventory
+shows only unrelated old Deno processes. Its sole generated toy fixture was
+preserved outside Git at ~/.local/state/sentinel-reporting/2026-09-14/interrupted-fixture-6da29f31.
+V4 immutable assignment /tmp/sentinel-reporting-v4.txt owns only workflow and
+test for the exact audit correction, first edit2min/handback5min,20toolcalls,
+no children/checks, one final test formatter. Finish focused checks and audit
+before another full run; no new authority, runtime or durable-state change.
 
 Latest verified state, 2026-09-14 07:33 UTC: both VPS checkouts were clean at
 bd8065d28bd5a822988a8085e6c75674ee88a575 before this planning-only update;

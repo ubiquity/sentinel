@@ -389,6 +389,12 @@ jobs:
             if (detailChargedSevenDays > R.chargedSevenDays || R.chargedSevenDays > detailChargedSevenDays + R.omitted) {
               reject("rolling seven-day usage is inconsistent with the bounded detail");
             }
+            // Every charge inside the rolling hour is also inside the rolling
+            // seven days, so omitted hourly charges cannot outnumber omitted
+            // seven-day charges.
+            if (R.chargedHour - detailChargedHour > R.chargedSevenDays - detailChargedSevenDays) {
+              reject("omitted rolling usage is inconsistent: every omitted hourly charge is also an omitted seven-day charge");
+            }
 
             const expectedSummary = W.omitted === 0 && R.omitted === 0 ? "complete" : "truncated";
             if (status.summary !== expectedSummary) reject("summary marker is inconsistent with the omission counts");
