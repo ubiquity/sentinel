@@ -808,7 +808,7 @@ Deno.test("mergePullRequest: unidentified or contradicting ruleset evidence bloc
           200,
           rulesetWire({
             id: RULESET_ID + 1,
-            bypass_actors: [],
+            bypass_actors: null,
             current_user_can_bypass: "never",
           }),
         ),
@@ -827,7 +827,7 @@ Deno.test("mergePullRequest: unidentified or contradicting ruleset evidence bloc
           rulesetWire({
             source_type: "Organization",
             source: "other-org",
-            bypass_actors: [],
+            bypass_actors: null,
             current_user_can_bypass: "never",
           }),
         ),
@@ -845,7 +845,7 @@ Deno.test("mergePullRequest: unidentified or contradicting ruleset evidence bloc
           200,
           rulesetWire({
             enforcement: "evaluate",
-            bypass_actors: [],
+            bypass_actors: null,
             current_user_can_bypass: "never",
           }),
         ),
@@ -866,6 +866,68 @@ Deno.test("mergePullRequest: unidentified or contradicting ruleset evidence bloc
           rulesetWire({
             bypass_actors: null,
             current_user_can_bypass: null,
+          }),
+        ),
+      ],
+    },
+    {
+      name: "bypass-actors-omitted-caller-always",
+      // An omitted actor list is not empty-list evidence: an explicit
+      // non-never caller-bypass value stays bypassable and blocks.
+      rulesets: [
+        rulesetWire({
+          bypass_actors: null,
+          current_user_can_bypass: "always",
+        }),
+      ],
+      extra: [
+        httpRespond(
+          "GET",
+          detailUrl,
+          200,
+          rulesetWire({
+            bypass_actors: null,
+            current_user_can_bypass: "always",
+          }),
+        ),
+      ],
+    },
+    {
+      name: "bypass-actors-omitted-caller-pull-requests-only",
+      rulesets: [
+        rulesetWire({
+          bypass_actors: null,
+          current_user_can_bypass: "pull_requests_only",
+        }),
+      ],
+      extra: [
+        httpRespond(
+          "GET",
+          detailUrl,
+          200,
+          rulesetWire({
+            bypass_actors: null,
+            current_user_can_bypass: "pull_requests_only",
+          }),
+        ),
+      ],
+    },
+    {
+      name: "bypass-actors-omitted-caller-exempt",
+      rulesets: [
+        rulesetWire({
+          bypass_actors: null,
+          current_user_can_bypass: "exempt",
+        }),
+      ],
+      extra: [
+        httpRespond(
+          "GET",
+          detailUrl,
+          200,
+          rulesetWire({
+            bypass_actors: null,
+            current_user_can_bypass: "exempt",
           }),
         ),
       ],
@@ -919,6 +981,41 @@ Deno.test("mergePullRequest: unidentified or contradicting ruleset evidence bloc
     mergeSha: SHA3,
   });
   assert.equal(putCount(positive.transport), 1);
+
+  // Hosted shape: the exact active/source-bound detail omits `bypass_actors`
+  // but explicitly reports `current_user_can_bypass: "never"`. The same
+  // credential performs the merge, so never authorizes the exact expected-head
+  // merge without inventing empty-list evidence.
+  const neverOmitted = mergedPort(happyScript({
+    rulesets: [
+      rulesetWire({ bypass_actors: null, current_user_can_bypass: "never" }),
+    ],
+    extra: [
+      httpRespond(
+        "GET",
+        detailUrl,
+        200,
+        rulesetWire({ bypass_actors: null, current_user_can_bypass: "never" }),
+      ),
+      httpRespond(
+        "PUT",
+        "/repos/ubiquity/sentinel/pulls/1/merge",
+        200,
+        mergeResponseWire(SHA3),
+      ),
+    ],
+  }));
+  const mergedNeverOmitted = await neverOmitted.port.mergePullRequest(
+    mergeRequest(),
+  );
+  assert.ok(mergedNeverOmitted.ok);
+  if (!mergedNeverOmitted.ok) return;
+  assert.deepEqual(mergedNeverOmitted.value, {
+    outcome: "merged",
+    head: SHA1,
+    mergeSha: SHA3,
+  });
+  assert.equal(putCount(neverOmitted.transport), 1);
 });
 
 Deno.test("mergePullRequest: required checks must pass on the exact head", async () => {

@@ -35,6 +35,38 @@ it has no write or test authority. Primary alone owns this register and plan.
 
 ### Historical checkpoints
 
+00:36 UTC: hosted merge-gate DSH task completed exit0 with terminal completed,
+25 tool calls, verified owned edit events, first pwd, one allowed final formatter
+and no subsequent calls, no checks/Git writes/children. Live PID settled.
+Primary reviewed four-file diff and git diff --check passed. GPT deterministic
+hosted-merge-gates execution passed at source fcd812d with this patch present:
+`459acb17ad9ea6b3117a31ea7e3934ee42910852ebdd735c5b0a8110d8083e59/2c03f680-1415-43b9-b375-5ea4ca867fce`,
+VPS, canonical worktree, direct execution3.455s/exit0. This proves local adapter
+behavior only, not actual Actions caller value, deployment or end-to-end delivery.
+Accept for canonical integration; Codex review remains deferred to integrated
+acceptance under project policy. Next implementation remains candidate base
+refresh followed by the protected hosted supervisor; no state reset or manual
+merge of runtime PR30 is authorized by these test results.
+
+00:34 UTC: fresh read-only Astra audit `hosted_acceptance_audit` confirmed the
+narrow caller-bound ruleset correction is safe: exact active/source-bound
+`current_user_can_bypass: never` from the same merge credential proves server
+enforcement even if actors are omitted. Preserve unknown/other caller values,
+present nonempty actors, and all head/review/CI/base gates as blocked. The old
+global-empty-list condition is implementation policy, not an owner mandate.
+It also independently confirmed two remaining gaps: existing candidates have
+no base-refresh path and hosted acceptance waits for a real supervisor.
+
+Sole DSH writer launched at canonical base fcd812d with immutable assignment
+`/tmp/sentinel-merge-gates-v1.txt`; owns impl.ts, wire.ts comments and two GitHub
+tests only. No children/checks/Git; one optional final formatter. First edit90s,
+handback5min/45calls, feedback next settled assignment. PID1245516 live cwd and
+NODE_ENV=production verified. Persisted sessionc3bea170-4775-4b75-856b-0e665bc7db90
+request header proves deepseek-official/deepseek-flash/max; settings use
+workspace-write. Exec73425 and stream `/tmp/sentinel-merge-gates-v1.stream.jsonl`.
+Playbook hash7e237d6002069b085f0ee1879972b18e6c8466a8c138fcbef508499b66291149.
+GPT owns registered evidence target hosted-merge-gates after settlement.
+
 Current checkpoint, 2026-09-11 20:39 UTC: owner forbids further tests/reviews and requires LOCAL iteration before GitHub deployment. Direct local launcher is configured, schedule paused, issue18 requeued under state063d4203615ffd9cf3025ca48de15bc8f9881434 with all three charges preserved; next eligibility21:25:48.847UTC. Owner temporary-cap question remains unanswered; no cap change is authorized yet. Small local-only source change now enforces owner instructions in exact scope0 Sentinel prompt and refuses push/PR/review/merge operations while preserving local candidate/state/read operations. No tests/reviews/checks run. DSH first local-only turn was stopped for repeated formatting research;9line partial constant preserved, PID25994 settled. Same session626e97f1 resumed with exact edits, completed/exit0 and no children/tests/reviews/Git writes; actual Flash/max and inherited workspace-write/ask verified. Second live env sampling missed the already-ended short process; explicit env-i NODE_ENVproduction launch retained. Primary will commit only local source plus ledger, install exact local revision without pushing or starting CI, and queue one direct local attempt at permitted time unless owner changes the cap. No autonomous candidate/delivery yet. Last real failure was nested supervisor/Codex sandbox startup; outer supervisor is bypassed for this owner-directed local experiment, model sandbox retained.
 
 Historical checkpoint, 2026-09-11 18:22 UTC: canonical a8fbd741013bb840bbe230ff6e0c6a44052d54fe still matches merged PR23. Installed runtime a411d89 and hourly minute53 scheduler are enabled, idle after invocation e3c0270f-d48c-4069-bab4-e418a1e619e0. Issue18 produced no candidate or PR: actual Luna/max receipt records interrupted/output_limit at 414585 characters against 400000. Reservation created18:06:34.323UTC remains charged; no requeue/reset. Actions34631726170 correctly reports red. Updater V2 worker e1d7633d settled exit0/completed, 67 calls, Flash/max/workspace-write/ask verified; no tests/Git writes/children, one formatter. Recovered checks: types e4370ed6 passed; host 1f2c331a failed 10 fixtures on missing completed-review resultId; loop 2614561b failed 5 fixtures on issueNumber null; local host66cb9055 and lint667abf66 passed. Ten new supervisor fixture directories were preserved after setup failures. Fresh read-only Astra fixture audit updater_fixture_audit confirmed missing resultId/issueNumber, wrong repository fixture binding, request lookup missing repo/base and setup cleanup defects; primary found rewritten receipt.createdAt and pending rollback terminalization needing bounded correction. Astra owns ledger/private state/Git; DSH V3 receives one bounded canonical correction for the four owned supervisor/loop source/test files; first edit90sec, handback6min/65calls, no children/checks/Git, one formatter. Playbook hash unchanged and credentials present in launch shell. Next: correct fixture construction, preserve original release timestamps and resumable rollback, then verify without rerunning unchanged failures. Local updater remains unaccepted and undeployed; output preparation and queued stale-base recovery remain required before useful live retry.
