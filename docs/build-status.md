@@ -36,6 +36,21 @@ it has no write or test authority. Primary alone owns this register and plan.
 
 ### Historical checkpoints
 
+04:05 UTC: PR42 merged46e1fcd records never adding branch protection. Root
+and canonical fast-forwarded; supervisor non-force advanced to reviewedcfe3d22.
+Fresh Astra installation_audit independently passed installation readiness.
+Bootstrap34804213902 prepare/repair/finalize completed success; actual terminal
+healthy/startupReady/settled at exactcfe3d22. Reservation Git tree unchanged.
+Reconcile34804462921 prepare could not read evidence; finalize correctly refused
+another run's saved intent. Independent diagnosis confirms parseHostedJobs uses
+label64 for all steps, rejecting pinned post-action names68/69chars. Raw operator
+evidence /tmp/sentinel-bootstrap-{attempt,jobs}.json and job-raw.log retained;
+no state reset or new model reservation. Only next correction client step-name
+bound to existing path512 and sanitized regression, /tmp/sentinel-step-name-fix-v1.txt.
+Sole DSH exec45138/PID1630625 live cwd/NODE_ENV verified, header820578
+deepseek-official/deepseek-flash/max. Primary owns docs/Git/evidence. No accepted
+bootstrap proof or autonomous delivery yet; do not repeat unchanged dispatch.
+
 03:53 UTC owner explicitly ordered deletion of supervisor source protection,
 never adding branch protection rules to this project, and proceeding. Deleted
 ruleset23197450; refreshed repository list confirms it absent. No restoration
