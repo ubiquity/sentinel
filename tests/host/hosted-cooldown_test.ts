@@ -549,9 +549,12 @@ Deno.test("hosted cooldown: absent or unreadable state latches and never reopens
 Deno.test("hosted cooldown: release state rejects dropping or weakening a cooldown", async () => {
   const finite = await makeRig();
   try {
-    await finite.seedRelease([
-      scopeCooldown({ observedAt: T0 + 5000, retryNotBefore: T0 + 30_000 }),
-    ]);
+    const seeded = scopeCooldown({
+      observedAt: T0 + 5000,
+      retryNotBefore: T0 + 30_000,
+      secondaryBackoff: 2,
+    });
+    await finite.seedRelease([seeded]);
     assert.equal((await attemptReleaseCooldowns(finite, [])).ok, false);
     assert.equal(
       (await attemptReleaseCooldowns(finite, [
@@ -559,21 +562,67 @@ Deno.test("hosted cooldown: release state rejects dropping or weakening a cooldo
       ])).ok,
       false,
     );
+    // A later observation may not shorten a finite deadline.
+    assert.equal(
+      (await attemptReleaseCooldowns(finite, [
+        scopeCooldown({
+          observedAt: T0 + 6000,
+          retryNotBefore: T0 + 20_000,
+          secondaryBackoff: 2,
+        }),
+      ])).ok,
+      false,
+    );
+    // Nor may it decrease the bounded fallback index.
+    assert.equal(
+      (await attemptReleaseCooldowns(finite, [
+        scopeCooldown({
+          observedAt: T0 + 6000,
+          retryNotBefore: T0 + 40_000,
+          secondaryBackoff: 1,
+        }),
+      ])).ok,
+      false,
+    );
+    // Every rejected attempt left the persisted record untouched.
+    assert.deepEqual(
+      (await readReleaseSnapshot(finite)).githubCooldowns,
+      [seeded],
+    );
+
     const applied = await attemptReleaseCooldowns(finite, [
       scopeCooldown({
         observedAt: T0 + 6000,
         retryNotBefore: T0 + 90_000,
         observationId: "f".repeat(64),
+        secondaryBackoff: 3,
       }),
     ]);
     assert.ok(
       applied.ok && applied.value.status === "applied",
       JSON.stringify(applied),
     );
-    assert.equal(
-      (await readReleaseSnapshot(finite)).githubCooldowns[0].retryNotBefore,
-      T0 + 90_000,
+    const extended = (await readReleaseSnapshot(finite)).githubCooldowns[0];
+    assert.equal(extended.retryNotBefore, T0 + 90_000);
+    assert.equal(extended.secondaryBackoff, 3);
+
+    // A finite hold may still become the stricter manual hold (null deadline).
+    const manualized = await attemptReleaseCooldowns(finite, [
+      scopeCooldown({
+        observedAt: T0 + 7000,
+        retryNotBefore: null,
+        observationId: "e".repeat(64),
+        secondaryBackoff: 3,
+      }),
+    ]);
+    assert.ok(
+      manualized.ok && manualized.value.status === "applied",
+      JSON.stringify(manualized),
     );
+    const held = (await readReleaseSnapshot(finite)).githubCooldowns[0];
+    assert.equal(held.retryNotBefore, null);
+    assert.equal(held.observedAt, T0 + 7000);
+    assert.equal(held.secondaryBackoff, 3);
   } finally {
     await finite.cleanup();
   }

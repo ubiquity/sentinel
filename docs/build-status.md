@@ -36,6 +36,47 @@ it has no write or test authority. Primary alone owns this register and plan.
 
 ### Historical checkpoints
 
+02:28 UTC: runtime and audit correction accepted. DSH47087/PID1289232
+settled exit0, actual header628037 FlashV4.1/max, live cwd/NODE_ENV verified;
+actual shell calls pwd and one formatter only, no children/background.
+Fresh runtime d256519e-0762-444e-81ee-74e8f5424358 PASS; cooldown/state
+8d236736-1971-489d-acc7-d7636e702f6c PASS, direct VPS execution at3aee5ae+draft.
+Guard forbids shorter finite deadlines/decreased backoff; scanner rejects
+truncated status-first child result beside healthy. Ordinary preflight remains
+accepted. Next sole consumer assignment /tmp/sentinel-hosted-consumer-launch-v1.txt
+replaces obsolete raw Actions receipts with strict stored supervisor receipts.
+
+02:25 UTC: runtime V2 settled exit0, actual shell calls pwd/one formatter only;
+no children/background. Fresh runtime evidence d69c7b38-11a5-4a41-8bea-65cdd35fe3a2
+passed. Independent hosted_authority_audit P1: finite retry deadline/backoff can
+regress under later observation. Primary also found malformed child status could
+be ignored beside a healthy result; actual preflight logs have no status field.
+Sole next assignment /tmp/sentinel-hosted-audit-fix-v1.txt owns only state guard,
+runtime scanner and their two focused tests; no workflow/consumer edits.
+
+02:19 UTC: runtime V1 settled with only pwd/owned tools/one formatter and no
+checks/network/Git/children. Direct evidencebe8eac31-94cb-4447-a22e-45ce49b834d5
+passed9/failed1: positive prepare fixture still supplied repair job identity.
+Primary found scoped env.toObject incompatibility, lost failed-run startup/base
+metadata, masked backward clock and ignored settled timeout. Sole correction
+/tmp/sentinel-hosted-runtime-v2.txt (initial full prompt preserved in
+runtime-launch-v1.txt) fixes those; exec19560/PID1286416 live cwd/env verified,
+header605667 FlashV4.1/max. Exact three-file scope, no checks/Git/network/children,
+one formatter then handback. Fresh hosted_authority_audit independently audits
+committed core/reader/cooldown only; current runtime draft excluded. Latest
+repair34796139912 completed01:32 atdevelopment556dee88; protected source still
+6987219254760a3d153166ce6b0d9b596738f03c. That sample is not full drain proof.
+
+02:09 UTC: cooldown committed/pushed3aee5aeb48f0bc4b23f24a423fbfae78db41c18f.
+Sole runtime assignment /tmp/sentinel-hosted-runtime-launch-v1.txt owns new
+hosted-runtime.ts, actions.ts and focused runtime test only. Exec54364/PID1282024
+live exact cwd/NODE_ENVproduction and header506815 FlashV4.1/max verified.
+No checks/network/Git/children, one final formatter, expected8min/65calls.
+Registered hosted-runtime proves real Git identity and owned-group boundary;
+actual live Actions remains later acceptance. Consumer cutover design at
+/tmp/sentinel-hosted-consumer-design-v1.txt is not yet assigned. Other writers
+are settled; primary alone owns docs and final integration.
+
 02:08 UTC: hosted cooldown accepted with direct real-Git evidence
 2626bbb7-d718-439d-b5bf-9a03894e025a at4b884ea+draft. Worker settled exit0;
 actual shell calls only pwd and one final formatter, no repeated shell searches,

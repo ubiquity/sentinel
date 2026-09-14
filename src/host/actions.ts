@@ -15,7 +15,13 @@ import { SystemClock } from "../contracts/ports.ts";
 import type { RepairCycleOutcomeV1 } from "../repair/loop.ts";
 import { parseRepairStateSnapshotV1 } from "../contracts/state-snapshots.ts";
 import { RollingStartBudget } from "../budget/mod.ts";
-import { DurableGitHubCooldownGate } from "../repair/github-cooldown.ts";
+import { HostedRepairCooldownGate } from "./hosted-cooldown.ts";
+import {
+  parseHostedEnvironment,
+  readHostedIdentityEnv,
+  readHostedRuntimeExecution,
+} from "./hosted-runtime.ts";
+import type { HostedExecutionIntentV1 } from "../contracts/hosted-supervisor.ts";
 import { fetchHttpTransport } from "../github/http.ts";
 import { runRepairEntrypoint } from "../main.ts";
 import { runActionsPreflight } from "./actions-preflight.ts";
@@ -69,12 +75,19 @@ export interface ActionsRepairHostResultV1 {
   startupReady: boolean;
   /** Bounded deterministic CI approval counts for this run. */
   ciApproval: ActionsCiApprovalSummaryV1;
+  /** The exact saved supervisor execution this run settles. */
+  execution: HostedExecutionIntentV1;
 }
 
 /** Run one hosted repair pass through the actual production entrypoint. */
 export async function runActionsRepairHost(): Promise<
   ActionsRepairHostResultV1
 > {
+  // The protected native identity is validated before any credential, state,
+  // executable or network work: a malformed job identity fails with no request
+  // and no durable write.
+  const identity = parseHostedEnvironment(readHostedIdentityEnv(), "repair");
+
   const githubToken = requireEnv("GITHUB_TOKEN");
   const modelToken = requireEnv("UOS_AI_TOKEN");
   const trustedPath = requireEnv("PATH");
@@ -105,8 +118,16 @@ export async function runActionsRepairHost(): Promise<
     ),
   });
   const clock = new SystemClock();
+  // The saved supervisor pointer must bind exactly this run, attempt, launcher
+  // and controller revision BEFORE any repair seed, source, model, preflight or
+  // review-client preparation. A stale or foreign pointer never runs.
+  const execution = await readHostedRuntimeExecution({
+    state,
+    identity,
+    controllerSha,
+  });
   await ensureRepairStateSeed(state, clock);
-  const gate = new DurableGitHubCooldownGate({ state, clock });
+  const gate = new HostedRepairCooldownGate({ state, clock });
   const hostInput = {
     stateRoot,
     sourceDir,
@@ -242,7 +263,10 @@ export async function runActionsRepairHost(): Promise<
     }, {
       deadline: clock.now() + RUN_DEADLINE_MS,
       stepLimit: STEP_LIMIT,
-      modelStartsEnabled: startupReady,
+      // Only an ordinary hosted execution may start a model. Bootstrap, prior,
+      // candidate and rollback runs execute the deterministic entrypoint with
+      // no model starts while keeping every budget, limit and source behavior.
+      modelStartsEnabled: startupReady && execution.purpose === "ordinary",
     });
   } catch (error) {
     failure = error;
@@ -274,6 +298,7 @@ export async function runActionsRepairHost(): Promise<
     login: ACTIONS_LOGIN,
     startupReady,
     ciApproval,
+    execution,
   };
   console.log(JSON.stringify(result));
   // The deterministic pass and its drain completed and were logged above; the

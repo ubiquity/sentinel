@@ -1484,10 +1484,13 @@ function validateRepairTransition(
 /**
  * Durable GitHub cooldowns are fail-closed preservation state in both refs:
  * one record per affected installation, never dropped, never moved to a
- * different installation, and a manual fail-closed hold (null deadline) can
- * never be silently converted into a finite retry deadline. A new observation
- * may refresh deadline, observation identity, backoff and observedAt for the
- * same installation; the role-owned writer owns that update policy.
+ * different installation, and a hold may only ever become STRICTER. A manual
+ * fail-closed hold (null deadline) can never be silently converted into a
+ * finite retry deadline; a finite deadline can never be shortened (moving to
+ * null is a stricter manual hold and stays allowed); and the bounded fallback
+ * index can never decrease. A new observation may otherwise refresh deadline,
+ * observation identity and observedAt for the same installation; the
+ * role-owned writer owns that update policy.
  */
 function cooldownTransitionMessage(
   priorRecords: readonly GitHubCooldownV1[],
@@ -1508,6 +1511,16 @@ function cooldownTransitionMessage(
       nextRecord.retryNotBefore !== null
     ) {
       return "a manual github cooldown hold cannot become a retry deadline";
+    }
+    if (
+      priorRecord.retryNotBefore !== null &&
+      nextRecord.retryNotBefore !== null &&
+      nextRecord.retryNotBefore < priorRecord.retryNotBefore
+    ) {
+      return "a github cooldown deadline cannot be shortened";
+    }
+    if (nextRecord.secondaryBackoff < priorRecord.secondaryBackoff) {
+      return "a github cooldown backoff cannot decrease";
     }
   }
   return null;
