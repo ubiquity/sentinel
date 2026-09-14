@@ -2,6 +2,64 @@
 
 ## Active task register — Astra owned
 
+13:17 UTC Astra resumption: the previous goal turn made progress by admitting
+the verified issue48 and merging documentation PR49. This session fetched all
+published heads and tags, then verified both clean source checkouts and both
+remote source branches at2ffa49d629ae9fa9d42d14a473210365014a1334. PR49 merged
+12:56:39UTC; both merged-source CI runs34846229638/34846233584 passed. The
+canonical path remains /home/codex/repos/ubiquity/sentinel/.codex-worktrees/master-plan-gfa795549e5
+on codex/master-plan-gfa795549e5. No local implementation writer or open PR
+exists. No implementation or test was repeated during reconciliation.
+
+Repair refc9be3e3360d75523009d109d4d8591d519ffa264 and release
+ref453b2b057ef79e464d536b18723afb5a3a21850a remain unchanged. Supervisor
+2a24c4d9cb16ffcd7fec0ea75364be9fa0adf9d7 still selects runtime989af8a,
+generation2, with no current execution. Scheduled supervisor34848031954
+completed13:15:05UTC and skipped repair. The next ordinary eligibility remains
+13:41:31.649UTC; it is not a promised model start. Issue48 remains the admitted
+runtime-owned fix; preserve its two-file scope and all historical reservations.
+
+Fresh read-only Astra backlog_acceptance_map confirmed the open inventory:
+3,6,7,8,9,10,13,14,15,16,40,48. Native children4,5,11,12,18,21 are closed;
+8/9/10 have accepted hosted self-scope portions but incomplete gateway scope.
+The full source after PR46 is unchanged by PR47/49. Gateway requirements still
+need the approved VPS contract, retention, stability and ownership choices;
+captured-regression throughput, review-wait overlap, exact isolated rollback
+and six qualifying observed hours remain unproved. Update parent3's stale
+continuation paragraph without weakening its completion criteria.
+
+Fresh read-only Astra issue40_scope_audit read the existing nine-test cooldown
+receipts and diagnosed the remaining transport boundary. The GitHub repository
+is public, so credential-free exact-SHA state reads and source checkouts can
+remove the initial gate/read recursion. They cannot persist a newly observed
+App token-mint limit before any App write token exists, or save a state-push
+limit through that same blocked writer. Native prepare/finalize credentials
+are contents:read/actions:read. The pinned token action also performs ungated
+installation discovery, retries and post-job revocation, while the existing
+hosted gate accepts only native scope0. A complete fix therefore needs an
+independent durable observation capability with explicit positive App scope;
+do not relabel the App as0, grant native release writes, exempt failed writes,
+or count logs as authoritative cooldown storage. Issue40 remains open.
+
+The owner has been asked whether to authorize a supervisor-only cooldown store
+on the existing VPS with a scoped secret; Actions would remain the runtime.
+No answer, new service, interface or credential is inferred. Source coding for
+that dependent change has not started. Independent hosted self-repair remains
+authorized and continues under the existing supervisor and admission policy.
+
+13:20 UTC evidence preparation: parent3's continuation paragraph was updated
+and reread successfully; its full completion criteria remain intact. Issue40
+comment5664612861 records the independently verified persistence blocker and
+correct current test paths. Frozen offline issue48 acceptance probe
+/tmp/sentinel-issue48-acceptance-v1.ts (SHA256
+39b21fd6238c1943dd1388c0eb9bfa3ab0744ff7ef367d5a935259f321e0cdc0)
+is registered as issue48-independent-publication in the existing VPS evidence
+namespace. It will exercise169 actual outgoing PR bodies after canonical
+integration: nine keywords, case variants, colon/whitespace, short/qualified
+references, mixed references and unchanged text. It has not run, changes no
+project source and gives no test, review or delivery credit. The original
+four-case failure receipt remains the before evidence; no repeat is needed.
+
 12:46 UTC self-repair admission: existing issue40 cannot be assigned to the
 runtime because its remaining token-minting/checkout/state-transport work is
 protected supervisor authority. Read-only self_repair_scope confirmed that
