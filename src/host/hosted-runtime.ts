@@ -613,7 +613,7 @@ async function realDirectory(path: string): Promise<string> {
 }
 
 /** Exact commit of a clean worktree, read with fixed credential-free git. */
-async function readCleanGitHead(
+export async function readCleanGitHead(
   process: ReplayRuntimeV1,
   dir: string,
 ): Promise<GitSha> {

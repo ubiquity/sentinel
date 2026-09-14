@@ -1,10 +1,9 @@
-# Sentinel repair polling workflow.
+# Sentinel repair dispatcher.
 #
-# One serialized hourly pass uses the trusted hosted host in
-# src/host/actions.ts. The host persists its repair state on the dedicated
-# sentinel-state/repair ref, admits at most one gpt-5.6-luna/max start per
-# rolling hour (and 168 per rolling seven days), and keeps credentials out of
-# model children. Manual dispatch uses the same path.
+# Hourly/manual native-token dispatch of the exact protected supervisor ref.
+# This workflow holds no App key, no model credential and no runtime code; the
+# selected runtime executes in supervisor.yml's repair job with its own
+# sentinel-repair concurrency, so dispatch never holds the runtime group.
 name: sentinel-repair
 
 on:
@@ -13,56 +12,22 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
   actions: write
-  checks: read
-  statuses: read
-  issues: write
-  pull-requests: write
 
 concurrency:
-  group: sentinel-repair
+  group: sentinel-repair-dispatch
   cancel-in-progress: false
 
 jobs:
-  repair:
+  dispatch:
     runs-on: ubuntu-latest
-    # Plan §4 fixed job ceiling: 120 minutes. The loop enforces the same
-    # run-relative ceiling plus the 90-minute no-new-model-work cutoff; this
-    # is the host-side hard stop below GitHub's six-hour hosted-job maximum.
-    timeout-minutes: 120
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-      - uses: denoland/setup-deno@v2
-        with:
-          deno-version: v2.x
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - name: Install pinned Codex app-server
-        run: npm install --global @openai/codex@0.154.0
-      # GitHub-hosted Linux runners need unprivileged user namespaces for
-      # bubblewrap; same handling as openai/codex-action action.yml 289-315:
-      # https://github.com/openai/codex-action/blob/main/action.yml
-      # Ephemeral runner only; no model profile or host setting changes.
-      # Optional remediation: the in-process startup proof decides model
-      # availability, so a setup failure must not suppress deterministic
-      # bookkeeping; the host proof fails red when startup is unavailable.
-      - name: Enable Linux user namespaces for bubblewrap
-        continue-on-error: true
-        if: runner.os == 'Linux' && runner.environment == 'github-hosted'
-        run: |
-          set -euo pipefail
-          current_userns=$(sysctl -n kernel.unprivileged_userns_clone 2>/dev/null || true)
-          if [ -n "$current_userns" ] && [ "$current_userns" != "1" ]; then
-            sudo sysctl -w kernel.unprivileged_userns_clone=1
-          fi
-          current_apparmor=$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || true)
-          if [ -n "$current_apparmor" ] && [ "$current_apparmor" != "0" ]; then
-            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          fi
-      - name: Repair polling run
+      - name: Dispatch the exact protected supervisor ref
         env:
-          GITHUB_TOKEN: ${{ github.token }}
-          UOS_AI_TOKEN: ${{ secrets.UOS_AI_TOKEN }}
-        run: deno task repair:actions
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh api
+          --method POST
+          repos/ubiquity/sentinel/actions/workflows/supervisor.yml/dispatches
+          -f ref=sentinel-supervisor

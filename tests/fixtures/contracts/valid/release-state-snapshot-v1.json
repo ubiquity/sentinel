@@ -74,5 +74,6 @@
     }
   ],
   "hostedRuntimes": [],
-  "hostedReleases": []
+  "hostedReleases": [],
+  "githubCooldowns": []
 }

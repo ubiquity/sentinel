@@ -57,7 +57,6 @@ import {
   expectBoolean,
   expectCount,
   expectEnum,
-  expectExactKeys,
   expectGitSha,
   expectNonEmptyString,
   expectNullable,

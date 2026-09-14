@@ -885,6 +885,7 @@ Deno.test(
       releases: [],
       hostedRuntimes: [],
       hostedReleases: [],
+      githubCooldowns: [],
     }, null);
 
     const releaseRead: Pick<StateReadView, "readRelease"> = store;

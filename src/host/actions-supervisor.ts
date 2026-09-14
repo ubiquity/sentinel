@@ -1,15 +1,13 @@
 /**
- * Fixed hosted supervisor bootstrap.
+ * Fixed hosted supervisor composition.
  *
  * This entrypoint runs only from the protected `sentinel-supervisor` source
- * ref. Its first durable operation seeds the release-state ref through the
- * installation token minted by the workflow. The repair workflow never gets
- * this token or the environment that contains the App private key.
- *
- * Release promotion remains fail-closed until the trusted Deno target,
- * build-receipt resolver and monitoring policy are wired into a later
- * supervisor revision. This bootstrap never selects a revision and never
- * writes repair state.
+ * ref. Its protected prepare/finalize jobs compose hosted runtime pointer
+ * selection and authenticated execution settlement through the release-role
+ * App state, seeding the release ref exactly once before any gate use. The
+ * repair job never receives App credentials or this environment, no model
+ * token is read here, and this module never writes repair state: Deno release
+ * promotion remains a separate controller.
  */
 
 import { isGitSha } from "../contracts/brands.ts";
@@ -36,6 +34,7 @@ import type {
   StateReadView,
   StateWriteResultV1,
 } from "../contracts/ports.ts";
+import { portOk, SystemClock } from "../contracts/ports.ts";
 import type { ReleaseRequestV1 } from "../contracts/release.ts";
 import type { RepositoryIdentityV1 } from "../contracts/shared.ts";
 import { parseReleaseStateSnapshotV1 } from "../contracts/state-snapshots.ts";
@@ -44,8 +43,20 @@ import type {
   RepairStateSnapshotV1,
 } from "../contracts/state-snapshots.ts";
 import { tryParse } from "../contracts/validation.ts";
+import { GitHubApiClient } from "../github/client.ts";
+import { fetchHttpTransport } from "../github/http.ts";
+import type { HttpTransportV1 } from "../github/http.ts";
+import { DenoReplayRuntime } from "../replay/runtime.ts";
+import type { ReplayRuntimeV1 } from "../replay/runtime.ts";
 import { createReleaseStateStore, DenoGitRunner } from "../state/mod.ts";
-import { githubGitAuthEnv, joinPath } from "./local.ts";
+import { HostedSupervisorCooldownGate } from "./hosted-cooldown.ts";
+import {
+  parseHostedEnvironment,
+  readCleanGitHead,
+  readHostedIdentityEnv,
+} from "./hosted-runtime.ts";
+import type { HostedRuntimeJobV1 } from "./hosted-runtime.ts";
+import { ensurePrivateDir, githubGitAuthEnv, joinPath } from "./local.ts";
 
 const REMOTE_URL = "https://github.com/ubiquity/sentinel.git";
 const SUPERVISOR_TOKEN_ENV = "SENTINEL_SUPERVISOR_TOKEN";
@@ -73,8 +84,6 @@ export async function ensureHostedReleaseStateSeed(
   if (typeof scratchDir !== "string" || scratchDir.length === 0) {
     throw new Error(STATIC_STATE);
   }
-  if (!Number.isSafeInteger(now) || now < 0) throw new Error(STATIC_STATE);
-
   const state = createReleaseStateStore({
     scratchDir,
     remoteUrl: REMOTE_URL,
@@ -83,6 +92,20 @@ export async function ensureHostedReleaseStateSeed(
       githubGitAuthEnv(token),
     ),
   });
+  return await ensureHostedReleaseState(state, now);
+}
+
+/**
+ * Seed the release-state branch exactly once through an already-built
+ * release-role store, then reread its authoritative commit. A concurrent or
+ * lost write response is reconciled by the same reread; a found snapshot is
+ * never replaced and no force push is attempted.
+ */
+export async function ensureHostedReleaseState(
+  state: StateReadView & ReleaseStateWriter,
+  now = Date.now(),
+): Promise<HostedSupervisorBootstrapResultV1> {
+  if (!Number.isSafeInteger(now) || now < 0) throw new Error(STATIC_STATE);
   const current = await state.readRelease();
   if (!current.ok) throw new Error(`${STATIC_STATE} (${current.error.kind})`);
   if (current.value.status === "found") {
@@ -992,23 +1015,216 @@ function isToken(value: unknown): value is string {
     !/[\p{Cc}]/u.test(value);
 }
 
-async function main(): Promise<void> {
-  const token = Deno.env.get(SUPERVISOR_TOKEN_ENV);
-  if (!isToken(token)) throw new Error(STATIC_TOKEN);
-  const scratch = await Deno.makeTempDir({
-    dir: Deno.cwd(),
-    prefix: ".sentinel-supervisor-",
-  });
-  try {
-    const result = await ensureHostedReleaseStateSeed(token, scratch);
-    console.log(JSON.stringify(result));
-  } finally {
-    try {
-      await Deno.remove(scratch, { recursive: true });
-    } catch {
-      // The runner is ephemeral; cleanup is best effort after the receipt.
-    }
+// ---------------------------------------------------------------------------
+// Production composition: prepare/finalize over the existing core.
+// ---------------------------------------------------------------------------
+
+const SUPERVISOR_REPOSITORY: RepositoryIdentityV1 = {
+  owner: "ubiquity",
+  name: "sentinel",
+  installationId: 0,
+};
+const NATIVE_TOKEN_ENV = "GITHUB_TOKEN";
+const OUTPUT_ENV = "GITHUB_OUTPUT";
+const PATH_ENV = "PATH";
+const STATIC_SOURCE_CHECKOUT =
+  "hosted supervisor source checkout is not the exact clean revision";
+const STATIC_JOB = "hosted supervisor job identity is invalid";
+const STATIC_OUTPUT = "hosted supervisor prepare output is unavailable";
+const STATIC_RESULT = "hosted supervisor run result is unavailable";
+
+export interface HostedSupervisorHostInputV1 {
+  env: Readonly<Record<string, string | undefined>>;
+  sourceDir: string;
+  clock: Clock;
+  http: HttpTransportV1;
+  state: StateReadView & ReleaseStateWriter;
+  process: ReplayRuntimeV1;
+  /** Prepare-only exact output writer; one key=value record per call. */
+  writeOutput?: (name: string, value: string) => Promise<void>;
+}
+
+export interface HostedSupervisorHostResultV1 {
+  job: HostedRuntimeJobV1;
+  status: HostedSupervisorOutcomeV1["status"];
+  run: boolean;
+  revision: GitSha | null;
+  execution: HostedExecutionIntentV1 | null;
+  detail: string;
+}
+
+/** Only the protected prepare/finalize jobs are accepted here. */
+function supervisorJob(value: string | undefined): HostedRuntimeJobV1 {
+  if (value === "prepare" || value === "finalize") return value;
+  throw new Error(STATIC_JOB);
+}
+
+/**
+ * Real production composition: exact native identity and the clean protected
+ * source are proved BEFORE any auth, API, output or state work, then the
+ * existing core prepare/finalize runs with the authenticated native client
+ * behind the shared cooldown gate. Prepare writes only `run`/`revision`;
+ * finalize writes no outputs and never starts a model.
+ */
+export async function runHostedSupervisorHost(
+  input: HostedSupervisorHostInputV1,
+): Promise<HostedSupervisorHostResultV1> {
+  const job = supervisorJob(input.env.GITHUB_JOB);
+  const identity = parseHostedEnvironment(input.env, job);
+  const head = await readCleanGitHead(input.process, input.sourceDir);
+  if (head !== identity.launcherSha) throw new Error(STATIC_SOURCE_CHECKOUT);
+  // The prepare output sink must exist BEFORE any core, API or state work.
+  const writeOutput = input.writeOutput;
+  if (job === "prepare" && writeOutput === undefined) {
+    throw new Error(STATIC_OUTPUT);
   }
+  const nativeToken = input.env[NATIVE_TOKEN_ENV];
+  if (!isToken(nativeToken)) throw new Error(STATIC_TOKEN);
+
+  const gate = new HostedSupervisorCooldownGate({
+    state: input.state,
+    clock: input.clock,
+  });
+  const client = new GitHubApiClient({
+    repository: { ...SUPERVISOR_REPOSITORY },
+    apiBaseUrl: "https://api.github.com",
+    http: input.http,
+    auth: {
+      authorizationHeader: () =>
+        Promise.resolve(portOk(`Bearer ${nativeToken}`)),
+    },
+    cooldownGate: gate,
+    clock: input.clock,
+  });
+  const evidence: HostedSupervisorEvidencePortV1 = {
+    readExecution: (saved) => client.readHostedExecution(saved),
+    verifyRevision: (revision) => client.verifyHostedRevision(revision),
+    verifyRequest: (request) => client.verifyHostedReleaseRequest(request),
+  };
+  const core = {
+    clock: input.clock,
+    state: input.state,
+    run: {
+      runId: identity.runId,
+      runAttempt: identity.runAttempt,
+      launcherSha: identity.launcherSha,
+    },
+    evidence,
+  };
+  const outcome = job === "prepare"
+    ? await runHostedSupervisorPrepare(core)
+    : await runHostedSupervisorFinalize(core);
+  if (job === "finalize") {
+    return {
+      job,
+      status: outcome.status,
+      run: false,
+      revision: null,
+      execution: null,
+      detail: outcome.status === "pending" ? outcome.detail : outcome.status,
+    };
+  }
+  if (writeOutput === undefined) throw new Error(STATIC_OUTPUT);
+  if (outcome.status !== "run") {
+    await writeOutput("run", "false");
+    return {
+      job,
+      status: outcome.status,
+      run: false,
+      revision: null,
+      execution: null,
+      detail: outcome.status === "pending" ? outcome.detail : outcome.status,
+    };
+  }
+  if (!isGitSha(outcome.execution.revision)) throw new Error(STATIC_RESULT);
+  await writeOutput("run", "true");
+  await writeOutput("revision", outcome.execution.revision);
+  return {
+    job,
+    status: "run",
+    run: true,
+    revision: outcome.execution.revision,
+    execution: outcome.execution,
+    detail: "run",
+  };
+}
+
+/**
+ * Production entrypoint: named native environment only, source proof before
+ * credentials/scratch, release state through the App Git token, and the native
+ * GITHUB_TOKEN for every authenticated API request behind the shared cooldown
+ * gate. No model token, no environment dump and no App private key.
+ */
+async function main(): Promise<void> {
+  const env: Record<string, string | undefined> = {
+    ...readHostedIdentityEnv(),
+    [PATH_ENV]: Deno.env.get(PATH_ENV),
+    [NATIVE_TOKEN_ENV]: Deno.env.get(NATIVE_TOKEN_ENV),
+    [SUPERVISOR_TOKEN_ENV]: Deno.env.get(SUPERVISOR_TOKEN_ENV),
+    [OUTPUT_ENV]: Deno.env.get(OUTPUT_ENV),
+  };
+  const job = supervisorJob(env.GITHUB_JOB);
+  const identity = parseHostedEnvironment(env, job);
+  const process = new DenoReplayRuntime(Deno.execPath());
+  const sourceDir = Deno.cwd();
+  // Exact clean protected source BEFORE credentials, scratch, API or output.
+  const head = await readCleanGitHead(process, sourceDir);
+  if (head !== identity.launcherSha) throw new Error(STATIC_SOURCE_CHECKOUT);
+
+  const path = env[PATH_ENV];
+  const nativeToken = env[NATIVE_TOKEN_ENV];
+  const appToken = env[SUPERVISOR_TOKEN_ENV];
+  if (
+    !isToken(nativeToken) || !isToken(appToken) ||
+    typeof path !== "string" || path.length === 0
+  ) {
+    throw new Error(STATIC_TOKEN);
+  }
+  // The prepare output sink is validated before any scratch or state write.
+  let writeOutput: ((name: string, value: string) => Promise<void>) | undefined;
+  if (job === "prepare") {
+    const outputPath = env[OUTPUT_ENV];
+    if (typeof outputPath !== "string" || outputPath.length === 0) {
+      throw new Error(STATIC_OUTPUT);
+    }
+    writeOutput = async (name, value) => {
+      await Deno.writeTextFile(outputPath, `${name}=${value}\n`, {
+        append: true,
+        create: false,
+      });
+    };
+  }
+
+  const sentinelDir = joinPath(sourceDir, ".sentinel");
+  const scratch = joinPath(sentinelDir, "state-scratch");
+  const gitHome = joinPath(sentinelDir, "state-git-home");
+  await ensurePrivateDir(scratch);
+  await ensurePrivateDir(gitHome);
+  const state = createReleaseStateStore({
+    scratchDir: scratch,
+    remoteUrl: REMOTE_URL,
+    runner: new DenoGitRunner(gitHome, githubGitAuthEnv(appToken)),
+  });
+  const clock = new SystemClock();
+  await ensureHostedReleaseState(state, clock.now());
+  const result = await runHostedSupervisorHost({
+    env,
+    sourceDir,
+    clock,
+    http: fetchHttpTransport(),
+    state,
+    process,
+    writeOutput,
+  });
+  // Bounded trusted result only; no raw error or credential is ever logged.
+  console.log(JSON.stringify({
+    job: result.job,
+    status: result.status,
+    run: result.run,
+    revision: result.revision,
+    execution: result.execution,
+    detail: result.detail,
+  }));
 }
 
 if (import.meta.main) {
@@ -1016,19 +1232,12 @@ if (import.meta.main) {
     await main();
   } catch (error) {
     const message = error instanceof Error ? error.message : "";
-    if (
-      message === STATIC_TOKEN ||
-      message === STATIC_STATE ||
-      message === STATIC_SEED ||
-      /^hosted supervisor release state (?:is unavailable|could not be seeded) \((?:unavailable|auth_failed|rate_limited|not_found|conflict|invalid)\)$/
-        .test(
-          message,
-        )
-    ) {
-      console.error(message);
-    } else {
-      console.error(STATIC_SEED);
-    }
+    console.error(
+      message === STATIC_JOB || message === STATIC_SOURCE_CHECKOUT ||
+        message === STATIC_OUTPUT || message === STATIC_TOKEN
+        ? message
+        : STATIC_RESULT,
+    );
     Deno.exit(1);
   }
 }

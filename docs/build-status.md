@@ -36,6 +36,55 @@ it has no write or test authority. Primary alone owns this register and plan.
 
 ### Historical checkpoints
 
+03:20 UTC: integrated3e81df9b completed in399seconds:1067passed84steps,
+1failed9ignored. Only failure was valid JSON release snapshot missing cooldowns.
+No other failure was reported. Sole fixture/comment correction exec37128,
+PID1502902, header819340 FlashV4.1/max verified with live cwd/NODE_ENV;
+settled exit0/completed, actual pwd/reads/two edits/one formatter, no descendants.
+Fresh contract fixtures734d49c7-767b-49fa-bb39-0fb1694751dd passed.
+Composition and fixture changes are ready to commit for exact integrated
+validation; full acceptance, formal review and installation are still pending.
+
+03:12 UTC: workflow V3 exec65560 settled exit0/completed, actual header814078
+confirms deepseek-official/deepseek-flash/max. Actual calls were scoped reads,
+edits, pwd and one formatter; no descendants remain. Live cwd/NODE_ENV check
+was missed across handoff, so this launch does not have full live attestation.
+Fresh hosted-workflow b599773d-8e02-4217-bc2a-a22396457492 passed in22seconds.
+Integrated30a7b934-1d5b-426b-84ca-52e3fe64adad passed fmt/lint/production
+check, then failed test typecheck: ports_test release fixture omitted cooldowns.
+Single-file correction exec6118/PID1385049 settled exit0/completed; live
+cwd/NODE_ENV and header818531 FlashV4.1/max verified. Actual calls pwd/read/edit/
+one formatter only. Fresh integrated3e81df9b-189d-4b12-9040-c4ae8aacc53d
+is running under exec90636; no verdict yet. All references use VPS namespace
+459acb17ad9ea6b3117a31ea7e3934ee42910852ebdd735c5b0a8110d8083e59.
+Full explicit heads/tags fetch refreshes canonical remote to d421c12; default
+configured fetch only follows development. Protected source still6987219.
+No formal review, installation or autonomous delivery proof yet.
+
+03:03 UTC: workflow V1/V2 settled exit0 with actual shell calls pwd/oneformatter
+only; V2 exec45538/PID1374630 live cwd/NODE_ENV/header802041 verified.
+Fresh744b1efb-d5ca-460b-8483-d9d8aa83b503 failed compile beforetests:
+duplicate STATIC_SOURCE/writeOutput and fixture calling method hidden by facade.
+Sole next V3 corrects these and pins existing setup-node v4.4.0 to verified
+49933ea5288caeca8642d1e84afbd3f7d6820020 (official v4/v4.4.0 refs agree).
+Independent integrated authority audit has no other P0/P1 receipt/settlement
+findings. No integrated run/review/source installation yet.
+
+02:53 UTC: workflow writer exec32651/PID1373166 verified live cwd/NODE_ENV;
+header760826 FlashV4.1/max. Existing automatic CI34800597677 on d421c12
+failed lint at client.ts:60 unused expectExactKeys import after consumer removal,
+saved /tmp/sentinel-ci-d421c12.log. Not a focused test failure. Exact removal
+recorded in /tmp/sentinel-hosted-workflow-correction-notes-v2.txt for next settled
+worker boundary; current immutable workflow scope excludes client. No rerun.
+
+02:52 UTC: consumer committedb066585, normal no-ff protected-source merge
+d421c124c2b582e0d37daf92449f41a9bf7d9975 preserves unchanged accepted tree;
+6987219 is now an ancestor. Pushed exact canonical head. Sole next writer
+exec32651 uses /tmp/sentinel-hosted-workflow-launch-v1.txt for production
+prepare/repair/finalize composition, existing task grants, two workflows and
+actual composition fixtures; no other writer/test runs. Registered hosted-workflow
+then sentinel-integrated remain next checks. Protected remote source unchanged.
+
 02:50 UTC: consumer accepted after V2 fixture change and V3 typing correction.
 V2 header715734/PID1329872 and V3 header757341/PID1331410 verified
 FlashV4.1/max/cwd/NODE_ENV, both settled exit0, only permitted shell mutations,
