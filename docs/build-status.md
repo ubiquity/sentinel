@@ -2,15 +2,18 @@
 
 ## Active task register — Astra owned
 
-Latest verified state, 2026-09-14 04:32 UTC: canonical branch and both VPS
-checkouts are at ec940acf81118c5cda65832dcfc9f5b6fb2cfeda. No DSH print writer
-is running. Supervisor ruleset23197450 remains absent; never recreate it.
-Healthy bootstrap proof is persisted; autonomous delivery is not yet proved.
-PR30 remains runtime-owned at d92d140 with an unprepared base_refresh intent,
-not a published refresh. Read-only installation_audit is diagnosing that
-unavailable result before the next ordinary pass due 04:55:28 UTC. Issue21 remains
-blocked without a trusted receipt; preserve all five reservations. The older
-00:30 checkpoint below records the starting state, not current installation.
+Latest verified state, 2026-09-14 06:09 UTC: both VPS checkouts and the active
+runtime are at 989af8a52179702a5fd063337d09b2b376e739f1. The fixed supervisor
+remains at 2a24c4d9cb16ffcd7fec0ea75364be9fa0adf9d7. No implementation writer
+is running. Supervisor ruleset 23197450 remains absent; never recreate it.
+PR30 was autonomously refreshed, reviewed clean, passed exact-head CI and merged
+by github-actions[bot]. Its exact hosted release is accepted with healthy prior
+and candidate proofs. Issue18 is still open: receipt ingestion and closure await
+the ordinary pass due 06:56:40 UTC. Issue21 remains blocked without a trusted
+receipt; preserve all six reservations. A second delivery, six hours of observation
+and separate gateway acceptance remain unproved. Owner's hard stop is 06:25 UTC.
+Pro research is blocked by revoked authentication; no new submission was made.
+The older checkpoints below retain historical evidence.
 
 Current checkpoint, 2026-09-14 00:30 UTC: owner supersedes the Mac-only canonical
 location and confirms all work is pushed. Canonical worktree is now
@@ -45,6 +48,72 @@ hosted_acceptance_audit has returned its foundation and composition findings;
 it has no write or test authority. Primary alone owns this register and plan.
 
 ### Historical checkpoints
+
+06:09 UTC: first autonomous hosted release accepted. PR30 merged at 05:59:47 UTC
+by github-actions[bot] as 989af8a52179702a5fd063337d09b2b376e739f1 in ordinary
+run 34811445906. Its tree equals reviewed head f9df73e; exact-head CI had passed
+1071 tests, 84 steps, zero failures and nine ignored tests. The persisted release
+request is release:c8958a08eaa25953233643862a0bbd0717400468d43a7db31546523df55cd453.
+Prior verification 34811564193 passed for cfe3d22. Candidate verification
+34811959137 passed for exact 989af8a; job 103874980013, launcher 2a24c4d,
+generation 2, startupReady and settled true, healthy terminal. Its log digest is
+9bfe931f80a40eb188df317dc26417ed91c73222739af0b03acd2e9c481f6844.
+Release ref da9504b records phase accepted at hostedReleases/7ba18da69fde1f29b100bac9e976cbf6dbeee37abc6dc24ceea70bf1992b3dab.json.
+Active pointer is 989af8a. All six reservation blobs are unchanged from cf78197.
+Candidate, prior and merge logs are retained in /tmp/sentinel-accepted-candidate-34811959137.log,
+/tmp/sentinel-prior-34811564193.log and /tmp/sentinel-autonomous-merge-34811445906.log.
+Both VPS checkouts fast-forwarded; worker 261e044 and candidate f9df73e are
+ancestry-proved in canonical 989af8a. Only the primary ledger is dirty.
+Fresh live_delivery_audit independently confirmed the accepted release and
+all stated completion limits. Issue18 remains open; next ordinary deadline 1789369000414
+(06:56:40 UTC) is preserved. No full-goal completion claim or fabricated closure.
+
+05:32 UTC: release preflight audit confirms prior/candidate verification is not
+gated by the ordinary deadline, but receipt ingestion/closure is. Candidate
+verification runs before finalize records accepted, then next ordinary handles
+closure (likely06:56 after05:56 run). Treat this as a verified cadence limitation;
+deadline pressure alone does not justify a new execution purpose. Such a change
+would also need compatibility with exact active runtimecfe3d22 and advancing
+development would stale PR30's reviewed base. No speculative source correction
+assigned. Current priority remains actual autonomous merge/release proof before
+06:25. Pro questions prepared /tmp/sentinel-outstanding-research-20260914.txt;
+auth refresh requested asynchronously, no submission and no repeated auth probe.
+
+05:27 UTC: owner limits further work to one hour from05:25:43UTC; stop by
+06:25UTC and report verified outcome or exact remaining blocker. Owner invoked
+gpt-pro for outstanding questions, authorizing one new combined submission.
+Used0 of1 submissions: existing old jobs15779736-561f-4b61-b913-d91a509087bb and
+92dfaf6a-5e80-4ed5-ac4f-50b151be2067 both report expired/revoked ChatGPT session
+on retrieval; no new research submitted, no authentication retry. Local pace
+nudge null. Evidence /tmp/sentinel-pro-prior-retrieval.{jsonl,stderr}.
+PR30 exactf9df73e CI34807909081 passed and GitHub mergeStateStatus CLEAN.
+Fresh live_delivery_audit found no substantive source correction; ordinary
+healthy proof persisted, release/closure still missing. Same auditor performs
+one bounded read-only preflight of upcoming self-release while primary checks
+issue21 recovery boundaries. Preserve next ordinary05:56:07 and all charges.
+
+05:02 UTC: ordinary run34807804806 at launcher2a24c4d completed success.
+Runtimecfe3d22 autonomously refreshed PR30 fromd92d140 to
+f9df73e53a4c322391c2628b7e372389fa33d4bb, with exact parentsd92d140/2a24c4d.
+New reservation5975971fd24eb349e8cd9ca67bdabe177b0be9b40bfde42cc122e3ab639671b2
+preserves all five old blobs. Review5194066280 completed clean at05:00:33UTC,
+no findings, exactf9df73e/base2a24c4d. Journal request/runtime evidence records
+Luna/max completed, thread01a09e47-bfd6-7731-a1f8-bfb0824e9bb2; retained at
+/tmp/sentinel-pr30-review-f9df73e.txt. Runtime dispatched CI34807909081, live.
+Saved review_pending until1789362789421 (05:13:09UTC); next ordinary deadline
+1789365367805 (05:56:07UTC). Preserve both. No autonomous merge/release/closure
+yet; no manual merge of PR30. Fresh read-only live_delivery_audit is reconciling
+scope and authority; primary alone owns ledger. Merged CI34807599165 passed.
+
+04:53 UTC: PR44 merged as 2a24c4d9cb16ffcd7fec0ea75364be9fa0adf9d7;
+merged tree equals final reviewed eae37a7. Both final CI runs34807256826 and
+34807259253 passed; latter1070tests/84steps/0fail/9ignored. CodeRabbit blocked
+on deadline spacing only; fixed in eae37a7, resolved thread and dismissed the
+fixed review. Documentation review exit0/no findings. Installed supervisor ref
+by ancestry-preserving non-force push to exact2a24c4d; both VPS checkouts
+fast-forwarded. Actual supervisor34807611883 uses2a24c4d, prepare passed and
+repair correctly skipped before04:55:28 deadline. Merged CI34807599165 running.
+No autonomous delivery yet. No protection, reservation or deadline changes.
 
 04:44 UTC: history V1 and V2 settled exit0/completed; actual Flash/max headers
 825941/836819 and live cwd/NODE_ENV verified. Only pwd/final formatter shell
