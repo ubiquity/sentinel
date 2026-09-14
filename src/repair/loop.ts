@@ -13,6 +13,7 @@
  */
 
 import type { FixtureDigest, GitSha } from "../contracts/brands.ts";
+import { isGitSha } from "../contracts/brands.ts";
 import { canonicalStringify } from "../contracts/canonical.ts";
 import type {
   Clock,
@@ -29,6 +30,7 @@ import type {
   StateReadView,
   StateWriteResultV1,
 } from "../contracts/ports.ts";
+import { BASE_REFRESH_CONFLICT_DETAIL } from "../contracts/ports.ts";
 import type { RepositoryConfigV1 } from "../contracts/repository-config.ts";
 import type { IncidentEvidenceV1 } from "../contracts/incident.ts";
 import { parseMergeRequestV1 } from "../contracts/merge-request.ts";
@@ -57,7 +59,10 @@ import type {
   EvidenceRefV1,
   RepositoryIdentityV1,
 } from "../contracts/shared.ts";
-import type { WorkRecordV1 } from "../contracts/work-record.ts";
+import type {
+  IncompleteOperationV1,
+  WorkRecordV1,
+} from "../contracts/work-record.ts";
 import type { BudgetControllerV1 } from "../budget/mod.ts";
 import { MAX_REVIEW_TOTAL_MS } from "../github/codex-reviewer.ts";
 import {
@@ -1077,6 +1082,13 @@ async function executeWorkStep(
     );
   }
 
+  // A saved base-refresh intent is reconciled wherever it is observed (the
+  // work step as well as delivery): the old candidate is preserved until the
+  // exact deterministic prepared commit was actually published.
+  if (record.intent !== null && record.intent.kind === "base_refresh") {
+    return executeBaseRefreshIntent(deps, context, record);
+  }
+
   // A saved implementation intent is never resubmitted; fail closed.
   if (record.intent !== null && record.intent.kind === "implementation") {
     return handleImplementationUncertainty(deps, context, record);
@@ -1133,6 +1145,22 @@ async function executeWorkStep(
     headRejectedByReview(context.snapshot, record)
   ) {
     return executeImplementationStep(deps, context, record, config);
+  }
+
+  // An issue candidate with an existing PR is checked against the CURRENT
+  // configured base BEFORE any fresh review budget is spent: a newer base
+  // creates the next deterministic base-refresh intent first. The hook never
+  // touches a pending publish/implementation/review intent, never runs for a
+  // head rejected by review (that correction path is handled above), and is
+  // inert when the host offers no prepareBaseRefresh capability.
+  if (
+    record.source.kind === "issue" &&
+    record.target.pr !== null &&
+    record.intent === null &&
+    deps.github.prepareBaseRefresh !== undefined
+  ) {
+    const refresh = await ensureBaseRefreshIntent(deps, context, record);
+    if (refresh !== null) return refresh;
   }
 
   // A head exists: it is publishable only after a validated replay result, or
@@ -3342,19 +3370,25 @@ async function applyObservedReview(
 // Delivery phase: merge → release request → acceptance → closure.
 // ---------------------------------------------------------------------------
 
-function executeDeliveryStep(
+async function executeDeliveryStep(
   deps: RepairCycleDepsV1,
   context: LoopContextV1,
   record: WorkRecordV1,
 ): Promise<StepResultV1> {
   if (record.target.pr === null || record.target.head === null) {
-    return Promise.resolve({
+    return {
       kind: "state_error",
       detail: "delivery without PR/head identity",
-    });
+    };
   }
 
   if (record.intent !== null) {
+    if (record.intent.kind === "base_refresh") {
+      // A saved candidate-base refresh is reconciled before any other
+      // delivery effect: the old candidate is preserved until the exact
+      // deterministic prepared commit was actually published.
+      return executeBaseRefreshIntent(deps, context, record);
+    }
     if (record.intent.kind === "issue_closure") {
       return retryClosure(deps, context, record);
     }
@@ -3376,9 +3410,396 @@ function executeDeliveryStep(
     (request) => releaseRequestMatchesDelivery(request, record),
   );
   if (existingRequest !== undefined) {
+    // An existing release request is delivery bookkeeping: a base movement
+    // never replaces or duplicates it.
     return observeReleaseAcceptance(deps, context, record, existingRequest);
   }
+  // Only an issue task with an existing candidate/PR, no other intent and an
+  // available prepareBaseRefresh capability may persist a base-refresh intent:
+  // an unsupported/fake port must never receive an intent it cannot execute.
+  // The check happens BEFORE the merge path and never touches immutable
+  // identities, counters, reviews or evidence.
+  if (
+    record.intent === null && record.source.kind === "issue" &&
+    deps.github.prepareBaseRefresh !== undefined
+  ) {
+    const refresh = await ensureBaseRefreshIntent(deps, context, record);
+    if (refresh !== null) return refresh;
+  }
   return executeMerge(deps, context, record);
+}
+
+/**
+ * Deterministic base-refresh intent identity: exact PR, old candidate head and
+ * observed new base. Never time- or list-derived, so a restart reproduces the
+ * identical key.
+ */
+function baseRefreshIntentKey(
+  pullRequestNumber: number,
+  expectedHead: GitSha,
+  observedBase: GitSha,
+): string {
+  return `base_refresh:${pullRequestNumber}:${expectedHead}:${observedBase}`;
+}
+
+/**
+ * Observe the actual configured base ref for an eligible issue delivery. A
+ * moved base persists the durable refresh intent BEFORE any preparation or
+ * side effect and performs no reservation, model call or external write. The
+ * immutable record identities, counters, evidence and reviews are untouched;
+ * the target stays on the old base/head until publication succeeded. Returns
+ * null when the base did not move (the existing merge path is unchanged), or
+ * an explicit step result for a wait/refusal/deferral.
+ */
+async function ensureBaseRefreshIntent(
+  deps: RepairCycleDepsV1,
+  context: LoopContextV1,
+  record: WorkRecordV1,
+): Promise<StepResultV1 | null> {
+  const config = configFor(deps, record.repository);
+  if (config === null) return null;
+  if (
+    record.target.pr === null || record.target.head === null ||
+    record.target.branch === null
+  ) {
+    return null;
+  }
+  // The base read is a GitHub read: the shared gate is checked first (a
+  // cooling installation never writes a refresh intent it cannot act on).
+  const cooling = await checkGithubCooldown(
+    deps,
+    record.repository,
+    context.bounds,
+  );
+  if (cooling.kind === "state_error") {
+    return { kind: "state_error", detail: cooling.detail };
+  }
+  if (cooling.kind === "deferred") {
+    return { kind: "deferred", detail: cooling.detail };
+  }
+  const readAt = deps.clock.now();
+  const ref = await deps.github.readRef(`refs/heads/${config.baseBranch}`);
+  if (!ref.ok || ref.value === null) {
+    // The base ref could not be observed: a bounded wait, never a fabricated
+    // "unchanged" base and never a refresh intent against unknown state.
+    return persistWork(
+      deps,
+      context,
+      setWait(
+        record,
+        {
+          reason: "unavailable",
+          since: readAt,
+          until: readAt + CHECK_POLL_MS,
+        },
+        readAt,
+      ),
+    );
+  }
+  const observedBase = ref.value.sha;
+  if (observedBase === record.target.base) return null;
+  const intent: IncompleteOperationV1 = {
+    kind: "base_refresh",
+    key: baseRefreshIntentKey(
+      record.target.pr,
+      record.target.head,
+      observedBase,
+    ),
+    startedAt: readAt,
+    branch: record.target.branch,
+    expectedHead: record.target.head,
+    observedBase,
+    pr: record.target.pr,
+    requestId: null,
+    resultId: null,
+  };
+  return persistWork(deps, context, setIntent(record, intent, readAt));
+}
+
+/**
+ * Execute or resume one durable base-refresh intent.
+ *
+ * The deterministic prepared commit is regenerated through the optional
+ * trusted port capability (a fresh run reproduces the identical SHA after a
+ * runner disappeared) and persisted as the intent result BEFORE any push. The
+ * exact branch is then read: only the old candidate head or the exact prepared
+ * result are accepted. The old head is pushed with the existing expected-ref
+ * pushHead; an already-published prepared commit is reconciled without a
+ * duplicate push. Unknown heads, failures and lost responses leave the same
+ * durable intent with a bounded wait, while a known merge conflict blocks the
+ * task with the existing blocker fields and retains the candidate. On success
+ * the target advances to the exact new base/prepared head, the intent is
+ * cleared and nextStep returns to `work`, so the existing publication and
+ * fresh-review admission handle the exact new head (an old review is never
+ * reused).
+ */
+async function executeBaseRefreshIntent(
+  deps: RepairCycleDepsV1,
+  context: LoopContextV1,
+  record: WorkRecordV1,
+): Promise<StepResultV1> {
+  const intent = record.intent;
+  if (
+    intent === null || intent.kind !== "base_refresh" ||
+    record.target.pr === null || record.target.head === null ||
+    record.target.branch === null
+  ) {
+    return {
+      kind: "state_error",
+      detail: "base refresh intent identity mismatch",
+    };
+  }
+  const observedBase = intent.observedBase;
+  const persistedPrepared = intent.resultId;
+  if (
+    intent.branch !== record.target.branch ||
+    intent.expectedHead !== record.target.head ||
+    intent.pr !== record.target.pr ||
+    intent.requestId !== null ||
+    observedBase === null ||
+    !isGitSha(observedBase) ||
+    (persistedPrepared !== null && !isGitSha(persistedPrepared))
+  ) {
+    return {
+      kind: "state_error",
+      detail: "base refresh intent identity mismatch",
+    };
+  }
+  const config = configFor(deps, record.repository);
+  if (config === null) {
+    return {
+      kind: "state_error",
+      detail: "base refresh without repository configuration",
+    };
+  }
+  const prepare = deps.github.prepareBaseRefresh?.bind(deps.github);
+  if (prepare === undefined) {
+    // Capability absence is an explicit bounded wait: the durable intent and
+    // the old candidate are preserved and no deprecated path is taken.
+    const at = deps.clock.now();
+    return persistWork(
+      deps,
+      context,
+      setWait(
+        record,
+        { reason: "unavailable", since: at, until: at + CHECK_POLL_MS },
+        at,
+      ),
+    );
+  }
+  const expectedBase: GitSha = observedBase;
+  const prepared = await prepare({
+    pullRequestNumber: record.target.pr,
+    branch: record.target.branch,
+    expectedHead: record.target.head,
+    previousBase: record.target.base,
+    expectedBase,
+    ...(persistedPrepared === null ? {} : { preparedHead: persistedPrepared }),
+  });
+  if (!prepared.ok) {
+    if (
+      prepared.error.kind === "conflict" &&
+      prepared.error.detail === BASE_REFRESH_CONFLICT_DETAIL
+    ) {
+      // A known deterministic merge conflict: retain the candidate, spend no
+      // model work and block with the existing blocker fields. Every other
+      // failure (identity mismatch, moved base, bounds, unavailable objects)
+      // keeps the exact durable intent and waits bounded below.
+      const at = deps.clock.now();
+      return persistWork(
+        deps,
+        context,
+        markBlocked(
+          clearIntent(record, at),
+          "other",
+          "base refresh has conflicts",
+          at,
+        ),
+      );
+    }
+    const at = deps.clock.now();
+    if (persistedPrepared === null) {
+      // No authorized push can exist before the prepared result was persisted.
+      // Re-observe the configured base under the shared cooldown: a SECOND
+      // movement after this intent was written clears ONLY this unprepared
+      // intent so the next step plans a fresh one against the newest base.
+      // Target, source, counters, reviews, evidence and history are preserved.
+      const cooling = await checkGithubCooldown(
+        deps,
+        record.repository,
+        context.bounds,
+      );
+      if (cooling.kind === "state_error") {
+        return { kind: "state_error", detail: cooling.detail };
+      }
+      if (cooling.kind === "deferred") {
+        return { kind: "deferred", detail: cooling.detail };
+      }
+      const currentBase = await deps.github.readRef(
+        `refs/heads/${config.baseBranch}`,
+      );
+      const observedAt = deps.clock.now();
+      if (!currentBase.ok || currentBase.value === null) {
+        // A failed ref read retains the exact intent with a bounded wait.
+        return persistWork(
+          deps,
+          context,
+          setWait(
+            record,
+            {
+              reason: "unavailable",
+              since: observedAt,
+              until: observedAt + CHECK_POLL_MS,
+            },
+            observedAt,
+          ),
+        );
+      }
+      if (currentBase.value.sha !== expectedBase) {
+        // Clear only this unprepared intent; the same run replans a fresh
+        // refresh against the newly observed base before any model/review
+        // spend. No other intent is ever cleared here.
+        return persistWork(deps, context, clearIntent(record, observedAt));
+      }
+    }
+    return persistWork(
+      deps,
+      context,
+      setWait(
+        record,
+        { reason: "unavailable", since: at, until: at + CHECK_POLL_MS },
+        at,
+      ),
+    );
+  }
+  const preparedHead = prepared.value;
+  if (!isGitSha(preparedHead)) {
+    return {
+      kind: "state_error",
+      detail: "base refresh prepared identity invalid",
+    };
+  }
+  if (persistedPrepared !== null && persistedPrepared !== preparedHead) {
+    // The persisted deterministic result must regenerate byte-identically.
+    return {
+      kind: "state_error",
+      detail: "base refresh prepared identity mismatch",
+    };
+  }
+  // Persist the exact prepared result BEFORE any push: a crash after a
+  // successful push is then recoverable from the durable intent alone.
+  let durable = record;
+  if (persistedPrepared === null) {
+    durable = setIntent(
+      record,
+      { ...intent, resultId: preparedHead },
+      deps.clock.now(),
+    );
+    const persisted = await persistWork(deps, context, durable);
+    if (persisted.kind !== "progress") return persisted;
+  }
+  // Recheck the total run deadline and the shared cooldown immediately before
+  // the external write (the gate wait may have crossed the deadline).
+  if (deps.clock.now() >= context.bounds.runDeadline) {
+    return {
+      kind: "margin",
+      detail: "base refresh crossed the total run deadline before push",
+    };
+  }
+  const cooling = await checkGithubCooldown(
+    deps,
+    record.repository,
+    context.bounds,
+  );
+  if (cooling.kind === "state_error") {
+    return { kind: "state_error", detail: cooling.detail };
+  }
+  if (cooling.kind === "deferred") {
+    return { kind: "deferred", detail: cooling.detail };
+  }
+  if (deps.clock.now() >= context.bounds.runDeadline) {
+    return {
+      kind: "margin",
+      detail: "base refresh crossed the total run deadline before push",
+    };
+  }
+  const ref = `refs/heads/${record.target.branch}`;
+  const current = await deps.github.readRef(ref);
+  const readAt = deps.clock.now();
+  if (!current.ok || current.value === null) {
+    return persistWork(
+      deps,
+      context,
+      setWait(
+        durable,
+        { reason: "unavailable", since: readAt, until: readAt + CHECK_POLL_MS },
+        readAt,
+      ),
+    );
+  }
+  const currentHead = current.value.sha;
+  if (currentHead === record.target.head) {
+    // The candidate ref read is awaited wall-clock time: recheck the total run
+    // deadline immediately before the push. A slow read that crossed the bound
+    // keeps the exact durable intent/prepared SHA with zero push after cutoff.
+    if (deps.clock.now() >= context.bounds.runDeadline) {
+      return {
+        kind: "margin",
+        detail:
+          "base refresh crossed the total run deadline after the ref read",
+      };
+    }
+    // The branch still carries the old candidate: one exact expected-ref push
+    // publishes the deterministic prepared commit.
+    const pushed = await deps.github.pushHead(
+      ref,
+      preparedHead,
+      record.target.head,
+    );
+    const pushAt = deps.clock.now();
+    if (!pushed.ok || pushed.value !== "applied") {
+      // Unknown/error/lost push: keep the same durable intent and wait
+      // bounded; a later run reconciles the exact ref before repeating.
+      return persistWork(
+        deps,
+        context,
+        setWait(
+          durable,
+          {
+            reason: "unavailable",
+            since: pushAt,
+            until: pushAt + CHECK_POLL_MS,
+          },
+          pushAt,
+        ),
+      );
+    }
+  } else if (currentHead !== preparedHead) {
+    // Any unrelated head is never adopted: preserve the intent and wait.
+    return persistWork(
+      deps,
+      context,
+      setWait(
+        durable,
+        { reason: "unavailable", since: readAt, until: readAt + CHECK_POLL_MS },
+        readAt,
+      ),
+    );
+  }
+  // Success: the refreshed candidate becomes the exact target and the existing
+  // publication path requests a fresh review for the new head. Branch, PR,
+  // checkpoint, counters, source, evidence and prior reviews are preserved.
+  const doneAt = deps.clock.now();
+  const refreshed: WorkRecordV1 = {
+    ...durable,
+    target: { ...durable.target, base: expectedBase, head: preparedHead },
+    nextStep: "work",
+    wait: null,
+    blocker: null,
+    intent: null,
+    updatedAt: doneAt,
+  };
+  return persistWork(deps, context, refreshed);
 }
 
 /**

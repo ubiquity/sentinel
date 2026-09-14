@@ -9,6 +9,7 @@ import {
   asIncidentFingerprint,
   asSourceSnapshotDigest,
   asWorkItemId,
+  isGitSha,
 } from "./brands.ts";
 import type {
   GitSha,
@@ -69,7 +70,8 @@ export type IncompleteOpKindV1 =
   | "issue_closure"
   | "push"
   | "implementation"
-  | "replay";
+  | "replay"
+  | "base_refresh";
 export type TaskSourceKindV1 = "issue" | "incident" | "review_backlog";
 
 export interface WorkWaitV1 {
@@ -91,6 +93,12 @@ export interface WorkBlockerV1 {
  * PR number and the external request/result identities — never a free-text
  * detail or model-supplied JSON. `pr`/`requestId`/`resultId` stay null until
  * the object exists; the key remains the deterministic idempotency key.
+ *
+ * `base_refresh` reuses these fields: `expectedHead` is the old candidate,
+ * `observedBase` the newly observed configured base and `resultId` the exact
+ * deterministic prepared commit once generated (null before preparation). It
+ * has no external request id, and `target` stays on the old base/head until the
+ * prepared commit was actually published.
  */
 export interface IncompleteOperationV1 {
   kind: IncompleteOpKindV1;
@@ -560,6 +568,7 @@ function parseIntent(input: unknown, path: string): IncompleteOperationV1 {
       "push",
       "implementation",
       "replay",
+      "base_refresh",
     ],
     `${path}.kind`,
   );
@@ -645,6 +654,52 @@ function parseIntent(input: unknown, path: string): IncompleteOperationV1 {
       "invalid_lifecycle",
       "review_request intent requires a deterministic branch",
     );
+  }
+  if (kind === "base_refresh") {
+    // Exact old candidate/new base binding plus the exact PR and branch; the
+    // prepared commit result id is a Git SHA once it exists, never free text.
+    if (branch === null) {
+      fail(
+        `${path}.branch`,
+        "invalid_lifecycle",
+        "base_refresh intent requires a deterministic branch",
+      );
+    }
+    if (expectedHead === null) {
+      fail(
+        `${path}.expectedHead`,
+        "invalid_lifecycle",
+        "base_refresh intent requires the old candidate head",
+      );
+    }
+    if (observedBase === null) {
+      fail(
+        `${path}.observedBase`,
+        "invalid_lifecycle",
+        "base_refresh intent requires the observed new base",
+      );
+    }
+    if (pr === null) {
+      fail(
+        `${path}.pr`,
+        "invalid_lifecycle",
+        "base_refresh intent requires a PR number",
+      );
+    }
+    if (requestId !== null) {
+      fail(
+        `${path}.requestId`,
+        "invalid_lifecycle",
+        "base_refresh intent has no external request id",
+      );
+    }
+    if (resultId !== null && !isGitSha(resultId)) {
+      fail(
+        `${path}.resultId`,
+        "invalid_lifecycle",
+        "base_refresh result id must be an exact git SHA",
+      );
+    }
   }
   return {
     kind,

@@ -521,3 +521,135 @@ Deno.test(
     }
   },
 );
+
+Deno.test(
+  "actions candidates: restores the prepared base-refresh commit after a lost state response",
+  async () => {
+    const ctx = await makeCandidateCtx();
+    try {
+      // The candidate branch now carries the exact deterministic prepared
+      // commit (old candidate first parent, moved base second parent) while
+      // the durable record still points at the old candidate.
+      const work = `${ctx.tmp}/work`;
+      assert.ok(
+        (await gitRun(work, ["checkout", "-q", "development"], ctx.env)).ok,
+      );
+      await Deno.writeTextFile(`${work}/refresh-base.txt`, "new base\n");
+      assert.ok((await gitRun(work, ["add", "-A"], ctx.env)).ok);
+      assert.ok(
+        (await gitRun(work, ["commit", "-q", "-m", "new base"], ctx.env)).ok,
+      );
+      const newBase = (await gitRun(work, ["rev-parse", "HEAD"], ctx.env))
+        .stdout.trim() as GitSha;
+      const executor = new DenoGitExecutor({
+        localDir: work,
+        remoteUrl: ctx.bare,
+        gitHome: `${ctx.tmp}/home`,
+      });
+      const integrated = await executor.integrateBase(ctx.head, newBase);
+      assert.ok(integrated.ok, JSON.stringify(integrated));
+      const prepared = integrated.value;
+      assert.ok(
+        (await gitRun(
+          work,
+          ["push", "-q", "origin", `${prepared}:refs/heads/${BRANCH}`],
+          ctx.env,
+        )).ok,
+      );
+
+      const state = new MemoryState();
+      state.repair = snapshot([
+        candidateRecord(ctx, {
+          intent: {
+            kind: "base_refresh",
+            key: `base_refresh:12:${ctx.head}:${newBase}`,
+            startedAt: T0,
+            branch: BRANCH,
+            expectedHead: ctx.head,
+            observedBase: newBase,
+            pr: 12,
+            requestId: null,
+            resultId: prepared,
+          },
+          nextStep: "delivery",
+        }),
+      ]);
+      const durableBefore = structuredClone(state.repair);
+      const clone = await ctx.clone();
+      assert.equal(await objectPresent(clone, ctx.env, ctx.head), false);
+      const ensured = await restorer(
+        ctx,
+        state,
+        new FakeGate(),
+        new RefHttp(prepared),
+        clone,
+      ).ensure({ base: ctx.base, head: ctx.head });
+      assert.ok(ensured.ok, JSON.stringify(ensured));
+      assert.equal(await objectPresent(clone, ctx.env, ctx.head), true);
+      assert.equal(await objectPresent(clone, ctx.env, newBase), true);
+      assert.equal(await objectPresent(clone, ctx.env, prepared), true);
+      assert.deepEqual(
+        state.repair,
+        durableBefore,
+        "the durable record is never altered by the restore",
+      );
+
+      // Crash after persisting the prepared result but BEFORE the push: the
+      // remote ref still carries the OLD candidate. A fresh shallow clone must
+      // accept that exact observed head, fetch it and restore the old objects
+      // (and the old base) without touching the durable record.
+      assert.ok(
+        (await gitRun(
+          work,
+          [
+            "push",
+            "-q",
+            "--force",
+            "origin",
+            `${ctx.head}:refs/heads/${BRANCH}`,
+          ],
+          ctx.env,
+        )).ok,
+      );
+      const prePushClone = await ctx.clone();
+      assert.equal(
+        await objectPresent(prePushClone, ctx.env, ctx.head),
+        false,
+      );
+      const prePush = await restorer(
+        ctx,
+        state,
+        new FakeGate(),
+        new RefHttp(ctx.head),
+        prePushClone,
+      ).ensure({ base: ctx.base, head: ctx.head });
+      assert.ok(prePush.ok, JSON.stringify(prePush));
+      assert.equal(await objectPresent(prePushClone, ctx.env, ctx.head), true);
+      assert.equal(await objectPresent(prePushClone, ctx.env, ctx.base), true);
+      assert.deepEqual(
+        state.repair,
+        durableBefore,
+        "prepared-before-push restore never alters state",
+      );
+
+      // An unrelated remote head (neither the durable candidate nor the exact
+      // persisted prepared commit) is refused without a fetch.
+      const unrelated = "1234567890abcdef1234567890abcdef12345678" as GitSha;
+      const unrelatedClone = await ctx.clone();
+      const refused = await restorer(
+        ctx,
+        state,
+        new FakeGate(),
+        new RefHttp(unrelated),
+        unrelatedClone,
+      ).ensure({ base: ctx.base, head: ctx.head });
+      assert.equal(refused.ok, false);
+      assert.equal(
+        await objectPresent(unrelatedClone, ctx.env, ctx.head),
+        false,
+      );
+    } finally {
+      await ctx.cleanup();
+    }
+  },
+);

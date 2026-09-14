@@ -47,7 +47,11 @@
 
 import type { GitSha } from "../contracts/brands.ts";
 import type { PortResultV1 } from "../contracts/ports.ts";
-import { portError, portOk } from "../contracts/ports.ts";
+import {
+  BASE_REFRESH_CONFLICT_DETAIL,
+  portError,
+  portOk,
+} from "../contracts/ports.ts";
 import { createDeadline } from "./http.ts";
 
 export type GitPushStatusV1 =
@@ -76,6 +80,24 @@ export interface GitExecutorV1 {
     ancestor: GitSha,
     descendant: GitSha,
   ): Promise<PortResultV1<boolean>>;
+  /**
+   * Optional deterministic local base integration: both exact input commits
+   * must already exist in the trusted local object store; `head` is the
+   * candidate first parent and `base` the second. The returned commit is a
+   * pure function of those two commits (fixed merge tree, fixed commit text,
+   * fixed identity and timestamp), so repeated invocations yield the identical
+   * SHA. Every refresh creates that deterministic two-parent commit from the
+   * exact `head`/`base`, so the refresh identity is always distinct from the
+   * reviewed candidate head (the merge tree may equal the head tree when
+   * `base` is already an ancestor, but the commit is new and deterministic).
+   * Conflicts, bounds and invalid output fail closed with bounded static
+   * errors and no raw payload. It only writes local Git objects: no checkout,
+   * index or ref change, no hook, no network and no credential.
+   */
+  integrateBase?(
+    head: GitSha,
+    base: GitSha,
+  ): Promise<PortResultV1<GitSha>>;
   /**
    * Ordinary non-force push of the exact local candidate to the remote ref,
    * atomically guarded against the expected advertised ref value (null means
@@ -145,6 +167,20 @@ const GIT_KILL_SETTLE_MS = 1_000;
 const SHA_RE = /^[0-9a-f]{40}$/;
 const ZERO_SHA = "0000000000000000000000000000000000000000";
 const GUARD_MARKER = "sentinel-git-hook-reject";
+
+/**
+ * Bounded static base-refresh diagnostics. No conflict payload, command
+ * output, path, URL or credential is ever returned.
+ */
+const STATIC_BASE_REFRESH_INPUT = "base refresh input is invalid";
+const STATIC_BASE_REFRESH_OBJECT = "base refresh input commit is unavailable";
+const STATIC_BASE_REFRESH_OUTPUT = "base refresh output is invalid";
+const STATIC_BASE_REFRESH_FAILED = "base refresh failed";
+const STATIC_BASE_REFRESH_BOUND = "base refresh exceeded its bound";
+/** Fixed identity of every deterministic prepared commit (never configured). */
+const BASE_REFRESH_IDENTITY =
+  "Sentinel Base Refresh <sentinel-base-refresh@localhost>";
+const BASE_REFRESH_MESSAGE = "Sentinel deterministic base refresh";
 
 export class DenoGitExecutor implements GitExecutorV1 {
   private readonly gitHome: string;
@@ -231,6 +267,108 @@ export class DenoGitExecutor implements GitExecutorV1 {
     if (result.ok) return portOk(true);
     if (result.code === 1) return portOk(false);
     return portError("unavailable", "ancestry check failed");
+  }
+
+  /**
+   * Deterministic local two-parent integration.
+   *
+   * `merge-tree --write-tree` performs the whole merge in the object store
+   * only (no checkout, index or ref update, no hook, no network); the result is
+   * then committed through `hash-object -t commit -w --stdin` with fixed
+   * commit bytes (tree returned, old head first parent, base second parent,
+   * fixed Sentinel identity and epoch timestamp). Two invocations with the
+   * same parents are therefore byte-identical and return the same SHA, without
+   * introducing any environment or configuration interface. A conflict, a
+   * bound, a missing object or invalid output is a bounded static failure. A
+   * base that is already an ancestor of the head still produces a NEW
+   * deterministic two-parent commit (its tree equals the head tree), never the
+   * reused head itself: the refreshed candidate must carry its own identity
+   * for the fresh review that follows.
+   */
+  async integrateBase(
+    head: GitSha,
+    base: GitSha,
+  ): Promise<PortResultV1<GitSha>> {
+    if (!SHA_RE.test(head) || !SHA_RE.test(base)) {
+      return portError("invalid", STATIC_BASE_REFRESH_INPUT);
+    }
+    const headObject = await this.verifiedCommit(head);
+    if (!headObject.ok) return headObject;
+    if (!headObject.value) {
+      return portError("unavailable", STATIC_BASE_REFRESH_OBJECT);
+    }
+    const baseObject = await this.verifiedCommit(base);
+    if (!baseObject.ok) return baseObject;
+    if (!baseObject.value) {
+      return portError("unavailable", STATIC_BASE_REFRESH_OBJECT);
+    }
+    const merged = await this.runGit([
+      "merge-tree",
+      "--write-tree",
+      head,
+      base,
+    ], null);
+    if (!merged.ok) {
+      if (merged.timeout === true || merged.overflow === true) {
+        return portError("unavailable", STATIC_BASE_REFRESH_BOUND);
+      }
+      if (merged.code === 1) {
+        // A conflicted merge tree: rejected without any raw payload.
+        return portError("conflict", BASE_REFRESH_CONFLICT_DETAIL);
+      }
+      return portError("unavailable", STATIC_BASE_REFRESH_FAILED);
+    }
+    const tree = merged.stdout.split("\n")[0]?.trim() ?? "";
+    if (!SHA_RE.test(tree)) {
+      return portError("invalid", STATIC_BASE_REFRESH_OUTPUT);
+    }
+    const commitText = [
+      `tree ${tree}`,
+      `parent ${head}`,
+      `parent ${base}`,
+      `author ${BASE_REFRESH_IDENTITY} 0 +0000`,
+      `committer ${BASE_REFRESH_IDENTITY} 0 +0000`,
+      "",
+      BASE_REFRESH_MESSAGE,
+      "",
+    ].join("\n");
+    const written = await this.runGit(
+      [
+        "hash-object",
+        "-t",
+        "commit",
+        "-w",
+        "--stdin",
+      ],
+      null,
+      commitText,
+    );
+    if (!written.ok) {
+      if (written.timeout === true || written.overflow === true) {
+        return portError("unavailable", STATIC_BASE_REFRESH_BOUND);
+      }
+      return portError("unavailable", STATIC_BASE_REFRESH_FAILED);
+    }
+    const sha = written.stdout.trim();
+    if (!SHA_RE.test(sha)) {
+      return portError("invalid", STATIC_BASE_REFRESH_OUTPUT);
+    }
+    return portOk(sha as GitSha);
+  }
+
+  /** True exactly when the exact commit object exists locally. */
+  private async verifiedCommit(
+    sha: GitSha,
+  ): Promise<PortResultV1<boolean>> {
+    const result = await this.runGit([
+      "rev-parse",
+      "--verify",
+      "--quiet",
+      `${sha}^{commit}`,
+    ], null);
+    if (result.ok) return portOk(result.stdout.trim() === sha);
+    if (result.code === 1) return portOk(false);
+    return portError("unavailable", STATIC_BASE_REFRESH_FAILED);
   }
 
   async push(
@@ -336,6 +474,7 @@ export class DenoGitExecutor implements GitExecutorV1 {
   private async runGit(
     args: string[],
     hooksDir: string | null,
+    stdin: string | null = null,
   ): Promise<GitRunResultV1> {
     const path = Deno.env.get("PATH") ?? "/usr/bin:/bin";
     const commandArgs = hooksDir === null
@@ -355,7 +494,7 @@ export class DenoGitExecutor implements GitExecutorV1 {
           GIT_TERMINAL_PROMPT: "0",
           ...this.extraEnv,
         },
-        stdin: "null",
+        stdin: stdin === null ? "null" : "piped",
         stdout: "piped",
         stderr: "piped",
         // Owned process group: the child becomes a session/group leader
@@ -367,6 +506,20 @@ export class DenoGitExecutor implements GitExecutorV1 {
       }).spawn();
     } catch {
       return { ok: false, code: -1, stdout: "", stderr: "" };
+    }
+    if (stdin !== null) {
+      // Minimal stdin support for the one fixed plumbing write
+      // (`hash-object -w --stdin`): the payload is tiny fixed commit text,
+      // written and closed immediately, so the child can never wait on an
+      // open pipe. A rejected write means the child already exited; the exit
+      // status below still settles the run with the same bounds.
+      try {
+        const writer = child.stdin.getWriter();
+        await writer.write(new TextEncoder().encode(stdin));
+        await writer.close();
+      } catch {
+        // Settled by the child status/stream handling below.
+      }
     }
     const stdout = child.stdout.getReader();
     const stderr = child.stderr.getReader();

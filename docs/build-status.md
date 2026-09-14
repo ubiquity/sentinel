@@ -35,6 +35,56 @@ it has no write or test authority. Primary alone owns this register and plan.
 
 ### Historical checkpoints
 
+01:06 UTC: base-refresh V3 and fixture-only V4 completed exit0 with owned edits,
+single final formatter and no checks/Git/children. V3 live PID1252987 settled;
+V4 completed before live sampling, so retain launch command and exact persisted
+Flash/max header but do not claim V4 live environment attestation. GPT final
+base-refresh tests passed b66d5948-5273-4cae-8f9d-96c285df59ef (14 tests), real
+hosted restoration passed ec5ced03-55fc-4362-8691-9a728e0dd5ec (5 tests, including
+both prepared-before-push and published crash windows), lint passed
+48e0976d-82d5-42b3-af35-c178e43eb9f6. All direct VPS executions in namespace
+459acb17ad9ea6b3117a31ea7e3934ee42910852ebdd735c5b0a8110d8083e59 at canonical
+8e2c79b plus draft; diff check passed. Intermediate 5f1631ad failed two fixtures
+that omitted the now-required capability; corrected fixture inputs preserved
+all intent-before-effect and no-budget assertions. Accept base-refresh for
+canonical integration; full review/deployment remain pending integrated host.
+
+01:02 UTC: base-refresh V1 was stopped after repeated malformed searches;
+PID1247315 and descendants settled, source preserved, no completed terminal
+record. V2 resumed persisted session aa59f724-6774-4054-9f6e-f4233ca527ce and
+completed exit0 with edits and formatter. Actual Flash V4.1/max header verified;
+live process sampling was missed on V2, so no full live attestation claim.
+GPT direct focused tests passed 2ba24e1f-5ee3-478f-97e2-f147083a346c and fresh
+types passed 96842ab4-f68d-4434-a29e-9b7ee160b376 in evidence namespace
+459acb17ad9ea6b3117a31ea7e3934ee42910852ebdd735c5b0a8110d8083e59 on canonical
+8e2c79b plus draft. Host-restoration attempt 8e764077-27e3-44e2-8c60-a25c2aac8e75
+failed 3 of 5; registration omitted standard subprocess Deno executable and
+NODE_V8_COVERAGE grants. Registration corrected, no unchanged rerun.
+Primary inspection found prepared-before-push restore rejection, same-head
+refresh review-key reuse, and missing unsupported-port guard in delivery.
+V3 immutable assignment /tmp/sentinel-base-refresh-v3.txt owns five source/test
+files only, same session, exec44217/PID1252987. Live exact cwd/NODE_ENVproduction
+and persisted deepseek-official/deepseek-flash/max verified. First edits observed.
+No tests/Git/children; one final formatter then handback; four-minute/30-call
+diagnostic checkpoint, next-settled-assignment feedback and bounded task stop
+authority. Primary owns ledger; hosted_acceptance_audit is read-only on state
+and runtime seams for the next supervisor assignment. No deployment or live
+delivery claim; preserve PR30 and all issue21 charges.
+
+00:42 UTC: sole base-refresh DSH assignment `/tmp/sentinel-base-refresh-v1.txt`
+launched from canonical8e2c79b. Owns specified shared contracts/Git/host/loop and
+focused tests; no other writer. Design: deterministic two-parent local merge,
+durable base_refresh intent with prepared SHA before expected-ref push, restart
+reconciliation, fresh review/CI through existing publication, no model charge.
+PID1247315/exec76940, stream `/tmp/sentinel-base-refresh-v1.stream.jsonl`, persisted
+sessionaa59f724-6774-4054-9f6e-f4233ca527ce. Live cwd/NODE_ENV and actual
+deepseek-official/deepseek-flash/max verified; permission/preset workspace-write,
+sandbox/mode workspace-write, approval/policy ask verified in persisted events.
+First edit3min, expected12min/100calls; no children/tests/Git, one optional final
+formatter, next-settled-assignment feedback, bounded task-owned stop authority.
+GPT registered candidate-base-refresh, no execution yet. Fresh read-only Astra
+is checking hosted supervisor architecture independently; no writes/tests.
+
 00:36 UTC: hosted merge-gate DSH task completed exit0 with terminal completed,
 25 tool calls, verified owned edit events, first pwd, one allowed final formatter
 and no subsequent calls, no checks/Git writes/children. Live PID settled.
