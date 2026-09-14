@@ -2,6 +2,53 @@
 
 ## Active task register — Astra owned
 
+12:46 UTC self-repair admission: existing issue40 cannot be assigned to the
+runtime because its remaining token-minting/checkout/state-transport work is
+protected supervisor authority. Read-only self_repair_scope confirmed that
+boundary; no policy was weakened. A separate real bug was found in unprotected
+src/github/text.ts: actual GitHubPortImpl PR publication preserves GitHub's
+documented colon and qualified closing forms, enabling closure before delivery.
+Official GitHub documentation was fetched; the finite production-port test
+confirmed three faulty forms and one passing existing form. Fresh execution
+459acb17ad9ea6b3117a31ea7e3934ee42910852ebdd735c5b0a8110d8083e59/4bf0b503-f95f-4ab6-838f-3f5feccbbc6d
+failed the intended assertion in2.989s onb88c1e9. No network/model call occurred
+in that test. The original active runtime has identical sanitizer source.
+Full receipt, immutable reproduction, official source and issue text are
+preserved under ~/.local/state/sentinel-reporting/2026-09-14/self-repair-48/.
+
+Issue48 was created with the existing first-line admission marker. Owned runtime
+repair scope is src/github/text.ts and tests/github/pr_test.ts. No source fix
+was hand-implemented, no protected authority changed and no historical charge
+was reset. Supervisor dispatch34845049366 was submitted once at12:44:07UTC.
+The12:41 ordinary pass34844782953 had already completed before issue admission;
+its healthy settled receipt is job103978081858, runtime989af8a/baseb88c1e9.
+Release ref453b2b057ef79e464d536b18723afb5a3a21850a saves next ordinary
+eligibility1789393291649 (13:41:31.649UTC). Preserve that deadline; dispatch
+success does not prove a model start. Observe the next actual admitted repair
+and its reviewed PR/CI/hosted receipt; do not claim a second delivery yet.
+Fresh Astra self_repair_admission_audit independently returned PASS for this
+scope and evidence: the defect is real, both owned paths are unprotected, and
+gateway activation is not required for this existing hosted path. The audit
+read the saved failure and exact active configuration without tests or writes.
+Manual34845049366 completed with repair skipped at12:44:42UTC; it proves
+dispatch and cadence enforcement, not implementation. Review/CI/release and
+issue closure remain pending for48. No further scope correction is required.
+
+12:41 UTC owner resumed execution, reaffirmed GitHub Actions as the runtime
+and selected ubiquity/sentinel self-repair as the immediate target. The preceding
+gateway-blocked checkpoint no longer prevents this scoped work. Astra remains
+orchestrator; no model worker receives authority over live policy, credentials,
+state or promotion. Canonical lane verified clean atb88c1e9 before these owner
+scope/documentation edits; both source branches match. Repair ref remains
+c9be3e3360d75523009d109d4d8591d519ffa264; release refe6b3f8d has exact runtime
+989af8a generation2, execution null and healthy settled ordinary proof
+34839400382:1:repair, baseb88c1e9, job103960688897. Supervisor remains2a24c4d.
+Current intake has no admitted open issue. Read-only self_repair_scope checks
+existing issue40 against protected surfaces; self_repair_candidate checks a
+bounded unprotected selection/transition surface for a reproducible real defect.
+These audits create no source changes or issues. Admit work only after concrete
+scope/evidence; never fabricate a task or reset the historical issue21 attempt.
+
 10:09 UTC final reporting checkpoint: canonical-sync CI34831118005 also passed
 on0144a6a; all four candidate/PR/merged/sync CI runs are successful. Issue21
 closed10:08:11UTC with operator-disposition comment5662330431; issue12
