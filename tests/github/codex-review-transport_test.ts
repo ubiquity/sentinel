@@ -20,7 +20,10 @@ import {
   type GitReviewSnapshotCaptureV1,
 } from "../../src/github/codex-review-transport.ts";
 import {
+  isJournalBoundExceeded,
+  MAX_JOURNAL_BYTES,
   parseReviewJournalBody,
+  parseReviewResultJson,
   renderReviewJournalBody,
   REVIEW_MODEL,
   REVIEW_REASONING,
@@ -86,6 +89,22 @@ const FINDINGS_RESULT: ReviewResultV1 = {
     lineEnd: 3,
   }],
 };
+
+function oversizedFindingsResult(): ReviewResultV1 {
+  const body = "x".repeat(7_000);
+  return {
+    verdict: "findings",
+    summary: "four valid findings exceed the rendered journal bound",
+    findings: Array.from({ length: 4 }, (_, index) => ({
+      priority: index as 0 | 1 | 2 | 3,
+      title: `oversized finding ${index}`,
+      body,
+      path: "account.ts",
+      lineStart: index + 1,
+      lineEnd: index + 1,
+    })),
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Durable scripted remote store (real GitHubApiClient endpoints)
@@ -755,6 +774,92 @@ Deno.test(
         assert.equal(read.value.status, "completed");
         assert.equal(read.value.summary, FINDINGS_RESULT.summary);
       }
+    });
+  },
+);
+
+Deno.test(
+  "transport: an oversized valid result settles as a bounded unavailable journal",
+  async () => {
+    await withRealGitRange(async ({ base, head, snapshot }) => {
+      const result = oversizedFindingsResult();
+      // The model-result parser accepts each finding and the complete JSON;
+      // that does not promise that the journal's duplicated representations
+      // fit the publication bound.
+      assert.deepEqual(parseReviewResultJson(JSON.stringify(result)), result);
+      const candidate = await readyJournal(result);
+      let renderError: unknown = null;
+      try {
+        renderReviewJournalBody(candidate);
+      } catch (error) {
+        renderError = error;
+      }
+      assert.equal(isJournalBoundExceeded(renderError), true);
+
+      const session = new RecordingSession();
+      session.result = result;
+      const h = makeHarness({ session, snapshot });
+      // Both durable publication writes report an ambiguous response after
+      // applying. The consumer must reconcile exact readback, not retry.
+      h.store.lostUpdate = true;
+      h.store.lostSubmit = true;
+      const submitted = await h.transport.submitReview(
+        submission({ expectedBase: base, expectedHead: head }),
+      );
+      assert.equal(submitted.ok, true);
+      assert.equal(submitted.ok ? submitted.value.status : "", "submitted");
+      await settle(h.transport);
+
+      const review = onlyReview(h.store);
+      assert.equal(review.state, "commented");
+      assert.equal(session.turnStarts(), 1);
+      assert.equal(session.closed, 1);
+      assert.equal(h.store.creates, 1);
+      assert.equal(h.store.updates, 2);
+      assert.equal(h.store.submits, 1);
+      assert.ok(
+        new TextEncoder().encode(review.body ?? "").byteLength <=
+          MAX_JOURNAL_BYTES,
+      );
+      const journal = await parseReviewJournalBody(review.body ?? "");
+      assert.ok(journal.phase === "ready");
+      assert.equal(journal.result.verdict, "unavailable");
+      assert.deepEqual(journal.result.findings, []);
+      assert.equal(journal.execution, null);
+      assert.equal(journal.operationKey, OP_KEY);
+      assert.equal(journal.requestId, REQUEST_ID);
+      assert.equal(journal.reviewId, review.id);
+      assert.equal(journal.prNumber, PR);
+      assert.equal(journal.expectedBase, base);
+      assert.equal(journal.expectedHead, head);
+
+      // A fresh consumer recognizes the terminal unavailable disposition and
+      // an exact resubmission adopts it without another review or model start.
+      const fresh = h.freshTransport();
+      const read = await fresh.readReview({
+        operationKey: OP_KEY,
+        requestId: null,
+        prNumber: PR,
+      });
+      assert.equal(read.ok, true);
+      if (read.ok) {
+        assert.equal(read.value.status, "unavailable");
+        assert.equal(read.value.operationKey, OP_KEY);
+        assert.equal(read.value.requestId, REQUEST_ID);
+        assert.equal(read.value.githubReviewId, review.id);
+        assert.equal(read.value.expectedBase, base);
+        assert.equal(read.value.expectedHead, head);
+      }
+      assert.equal(h.snapshotCaptures(), 1);
+      assert.equal(h.sessions.length, 1);
+      const retry = await fresh.submitReview(
+        submission({ expectedBase: base, expectedHead: head }),
+      );
+      assert.equal(retry.ok, true);
+      assert.equal(retry.ok ? retry.value.status : "", "submitted");
+      assert.equal(h.store.creates, 1);
+      assert.equal(h.store.submits, 1);
+      assert.equal(session.turnStarts(), 1);
     });
   },
 );
