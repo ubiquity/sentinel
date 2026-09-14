@@ -62,6 +62,12 @@ Do not use labels for admission: ubiquity-os[bot] removes the default labels.
 
 ### Hosted Actions implementation checkpoint, 2026-09-14
 
+Owner update, 2026-09-14: never add branch protection rules or branch rulesets
+to Sentinel. Delete the supervisor source ruleset and proceed with the reviewed
+installation. This supersedes the proposed protection exception and restoration;
+do not recreate deleted rules. Preserve credential separation, exact revision
+validation, review and runtime writer ownership.
+
 The current delivery target is the real hosted Sentinel, using the existing
 protected supervisor workflow and App credential. The protected workflow runs
 prepare, repair, and finalize on separate runners. Only prepare and finalize
