@@ -2,201 +2,6 @@
 
 ## Active task register — Astra owned
 
-14:29 UTC policy source ready: DSH session76869c33/stream50821d1f completed
-exit0 with the exact four-file scope, actual Flash/max request and
-workspace-write/ask. PID2090781 and its process group settled naturally before
-the guarded stop command; no signal was sent. The launch mistakenly inherited
-unneeded credential variables; the command audit found no credential reads,
-environment dumps, network calls or tests. Record this launch violation without
-claiming an external leak. Subsequent DSH launches must use env-i with only the
-required provider credential, HOME/PATH and NODE_ENV=production. The worker also
-made a read-only diff/grep call after its allowed single formatter; no additional
-mutation followed. Useful source changes are preserved and independently checked.
-
-GPT focused host/status/budget validation passed on the changed canonical source
-in10.303s, reference
-459acb17ad9ea6b3117a31ea7e3934ee42910852ebdd735c5b0a8110d8083e59/6fb3165b-8aa9-44bb-aca0-939ba5079c1a.
-The new real producer/renderer fixtures cover59/60/61 hourly charges, exact
-retry ordering, weekly boundaries, refunds and forged/truncated status. No
-generic budget implementation or saved state changed. Full harness, exact-head
-review, source PR and live activation remain pending.
-
-Read-only deployment audit identified an existing-API route for this owner
-policy update: a temporary trusted operator can obtain a genuine Luna/max
-structured review of the exact open policy PR, with durable60/168 admission and
-actual owner0x4007 publisher, then persist its authentic receipt and an exact
-ReleaseRequest after expected-head merge. No synthetic review receipt or direct
-pointer write is permitted. Review the fixed-input script before use; temporarily
-quiesce hosted repair entrypoints and verify no execution before transferring
-repair-state write ownership, then restore scheduling after settlement. The
-existing supervisor retains exclusive pointer/release ownership and performs
-fresh prior/candidate verification. No new production interface is authorized.
-
-14:21 UTC owner-authorized policy update: the owner selected60 shared Luna
-starts per rolling hour. MASTER-PLAN and the global decisions log record that
-this replaces the one-start hourly cap;168 per rolling seven days, Luna/max,
-shared charging, historical reservations and the independent ordinary cadence
-remain. This removes the previous policy blocker after reviewed live activation;
-it does not approve the pending issue40 store/secret or gateway choices.
-
-Canonical identity reverified ata3353a8 on the recorded path/branch; root clean,
-canonical dirty only with task-owned MASTER-PLAN and this ledger. No DSH writer
-exists. Scheduled supervisor34854688040 settled successfully14:18:21UTC with
-repair skipped before the saved ordinary deadline. PR51 remains runtime-owned.
-Source scope for bounded DSH policy writer is src/host/local.ts,
-.github/workflows/local-status.yml, tests/host/local_test.ts and
-tests/host/local-status_test.ts only. No runtime/source role transfer for issue48.
-Primary registered luna-hourly-60-focused; GPT owns execution after settlement,
-not DSH. Keep exact59/60/61 admission/report boundaries and168/week semantics.
-No new variable, secret, CLI flag, schema, cadence change or wait reset.
-
-DSH playbook2026-09-12.1 reread, SHA256
-7e237d6002069b085f0ee1879972b18e6c8466a8c138fcbef508499b66291149;
-test-evidence3398f352 and git-coordinationdd4b27cd reread. Existing login shell
-has the required API key without disclosure. Settings select the owner-approved
-deepseek-official/deepseek-flash/max with workspace-write; actual launch/header
-verification remains required. Assignment uses the canonical isolated task lane,
-one writer, no children/Git/tests, one final owned-file formatting pass, first
-edit within2minutes and handback expected within10minutes. Supported feedback
-is the next settled assignment; task-owned bounded stop authority follows the
-playbook after diagnosis. Preserve all other files and private/live state.
-
-14:12 UTC repeated-blocker reconciliation: the same model-admission hold and
-pending owner choices remain across three consecutive goal turns. Live GitHub
-reads confirm PR51 is open at4ff7cc6 with no review, no active or queued
-supervisor run, and unchanged repair5e3a73b/releasedd8a611 state refs. Both
-source branches remain ata3353a8. Dispatcher workflow357012160 is active.
-No implementation, test or dispatch is eligible merely to repeat this check.
-The primary goal is blocked pending the14:44:10.881UTC model boundary or the
-owner's existing issue40/gateway decisions; the scheduled Sentinel remains
-enabled. Preserve the local ledger delta, exact candidate, confirmed acceptance
-failure, submitted reservation and all earlier charges. Resume from the next
-action below after an actual prerequisite change; do not reset work or count
-this idle period as verified runtime observation.
-
-14:05 UTC Astra resumption and issue48 checkpoint: canonical path and branch
-remain unchanged; both local source checkouts and both remote source branches
-are at a3353a801ccda59a5e324ec7fcdde89df7b22a7c. Only this task-owned ledger
-is dirty. All published branch refs and tags were explicitly fetched; the
-default origin refspec otherwise fetches development only. No DSH writer exists.
-
-Autonomous run34850861828 settled successfully. Repair job103998297689
-finished13:58:58UTC; finalize104004129041 finished13:59:23UTC. Release
-refdd8a611 records execution null and an exact healthy settled proof for
-runtime989af8a, launcher2a24c4d, generation2, basea3353a8 and that repair job.
-This is ordinary-run health, not candidate delivery. Repair ref5e3a73b
-preserves attempt1, submitted reservationf5469bca and PR51 at exact candidate
-4ff7cc6228006d7c28f314b71a2589cacd11686f, created13:57:12UTC. The only changed
-paths are src/github/text.ts and tests/github/pr_test.ts. Work is waiting on
-budget_cap until14:44:10.881UTC with reviewRounds0; ordinary eligibility is
-14:42:21.509UTC. Preserve both boundaries and the existing candidate. No review
-has run. PR CI34852455466 passed14:03:12UTC on that exact candidate.
-
-Fresh read-only Astra issue48_candidate_audit requires an acceptance correction:
-the optional separator also strips closing-keyword prefixes from ordinary owner
-names, such as fixed-tools/widget#123 becoming ed-tools/widget#123. This is P2,
-not an inferred P0/P1. Astra independently executed a five-case diagnostic
-through the actual outgoing publication port from an immutable candidate archive:
-four intended failures and one control pass in2.847s. Evidence reference
-459acb17ad9ea6b3117a31ea7e3934ee42910852ebdd735c5b0a8110d8083e59/9103a9f0-ddc0-4eda-a3fa-bde85c2dd922.
-Full evidence and the candidate archive are retained under self-repair-48/;
-archive SHA2567983e96e2cd1c8fc6f5e437ea93afa400bed4629836c68be397081d925ecac54.
-The original169-case acceptance input remains frozen and unexecuted; it lacks
-these owner-prefix cases and cannot alone establish preservation acceptance.
-The exact finding is tracked on issue48 comment5665237010 and linked from
-PR51 comment5665236728. Do not claim the known defect is fixed or delivered.
-
-The next runtime reviewer consumes only the exact Git diff and changed files,
-not issue text or PR comments. The posted evidence is not reviewer steering.
-Preserve the budgeted current-head review path; do not invent a receipt, raise
-the severity to force a correction, change protected authority or hand-code the
-runtime task. Source tracing confirmed that a later implementation rereads the
-latest issue body before model reservation. Astra added the verified failure
-cases to issue48's body, preserving its first-line admission marker, original
-acceptance, immutable work identity and two-file scope; the full3305-character
-body fits the8000-character input bound. It does not trigger a correction or
-change the pending review input. Contrary to the P0/P1-only source comment,
-both active runtime989af8a and current source route any unresolved structured
-finding, including P2/P3, to correction. The read-only auditor corrected its
-initial comment-based claim after tracing normalization and the actual branch.
-No policy was changed. Detailed model result receipts stay on the ephemeral runner;
-the hosted log exports only its terminal receipt. The20-minute model timer
-starts at acknowledged turn/start, not at the earlier reservation or intent.
-The watch and diagnostic processes are settled. Keep the ledger checkpoint
-local while this candidate awaits review; an unrelated documentation merge
-would move its base and can require another budgeted candidate review.
-Next action: after both saved eligibility boundaries, observe the scheduled
-supervisor or dispatch it once only if no execution is active, then inspect the
-exact runtime review receipt. If it misses the independently confirmed defect,
-retain that acceptance failure and follow the existing finding/backlog policy;
-never report a second accepted delivery from CI or hosted health alone.
-
-13:44 UTC admission proved: repair state3714e15 contains new
-issue-ubiquity-sentinel-48, attempt1, implementation intent
-f5469bca8e1d1a0b2f320d4cc28034e8be2b7c4dc2b5db4419c1bdbe5bec93d8,
-basea3353a801ccda59a5e324ec7fcdde89df7b22a7c and branch
-sentinel/repair/issue-ubiquity-sentinel-48. Its reservation was saved at
-13:44:10.881UTC and intent at13:44:15.007UTC; reservation outcome is still
-reserved, not a submitted/terminal receipt. Exact initial work, reservation and
-runtime snapshots are archived under self-repair-48/. Existing six historical
-reservation blobs and both prior work records are unchanged. Follow the live
-run34850861828 for implementation/PR/CI; no result or delivery is accepted yet.
-The shared model-hour boundary from this reservation is14:44:10.881UTC;
-do not confuse it with the earlier ordinary-run eligibility14:42:21.509UTC.
-
-13:43 UTC hosted execution checkpoint: after rechecking the exact saved
-13:41:31.649UTC deadline and confirming no active supervisor job or execution,
-Astra dispatched supervisor34850861828 once at13:42:04UTC. Prepare
-job103998170916 passed; repair job103998297689 started13:42:30UTC and is
-running the selected runtime. Saved execution34850861828:1:repair binds exact
-launcher2a24c4d9cb16ffcd7fec0ea75364be9fa0adf9d7, runtime
-989af8a52179702a5fd063337d09b2b376e739f1 and generation2. Next ordinary
-eligibility is now14:42:21.509UTC. No policy, charge or historical work was
-reset. At13:43:15UTC no new issue48 work/reservation had appeared yet; a live
-repair job is not evidence of a model invocation. Observe this exact run,
-not another dispatch. Task-owned read-only watch session76846 captures status
-in ~/.local/state/sentinel-reporting/2026-09-14/self-repair-48/run-34850861828-watch.log.
-The configured model-session bound remains20minutes; inspect real job/state
-progress and diagnose a failure before any further assignment or retry.
-
-Documentation PR50 merged13:29:11UTC as
-a3353a801ccda59a5e324ec7fcdde89df7b22a7c, with candidate
-683286a416f5e514f904b14bbf3087ee321932fb and an identical reviewed tree.
-Both local checkouts and both remote source branches were verified clean at
-that merge. Local Codex review completedexit0/no actionable finding, session
-01a0a014-a20c-7eb3-b8d3-545a3636e01a; one review round used, no local tests
-repeated. Log SHA256d841bc011225c0795b0dc3024ea870bcd4f297645bb5a44f6f7960fac45340cb.
-Candidate/PR CI34848773222/34848876939 and merged/sync
-CI34849534448/34849572983 all passed. Complete review/CI/issue receipts are
-under ~/.local/state/sentinel-reporting/2026-09-14/reconciliation/.
-
-The owner choice for issue40 remains pending. A fresh read-only Astra audit
-confirmed a concrete proposal: a fixed restricted SSH Deno command on the
-existing VPS, no new listener, private durable request intents and holds, and
-an environment-scoped supervisor key. Exact App identity was independently
-read from GitHub: App4926599, installation161274577, clientIv23liB8E2FcIZd9i7Pg;
-preserve native scope0 and explicit sentinel/contents:write mint limits.
-Lost persistence acknowledgments must leave a durable pending request, and
-authenticated state writes need individually gated HTTP with exact object/ref
-verification. The complete unapproved proposal is saved at
-/tmp/sentinel-issue40-store-proposal-v1.md and archived in the reconciliation
-directory, SHA256037c7948fc980ad4f88b3fd3fb1ea70060e647f723541829eb6f40513b3386e2.
-No new secret, service, source change or supervisor installation is approved
-or performed by this checkpoint; do not ask the pending question again.
-
-The independent gateway audit produced the separate unapproved VPS contract
-proposal /tmp/sentinel-gateway-contract-proposal-v1.md, archived in the same
-directory with SHA2561b0b3fb14ac7379d5114bbc5f08487b157309081ef3d89cb1ade711125f83b46.
-It binds the existing deployment lock, exact source/current identity, missing
-prior/intent/monitor/rollback receipts, runtime write-boundary gap and distinct
-CI/deployer archive digests. Actual read-only loopback health and incident
-discovery succeeded at gateway4a65e8f; one sampled incident had no evidence_ref.
-That sample proves neither captured regression coverage nor complete absence.
-Isolated port8002, eight-day/8MiB/2GiB retention and target receipt details are
-proposals only; numerical stability thresholds and owner choices remain open.
-No gateway deployment, service restart, capture write, paid inference or Mac
-operation occurred. Both read-only auditors are settled; no DSH writer exists.
-
 13:17 UTC Astra resumption: the previous goal turn made progress by admitting
 the verified issue48 and merging documentation PR49. This session fetched all
 published heads and tags, then verified both clean source checkouts and both
@@ -1337,16 +1142,9 @@ is evidence, not a second queue. Only the current GPT-6 Astra integration owner
 may edit this file. Workers return proposed updates and immutable evidence;
 READY means awaiting Astra acceptance. Do not create replacement task lists.
 
-Last reconciled: 2026-09-14 13:49 UTC by the current Astra integration owner,
-using the fresh backlog audit and exact source/runtime receipts above. Source
-delivery is accepted through PR46, with documentation through PR50 at a3353a8.
-The canonical lane remains codex/master-plan-gfa795549e5 in its recorded VPS
-worktree. No DSH writer exists; hosted issue48 attempt1 is active in run34850861828.
-Issues1,4,5,11,12,18,21 and32 are closed with their recorded dispositions.
-Hosted Sentinel has one accepted autonomous delivery; gateway live acceptance
-remains incomplete. Earlier Linux source2fc0fc3c291cc70d4e93bea9302c4fa07a3585a0,
-its204-file manifest and the eight preserved historical diagnostic directories
-remain dated evidence below, not an active draft or an instruction to repeat work.
+Last reconciled: 2026-09-11 00:42 UTC by Astra after owner-authorized supervision transfer and focused issue4 acceptance. All task workers and acceptance jobs have exited; shared DSH Web was untouched.
+Canonical lane remains codex/master-plan-gfa795549e5 in its recorded worktree. Validated source base2fc0fc3c291cc70d4e93bea9302c4fa07a3585a0 plus the focused draft is bound by the204-file Linux manifest below; the focused commit records the accepted candidate.
+Issue #1 is closed through merged PR #17. T05/issue #4 now has local canonical acceptance: Linux4/4, Mac98/98, types/format/lint, and fresh independent Astra audit. All eight old diagnostic directories remain. Issue11 gateway publication is accepted and closed; see the current dated issue11 receipt. No next issue selected. Aggregate Sentinel review/publication/merge remains T08/issue12. No production activation is claimed.
 
 Task states: pending, in_progress, ready, accepted, blocked, rejected. Only
 accepted closes a task, and only after the acceptance evidence below exists.
@@ -1355,16 +1153,16 @@ to keep retrying. Scope changes require an Astra entry with the reason.
 
 | ID | State / owner | Required acceptance | Evidence or exact next action |
 | --- | --- | --- | --- |
-| T01 Causal capture verifier | accepted / Astra, fresh audit and canonical check below | Concrete restricted execution of original and sanitized input at the same original SHA; intended failure observed in both; identical safe fixture passes candidate through the real local loop; privacy and negative cases preserved | Worker correction `7491c68` and original `55555dc` are canonical ancestors through merge `090b8aa`. Fresh final Astra audit accepted the exact frozen candidate; canonical focused host suite passed 186/186. This is local causal-verifier evidence. T04, T05 and T08 have separate accepted receipts; gateway live acceptance remains T09–T12. |
+| T01 Causal capture verifier | accepted / Astra, fresh audit and canonical check below | Concrete restricted execution of original and sanitized input at the same original SHA; intended failure observed in both; identical safe fixture passes candidate through the real local loop; privacy and negative cases preserved | Worker correction `7491c68` and original `55555dc` are canonical ancestors through merge `090b8aa`. Fresh final Astra audit accepted the exact frozen candidate; canonical focused host suite passed 186/186. Local macOS slice only; T04 target consumer, T05 production isolation and T08 full aggregate acceptance remain open. No active DSH writer. |
 | T02 Runtime model receipt | accepted / Astra | Owner-approved correlated request/runtime evidence binds configured provider, Luna/max, routing and exact invocation/thread/turn; unavailable evidence fails closed | Frozen 12-path candidate verified; fresh source audit passed behavior, 72/72 tests and format/lint passed. Real concrete Luna/max smoke settled with completed runtime receipt. Acceptance details below. No backend-attestation or production-isolation claim. |
-| T03 Runtime review transport | accepted / Astra integration | Concrete completed review transport and durable receipt bind operation, PR, head, reviewer and terminal result; no silence-as-clean | Audited transport hash23507800 preserved. Integrated60a66325 passed146/147; corrected sole fixture passed2a236c00 in19s. Final source/test type, format and lint pass. Concrete producer/live request evidence retained. T08 source delivery is accepted; hosted PR30 also has its completed exact-head runtime review. Gateway activation remains separate under T09–T10. |
+| T03 Runtime review transport | accepted / Astra integration | Concrete completed review transport and durable receipt bind operation, PR, head, reviewer and terminal result; no silence-as-clean | Audited transport hash23507800 preserved. Integrated60a66325 passed146/147; corrected sole fixture passed2a236c00 in19s. Final source/test type, format and lint pass. Concrete producer/live request evidence retained. Local integration accepted; aggregate exact-head review, publication and runtime activation remain T08–T10. |
 | T04 Gateway replay consumer | accepted and published / Astra; issue11 closed | Actual target command consumes the safe permanent fixture, fails original, passes candidate, and runs in target validation | Gateway checkpointcf5af622 passed77/77 and fresh source audit; clean existing m06 lane. Sentinel metadata/source checkpointaf11a37 passed71/71 (3109c98f), type/format/lint; actual local causal loop and original/sanitized/candidate dispatch verified. Transient metadata stays outside fixture digest. Publication accepted through gateway PR279 at7a6a15c3 with deployed identity and authenticated inference; a subsequent causal live capture remains T11. No historical SHA proof is fabricated. |
-| T05 Production replay isolation | accepted source / Astra; issue4 closed | Captured callable isolation, real Linux configured target commands and read-only causal execution, malformed capability refusal and cleanup; preserved Mac behavior | Linux4/4, Mac98/98, types/format/lint and independent Astra audit passed on identical manifest-bound bytes; see issue4 acceptance below. Eight prior diagnostic directories are preserved in the historical record. Aggregate source review/merge is accepted under issue12/T08. |
-| T06 Trusted host wiring | in progress / Astra; hosted self-scope accepted, gateway scope pending | Real local issue intake, scoped authentication, durable state CAS, isolated model/review and supervised runtime delivery; missing capabilities fail closed | Hosted self-repair and supervised release operate with accepted issue18/PR30 delivery at989af8a; issue48 attempt1 is active. Issues8/9/10 retain gateway discovery, key/storage, replay and VPS release capability gaps. Do not reassign the completed host assembly from old failure34610680968. |
-| T07 Activation decisions | hosted policy approved / Astra; gateway and issue40 choices pending | Record local cadence/session bound, credential scope, protected paths and supervisor ownership; gateway retention/stability remains separate | Hosted policy is one shared Luna/max start per rolling hour and168 per seven days. Local operator login0x4007 is distinct from the supervisor App4926599/install161274577 and native Actions scope0. Gateway contract/retention/stability/ownership and the new issue40 store/secret choice remain pending. |
+| T05 Production replay isolation | accepted locally / Astra; issue #4 | Captured callable isolation, real Linux configured target commands and read-only causal execution, malformed capability refusal and cleanup; preserved Mac behavior | Linux4/4, Mac98/98, types/format/lint and independent Astra audit passed on identical manifest-bound bytes; see issue4 acceptance below. Eight prior diagnostics preserved. Full aggregate review/merge remains issue12. |
+| T06 Trusted host wiring | in progress / Astra with serialized DSH | Real local issue intake, scoped authentication, durable state CAS, isolated model/review and supervised runtime delivery; missing capabilities fail closed | Issue-only adapter draft ready; focused acceptance running. Local host, dependency intake and delivery still required. Actions34610680968 confirms missing host assembly. |
+| T07 Activation decisions | hourly policy approved / Astra implements | Record local cadence/session bound, credential scope, protected paths and supervisor ownership; gateway retention/stability remains separate | Owner approved local self-repair, hourly Luna/max and monitoring: one shared start per rolling hour,168 per seven days. Existing local gh identity0x4007 has Sentinel access; no local App key verified. Do not mislabel personal auth as App authentication. |
 | T08 Integrated delivery | accepted source delivery / Astra | Accepted worker tips are canonical ancestors; exact candidate passes integrated harness, current-head Codex review and required CI; resulting PR merged | PR46 merged as0144a6a; exactff678b6 passed the full1093-test harness, Codex review and candidate CI. Fresh Astra audited evidence and18 accepted/disposition ancestors. Merged development CI34831023629 passed. Hosted and gateway live acceptance remain separate; see the current register. |
 | T09 Isolated release and rollback | pending / Astra; depends on T07–T08 | Exact candidate/prior revisions, real promotion, continuous acceptance and exact restoration proved in isolated environment | Perform before production promotion ownership transfer. Health alone is insufficient. |
-| T10 Production ownership and activation | pending / Astra; depends on T09 | Authorized drain and exclusive release ownership verified; trusted runtime deployed with approved capabilities | Hosted Sentinel is active. The gateway's existing VPS deployment path remains authoritative until approved handover; its former Deno workflow now performs CI only. Reconcile exact live owners and prove replacement/settlement before enabling another target writer. |
+| T10 Production ownership and activation | pending / Astra; depends on T09 | Authorized drain and exclusive release ownership verified; trusted runtime deployed with approved capabilities | Existing gateway workflow retains promotion. Do not remove it before replacement proof or run two production writers. |
 | T11 Two autonomous deliveries | pending / Astra; depends on T10 | Two distinct eligible deliveries with exact PR/review/merge/revision/closure receipts; at least one actual captured incident with permanent regression | Discover incidents first, then priority selection. Do not assign an unrelated capture to a preselected issue. |
 | T12 Six-hour observation | pending / Astra; depends on activation and verified receipts | Six observed hours, continued eligible selection, stability evidence and no unresolved ownership/recovery fault | Record actual start/end and gaps; setup time or waiting for approval does not count. |
 | T13 Preserved work reconciliation | accepted / Astra, fresh audit below | Every unintegrated task tip and dirty source draft has explicit disposition; no accepted work stranded | Fresh Astra found no missing production behavior in the listed drafts. All committed accepted worker tips, including T01 after merge `090b8aa`, are canonical ancestors; root docs tip `9da7f77` is now an ancestor through tree-unchanged merge `c3f6ffb94028671746453d3a8f56ea1a9272ec09`. Dirty diagnostics and rejected/superseded drafts remain preserved, with dispositions below. |
