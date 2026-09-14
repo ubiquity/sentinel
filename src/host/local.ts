@@ -14,7 +14,7 @@
  * environment or a log line.
  */
 
-import { isGitSha } from "../contracts/brands.ts";
+import { isGitSha, isSha256Hex } from "../contracts/brands.ts";
 import type { GitSha } from "../contracts/brands.ts";
 import { portError, portOk, SystemClock } from "../contracts/ports.ts";
 import type {
@@ -414,8 +414,10 @@ export interface LocalModelResultProjectionV1 {
  * `<stateRoot>/model-results/<localCheckoutKey(taskId)>/`, using a unique
  * `crypto.randomUUID()` filename, private 0700 directories and a 0600 file.
  * Returns the exact written path. This diagnostic stays outside every model
- * checkout and is never part of Actions status or public logs. A throw means
- * the receipt was not saved: the caller must not import or publish a candidate.
+ * checkout. After the private report is saved, one strictly validated advisory
+ * summary line is emitted for the existing Actions log; that summary never
+ * changes this path, this file or any caller result. A throw means the receipt
+ * was not saved: the caller must not import or publish a candidate.
  */
 export async function writeLocalModelResult(
   stateRoot: string,
@@ -434,6 +436,7 @@ export async function writeLocalModelResult(
     path,
     JSON.stringify(projectLocalModelResult(request, result, observedAt)) + "\n",
   );
+  emitLocalModelDiagnostic(request, result, observedAt, key);
   return path;
 }
 
@@ -503,6 +506,246 @@ function localModelResultReason(
   if (receipt.actual.terminalOrigin === "host-timeout") return "host_timeout";
   if (receipt.error !== null) return "runtime_error";
   return null;
+}
+
+/**
+ * Public advisory summary of exactly one local model result. It is a separate
+ * explicit allow-list, never a serialization of the private projection: no
+ * provider/model/reasoning identity, thread/turn identity, task string, raw
+ * error, prompt, output, filesystem or candidate path, or credential value can
+ * reach this shape. `taskKey` is the stable SHA-256 of the task id and `base`
+ * is the exact validated request base.
+ */
+export interface LocalModelDiagnosticV1 {
+  version: "v1";
+  kind: "sentinel_model_diagnostic";
+  taskKey: string;
+  base: GitSha;
+  observedAt: number;
+  outcome: "completed" | "failed" | "interrupted" | "port_error";
+  reason: LocalModelResultReasonV1;
+  errorKind: PortErrorKindV1 | null;
+  terminalOrigin: "runtime" | "host-timeout" | null;
+  observedTerminalStatus: "completed" | "interrupted" | "failed" | null;
+  durationMs: number | null;
+  outputChars: number | null;
+  candidatePresent: boolean;
+}
+
+const LOCAL_DIAGNOSTIC_KEYS = [
+  "version",
+  "kind",
+  "taskKey",
+  "base",
+  "observedAt",
+  "outcome",
+  "reason",
+  "errorKind",
+  "terminalOrigin",
+  "observedTerminalStatus",
+  "durationMs",
+  "outputChars",
+  "candidatePresent",
+] as const;
+
+const PORT_ERROR_KINDS: readonly PortErrorKindV1[] = [
+  "unavailable",
+  "auth_failed",
+  "rate_limited",
+  "not_found",
+  "conflict",
+  "invalid",
+];
+
+function isPortErrorKind(value: unknown): value is PortErrorKindV1 {
+  return typeof value === "string" &&
+    PORT_ERROR_KINDS.includes(value as PortErrorKindV1);
+}
+
+function isAdvisoryCount(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+/**
+ * Strict parser of the advisory summary: exact own keys only, fixed enums,
+ * non-negative safe integers and the port-error/receipt shapes validated
+ * separately so a mixed record is rejected. Null means no summary may be
+ * emitted or copied. Only validated fields are copied into the result.
+ */
+export function parseLocalModelDiagnosticV1(
+  value: unknown,
+): LocalModelDiagnosticV1 | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  if (Object.keys(record).length !== LOCAL_DIAGNOSTIC_KEYS.length) return null;
+  if (!LOCAL_DIAGNOSTIC_KEYS.every((key) => Object.hasOwn(record, key))) {
+    return null;
+  }
+  const version = record.version;
+  const kind = record.kind;
+  const taskKey = record.taskKey;
+  const base = record.base;
+  const observedAt = record.observedAt;
+  const outcome = record.outcome;
+  const reason = record.reason;
+  const errorKind = record.errorKind;
+  const terminalOrigin = record.terminalOrigin;
+  const observedTerminalStatus = record.observedTerminalStatus;
+  const durationMs = record.durationMs;
+  const outputChars = record.outputChars;
+  const candidatePresent = record.candidatePresent;
+
+  if (version !== "v1") return null;
+  if (kind !== "sentinel_model_diagnostic") return null;
+  if (!isSha256Hex(taskKey)) return null;
+  if (!isGitSha(base)) return null;
+  if (!isAdvisoryCount(observedAt)) return null;
+  if (
+    terminalOrigin !== null && terminalOrigin !== "runtime" &&
+    terminalOrigin !== "host-timeout"
+  ) {
+    return null;
+  }
+  if (
+    observedTerminalStatus !== null && observedTerminalStatus !== "completed" &&
+    observedTerminalStatus !== "interrupted" &&
+    observedTerminalStatus !== "failed"
+  ) {
+    return null;
+  }
+
+  if (outcome === "port_error") {
+    // A port error has one fixed shape: its kind, no terminal, no counters and
+    // no candidate. Any other combination is not this record.
+    if (reason !== "runtime_error") return null;
+    if (!isPortErrorKind(errorKind)) return null;
+    if (terminalOrigin !== null || observedTerminalStatus !== null) return null;
+    if (durationMs !== null || outputChars !== null) return null;
+    if (candidatePresent !== false) return null;
+    return {
+      version: "v1",
+      kind: "sentinel_model_diagnostic",
+      taskKey,
+      base,
+      observedAt,
+      outcome: "port_error",
+      reason: "runtime_error",
+      errorKind,
+      terminalOrigin: null,
+      observedTerminalStatus: null,
+      durationMs: null,
+      outputChars: null,
+      candidatePresent: false,
+    };
+  }
+
+  if (
+    outcome !== "completed" && outcome !== "failed" && outcome !== "interrupted"
+  ) {
+    return null;
+  }
+  if (
+    reason !== null && reason !== "output_limit" &&
+    reason !== "failed_command_loop" && reason !== "host_timeout" &&
+    reason !== "runtime_error"
+  ) {
+    return null;
+  }
+  if (errorKind !== null) return null;
+  if (terminalOrigin === null) return null;
+  if (terminalOrigin === "host-timeout" && observedTerminalStatus !== null) {
+    return null;
+  }
+  if (!isAdvisoryCount(durationMs) || !isAdvisoryCount(outputChars)) {
+    return null;
+  }
+  if (typeof candidatePresent !== "boolean") return null;
+  return {
+    version: "v1",
+    kind: "sentinel_model_diagnostic",
+    taskKey,
+    base,
+    observedAt,
+    outcome,
+    reason,
+    errorKind: null,
+    terminalOrigin,
+    observedTerminalStatus,
+    durationMs,
+    outputChars,
+    candidatePresent,
+  };
+}
+
+/**
+ * Rebuild the advisory summary through the explicit allow-list. Only typed
+ * receipt/port fields are copied; no untrusted object is spread.
+ */
+function projectLocalModelDiagnostic(
+  request: ModelRunRequestV1,
+  result: PortResultV1<ModelRunReceiptV1>,
+  observedAt: number,
+  taskKey: string,
+): LocalModelDiagnosticV1 {
+  const reason = localModelResultReason(request, result);
+  if (!result.ok) {
+    return {
+      version: "v1",
+      kind: "sentinel_model_diagnostic",
+      taskKey,
+      base: request.base,
+      observedAt,
+      outcome: "port_error",
+      reason,
+      errorKind: result.error.kind,
+      terminalOrigin: null,
+      observedTerminalStatus: null,
+      durationMs: null,
+      outputChars: null,
+      candidatePresent: false,
+    };
+  }
+  const receipt = result.value;
+  return {
+    version: "v1",
+    kind: "sentinel_model_diagnostic",
+    taskKey,
+    base: request.base,
+    observedAt,
+    outcome: receipt.outcome,
+    reason,
+    errorKind: null,
+    terminalOrigin: receipt.actual.terminalOrigin,
+    observedTerminalStatus: receipt.actual.observedTerminalStatus,
+    durationMs: receipt.actual.durationMs,
+    outputChars: receipt.actual.outputChars,
+    candidatePresent: receipt.candidate !== null,
+  };
+}
+
+/**
+ * Emit the one advisory summary line after the private report is saved. A
+ * projection that fails the strict parser prints nothing, and any preparation
+ * or emission failure stays local: the saved private report and the caller's
+ * result are never changed by advisory diagnostics.
+ */
+function emitLocalModelDiagnostic(
+  request: ModelRunRequestV1,
+  result: PortResultV1<ModelRunReceiptV1>,
+  observedAt: number,
+  taskKey: string,
+): void {
+  try {
+    const safe = parseLocalModelDiagnosticV1(
+      projectLocalModelDiagnostic(request, result, observedAt, taskKey),
+    );
+    if (safe === null) return;
+    console.log(JSON.stringify(safe));
+  } catch {
+    // Advisory only: never affect the successful private persistence.
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1348,23 +1591,12 @@ export class LocalCheckoutModelPort implements ImplementationPort {
       ? request
       : { ...request, base: checkoutBase };
     const result = await port.runModel(modelRequest);
-    if (!result.ok) {
-      // The port detail is a bounded static diagnostic (never model output or
-      // a credential). Hosted runs otherwise only expose the generic blocked
-      // transition, which hides the actual failure boundary needed to repair
-      // the runtime.
-      console.log(JSON.stringify({
-        kind: "sentinel_model_result",
-        ok: false,
-        taskId: request.taskId,
-        errorKind: result.error.kind,
-        errorDetail: result.error.detail,
-      }));
-    }
     // Persist the private minimal diagnostic BEFORE returning the receipt or
     // importing any candidate: a run without its saved receipt may not
     // publish. A storage failure must not erase the existing checkout or the
-    // durable reservation, so it only returns static unavailable.
+    // durable reservation, so it only returns static unavailable. The common
+    // saved-report path also emits the bounded advisory summary line for both
+    // receipt results and port errors; no raw port detail is ever logged here.
     try {
       await writeLocalModelResult(
         this.input.stateRoot,
