@@ -2,6 +2,16 @@
 
 ## Active task register — Astra owned
 
+Latest verified state, 2026-09-14 04:32 UTC: canonical branch and both VPS
+checkouts are at ec940acf81118c5cda65832dcfc9f5b6fb2cfeda. No DSH print writer
+is running. Supervisor ruleset23197450 remains absent; never recreate it.
+Healthy bootstrap proof is persisted; autonomous delivery is not yet proved.
+PR30 remains runtime-owned at d92d140 with an unprepared base_refresh intent,
+not a published refresh. Read-only installation_audit is diagnosing that
+unavailable result before the next ordinary pass due04:55:28UTC. Issue21 remains
+blocked without a trusted receipt; preserve all five reservations. The older
+00:30 checkpoint below records the starting state, not current installation.
+
 Current checkpoint, 2026-09-14 00:30 UTC: owner supersedes the Mac-only canonical
 location and confirms all work is pushed. Canonical worktree is now
 `/home/codex/repos/ubiquity/sentinel/.codex-worktrees/master-plan-gfa795549e5`,
@@ -35,6 +45,28 @@ hosted_acceptance_audit has returned its foundation and composition findings;
 it has no write or test authority. Primary alone owns this register and plan.
 
 ### Historical checkpoints
+
+04:28 UTC: step-name correction0b020d4 accepted after focused reader9b31b558,
+full CI34804852960 (1069tests/84steps/0fail), local Codex review no findings,
+PR CI34805406699 passed; PR43 mergedec940acf81118c5cda65832dcfc9f5b6fb2cfeda.
+Merged CI34805743698 passed. Local full70b0e5da failed only unchanged composed
+release test (monitoring instead of accepted); fresh independent audit found no
+justified source correction, isolated file3cb1339b passed44seconds. Preserve
+failure, cause unconfirmed. No unchanged full rerun.
+
+Installed supervisorec940ac without ruleset recreation. Immediate dispatch
+34805762129 surprisingly resolved oldcfe3d22; primary initially misattributed
+its continued failure. Verify run.head_sha immediately after every dispatch.
+Scheduled34805981730 used ec940ac, completed success and persisted original
+bootstrap34804213902:1:repair healthy proof in release reffa45709. Active runtime
+remains exactcfe3d22, execution cleared, healthy job103852805869, digest
+8e488466ff5ca1d42675765d31de4e003819340ab4750ab17ae465c4732225ce.
+All original model reservation blobs unchanged. New reconciliation34806076970
+also uses ec940ac. Ordinary next due1789361728122 (04:55:28UTC); preserve this
+deadline and budget. Bootstrap acceptance is now proved; autonomous issue
+delivery and observation remain outstanding. PR42 policy merged46e1fcd;
+supervisor source ruleset23197450 absent, never recreate it. Both VPS checkouts
+are at mergedec940ac; only this primary-owned ledger update is uncommitted.
 
 04:05 UTC: PR42 merged46e1fcd records never adding branch protection. Root
 and canonical fast-forwarded; supervisor non-force advanced to reviewedcfe3d22.
