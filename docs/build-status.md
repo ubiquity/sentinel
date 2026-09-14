@@ -35,6 +35,69 @@ it has no write or test authority. Primary alone owns this register and plan.
 
 ### Historical checkpoints
 
+01:34 UTC: hosted foundation accepted for canonical integration. V5 fixed both
+source-audit findings: full release-proof equality with the exact settlement,
+and stable execution-ID reuse rejection in parser and transitions. V6 changed
+only two fixture execution IDs; earlier febfa21f had exposed their reused prior
+ID under the stronger guard. Final14 contract/state tests pass direct receipt
+24352d21-8cf0-44da-8cad-fe8ad4d25b4d in the existing VPS evidence namespace at
+c091839+draft. Primary checked both exact guard changes and storage/snapshot
+wiring; diff check passed. Prior type88e2758d and lint838dd29f passed; focused
+test execution also compiled the final contract. V5/V6 completed exit0 with
+owned mutations, one formatter and no checks/Git/children. V5 live cwd/env and
+actual Flash/max verified; V6 ended before live sampling, so retain explicit
+env-i launch/header evidence without claiming live environment attestation.
+No supervisor core execution, workflow cutover, review or deployment yet.
+
+01:28 UTC: hosted-contracts V2/V3/V4 completed with settled owned processes,
+verified live cwd/NODE_ENVproduction and actual FlashV4.1/max; no checks/Git or
+children, one final formatter each. V3 added exact not_started settlement and
+initial-snapshot validation. GPT types passed 88e2758d-4cac-4588-84ff-bda71ec669fe.
+Initial contract/state attempt b0e26bae failed five fixture boundary/time inputs;
+V4 corrected only tests. All14 then passed 53814910-1e47-455e-a564-7ea38b186ae5,
+lint passed 838dd29f-67ae-42c8-b821-6455b4f85841, direct VPS/canonical c091839+draft
+in namespace459acb17ad9ea6b3117a31ea7e3934ee42910852ebdd735c5b0a8110d8083e59.
+Independent source audit found two substantive guards missing: complete proof
+equality for release attachment, and stable execution-ID comparison on replay.
+Sole V5 /tmp/sentinel-hosted-contracts-v5.txt now owns the contract and its test
+only, exec6789, same persisted session. Expected3min/20calls, no tests/Git/children,
+one formatter then handback; primary validates through existing evidence targets.
+Core design /tmp/sentinel-hosted-core-design-v2.txt incorporates skipped-job
+settlement and release-recovery precedence over initial bootstrap. Core not yet
+implemented or deployed; source schema remains uncommitted pending these guards.
+
+01:17 UTC: hosted-contracts V1 completed exit0 with owned mutations, one final
+formatter and no checks/Git/children. It still emitted several malformed quoted
+shell searches, but did not repeat them into a loop; minimum read-tool guidance
+remains required. GPT type evidence 2ee02865-dc59-45b5-9782-3fc650ddf46c failed one
+new fixture's widened purpose string. No contract/state test run yet. Read-only
+audit found missing ordinary/bootstrap failure settlement, failed rollback proof
+retry deadlock, and pointer/execution ordering requirements. Sole V2 correction
+/tmp/sentinel-hosted-contracts-v2.txt owns contract, two focused tests, and shared
+record-kind literals only. Same session, exec78306/PID1257879, live cwd and
+NODE_ENVproduction plus actual FlashV4.1/max verified; workspace-write/ask intact.
+Five-minute/45-call checkpoint, one formatter then handback, no tests/Git/children.
+Latest hosted run34793759676 completed but still reports zero terminal records;
+restricted log /tmp/sentinel-repair-34793759676.log confirms old merge gate.
+PR30 remains exact d92d140 and behind; no new delivery or budget reset.
+
+01:08 UTC: base refresh committed and pushed as
+c091839e634dc9a5edce7f5fd0897143c3f82d3f; canonical source clean before next task.
+Independent hosted audit confirmed separate runtime/release collections through
+existing release Git CAS, protected prepare/repair/finalize jobs using standard
+GitHub identity fields, no new credentials. Verified supervisor workflow ID
+357012162 from GitHub. Sole foundation DSH assignment
+/tmp/sentinel-hosted-contracts-v1.txt now owns new hosted-supervisor contract,
+snapshot/store release seams, focused tests and listed mechanical snapshot
+constructors only. Same persisted session aa59f724, exec74287/PID1256010, live
+exact cwd/NODE_ENVproduction and actual deepseek-official/deepseek-flash/max
+verified. workspace-write/ask inherited persisted settings. First edit target
+2min; handback10min/80calls diagnostic, no children/checks/Git, one final formatter.
+GPT registered hosted-supervisor-contracts; not executed yet. Next settled
+assignment feedback; bounded exact-task stop authority. Primary ledger only;
+read-only auditor checking state edge cases independently. Protected supervisor
+installation and live delivery remain unperformed; no state/budget changes.
+
 01:06 UTC: base-refresh V3 and fixture-only V4 completed exit0 with owned edits,
 single final formatter and no checks/Git/children. V3 live PID1252987 settled;
 V4 completed before live sampling, so retain launch command and exact persisted

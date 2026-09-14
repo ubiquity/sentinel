@@ -11,6 +11,14 @@ import { parseBudgetReservationV1 } from "./budget-reservation.ts";
 import type { BudgetReservationV1 } from "./budget-reservation.ts";
 import { parseGitHubCooldownV1 } from "./github-cooldown.ts";
 import type { GitHubCooldownV1 } from "./github-cooldown.ts";
+import {
+  parseHostedReleaseRecordV1,
+  parseHostedRuntimeRecordV1,
+} from "./hosted-supervisor.ts";
+import type {
+  HostedReleaseRecordV1,
+  HostedRuntimeRecordV1,
+} from "./hosted-supervisor.ts";
 import { parseIncidentEvidenceV1, parseIncidentSummaryV1 } from "./incident.ts";
 import type { IncidentEvidenceV1, IncidentSummaryV1 } from "./incident.ts";
 import { parseReleaseRecordV1, parseReleaseRequestV1 } from "./release.ts";
@@ -59,6 +67,14 @@ export interface ReleaseStateSnapshotV1 {
   sequence: number;
   updatedAt: number;
   releases: ReleaseRecordV1[];
+  /**
+   * Hosted supervisor records (separate from Deno release records). The
+   * runtime pointer is at most one record; hosted releases are one per exact
+   * release request id. They persist in the same release state ref through
+   * their own collections and never fabricate a ReleaseRecordV1.
+   */
+  hostedRuntimes: HostedRuntimeRecordV1[];
+  hostedReleases: HostedReleaseRecordV1[];
 }
 
 const REPAIR_KEYS = [
@@ -83,6 +99,8 @@ const RELEASE_KEYS = [
   "sequence",
   "updatedAt",
   "releases",
+  "hostedRuntimes",
+  "hostedReleases",
 ] as const;
 
 export function parseRepairStateSnapshotV1(
@@ -193,6 +211,27 @@ export function parseReleaseStateSnapshotV1(
     parseReleaseRecordV1,
   );
   expectUniqueIds(releases, "$.releases");
+  const hostedRuntimes = expectArray(
+    obj.hostedRuntimes,
+    "$.hostedRuntimes",
+    MaxItems.snapshotRecords,
+    parseHostedRuntimeRecordV1,
+  );
+  if (hostedRuntimes.length > 1) {
+    fail(
+      "$.hostedRuntimes",
+      "invalid_lifecycle",
+      "at most one hosted runtime pointer record is representable",
+    );
+  }
+  expectUniqueIds(hostedRuntimes, "$.hostedRuntimes");
+  const hostedReleases = expectArray(
+    obj.hostedReleases,
+    "$.hostedReleases",
+    MaxItems.snapshotRecords,
+    parseHostedReleaseRecordV1,
+  );
+  expectUniqueIds(hostedReleases, "$.hostedReleases");
 
   return {
     version: "v1",
@@ -201,6 +240,8 @@ export function parseReleaseStateSnapshotV1(
     sequence,
     updatedAt,
     releases,
+    hostedRuntimes,
+    hostedReleases,
   };
 }
 

@@ -236,6 +236,8 @@ async function makeRig(
       stateHead: null,
       sequence: 1,
       updatedAt: T0 + 2000,
+      hostedRuntimes: [],
+      hostedReleases: [],
       releases: [monitoredReleaseRecord("rel-1", "accepted", {
         requestId,
         requestRevision: SHA3,

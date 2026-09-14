@@ -37,6 +37,15 @@ import { canonicalStringify } from "../contracts/canonical.ts";
 import { parseGitHubCooldownV1 } from "../contracts/github-cooldown.ts";
 import type { GitHubCooldownV1 } from "../contracts/github-cooldown.ts";
 import {
+  parseHostedReleaseRecordV1,
+  parseHostedRuntimeRecordV1,
+  validateHostedStateTransition,
+} from "../contracts/hosted-supervisor.ts";
+import type {
+  HostedReleaseRecordV1,
+  HostedRuntimeRecordV1,
+} from "../contracts/hosted-supervisor.ts";
+import {
   parseIncidentEvidenceV1,
   parseIncidentSummaryV1,
 } from "../contracts/incident.ts";
@@ -288,6 +297,18 @@ const RECORD_COLLECTIONS: Record<StateKind, RecordCollection[]> = {
       directory: "releases",
       kind: "release_record",
       parse: parseReleaseRecordV1,
+      rows: [],
+    },
+    {
+      directory: "hostedRuntimes",
+      kind: "hosted_runtime",
+      parse: parseHostedRuntimeRecordV1,
+      rows: [],
+    },
+    {
+      directory: "hostedReleases",
+      kind: "hosted_release",
+      parse: parseHostedReleaseRecordV1,
       rows: [],
     },
   ],
@@ -803,14 +824,19 @@ export class GitStateStore implements StateStore {
       add("github_cooldown", repair.githubCooldowns);
     } else {
       const release = next as ReleaseStateSnapshotV1;
-      const directory = collectionDirectory(kind, "release_record");
-      for (const value of release.releases) {
-        records.push({
-          id: recordIdentity(value as RecordIdentitySource),
-          directory,
-          value,
-        });
-      }
+      const add = (recordKind: string, rows: readonly unknown[]) => {
+        const directory = collectionDirectory(kind, recordKind);
+        for (const value of rows) {
+          records.push({
+            id: recordIdentity(value as RecordIdentitySource),
+            directory,
+            value,
+          });
+        }
+      };
+      add("release_record", release.releases);
+      add("hosted_runtime", release.hostedRuntimes);
+      add("hosted_release", release.hostedReleases);
     }
     return Promise.all(
       records.map(async (record) => ({
@@ -1043,6 +1069,12 @@ export class GitStateStore implements StateStore {
           sequence: manifest.sequence,
           updatedAt: manifest.updatedAt,
           releases: orderRecords(records.releases) as ReleaseRecordV1[],
+          hostedRuntimes: orderRecords(
+            records.hostedRuntimes,
+          ) as HostedRuntimeRecordV1[],
+          hostedReleases: orderRecords(
+            records.hostedReleases,
+          ) as HostedReleaseRecordV1[],
         };
         snapshot = parseReleaseStateSnapshotV1(release);
       }
@@ -1167,6 +1199,17 @@ function validateSnapshotTransition(
   if (prior === null) {
     if (next.sequence !== 1) {
       return "the first state snapshot must have sequence 1";
+    }
+    // Initial hosted validation: a first release snapshot cannot smuggle
+    // historical proofs, a non-initial generation or terminal receipts.
+    if (!("work" in next)) {
+      const firstRelease = next as ReleaseStateSnapshotV1;
+      return validateHostedStateTransition(
+        [],
+        [],
+        firstRelease.hostedRuntimes,
+        firstRelease.hostedReleases,
+      );
     }
   } else {
     if (next.sequence !== prior.sequence + 1) {
@@ -1491,7 +1534,15 @@ function validateReleaseTransition(
       return "release record phase transition is not allowed";
     }
   }
-  return null;
+  // Hosted supervisor records share this ref through their own collections;
+  // the existing Deno checks above run first, then the hosted preservation and
+  // pointer-movement rules.
+  return validateHostedStateTransition(
+    prior.hostedRuntimes,
+    prior.hostedReleases,
+    next.hostedRuntimes,
+    next.hostedReleases,
+  );
 }
 
 // ---------------------------------------------------------------------------

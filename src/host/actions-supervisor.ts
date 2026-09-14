@@ -100,6 +100,8 @@ function emptyReleaseState(now: number): ReleaseStateSnapshotV1 {
     sequence: 1,
     updatedAt: now,
     releases: [],
+    hostedRuntimes: [],
+    hostedReleases: [],
   });
 }
 

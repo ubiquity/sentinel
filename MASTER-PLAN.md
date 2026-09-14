@@ -60,6 +60,34 @@ Do not use labels for admission: ubiquity-os[bot] removes the default labels.
 
 ## 2. Canonical goal identity
 
+### Hosted Actions implementation checkpoint, 2026-09-14
+
+The current delivery target is the real hosted Sentinel, using the existing
+protected supervisor workflow and App credential. The protected workflow runs
+prepare, repair, and finalize on separate runners. Only prepare and finalize
+receive the supervisor environment and release-state writer token. Repair
+receives the existing repair/model credentials and keeps one exclusive runtime
+writer. Five-minute reconciliation and hourly ordinary model admission remain
+separate; prior, candidate, rollback, and bootstrap verification runs use the
+actual repair entrypoint with model starts disabled.
+
+Persist a fixed self-scope runtime pointer and separate hosted release records
+in the existing release-state Git store. They are not Deno release records.
+Record exact execution run/attempt, protected launcher SHA, actual runtime SHA,
+pointer generation, purpose and intent before execution. Authenticate the exact
+completed runtime job and its bounded log through GitHub before recording proof.
+Keep execution settlement separate from healthy-run proof; missing evidence
+stays pending. A failed verification must restore only the recorded prior
+revision and obtain a fresh healthy rollback run before terminal rollback.
+Every pointer change consumes a previously saved exact intent through Git CAS.
+
+Installation must bind the reviewed integrated source to the existing protected
+supervisor ref, account for old direct repair runs, and establish an exact
+bootstrap pointer followed by a real healthy verification run. Do not select a
+runtime by moving branch tip, timestamp, or list order. Bootstrap alone is not
+autonomous issue delivery. Preserve PR30, issue21 state and all model charges;
+accepted candidate refresh requires a new exact-head review and current CI.
+
 Owner location update, 2026-09-14: the VPS replaces the Mac as the authoritative
 development host. The owner confirms all work is pushed to Git. Fetch all
 published branches and tags; Mac access and inspection of its worktrees are no

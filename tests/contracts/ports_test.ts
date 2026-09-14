@@ -369,6 +369,8 @@ Deno.test("StateStore: repair and release branches are strictly separate", async
     sequence: 1,
     updatedAt: 1786000000000,
     releases: [],
+    hostedRuntimes: [],
+    hostedReleases: [],
   };
   await store.writeRepair(repairSnapshot, null);
   await store.writeRelease(releaseSnapshot, null);
@@ -778,6 +780,8 @@ Deno.test(
       sequence: 1,
       updatedAt: T0,
       releases: [],
+      hostedRuntimes: [],
+      hostedReleases: [],
     };
     await store.writeRelease(releaseSnapshot, null);
     assert.equal(store.repairWrites, 1);
@@ -877,6 +881,8 @@ Deno.test(
       sequence: 1,
       updatedAt: T0,
       releases: [],
+      hostedRuntimes: [],
+      hostedReleases: [],
     }, null);
 
     const releaseRead: Pick<StateReadView, "readRelease"> = store;

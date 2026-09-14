@@ -38,6 +38,8 @@ export type RecordKindV1 =
   | "replay_result"
   | "release_request"
   | "release_record"
+  | "hosted_runtime"
+  | "hosted_release"
   | "repair_state_snapshot"
   | "release_state_snapshot";
 
