@@ -293,6 +293,7 @@ async function seedMonitorWindow(
     ),
     hostedRuntimes: priorSnapshot.hostedRuntimes,
     hostedReleases: priorSnapshot.hostedReleases,
+    githubCooldowns: priorSnapshot.githubCooldowns,
   };
   const written = await store.writeRelease(next, read.value.head);
   assert.ok(written.ok, "seeded window must be applied");
@@ -690,6 +691,7 @@ Deno.test("checkpoint: state CAS conflict stops the run before any promotion", a
       releases: read.value.snapshot.releases,
       hostedRuntimes: read.value.snapshot.hostedRuntimes,
       hostedReleases: read.value.snapshot.hostedReleases,
+      githubCooldowns: read.value.snapshot.githubCooldowns,
     };
     const pushed = await other.writeRelease(next, read.value.head);
     assert.ok(pushed.ok);

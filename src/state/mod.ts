@@ -225,9 +225,9 @@ function parseStateManifest(
 /**
  * Identity source of one validated state record. Every record kind carries
  * exactly one of the two: existing records identify by their string `id`,
- * while the durable GitHub cooldown fragment is deliberately a kind-less
- * plain data record addressing its storage slot by its positive installation
- * id (`githubCooldowns/sha256(String(installationId)).json`).
+ * while the durable GitHub cooldown fragment (repair and release roles) is
+ * deliberately a kind-less plain data record addressing its storage slot by its
+ * positive installation id (`githubCooldowns/sha256(String(installationId)).json`).
  */
 interface RecordIdentitySource {
   id?: string;
@@ -309,6 +309,12 @@ const RECORD_COLLECTIONS: Record<StateKind, RecordCollection[]> = {
       directory: "hostedReleases",
       kind: "hosted_release",
       parse: parseHostedReleaseRecordV1,
+      rows: [],
+    },
+    {
+      directory: "githubCooldowns",
+      kind: "github_cooldown",
+      parse: parseGitHubCooldownV1,
       rows: [],
     },
   ],
@@ -837,6 +843,9 @@ export class GitStateStore implements StateStore {
       add("release_record", release.releases);
       add("hosted_runtime", release.hostedRuntimes);
       add("hosted_release", release.hostedReleases);
+      // Release-role cooldowns use the same kind-less fragment convention as
+      // the repair role; both are addressed by installation id.
+      add("github_cooldown", release.githubCooldowns);
     }
     return Promise.all(
       records.map(async (record) => ({
@@ -1075,6 +1084,9 @@ export class GitStateStore implements StateStore {
           hostedReleases: orderRecords(
             records.hostedReleases,
           ) as HostedReleaseRecordV1[],
+          githubCooldowns: orderRecords(
+            records.githubCooldowns,
+          ) as GitHubCooldownV1[],
         };
         snapshot = parseReleaseStateSnapshotV1(release);
       }
@@ -1461,14 +1473,28 @@ function validateRepairTransition(
     // pending/unavailable observations may update observed reviewer, result,
     // findings and outcome — including becoming completed.
   }
-  // Durable GitHub cooldowns are fail-closed preservation state: one record
-  // per affected installation, never dropped, never moved to a different
-  // installation, and a manual fail-closed hold (null deadline) can never be
-  // silently converted into a finite retry deadline. A new observation may
-  // refresh deadline, observation identity, backoff and observedAt for the
-  // same installation; the m01 writer owns that update policy.
-  for (const priorRecord of prior.githubCooldowns) {
-    const nextRecord = next.githubCooldowns.find(
+  // Durable GitHub cooldowns are fail-closed preservation state; the same
+  // guard protects both refs.
+  return cooldownTransitionMessage(
+    prior.githubCooldowns,
+    next.githubCooldowns,
+  );
+}
+
+/**
+ * Durable GitHub cooldowns are fail-closed preservation state in both refs:
+ * one record per affected installation, never dropped, never moved to a
+ * different installation, and a manual fail-closed hold (null deadline) can
+ * never be silently converted into a finite retry deadline. A new observation
+ * may refresh deadline, observation identity, backoff and observedAt for the
+ * same installation; the role-owned writer owns that update policy.
+ */
+function cooldownTransitionMessage(
+  priorRecords: readonly GitHubCooldownV1[],
+  nextRecords: readonly GitHubCooldownV1[],
+): string | null {
+  for (const priorRecord of priorRecords) {
+    const nextRecord = nextRecords.find(
       (record) => record.installationId === priorRecord.installationId,
     );
     if (nextRecord === undefined) {
@@ -1534,6 +1560,13 @@ function validateReleaseTransition(
       return "release record phase transition is not allowed";
     }
   }
+  // Durable cooldowns are preserved on this ref exactly as on the repair ref:
+  // a record can never disappear, move backward or lift a manual hold.
+  const cooldownMessage = cooldownTransitionMessage(
+    prior.githubCooldowns,
+    next.githubCooldowns,
+  );
+  if (cooldownMessage !== null) return cooldownMessage;
   // Hosted supervisor records share this ref through their own collections;
   // the existing Deno checks above run first, then the hosted preservation and
   // pointer-movement rules.

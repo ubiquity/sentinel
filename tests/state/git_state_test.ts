@@ -100,6 +100,7 @@ function releaseSnapshot(
     releases: [],
     hostedRuntimes: [],
     hostedReleases: [],
+    githubCooldowns: [],
     ...overrides,
   };
 }

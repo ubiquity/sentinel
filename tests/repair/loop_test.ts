@@ -238,6 +238,7 @@ async function makeRig(
       updatedAt: T0 + 2000,
       hostedRuntimes: [],
       hostedReleases: [],
+      githubCooldowns: [],
       releases: [monitoredReleaseRecord("rel-1", "accepted", {
         requestId,
         requestRevision: SHA3,

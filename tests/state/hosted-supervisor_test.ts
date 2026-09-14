@@ -227,6 +227,7 @@ function snapshot(input: {
     releases: input.releases ?? [],
     hostedRuntimes: input.hostedRuntimes,
     hostedReleases: input.hostedReleases,
+    githubCooldowns: [],
   };
 }
 

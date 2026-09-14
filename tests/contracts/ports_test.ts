@@ -371,6 +371,7 @@ Deno.test("StateStore: repair and release branches are strictly separate", async
     releases: [],
     hostedRuntimes: [],
     hostedReleases: [],
+    githubCooldowns: [],
   };
   await store.writeRepair(repairSnapshot, null);
   await store.writeRelease(releaseSnapshot, null);
@@ -782,6 +783,7 @@ Deno.test(
       releases: [],
       hostedRuntimes: [],
       hostedReleases: [],
+      githubCooldowns: [],
     };
     await store.writeRelease(releaseSnapshot, null);
     assert.equal(store.repairWrites, 1);

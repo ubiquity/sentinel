@@ -75,6 +75,13 @@ export interface ReleaseStateSnapshotV1 {
    */
   hostedRuntimes: HostedRuntimeRecordV1[];
   hostedReleases: HostedReleaseRecordV1[];
+  /**
+   * Durable GitHub cooldowns observed by the release role (the hosted
+   * supervisor records its own scope-0 hold here). Repair-role cooldowns stay
+   * in the repair snapshot; the cross-role gates read both refs and never
+   * drop either record. One record per affected installation.
+   */
+  githubCooldowns: GitHubCooldownV1[];
 }
 
 const REPAIR_KEYS = [
@@ -101,6 +108,7 @@ const RELEASE_KEYS = [
   "releases",
   "hostedRuntimes",
   "hostedReleases",
+  "githubCooldowns",
 ] as const;
 
 export function parseRepairStateSnapshotV1(
@@ -232,6 +240,14 @@ export function parseReleaseStateSnapshotV1(
     parseHostedReleaseRecordV1,
   );
   expectUniqueIds(hostedReleases, "$.hostedReleases");
+  const githubCooldowns = expectArray(
+    obj.githubCooldowns,
+    "$.githubCooldowns",
+    MaxItems.snapshotRecords,
+    parseGitHubCooldownV1,
+  );
+  // Cooldowns have no string id; one record per affected installation.
+  expectUniqueInstallationIds(githubCooldowns, "$.githubCooldowns");
 
   return {
     version: "v1",
@@ -242,6 +258,7 @@ export function parseReleaseStateSnapshotV1(
     releases,
     hostedRuntimes,
     hostedReleases,
+    githubCooldowns,
   };
 }
 

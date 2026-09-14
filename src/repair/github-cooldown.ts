@@ -163,7 +163,12 @@ function safeSum(a: number, b: number): number | null {
   return Number.isSafeInteger(sum) ? sum : null;
 }
 
-function computeCooldown(
+/**
+ * Pure cooldown merge: exported so the hosted cross-role gate can apply the
+ * exact same policy to its own ref's prior record before conservatively
+ * merging the other ref's hold.
+ */
+export function computeCooldown(
   installationId: number,
   prior: GitHubCooldownV1 | undefined,
   rate: GitHubRateLimitV1,

@@ -36,6 +36,25 @@ it has no write or test authority. Primary alone owns this register and plan.
 
 ### Historical checkpoints
 
+02:08 UTC: hosted cooldown accepted with direct real-Git evidence
+2626bbb7-d718-439d-b5bf-9a03894e025a at4b884ea+draft. Worker settled exit0;
+actual shell calls only pwd and one final formatter, no repeated shell searches,
+checks/Git/network/children. Primary inspected strict release collection and
+preservation guard, role-limited gates and mechanical Deno/core constructors.
+Both refs' holds block hosted requests; each role writes only its own ref.
+Prepared runtime assignment /tmp/sentinel-hosted-runtime-v2.txt is next; it is
+not launched until this accepted state is committed. Live activation unchanged.
+
+02:02 UTC: reader committed/pushed4b884ea. Sole cooldown assignment
+/tmp/sentinel-hosted-cooldown-launch-v1.txt owns release snapshot/store cooldown
+seams, pure calculator export, hosted role gates and listed mechanical fixtures.
+Exec34677/PID1277882 live cwd/NODE_ENVproduction and header432720 FlashV4.1/max
+verified. Existing registered hosted-cooldown uses real Git fixtures. Expected
+8min/65calls; no checks/network/Git/children, one final formatter. Supplied exact
+source positions and restricted shell calls to pwd/formatter to correct prior
+malformed searches; current calls use read/grep tools. Next wiring design is
+/tmp/sentinel-hosted-wiring-design-v1.txt, primary-owned, not yet implementation.
+
 02:01 UTC: reader accepted with direct fresh evidence
 39f5d4cd-565e-4daa-b02e-00cebe8c90e3 at ad22083+draft. V2/V3 settled exit0;
 V3 PID1277270 live cwd/NODE_ENVproduction and header428008 FlashV4.1/max verified.

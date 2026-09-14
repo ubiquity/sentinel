@@ -132,6 +132,7 @@ function emptyReleaseState(now: number): ReleaseStateSnapshotV1 {
     releases: [],
     hostedRuntimes: [],
     hostedReleases: [],
+    githubCooldowns: [],
   });
 }
 
@@ -291,6 +292,7 @@ async function commitHosted(
       releases: [],
       hostedRuntimes: runtime === null ? [] : [runtime],
       hostedReleases: [...releases].sort(byId),
+      githubCooldowns: [],
     }
     : {
       ...base,

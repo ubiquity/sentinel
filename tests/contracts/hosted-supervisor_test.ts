@@ -181,6 +181,7 @@ function releaseSnapshot(overrides: Record<string, unknown> = {}) {
     releases: [],
     hostedRuntimes: [],
     hostedReleases: [],
+    githubCooldowns: [],
     ...overrides,
   });
 }
@@ -506,6 +507,7 @@ Deno.test("hosted supervisor: snapshot requires the hosted collections and bound
       sequence: 1,
       updatedAt: T,
       releases: [],
+      githubCooldowns: [],
     }),
   );
   assert.ok(
@@ -518,6 +520,7 @@ Deno.test("hosted supervisor: snapshot requires the hosted collections and bound
       releases: [],
       hostedRuntimes: [runtime(), runtime()],
       hostedReleases: [],
+      githubCooldowns: [],
     }),
   );
   assert.ok(
@@ -530,6 +533,7 @@ Deno.test("hosted supervisor: snapshot requires the hosted collections and bound
       releases: [],
       hostedRuntimes: [],
       hostedReleases: [hostedRelease(), hostedRelease()],
+      githubCooldowns: [],
     }),
   );
 });
