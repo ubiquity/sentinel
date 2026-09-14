@@ -2,6 +2,39 @@
 
 ## Active task register — Astra owned
 
+Current checkpoint, 2026-09-14 00:30 UTC: owner supersedes the Mac-only canonical
+location and confirms all work is pushed. Canonical worktree is now
+`/home/codex/repos/ubiquity/sentinel/.codex-worktrees/master-plan-gfa795549e5`,
+same branch `codex/master-plan-gfa795549e5` and preserved goal suffix. Fetched all
+published heads and tags with full history. Remote canonical f0bd7a0 and
+development 556dee8 had identical trees but different ancestry after squash
+delivery; integrated development with an ancestry-preserving merge. The issue-1
+interrupt worker tip 261e044 is already integrated. PR30 at d92d140 remains a
+runtime-owned candidate for issue18; do not merge it manually to claim autonomous
+success. State refs and protected supervisor ref are intentional. All 334 commits
+reported by local fsck also occur in `git rev-list --all`; no unreferenced commit
+was found in that inventory. No Mac inspection is required by current authority.
+
+Current Actions evidence: repair34789040915 has startupReady true, zero terminal
+records, issue21 blocked after no trusted model receipt, issue18 awaiting delivery.
+Merge rejects ruleset23197426 because Actions token sees omitted bypass_actors;
+operator read returns empty actors and current_user_can_bypass never. PR30 is
+also behind strict branch checks. Preserve state and all charged reservations.
+Supervisor34791116998 only confirms existing release-state seed at14bd027; no
+accepted delivery is proved. Next scope is the hosted merge authority/base path,
+then protected supervisor delivery proof; old local-only pause notes below are
+historical and superseded by the owner's current end-to-end Actions instruction.
+
+DeepSeek official catalog and pricing documentation identify `deepseek-flash`
+as V4.1 Flash. This owner's explicit latest-model instruction supersedes the old
+API-name rule for development workers; max/workspace-write and separate runtime
+Luna policy remain. No DSH writer launched yet. Primary re-read playbook2026-09-12.1,
+git-coordination, project-workflow, test-evidence and Deno instructions. Fresh
+read-only Astra audit hosted_acceptance_audit is checking the next correction;
+it has no write or test authority. Primary alone owns this register and plan.
+
+### Historical checkpoints
+
 Current checkpoint, 2026-09-11 20:39 UTC: owner forbids further tests/reviews and requires LOCAL iteration before GitHub deployment. Direct local launcher is configured, schedule paused, issue18 requeued under state063d4203615ffd9cf3025ca48de15bc8f9881434 with all three charges preserved; next eligibility21:25:48.847UTC. Owner temporary-cap question remains unanswered; no cap change is authorized yet. Small local-only source change now enforces owner instructions in exact scope0 Sentinel prompt and refuses push/PR/review/merge operations while preserving local candidate/state/read operations. No tests/reviews/checks run. DSH first local-only turn was stopped for repeated formatting research;9line partial constant preserved, PID25994 settled. Same session626e97f1 resumed with exact edits, completed/exit0 and no children/tests/reviews/Git writes; actual Flash/max and inherited workspace-write/ask verified. Second live env sampling missed the already-ended short process; explicit env-i NODE_ENVproduction launch retained. Primary will commit only local source plus ledger, install exact local revision without pushing or starting CI, and queue one direct local attempt at permitted time unless owner changes the cap. No autonomous candidate/delivery yet. Last real failure was nested supervisor/Codex sandbox startup; outer supervisor is bypassed for this owner-directed local experiment, model sandbox retained.
 
 Historical checkpoint, 2026-09-11 18:22 UTC: canonical a8fbd741013bb840bbe230ff6e0c6a44052d54fe still matches merged PR23. Installed runtime a411d89 and hourly minute53 scheduler are enabled, idle after invocation e3c0270f-d48c-4069-bab4-e418a1e619e0. Issue18 produced no candidate or PR: actual Luna/max receipt records interrupted/output_limit at 414585 characters against 400000. Reservation created18:06:34.323UTC remains charged; no requeue/reset. Actions34631726170 correctly reports red. Updater V2 worker e1d7633d settled exit0/completed, 67 calls, Flash/max/workspace-write/ask verified; no tests/Git writes/children, one formatter. Recovered checks: types e4370ed6 passed; host 1f2c331a failed 10 fixtures on missing completed-review resultId; loop 2614561b failed 5 fixtures on issueNumber null; local host66cb9055 and lint667abf66 passed. Ten new supervisor fixture directories were preserved after setup failures. Fresh read-only Astra fixture audit updater_fixture_audit confirmed missing resultId/issueNumber, wrong repository fixture binding, request lookup missing repo/base and setup cleanup defects; primary found rewritten receipt.createdAt and pending rollback terminalization needing bounded correction. Astra owns ledger/private state/Git; DSH V3 receives one bounded canonical correction for the four owned supervisor/loop source/test files; first edit90sec, handback6min/65calls, no children/checks/Git, one formatter. Playbook hash unchanged and credentials present in launch shell. Next: correct fixture construction, preserve original release timestamps and resumable rollback, then verify without rerunning unchanged failures. Local updater remains unaccepted and undeployed; output preparation and queued stale-base recovery remain required before useful live retry.

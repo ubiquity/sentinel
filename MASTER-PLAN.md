@@ -60,16 +60,29 @@ Do not use labels for admission: ubiquity-os[bot] removes the default labels.
 
 ## 2. Canonical goal identity
 
+Owner location update, 2026-09-14: the VPS replaces the Mac as the authoritative
+development host. The owner confirms all work is pushed to Git. Fetch all
+published branches and tags; Mac access and inspection of its worktrees are no
+longer prerequisites. Keep the existing goal suffix and branch names. The
+original Mac plan identifier below is historical identity, not a host dependency.
+For any remaining Sentinel module assignment in this plan, replace the prefix
+`/Users/nv/repos/ubiquity/sentinel` with `/home/codex/repos/ubiquity/sentinel`;
+retain the recorded lane name and branch. Historical evidence paths stay intact.
+This update does not relocate the separate gateway repository or transfer its
+runtime ownership. Development coding uses DeepSeek V4.1 Flash (`deepseek-flash`)
+at max reasoning; the product runtime remains Luna/max.
+
 | Identity | Value |
 | --- | --- |
-| Canonical plan / goal ID | `/Users/nv/repos/ubiquity/sentinel/MASTER-PLAN.md` |
+| Canonical plan | `/home/codex/repos/ubiquity/sentinel/.codex-worktrees/master-plan-gfa795549e5/MASTER-PLAN.md` |
+| Original goal ID (preserved) | `/Users/nv/repos/ubiquity/sentinel/MASTER-PLAN.md` |
 | Goal slug / hash suffix | `master-plan` / `gfa795549e5` |
-| Repository root | `/Users/nv/repos/ubiquity/sentinel` |
+| Repository root | `/home/codex/repos/ubiquity/sentinel` |
 | Canonical worktree name | `master-plan-gfa795549e5` |
-| Canonical worktree path | `/Users/nv/repos/ubiquity/sentinel/.codex-worktrees/master-plan-gfa795549e5` |
+| Canonical worktree path | `/home/codex/repos/ubiquity/sentinel/.codex-worktrees/master-plan-gfa795549e5` |
 | Canonical branch | `codex/master-plan-gfa795549e5` |
 | Base ref / exact initialization SHA | local `development` / `ec4bd82df4adfdb962e10332607ee4fbf539cdeb` |
-| Lane status / owner | planned, not created; next primary orchestrator creates and owns it |
+| Lane status / owner | existing on VPS; current primary orchestrator owns integration |
 
 
 Local initialization base is a documentation-only commit. After creating the canonical lane from that exact base, fast-forward it to the root's verified planning-only `development` tip before implementation; verify the intervening commits modify only these planning documents. Record that exact documentation tip in `docs/build-status.md` before assigning work. This admits the final plan commit without a circular self-referential SHA. Do not follow a moving root tip blindly if implementation or another writer has appeared.
@@ -307,4 +320,4 @@ Planning completion is distinct: a committed local documentation repository and 
 
 ## Copyable goal sentence
 
-Goal: Use canonical worktree name master-plan-gfa795549e5 at /Users/nv/repos/ubiquity/sentinel/.codex-worktrees/master-plan-gfa795549e5 on branch codex/master-plan-gfa795549e5, read AGENTS.md and /Users/nv/repos/ubiquity/sentinel/MASTER-PLAN.md in full, then orchestrate the standalone Sentinel build through the recorded foundation and isolated DSH module lanes, integrate and validate on the canonical lane, defer Codex review until integrated acceptance, and prove captured-request regression repair plus reviewed delivery and exact Deno rollback within the plan’s activation boundaries.
+Goal: Use canonical worktree name master-plan-gfa795549e5 at /home/codex/repos/ubiquity/sentinel/.codex-worktrees/master-plan-gfa795549e5 on branch codex/master-plan-gfa795549e5, read AGENTS.md and /home/codex/repos/ubiquity/sentinel/.codex-worktrees/master-plan-gfa795549e5/MASTER-PLAN.md in full, then orchestrate Sentinel through end-to-end operational GitHub Actions with DeepSeek V4.1 Flash coding workers, preserve the recorded runtime model and ownership policies, reconcile all published work, and verify autonomous reviewed delivery on the canonical state.
