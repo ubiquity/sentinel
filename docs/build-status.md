@@ -2,12 +2,51 @@
 
 ## Active task register — Astra owned
 
-Updated 2026-09-15 21:17 UTC. This is the only authoritative acceptance ledger.
+Updated 2026-09-15 21:34 UTC. This is the only authoritative acceptance ledger.
 The goal remains incomplete: autonomous GitHub Actions repair against Sentinel,
 then the separately authorized ai.ubq.fi target. Only the current GPT-6 Astra
 integration owner may change scope, status, acceptance or write ownership here.
 
 ### Current checkpoint
+
+- Canonical4620b203a9f1d43f05474c334630eec96f83454a is clean/pushed before this
+  ledger update. M15 corrected PR70 head864d7a0cbb595616b4e90293338f496788b8321a
+  is committed, pushed and integrated. P1 source predicates match exact incident
+  and repository; GPT150 other reader checks passed in c0b7794c, and all3 intake
+  cases passed after one ref-expectation correction in807db572-72ac-4a53-bcf1-
+  34edf56b7c26, child0/executed13052ms. Both CI runs35025797252/35025801940 passed
+  at the exact corrected head (5m41s and5m49s). Review permission remains pending.
+- PR70 REVIEW ALLOWANCE EXHAUSTED: fresh no-history Astra audit proved3 distinct
+  completed local source-only/window/fixture reviews, plus earlier integrated
+  review. MASTER-PLAN156/215 forbid another round or a new-commit reset. Owner
+  question sent21:28:31 asks one additional local+authentic acceptance round;
+  answer pending. Do not launch either review, merge or install before permission.
+  M14 independent implementation/tests continue. No new review charge exists.
+- M14 base54402340a98c4625267ad4018b2b9ce5cd1a4d7f has only two dirty V10 fixture
+  files; no active writer. V10b's genuine unapplied-ack error/eight-step/null
+  initial-result fixes settled. First capture f0b8889a failed only2 TS2322 before
+  test execution. V10c exec49342/PID4168380 settled exit0/completed; live/header
+  production/Flash/max/workspace-write/ask verified, session81ec7d71-8b1e-43b5-
+  85fc-4848444630e5/stream8e3d4036. Four resultId observation types corrected to
+  string|null; all exact runtime equality assertions retained. New three-case
+  capture runs as exec68792, expected roughly7minutes. Earlier ordinary proof
+  54670e80 remains valid; crash cuts are not yet accepted.
+- M17 V6 exec35282/PID4167047 settled exit0/completed; live/header verified,
+  session3eb1e615-b049-4d48-829a-789b3564d598/stream678f23fa. Primary proved exact
+  literal-only mapping to864d7a0/source-v5/private root reader-install-pr70-v5,
+  review reservation attempt3. Typecheckd6bf382d-d4c3-4694-a4da-cf4fe15ff3d9 passed
+  child0/executed7860ms. Clones are clean at864d7a0; release clone is placeholder.
+  No live marker, invocation or reservation; prepared operators await permission.
+- M15 V2 fast one-assertion writer exited before live process attestation;
+  production launch command and persisted Flash/max/workspace-write/ask proved.
+  Preserve this qualification. No repeated paid run solely to recreate attestation.
+- Live queue at repaire409631: issue48 is due base_refresh wait on lost H1;
+  issue61 is blocked with unresolved implementation intent; issue21 is blocked,
+  issues18/58 are done. Only open issues48/61 carry the explicit repair opt-in.
+  There is spare WIP capacity but no additional opted-in task to dispatch; do not
+  create redundant runs or alter admission markers to claim queue saturation.
+
+Earlier continuation checkpoint (superseded only by the exact items above):
 
 - Canonical43c8171cb9f9c077f8863f9582edd2797a248657 includes final M15e5053e0
   and accepted M16 ancestry. The M16 merge retained exactly the canonical tree
