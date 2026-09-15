@@ -2,12 +2,29 @@
 
 ## Active task register — Astra owned
 
-Updated 2026-09-15 21:34 UTC. This is the only authoritative acceptance ledger.
+Updated 2026-09-15 21:53 UTC. This is the only authoritative acceptance ledger.
 The goal remains incomplete: autonomous GitHub Actions repair against Sentinel,
 then the separately authorized ai.ubq.fi target. Only the current GPT-6 Astra
 integration owner may change scope, status, acceptance or write ownership here.
 
 ### Current checkpoint
+
+- Continuation verified at 21:53 UTC: canonical fe4691b4671bcabd504f3c25f551f10bebf9443e
+  matches its published branch; only primary-owned ledger additions are dirty.
+  M14 is at 49cbd624ec727c359da26d6afa86e9f96e7c651e with V12 active, not the
+  earlier V10/V11 states below. V12 exec76948/PID4193888 has useful helper edits.
+  Persisted session4cb92c3f-3d10-40ac-84f3-8957eaa6e2f7 and stream96e970ad
+  prove Flash/max/workspace-write/ask; m14-launch-v12.json proves exact cwd,
+  production and credential presence. No tests run before writer settlement.
+  Existing three-case crash evidence and independent PASS remain valid.
+  The six-file assignment stays frozen; integration fixtures follow serially.
+  Fresh read-only issue61_blocker_scope diagnoses its separate unresolved intent.
+  No replacement model start, state surgery or admission-marker change is allowed.
+  PR70 remains OPEN at864d7a0, development remains8c861f5; extra review permission
+  is still unanswered. No new review, merge or install has been attempted.
+  Fresh refs: repairefe9f80e207ab189398d48fa28e0dcf04f8bcd28 and
+  releaseb52cb9a5d007d2e12bb1ef4abaacfbc10da90685. Supervisor35027650161 passed
+  at launchera076b17f; this proves supervision only, not another delivery.
 
 - Canonical4620b203a9f1d43f05474c334630eec96f83454a is clean/pushed before this
   ledger update. M15 corrected PR70 head864d7a0cbb595616b4e90293338f496788b8321a
@@ -45,6 +62,33 @@ integration owner may change scope, status, acceptance or write ownership here.
   issues18/58 are done. Only open issues48/61 carry the explicit repair opt-in.
   There is spare WIP capacity but no additional opted-in task to dispatch; do not
   create redundant runs or alter admission markers to claim queue saturation.
+
+At21:43 all3 real destructive cases passed64661bc7-296e-4661-ae56-3dd07469981a,
+child0/executed519318ms (four fresh child lifetimes account for roughly8m39s).
+Primary observed exact H1 restoration after unapplied acknowledgement and exact
+saved H2 recovery after both childA stores were deleted, zero replacement model
+calls and preserved accounting. Committed exact fixture as23a5f07. Fresh no-history
+Astra crash_cut_acceptance_audit checks that frozen diff/evidence, no tests.
+Ancestry merge fe4691b into M14 has one conflict: narrow incident predicates
+auto-merged, obsolete Stage1 parking comment/guard conflicts with Stage2 removal.
+V11 exec37580/PID4190047 owns only loop.ts to remove that obsolete guard/markers;
+live production/cwd/credential presence saved. No fixture changes under audit.
+At21:46 fresh Astra crash_cut_acceptance_audit PASS on frozen54402340..23a5f07,
+independently read64661bc7. These are real Git/state consumers with injected
+failure boundaries, not OS kills or hosted proof. H2 reconstruction matches the
+persisted exact SHA; the fixture does not isolate fetching H2 via its preserved
+ref. No substantive fixture correction required. V11 settled exit0/completed,
+session5c23dc7d-5aef-4023-8419-17310e951993/stream432eabb0, required header/live
+verified. Primary confirmed exact narrowed predicates with no parking restored.
+M14 ancestry merge49cbd624ec727c359da26d6afa86e9f96e7c651e is clean and pushed.
+Next serial assignment updates affected fake-port lifecycle fixtures only;
+no further crash-fixture execution without a new reason.
+V12 next writer owns only tests/repair/{helpers,loop_test,selection_test,
+run-bounds_test,base-refresh_test}.ts and tests/host/actions-ci_test.ts at49cbd62.
+Immutable m14-assignment-v12-repair-fixtures.md fixes explicit opt-in fake design
+and remaining push/review ambiguity plus central gate cases. Shared default
+preservation stays unavailable. Real handoff fixtures/source remain frozen.
+Integration fixture updates follow serially after this shared test seam settles.
 
 Earlier continuation checkpoint (superseded only by the exact items above):
 
