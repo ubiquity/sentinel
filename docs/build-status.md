@@ -2,7 +2,7 @@
 
 ## Active task register — Astra owned
 
-Updated 2026-09-15 20:07 UTC. This is the only authoritative acceptance ledger.
+Updated 2026-09-15 20:27 UTC. This is the only authoritative acceptance ledger.
 The goal remains incomplete: autonomous GitHub Actions repair against Sentinel,
 then the separately authorized ai.ubq.fi target. Only the current GPT-6 Astra
 integration owner may change scope, status, acceptance or write ownership here.
@@ -50,11 +50,23 @@ reader is verified as both installed launcher/source and runtime.
 ## Reader delivery: PR70 and PR67
 
 [PR70](https://github.com/ubiquity/sentinel/pull/70) is the focused runtime source:
-head `af3666976241c0739f72e13cb18fc224fc6a7cad`, base
+current head `9cc379d2d4792154c23f6ab66425cfbfc90b16c8`, base
 `8c861f5c4ba0453b1abfe95241ba36274ae42920`. The existing M15 head is already an
-ancestor of canonical `80b58f6`; nine source/test blobs equal PR67's source,
+ancestor of canonical `80b58f6` through its original `af366697` revision;
+nine original source/test blobs equal PR67's source,
 excluding its two documentation changes. Independent delivery-history audit
 approved this reuse of the existing lane.
+
+The new head raises the existing whole-review bound from10to20minutes after
+the observed incomplete review. Close reserve, Luna/max, exact-head admission
+and shared charging are unchanged. M15 writer exec38119/PID3964831 settled exit0,
+session `7ee1feb1-34ed-4d11-95b8-28ee8604425a`, stream
+`8df16abb-6432-4ea3-9184-477fc9e6d7ee`; settings and live production/cwd verified.
+GPT evidence `18bb1a12-df49-4982-b8dd-11f1f6645474` passed55tests/8steps/0failures
+in7274ms. New actual snapshot `0671b484-e14e-42a3-b7d9-b2bca32e1d0b` passed440ms,
+11files/649681prompt bytes. Local exact-source Codex review exec18130 settled
+exit0/no actionable defects. Push CI35019235545 and PR CI35019241504 pending.
+These new bytes require their own authentic review; none has launched yet.
 
 Validation: equivalent integrated source passed 1,127 tests / 84 steps / nine
 existing ignores; focused reader validation passed 149. Exact source-only local
@@ -105,9 +117,9 @@ each branch is `codex/` plus its exact lane name. Never retarget a lane.
 | Module / exact lane | Head / disposition / next action |
 | --- | --- |
 | M14 `master-plan-m14-candidate-durability-a7d774f22e6` | `cd0ff053a89c981b77de8e8c9ab4302ce5ad95d1`; NOT integrated. Publication validator prerequisite committed. V8 settled with ten dirty owned files; focused GPT validation started as exec59710. See below. |
-| M15 `master-plan-m15-candidate-state-reader-aa67276ff21` | `af3666976241c0739f72e13cb18fc224fc6a7cad`; canonical ancestor, focused PR70 delivery pending authentic review and installation. |
+| M15 `master-plan-m15-candidate-state-reader-aa67276ff21` | `9cc379d2d4792154c23f6ab66425cfbfc90b16c8`; review-window correction committed/pushed after focused validation and local review. Integrate reader/prerequisite before M14 behavior. Runtime installation pending. |
 | M16 `master-plan-m16-supervisor-candidate-reader-a45474af741` | `019fc75df644a83f9b02b662a3bf5fc1e7d642dc`; source installed through PR68. Its accepted ancestry still needs integration into canonical after reader delivery. |
-| M17 `master-plan-m17-reader-install-operator-a8a5557444a` | Base `80b58f66440cae044bb043b81bca2c52019c6e85`; V2 private operators settled. No tracked implementation. Release source clone is a placeholder; do not execute until rebound to exact verified PR70 merge and completed receipt. |
+| M17 `master-plan-m17-reader-install-operator-a8a5557444a` | Base `80b58f66440cae044bb043b81bca2c52019c6e85`; V3 private operator rebind running exec85754/PID3977260, immutable m17-assignment-v3.md, two private files only. Clean source-v3 clones at9cc379d; release clone remains a placeholder until actual merge/receipt. |
 
 M07, M08, M10, M11, M12 and M13 recorded tips were freshly verified as canonical
 ancestors on 2026-09-15 19:55 UTC. Their exact lanes and tips remain in the full
@@ -161,6 +173,17 @@ V8b launched20:13 as exec60647/PID3960889 in the same lane; live production/cwd/
 credential-presence proof is `m14-launch-v8b.json`. Persisted session
 `b14d1ca0-1834-4aa5-9636-297b024b6a00` and stream
 `bfcbecf1-74a3-4bad-bf26-d24a8eba4953` confirm Flash/max/workspace-write/ask.
+V8b settled exit0/completed in63calls. V8c settled exit0 after correcting exact
+object peeling, preventing lazy network fetch and binding the actual Git store;
+PID3967452/session `b2640453-406f-477b-ad07-1d5b36c89dcd`/stream
+`c5d71b62-09f2-423e-9f39-42e486e92b42`, required settings and launch verified.
+New GPT evidence `a432ac8e-b826-4e08-be68-7b12fe1efe5c` passed50 and failed only
+one new negative fixture before its consumer: the strict parser rejected the
+fixture's unequal target/preserved head. V8d exec68169/PID3972936 settled exit0
+after changing it to a parsed descriptor with mismatched operation/ref digest.
+Fresh audit found one remaining cleanup path: thrown validation must preserve
+scratch just like unavailable validation. V8e exec61268/PID3977746 owns only
+actions-candidates.ts for that correction. No new unchanged test execution.
 
 Next serial work: preserve → publish and acknowledge → refresh → preserve/publish
 successor → one central current-base/current-publication review gate before
