@@ -2,7 +2,7 @@
 
 ## Active task register — Astra owned
 
-Updated 2026-09-15 21:13 UTC. This is the only authoritative acceptance ledger.
+Updated 2026-09-15 21:17 UTC. This is the only authoritative acceptance ledger.
 The goal remains incomplete: autonomous GitHub Actions repair against Sentinel,
 then the separately authorized ai.ubq.fi target. Only the current GPT-6 Astra
 integration owner may change scope, status, acceptance or write ownership here.
@@ -46,6 +46,38 @@ or superseded drafts, is retained in this file at Git commit
 `74e67ec5a55fdd273f5ef2b56a477ddb27bd3072`. Read it with
 `git show 74e67ec5a55fdd273f5ef2b56a477ddb27bd3072:docs/build-status.md`.
 This compaction changes no acceptance decision and creates no second ledger.
+
+Continuation verification at21:17: canonical eef0d5b is clean and pushed.
+M14 lifecycle checkpoint f160f08 is committed; canonical ancestry merged as
+54402340a98c4625267ad4018b2b9ce5cd1a4d7f. Its real destructive test passed as
+recorded above. M15 remains clean e5053e0; fresh Astra confirmed P1 and mapped
+exact repository/incident matches for BOTH intake lookups, preserving dedupe.
+New disjoint assignments: M15 m15-assignment-p1-intake-v1.md owns only loop.ts
+and loop_test.ts. M14 m14-assignment-v10-crash-fixture.md owns only the two
+candidate-handoff fixture files. M14 source/other tests are frozen. Primary
+integrates accepted M15 before serial M14 unit updates; keep M14 out of Stage1.
+No live review/operator active, no release request; prior review charge retained.
+M15 P1 launch exec23066/PID4110122, persisted sessioncd75284c-01d1-4fec-beae-
+b73718da1d6a/stream5c93477a; M14 V10 launch exec49494/PID4110152, persisted
+session40866b2f-41c2-407f-bcd6-7f0773a37191/stream400897e8. Both exact cwd,
+production and credential-presence attestations saved in
+launch-m14-v10-m15-p1-v1.json. Both headers confirm Flash/max/workspace-write/ask.
+M14 clean checkpoint5440234 is pushed; current V10 remains unaccepted.
+Latest read-only hosted check: supervisor35024154550 succeeded at launcher
+a076b17f; repaire409631/releasea63128f, development8c861f5 unchanged. Recheck
+these historical refs before the next live operation.
+At21:26 M15 P1 V1 settled exit0 in52calls; primary inspected exact source/test
+diff. GPT c0b7794c-fa63-4d52-837b-47045ec4d420 passed150/failed1, child1,
+executed137090ms. Only new test expected short branch rather than full Git ref.
+M15 V2 exec60475 owns that one assertion in loop_test.ts; source stays frozen.
+M14 V10 settled exit0/completed in55calls with two dirty fixture files. Primary
+found three fixture-contract corrections before first execution: never return
+applied for an unapplied acknowledgement, remove two iterations beyond the
+eight-step cap, and allow the initial refresh intent's resultId to be null
+before preparation. V10b exec99518 owns only candidate-handoff_test.ts for these
+three changes; real child exact-H2 preservation predicate stays unchanged.
+Fresh read-only review-round audit is reconciling PR70's used acceptance rounds.
+Do not launch another review before that count is resolved; source work proceeds.
 
 Continuation verification at20:34: canonical3536daf is clean; M15 remains clean
 at9cc379d; M14 has only its ten owned changes; no process has a worker-lane cwd.
