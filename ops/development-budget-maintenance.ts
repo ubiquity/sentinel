@@ -1205,7 +1205,11 @@ async function readInstalledOutcome(
     throw new Error(STATIC_RELEASE);
   }
   const receiptId = record.request.source.reviewReceiptId;
-  if (receiptId === null) throw new Error(STATIC_RECEIPT);
+  // A valid completed receipt under an old or other operation key is a
+  // different operation and can never prove this installed attempt-2 outcome.
+  if (receiptId !== reviewRecordId(ATTEMPT_2_OPERATION_KEY)) {
+    throw new Error(STATIC_RECEIPT);
+  }
   const repair = await readStrictRepair(state);
   const receipt = repair.snapshot.reviews.find((entry) =>
     entry.id === receiptId

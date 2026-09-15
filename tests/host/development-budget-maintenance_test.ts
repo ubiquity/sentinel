@@ -96,9 +96,12 @@ import type {
 } from "../../.sentinel-policy-source/src/replay/runtime.ts";
 import {
   gitRun,
+  makeRemoteCtx,
   testGitEnv,
   workRecord,
 } from "../../.sentinel-policy-source/tests/state/helpers.ts";
+import { persistHostedReceipt } from "../../.sentinel-policy-source/tests/host/hosted-receipt-fixture.ts";
+import { createReleaseStateStore } from "../../.sentinel-policy-source/src/state/mod.ts";
 import {
   DiagnosticReviewPrepareCapabilityV1,
   MAINTENANCE_JOB,
@@ -1384,6 +1387,163 @@ Deno.test("maintenance fails closed when the merged review no longer matches its
     assert.equal(harness.state.writes, 0);
     assert.equal(harness.review.requestCalls, 0);
   });
+});
+
+// ---------------------------------------------------------------------------
+// Installed acceptance binds the exact attempt-2 receipt only
+// ---------------------------------------------------------------------------
+
+/** Mutable clock for the legal-lifecycle fixture; the suite never sleeps. */
+function lifecycleClock(
+  start: number,
+): { now(): number; advance(ms: number): void } {
+  let value = start;
+  return {
+    now: () => value,
+    advance: (ms: number) => {
+      value += ms;
+    },
+  };
+}
+
+Deno.test("maintenance requires the exact attempt-2 receipt for an installed runtime", async () => {
+  const currentReceipt = derivedReceipt(completedObservation({ findings: [] }));
+  // The same otherwise-valid receipt shape under the immutable attempt-1 key.
+  const oldReceipt = deriveReviewReceiptV1(
+    completedObservation({ findings: [] }),
+    {
+      operationKey: PRIOR_OPERATION_KEY,
+      submittedAt: REQUESTED_AT,
+      prNumber: PULL_REQUEST,
+      expectedHead: REVIEWED_HEAD,
+      expectedBase: REVIEWED_BASE,
+      expectedReviewer: MAINTENANCE_REVIEWER,
+    },
+    REPOSITORY,
+  );
+  assert.equal(currentReceipt.id, reviewRecordId(OPERATION_KEY));
+  assert.equal(oldReceipt.id, reviewRecordId(PRIOR_OPERATION_KEY));
+  assert.notEqual(oldReceipt.id, reviewRecordId(OPERATION_KEY));
+
+  const cases: {
+    label: string;
+    receipt: ReviewReceiptV1;
+    refused: boolean;
+  }[] = [
+    {
+      label: "current attempt-2 receipt",
+      receipt: currentReceipt,
+      refused: false,
+    },
+    { label: "old attempt-1 receipt", receipt: oldReceipt, refused: true },
+  ];
+
+  for (const testCase of cases) {
+    const root = await Deno.makeTempDir({
+      dir: Deno.cwd(),
+      prefix: "sentinel-installed-receipt-",
+    });
+    try {
+      const gitHome = `${root}/git-home`;
+      await Deno.mkdir(gitHome, { recursive: true });
+      const remote = await makeRemoteCtx(root, testGitEnv(gitHome));
+      const store = createReleaseStateStore({
+        scratchDir: `${root}/scratch`,
+        remoteUrl: remote.remoteUrl,
+      });
+      // Exact merged-release request, bound to the case's real stored receipt.
+      const request = parseReleaseRequestV1({
+        version: "v1",
+        kind: "release_request",
+        id: await releaseRequestId(REPOSITORY, MERGE_SHA, PULL_REQUEST),
+        target: { repository: REPOSITORY, environment: "production" },
+        revision: MERGE_SHA,
+        source: {
+          pullRequest: PULL_REQUEST,
+          reviewRequestId: testCase.receipt.requestId,
+          reviewReceiptId: testCase.receipt.id,
+          head: REVIEWED_HEAD,
+          base: REVIEWED_BASE,
+        },
+        status: "open",
+        failureReason: null,
+        createdAt: T0 + 90_000,
+      });
+      // Drive the actual supervisor core over the real release store until the
+      // accepted record exists; the clock stays after every lifecycle stamp.
+      const persisted = await persistHostedReceipt({
+        release: store,
+        clock: lifecycleClock(T0 + 120_000),
+        request,
+        priorRevision: REVIEWED_BASE,
+        phase: "accepted",
+      });
+      assert.equal(persisted.phase, "accepted", testCase.label);
+      assert.equal(
+        persisted.request.source.reviewReceiptId,
+        testCase.receipt.id,
+        testCase.label,
+      );
+      const read = await store.readRelease();
+      if (!read.ok || read.value.status !== "found") {
+        throw new Error(`${testCase.label}: release snapshot is unavailable`);
+      }
+      const installedRelease = read.value.snapshot;
+      const installedRuntime = installedRelease.hostedRuntimes[0];
+      assert.equal(installedRuntime.activeRevision, MERGE_SHA, testCase.label);
+      assert.equal(installedRuntime.execution, null, testCase.label);
+
+      await withHarness({
+        repair: repairSnapshot({
+          reviews: [testCase.receipt],
+          releaseRequests: [request],
+        }),
+        release: installedRelease,
+        pull: mergedPullRequest(),
+        observation: completedObservation({ findings: [] }),
+      }, async (harness) => {
+        const beforeRepair = canonicalStringify(harness.state.repair);
+        const beforeRelease = canonicalStringify(harness.state.release);
+        if (testCase.refused) {
+          await assert.rejects(
+            () => runMaintenanceEntrypoint(inputFor(harness)),
+            (error: unknown) =>
+              error instanceof Error && error.message === STATIC_RECEIPT,
+            testCase.label,
+          );
+        } else {
+          const outcome = await runMaintenanceEntrypoint(inputFor(harness));
+          assert.equal(outcome.status, "already_installed", testCase.label);
+          if (outcome.status !== "already_installed") return;
+          assert.equal(outcome.requestId, request.id);
+          assert.equal(outcome.receiptId, currentReceipt.id);
+          assert.equal(outcome.revision, MERGE_SHA);
+          assert.equal(outcome.generation, installedRuntime.generation);
+        }
+        // No state write, no model/review request, no merge verification, and
+        // both durable snapshots byte-for-byte preserved.
+        assert.equal(harness.state.writes, 0, testCase.label);
+        assert.equal(harness.review.requestCalls, 0, testCase.label);
+        assert.equal(harness.reads.verifyCalls, 0, testCase.label);
+        assert.equal(
+          canonicalStringify(harness.state.repair),
+          beforeRepair,
+          testCase.label,
+        );
+        assert.equal(
+          canonicalStringify(harness.state.release),
+          beforeRelease,
+          testCase.label,
+        );
+      });
+    } finally {
+      try {
+        await Deno.remove(root, { recursive: true });
+      } catch {
+        // Best-effort cleanup of this test's own temporary root.
+      }
+    }
+  }
 });
 
 // ---------------------------------------------------------------------------
