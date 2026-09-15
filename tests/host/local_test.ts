@@ -3,9 +3,11 @@
 import assert from "node:assert/strict";
 
 import {
+  createLocalCandidateLoader,
   createLocalRepositoryConfig,
   ensureBareStateRepository,
   ensureTaskCheckout,
+  finalizeLocalModelResult,
   localCheckoutKey,
   type LocalRepairHostOptionsV1,
   prepareSourceRepository,
@@ -35,7 +37,7 @@ import { DurableGitHubCooldownGate } from "../../src/repair/github-cooldown.ts";
 import { LOOP_STOP_MARKER } from "../../src/repair/model-port.ts";
 import { FakeClock, FakeGithub, MemoryState } from "../repair/helpers.ts";
 import { REPO, SHA1, SHA3, T0 } from "../state/helpers.ts";
-import { gitRun, testGitEnv } from "../state/helpers.ts";
+import { gitRun, makeRemoteCtx, testGitEnv } from "../state/helpers.ts";
 
 Deno.test("local repository config parses with fixed local scope", () => {
   const config = createLocalRepositoryConfig();
@@ -1637,6 +1639,374 @@ Deno.test(
       );
     } finally {
       await Deno.remove(fixture.root, { recursive: true }).catch(() => {});
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Candidate objects: exact task-mapped producer-checkout import and the
+// trusted-receipt preservation boundary.
+// ---------------------------------------------------------------------------
+
+Deno.test(
+  "local candidate loader imports only the exact task-mapped candidate",
+  async () => {
+    // The fixture root MUST be absolute: a relative root is duplicated inside
+    // nested Git commands and corrupts every later path assertion.
+    const root = await Deno.realPath(
+      await Deno.makeTempDir({
+        dir: ".",
+        prefix: "sentinel-candidate-loader-",
+      }),
+    );
+    const home = `${root}/home`;
+    const env = testGitEnv(home);
+    await Deno.mkdir(home, { recursive: true });
+    try {
+      const ctx = await makeRemoteCtx(root, env);
+      await Deno.writeTextFile(`${ctx.work}/base.txt`, "base\n");
+      assert.ok((await gitRun(ctx.work, ["add", "-A"], env)).ok);
+      assert.ok(
+        (await gitRun(ctx.work, ["commit", "-q", "-m", "base"], env)).ok,
+      );
+      assert.ok(
+        (await gitRun(ctx.work, ["branch", "-M", "development"], env)).ok,
+      );
+      const base = (await gitRun(ctx.work, ["rev-parse", "HEAD"], env))
+        .stdout.trim() as GitSha;
+      await Deno.writeTextFile(`${ctx.work}/candidate.txt`, "candidate\n");
+      assert.ok((await gitRun(ctx.work, ["add", "-A"], env)).ok);
+      assert.ok(
+        (await gitRun(ctx.work, ["commit", "-q", "-m", "candidate"], env)).ok,
+      );
+      const head = (await gitRun(ctx.work, ["rev-parse", "HEAD"], env))
+        .stdout.trim() as GitSha;
+
+      const stateRoot = `${root}/state`;
+      const taskId = asWorkItemId("issue-42");
+      const key = await localCheckoutKey(taskId);
+      const checkoutsDir = `${stateRoot}/checkouts`;
+      const checkout = `${checkoutsDir}/${key}`;
+      const mappingPath = `${checkoutsDir}/${key}.json`;
+      await Deno.mkdir(checkoutsDir, { recursive: true });
+      const cloneInto = async (destination: string, source: string) => {
+        assert.ok(
+          (await gitRun(
+            root,
+            ["clone", "-q", "--no-hardlinks", source, destination],
+            env,
+          )).ok,
+        );
+      };
+      const mapping = (
+        value: string,
+        overrides: Record<string, unknown> = {},
+      ) =>
+        JSON.stringify({
+          version: "v1",
+          kind: "local_checkout",
+          taskId: value,
+          base,
+          key,
+          ...overrides,
+        }) + "\n";
+      const freshSource = async (name: string): Promise<string> => {
+        const source = `${root}/${name}`;
+        assert.ok(
+          (await gitRun(root, ["init", "-q", "--bare", source], env)).ok,
+        );
+        return source;
+      };
+      const load = (source: string) =>
+        createLocalCandidateLoader({
+          stateRoot,
+          sourcePath: source,
+          scratch: home,
+          trustedPath: env.PATH ?? "/usr/bin:/bin",
+        });
+      // A genuinely base-only mirror and checkout: a clone of ctx.work keeps
+      // carrying the candidate object, which would invalidate every later
+      // absence assertion.
+      const baseOnly = `${root}/base-only.git`;
+      assert.ok(
+        (await gitRun(root, ["init", "-q", "--bare", baseOnly], env)).ok,
+      );
+      assert.ok(
+        (await gitRun(
+          ctx.work,
+          ["push", "-q", baseOnly, `${base}:refs/heads/development`],
+          env,
+        )).ok,
+      );
+      const resetBaseOnlyCheckout = async () => {
+        await Deno.remove(checkout, { recursive: true }).catch(() => {});
+        await cloneInto(checkout, baseOnly);
+        assert.ok(
+          (await gitRun(checkout, ["checkout", "-q", "--detach", base], env))
+            .ok,
+        );
+      };
+
+      // 1. A fresh empty source mirror imports the exact candidate from the
+      // exact task-mapped producer checkout.
+      await cloneInto(checkout, ctx.work);
+      await Deno.writeTextFile(mappingPath, mapping(taskId));
+      const sourceA = await freshSource("source-a.git");
+      const loaded = await load(sourceA)(taskId, head);
+      assert.ok(loaded.ok, JSON.stringify(loaded));
+      const imported = await gitRun(
+        sourceA,
+        ["rev-parse", `refs/sentinel/candidates/${key}`],
+        env,
+      );
+      assert.equal(imported.stdout.trim(), head);
+      assert.equal(
+        (await gitRun(sourceA, ["cat-file", "-e", `${base}^{commit}`], env))
+          .code,
+        0,
+      );
+
+      // 2. The positive moved-HEAD case: HEAD is detached at the base while
+      // the exact object still exists, so the exact object is imported and no
+      // mutable HEAD is ever resolved.
+      assert.ok(
+        (await gitRun(checkout, ["checkout", "-q", "--detach", base], env)).ok,
+      );
+      const sourceB = await freshSource("source-b.git");
+      const moved = await load(sourceB)(taskId, head);
+      assert.ok(moved.ok, JSON.stringify(moved));
+      assert.equal(
+        (await gitRun(
+          sourceB,
+          ["rev-parse", `refs/sentinel/candidates/${key}`],
+          env,
+        )).stdout.trim(),
+        head,
+      );
+
+      // 3. A source mirror that cannot be read is unavailable, never loss.
+      const unreadable = await load(`${root}/no-such-source.git`)(taskId, head);
+      assert.equal(unreadable.ok, false);
+      assert.equal(unreadable.ok ? null : unreadable.error.kind, "unavailable");
+
+      await resetBaseOnlyCheckout();
+
+      // 4. A wrong-task mapping is unknown availability even though the exact
+      // object is genuinely absent from this checkout: never positive loss.
+      await Deno.writeTextFile(mappingPath, mapping(asWorkItemId("issue-43")));
+      const wrongTask = await load(await freshSource("source-c.git"))(
+        taskId,
+        head,
+      );
+      assert.equal(wrongTask.ok, false);
+      assert.equal(wrongTask.ok ? null : wrongTask.error.kind, "unavailable");
+
+      // 5. Corrupt JSON and mismatched metadata are the same unknown state.
+      await Deno.writeTextFile(mappingPath, "{ not json\n");
+      const corrupt = await load(await freshSource("source-d.git"))(
+        taskId,
+        head,
+      );
+      assert.equal(corrupt.ok, false);
+      assert.equal(corrupt.ok ? null : corrupt.error.kind, "unavailable");
+      await Deno.writeTextFile(mappingPath, mapping(taskId, { version: "v2" }));
+      const wrongVersion = await load(await freshSource("source-e.git"))(
+        taskId,
+        head,
+      );
+      assert.equal(wrongVersion.ok, false);
+      assert.equal(
+        wrongVersion.ok ? null : wrongVersion.error.kind,
+        "unavailable",
+      );
+
+      // 6. A present path that is not a usable Git store can never prove
+      // absence.
+      await Deno.writeTextFile(mappingPath, mapping(taskId));
+      await Deno.remove(checkout, { recursive: true });
+      await Deno.writeTextFile(checkout, "not a git repository\n");
+      const invalidStore = await load(await freshSource("source-f.git"))(
+        taskId,
+        head,
+      );
+      assert.equal(invalidStore.ok, false);
+      assert.equal(
+        invalidStore.ok ? null : invalidStore.error.kind,
+        "unavailable",
+      );
+
+      // 7. An exact mapping with a proven-missing checkout is positive loss.
+      await Deno.remove(checkout);
+      const absentCheckout = await load(await freshSource("source-g.git"))(
+        taskId,
+        head,
+      );
+      assert.equal(absentCheckout.ok, false);
+      assert.equal(
+        absentCheckout.ok ? null : absentCheckout.error.kind,
+        "not_found",
+      );
+
+      // 8. The exact mapped checkout without the exact object is positive
+      // loss: this checkout genuinely has only the base commit.
+      await resetBaseOnlyCheckout();
+      const absentObject = await load(await freshSource("source-h.git"))(
+        taskId,
+        head,
+      );
+      assert.equal(absentObject.ok, false);
+      assert.equal(
+        absentObject.ok ? null : absentObject.error.kind,
+        "not_found",
+      );
+
+      // 9. A never-published producer (no mapping, no checkout) is the same
+      // proven absence.
+      await Deno.remove(mappingPath);
+      await Deno.remove(checkout, { recursive: true });
+      const never = await load(await freshSource("source-i.git"))(taskId, head);
+      assert.equal(never.ok, false);
+      assert.equal(never.ok ? null : never.error.kind, "not_found");
+    } finally {
+      await Deno.remove(root, { recursive: true }).catch(() => {});
+    }
+  },
+);
+
+Deno.test(
+  "local receipt finalization: a trusted completed receipt survives a failed import",
+  async () => {
+    const captured = captureConsoleLog();
+    const stateRoot = await Deno.makeTempDir({
+      dir: ".",
+      prefix: "sentinel-finalize-",
+    });
+    try {
+      const request = modelRequest();
+      const original = receipt();
+      assert.equal(original.ok, true);
+      const key = await localCheckoutKey(request.taskId);
+      const checkout = `${stateRoot}/checkouts/${key}`;
+      await Deno.mkdir(checkout, { recursive: true });
+      await Deno.writeTextFile(`${checkout}/keep.txt`, "keep\n");
+      let imports = 0;
+      const result = await finalizeLocalModelResult({
+        stateRoot,
+        request,
+        result: original,
+        observedAt: T0,
+        importCandidate: () => {
+          imports++;
+          return Promise.resolve(false);
+        },
+      });
+      assert.deepEqual(
+        result,
+        original,
+        "the exact original trusted receipt is returned unchanged",
+      );
+      assert.equal(imports, 1);
+      assert.equal(
+        (await Deno.stat(`${checkout}/keep.txt`)).isFile,
+        true,
+        "the persistent producer checkout is preserved",
+      );
+      // The existing diagnostic path still saved the private minimal receipt,
+      // including the exact candidate head; no publication happened here.
+      const resultsDir = `${stateRoot}/model-results/${key}`;
+      const files = [...Deno.readDirSync(resultsDir)];
+      assert.equal(files.length, 1);
+      const written = await Deno.readTextFile(
+        `${resultsDir}/${files[0]!.name}`,
+      );
+      assert.equal(written.includes(SHA3), true);
+      assert.equal(written.includes("thread-1"), true);
+      assert.equal(captured.lines.length, 1);
+      const advisory = JSON.parse(captured.lines[0]!) as Record<
+        string,
+        unknown
+      >;
+      assert.equal(advisory.candidatePresent, true);
+    } finally {
+      captured.restore();
+      await Deno.remove(stateRoot, { recursive: true }).catch(() => {});
+    }
+  },
+);
+
+Deno.test(
+  "local receipt finalization: a diagnostic write failure keeps the completed receipt",
+  async () => {
+    const captured = captureConsoleLog();
+    const stateRoot = await Deno.makeTempDir({
+      dir: ".",
+      prefix: "sentinel-finalize-failure-",
+    });
+    try {
+      // A plain file where the model-results directory belongs forces the
+      // private diagnostic write to fail through the existing path.
+      await Deno.writeTextFile(`${stateRoot}/model-results`, "occupied\n");
+      const request = modelRequest();
+      const original = receipt();
+      let imports = 0;
+      const result = await finalizeLocalModelResult({
+        stateRoot,
+        request,
+        result: original,
+        observedAt: T0,
+        importCandidate: () => {
+          imports++;
+          return Promise.resolve(false);
+        },
+      });
+      assert.deepEqual(
+        result,
+        original,
+        "the trusted completed receipt is never rewritten as unavailable",
+      );
+      assert.equal(
+        imports,
+        0,
+        "an unsaved diagnostic never imports or publishes a candidate",
+      );
+      assert.equal(captured.lines.length, 1);
+      assert.equal(
+        captured.lines[0]!.includes("trusted completed receipt is preserved"),
+        true,
+        "the static diagnostic failure is reported",
+      );
+
+      // Non-completed port errors keep the original conservative behavior.
+      const failure: PortResultV1<ModelRunReceiptV1> = {
+        ok: false,
+        error: { kind: "unavailable", detail: DUMMY_RAW_ERROR },
+      };
+      const conservative = await finalizeLocalModelResult({
+        stateRoot,
+        request,
+        result: failure,
+        observedAt: T0,
+        importCandidate: () => {
+          imports++;
+          return Promise.resolve(false);
+        },
+      });
+      assert.equal(conservative.ok, false);
+      assert.equal(
+        conservative.ok ? null : conservative.error.kind,
+        "unavailable",
+      );
+      assert.equal(
+        conservative.ok
+          ? null
+          : conservative.error.detail.includes(DUMMY_RAW_ERROR),
+        false,
+      );
+      assert.equal(imports, 0);
+      assert.equal(captured.lines.length, 1);
+    } finally {
+      captured.restore();
+      await Deno.remove(stateRoot, { recursive: true }).catch(() => {});
     }
   },
 );

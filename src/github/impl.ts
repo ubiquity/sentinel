@@ -30,6 +30,7 @@ import { asFindingFingerprint } from "../contracts/brands.ts";
 import { canonicalStringifySha256 } from "../contracts/canonical.ts";
 import { parseMergeRequestV1 } from "../contracts/merge-request.ts";
 import type {
+  CandidatePreservationRequestV1,
   Clock,
   GitHubBranchProtectionsV1,
   GitHubChecksV1,
@@ -273,6 +274,24 @@ export class GitHubPortImpl implements GitHubPort {
 
   readRef(ref: string): Promise<PortResultV1<GitHubRefV1 | null>> {
     return this.client.readRef(ref);
+  }
+
+  /**
+   * Candidate preservation is a host-composed capability, not a generic port
+   * behavior: this instance has no trusted candidate-object loader and no
+   * fresh empty object store, so every call is a static `unavailable` and no
+   * external effect happens. The trusted host composes the real capability on
+   * this same port instance (SAME readRef/pushHead transport).
+   */
+  preserveCandidate(
+    _request: CandidatePreservationRequestV1,
+  ): Promise<PortResultV1<void>> {
+    return Promise.resolve(
+      portError(
+        "unavailable",
+        "candidate preservation is not composed on this port",
+      ),
+    );
   }
 
   // -------------------------------------------------------------------------

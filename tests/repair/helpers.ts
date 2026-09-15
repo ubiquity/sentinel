@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 
 import type { FixtureDigest, GitSha } from "../../src/contracts/brands.ts";
 import type {
+  CandidatePreservationRequestV1,
   Clock,
   GitHubIssueV1,
   GitHubPort,
@@ -444,6 +445,20 @@ export class FakeGithub implements GitHubPort {
       );
     }
     return Promise.resolve(portOk(this.options.closeOutcome ?? "closed"));
+  }
+
+  /**
+   * Explicit unavailable default: candidate preservation is a host-composed
+   * capability. This recording fake never reports a preservation success and
+   * never performs a write; tests that need the real behavior compose the
+   * actual preserver over a real port and git remote.
+   */
+  preserveCandidate(
+    _request: CandidatePreservationRequestV1,
+  ): Promise<PortResultV1<void>> {
+    return Promise.resolve(
+      portError("unavailable", "candidate preservation is not composed"),
+    );
   }
 
   /** Deliver a completed review for the current release head. */
