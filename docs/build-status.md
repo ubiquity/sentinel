@@ -2,6 +2,236 @@
 
 ## Active task register — Astra owned
 
+18:48 UTC M15 focused acceptance is READY for integration. The first executable
+suite capture27289784-2900-4b77-bd73-1c6f56dc7a86 passed148 and failed only the
+new legacy-intake fixture (114078ms). Fresh static fixture audit found its missing
+authoritative github.issues entry. DSH V4 added only that entry,5calls, exec20698
+exit0, persistedf2061653/stream93b7e06d completed; m15-launch-v4.json and header
+prove exact cwd/production/Flash/max/workspace-write/ask. Corrected test capture
+2f8f673b-74ef-4637-b2b0-e137b97910a5 passed,8359ms/child0. Full evidence namespace
+is459acb17ad9ea6b3117a31ea7e3934ee42910852ebdd735c5b0a8110d8083e59; original
+148 passes remain valid because only the failing fixture changed. No worker
+tests or source changes during corrections. Integrated validation/review remain.
+
+M14 regression V3 is committed only in its isolated lane as
+88dbef7ee2655e953da0191e0a5caea9d98e0287 (clean). It is an accepted RED regression,
+not accepted product behavior. Capturee87d027a-14e4-404b-8fa5-3d3363a29dfb
+executed6991ms/child1 at the same candidate-restore boundary; the new frozen
+accounting assertion passed before teardown. Archived m14-red-v3-evidence.json.
+Final test/child hashes94123ffd/a5f51609. V3 settled15calls, exec51228 exit0,
+persistedd7333f0c/stream25650943 completed and launch/header proof verified.
+Do not include this deliberately failing fixture in the reader-only release.
+
+Ad hoc release-integration lane m16-supervisor-candidate-reader is PLANNED,
+name master-plan-m16-supervisor-candidate-reader-a45474af741, branch
+codex/master-plan-m16-supervisor-candidate-reader-a45474af741, path
+/home/codex/repos/ubiquity/sentinel/.codex-worktrees/master-plan-m16-supervisor-candidate-reader-a45474af741,
+base protected source3e10378598a45a8bbdfac06781626a83eb419363. After M15 source
+integration, copy only its reviewed parser and corresponding new contract tests
+into this source lane; do not merge unrelated development ancestry into the
+launcher. Separate source and runtime PR/revision identities remain mandatory.
+The source lane is a deployment counterpart of M15, not a competing work ledger.
+
+18:44 UTC hosted read-only audit: latest run35007546068 is healthy but only
+renewed issue48's unavailable wait. Issue61/PR63 were already present and remain
+unchanged/blocked; no new delivery occurred. Runtime20aae115/gen5 and
+launcher3e103785 are current; installed limits are120/hour with no weekly cap.
+Release execution is null. Historical queued34874909140 owns no current job.
+The existing temporary review/release operator pattern is being mapped for
+exact reviewed maintenance installation; no old fixed-input script is run.
+
+18:39 UTC continuation re-anchored canonical and both worker lanes at
+8c861f5c4ba0453b1abfe95241ba36274ae42920; no competing local writer found.
+Remote development and supervisor3e103785 are unchanged; live repair/release refs
+advanced to2aed7ba3/a2737b56, so earlier state heads are historical only.
+
+M15 V1 settled normally (exec79035 exit0, terminal completed),140calls against
+assigned80: overrun recorded, no worker tests. Fresh no-history Astra
+candidate_reader_acceptance_audit passed its four-file production delta
+(SHA2568fef2a0492f45fd9f484c9c9dce634f48dee38abd900673b11ab27a72171b08f)
+and required three fixture corrections: two invalid expired waits and one WIP
+expectation. M15 V2 corrected only those fixtures and settled (exec60350 exit0,
+persisteddf8d459e, stream154b466e, completed). Header proves Flash/max and
+workspace-write/ask. Launch command set production in its minimal environment,
+but the primary's /proc check ran after exit, so independent live-process
+NODE_ENV proof is missing for V2; do not claim full launch compliance. Preserve
+and independently validate the small delta rather than rerun unchanged work.
+GPT first focused m15-candidate-reader execution is running as exec5914.
+
+M14 V2 completed normally (exec40863 exit0, terminal completed),35calls. GPT
+capture459acb17ad9ea6b3117a31ea7e3934ee42910852ebdd735c5b0a8110d8083e59/
+fe96fe17-b7ce-4c28-b0d6-29d767d916e2 executed9467ms/child1. It reproduces the
+same real missing-candidate boundary after3of8 bounded handoff steps and fresh
+B1-only fetch; H1 was absent before restoration and remote remained H0.
+Full archived receipt/output: poka-yoke/m14-red-v2-evidence.json. Fresh audit
+passed its five corrections except the post-receipt accounting baseline must
+remain frozen before handoff. M14 V3 is narrowly correcting that assertion only,
+exec51228/PID3676044, immutable m14-assignment-v3.md; m14-launch-v3.json proves
+exact cwd, production and credential presence. No new source behavior is written.
+
+Reader installation route research proceeds independently. Stage1 must become
+both source and runtime before Stage2 writes; no old fixed-input operator script
+has been executed, no live state changed by this continuation, and no runtime
+acceptance is claimed from these tests/audits.
+
+18:25 UTC M14 regression now REPRODUCES the actual failure, not a setup error.
+GPT capture459acb17ad9ea6b3117a31ea7e3934ee42910852ebdd735c5b0a8110d8083e59/
+0bb9c813-373a-4a37-bba5-ac73a5a0dbc3 executed8804ms/child1. New realH1cb7bd416
+is recorded while remote staysH0c98bb0b5; base movededa7156->fb7d33 during the
+fake model response. After producer/mirror deletion, the separate process's
+real restorer reports remote identity mismatch and the real loop writes the
+same base_refresh/unavailable wait. Archived full receipt/output is
+poka-yoke/m14-red-v1-evidence.json; exact fixture copies are m14-v1-partial/.
+No paid/model/network calls occurred in the test.
+
+M14 V1 exceeded its80-call assignment limit (over100calls including one final
+formatter). Primary preserved its two files, verified exact PID/cwd and zero
+active children, sent scoped SIGTERM18:23:25, and verified process absent and
+exec69559 exited0. No turn/end or terminal result exists: this is partial worker
+output independently tested, not a completed/compliant worker handback. Audit
+is checking future success assertions before the next immutable correction;
+known defect: all-reservation equality must allow a separately charged new
+current-head review while preserving historical records. M15 remains independent.
+
+18:22 UTC M15 V1 launched18:21:09, exec79035/PID3663495, exact isolated lane.
+Immutable poka-yoke/m15-assignment-v1.md contains the frozen shape, strict parser
+rules and all four parking boundaries. Live m15-launch-v1.json proves cwd,
+production and credential presence; persisted8590645c/stream11d8b922 proves
+Flash/max/workspace-write/ask. Rules hash remainsfc44ca6e. GPT registered the
+five-file m15-candidate-reader target; worker checks/Git writes/children prohibited.
+M14 V1 has now written both owned fixture files; its edits remain unvalidated
+until terminal settlement and GPT execution. The two writers have disjoint paths
+and isolated worktrees at8c861f5; no runtime writer or live state changed.
+
+18:19 UTC primary froze candidateState/descriptor/preservation-intent semantics
+and the two-stage reader/behavior rollout in the existing poka-yoke proposal.
+The independent contract audit identifies four source surfaces for the reader:
+work-record parser, selection, intake/dispatch, post-loop Actions CI approval.
+Reader acceptance must preserve mixed real-Git records and charges byte-exactly
+while unrelated legacy work progresses; no live shape migration is permitted.
+
+Ad hoc prerequisite m15-candidate-state-reader is PLANNED at exact base8c861f5,
+lane master-plan-m15-candidate-state-reader-aa67276ff21, branch
+codex/master-plan-m15-candidate-state-reader-aa67276ff21, absolute worktree
+/home/codex/repos/ubiquity/sentinel/.codex-worktrees/master-plan-m15-candidate-state-reader-aa67276ff21.
+Identity digest uses the existing canonical plan path and module ID; suffix is
+a67276ff21. DSH owns only src/contracts/work-record.ts, src/repair/selection.ts,
+src/repair/loop.ts, src/host/actions-ci.ts and their assigned existing tests.
+This prerequisite may run beside M14 V1: M14 owns only its two new fixture files
+against immutable8c861f5; M15 owns no M14 fixture or shared helper. Integrate and
+install M15 first, then merge that canonical ancestry into the M14 lane before
+the behavior assignment. No parallel production runtime writers are introduced.
+
+Gateway read-only refresh confirms current ai.ubq.fi8bf9daad53a22abf8db4488ef1db2ac2d25c9d34
+is a VPS release; Deno Deploy is retired. Existing incident/capture endpoints
+remain passive, and the embedded automation is retired. Earlier Deno promotion
+acceptance cannot describe the current target. Scope/credential/authority choices
+remain pending; no gateway service, key, endpoint or deployment was changed.
+
+18:14 UTC fresh no-history candidate_durability_scope_audit PASSED the bounded
+regression assignment. Source-phase corrections: preserve completed accounting
+when candidate import/storage fails; bind operation/head before preservation;
+enforce refresh before review reservation on all paths; use existing guarded
+Git push; validate newly exposed history and metadata. New state requires a
+rollback-readable prerequisite release that preserves and parks new-format tasks,
+not merely a parser that sends them into the old loop. Supervisor/release readers
+must also understand the precise shape before behavior writes are enabled.
+
+M14 V1 is RUNNING from the exact planned isolated lane, exec69559/PID3658743,
+launched18:12:49 with immutable poka-yoke/m14-assignment-v1.md. Persisted session
+d63de56e-fea2-43dc-9a69-2de90dcdf0f6 / stream22d04b38 prove Flash/max,
+workspace-write/ask; m14-launch-v1.json independently proves exact cwd,
+NODE_ENV=production and nonempty credential presence. No worker tests/commits/
+pushes/children are allowed. GPT registered m14-candidate-handoff in shared
+evidence namespace459acb17ad9ea6b3117a31ea7e3934ee42910852ebdd735c5b0a8110d8083e59.
+Expected checkpoint is a written failing new-correction/base-movement/fresh-process
+fixture, not another runtime retry. First edit expected~5minutes, handback~15;
+diagnose actual progress, no timeout wrapper. Parent owns contract and ledger.
+
+18:10 UTC continuation verification: the preceding owner-facing answer delivered
+the Pro recommendation but made no runtime progress. Primary re-read MASTER-PLAN,
+decisions and orchestration/test procedures; canonical/root/published development
+remain8c861f5c4ba0453b1abfe95241ba36274ae42920. No local DSH process was found.
+Live refs remain supervisor3e103785, repair5f5d130, release2ab8112; latest
+supervisor35005162350 is completed/success. Only the ledger and saved proposal
+are dirty. Ordinary Actions is enabled; no live state mutation or retry occurred.
+
+Ad hoc module m14-candidate-durability is PLANNED, parent-owned architecture and
+one isolated DSH writer. Canonical plan path is the existing VPS MASTER-PLAN;
+SHA256(path + NUL + module ID) suffix7d774f22e6. Exact lane name
+master-plan-m14-candidate-durability-a7d774f22e6, branch
+codex/master-plan-m14-candidate-durability-a7d774f22e6, absolute worktree
+/home/codex/repos/ubiquity/sentinel/.codex-worktrees/master-plan-m14-candidate-durability-a7d774f22e6,
+base8c861f5c4ba0453b1abfe95241ba36274ae42920. First bounded assignment owns only
+tests/host/candidate-handoff_test.ts and tests/host/candidate-handoff-worker.ts:
+real-Git/production-consumer regression, expected to fail before the repair.
+No application edits, Git writes, model/network tests or ledger edits by DSH.
+Fresh no-history candidate_durability_scope_audit is checking this acceptance
+boundary; issue48_application_candidate_audit maps strict state contracts.
+Schema discovery: parsing old records with defaulted new fields would violate
+GitStateStore canonical-byte validation, so no parser-default migration is
+permitted. Define the explicit preservation contract before the source phase.
+Rules read: deepseek-harness2026-09-14.2 SHA256
+fc44ca6ec8e008328b59199fda05bf46f6ca536db8ccad7739d7ef8143ca5377.
+
+18:02 UTC Pro jobbeef79fa-b45b-4d6d-b6e8-0be7648b3e67 completed17:59:02.547;
+single result watcher exec28302 exited0,24polls, same one authorized submission.
+Full answer retained as poka-yoke/pro-answer-v1.md. Pro agrees that ordering
+alone is insufficient: checked candidate preservation and fresh-run retrieval
+must precede delivery-state acceptance; publish before refresh, and enforce
+refresh in every review-admission path. First proposed implementation action is
+the real-Git/production-consumer new-correction/base-movement/runner-destruction
+regression. It is a proposal, not an implemented fix or another model attempt.
+Primary independently verified relevant Git publication/namespace and GitHub
+closure/workflow-trigger documentation. A separate read-only boundary audit
+found publication-relevant review checks currently occur after public push;
+that additional evidence was not in Pro's original prompt. Full factual map is
+private poka-yoke/verified-boundaries.md. Owner-facing proposal is
+docs/poka-yoke-proposal-2026-09-15.md, subordinate to MASTER-PLAN and this ledger.
+Only these two primary-owned documentation paths are now dirty/uncommitted;
+application source remains canonical8c861f5. No m14 writer or runtime retry was
+launched; no new policy, credential, state, branch protection or release changed.
+
+17:49 UTC the one owner-authorized Pro submission succeeded, budget1/1 used:
+jobbeef79fa-b45b-4d6d-b6e8-0be7648b3e67, modelgpt-6-pro, created17:49:02.034,
+pending/conversationKnown:true. Submit exec90495 exited0. Full prompt and
+submission logs are under today's private poka-yoke directory. Retrieve this
+same job only; no resubmission or additional Pro allowance. One primary-owned
+result watcher will retain the answer. Unstarted implementation remains held
+pending this requested architecture and acceptance review; ordinary Actions
+and other eligible work remain enabled.
+
+17:47 UTC owner requested a GPT Pro poka-yoke review after more than a week of
+development. One new Pro submission is authorized by that explicit request;
+budget0/1 before launch. Installed gpt-pro skill and research policy were read.
+Saved job29dc3c4f-5143-4469-9ae7-192c5c689de5 is the completed previous21/reporting
+plan, already superseded in its old budgets/state; it does not answer this new
+candidate-durability failure. Two older pending jobs date09-11 and exceed the
+documented6hour retrieval lifetime; no old prompt was resubmitted. New immutable
+question is private poka-yoke/pro-question-v1.md under today's reporting root.
+Hold the unstarted m14 ordering patch while Pro challenges the complete design.
+No m14 branch/worktree/writer/issue was created. Canonical/root/development are
+8c861f5, source3e103785, runtime20aae115/gen5, and the only local tracked change
+is this primary-owned ledger entry. PR66 is merged and its merged CI passed.
+
+Latest48 outcome is a NEW, independently confirmed publication/durability defect,
+not the original no-receipt failure. Run35000353688 repair104487151243 completed
+healthy/settled17:37:23, finalize104493789043 passed17:37:53. Native diagnostic
+ordinary-35000353688-repair.log proves runtime completed, duration1020535ms,
+output1251093chars and candidatePresent:true; reservation48b133323 settled
+submitted. State5f5d1300904e8cf63d91ef9a415fd9a292fa9625 records new candidate
+51842315f2f51cea007fefef1cd29d7baa755386 but PR51 remains0e689889. Candidate bytes
+are not proved durable: local object missing, GitHub object404/commit422, zero
+run artifacts. Do not claim the SHA itself preserves the code or audit its diff.
+Fresh no-history issue48_application_candidate_audit confirmed exact-runtime
+publication/base-refresh deadlock: executeWorkStep refreshes before publishing,
+binds expectedHead518, while createPrepareBaseRefresh requires PRhead518 and
+rejects actual0e. The correction push is unreachable; another unchanged wait
+cannot repair it. Fresh-run restore likewise cannot fetch missing518. Preserve
+attempt3/submitted charge and its candidate identity; intent clearing alone is
+not recovery. Any correction must prove durable publication before refresh and
+refresh before fresh review, including real runner-replacement acceptance.
+
 17:28 UTC hosted recovery is APPLIED and58 is autonomously CLOSED. Source PR64
 merged17:17:19 as3e10378598a45a8bbdfac06781626a83eb419363, exact parents848f26f
 and eebaa57. Tree39855392aec8cc4eba53d33f2eebbc321f37274a equals reviewed
