@@ -105,6 +105,14 @@ export interface CandidateHandoffScenarioV1 {
   now: number;
   /** Bounded persisted transitions for the child run. */
   stepLimit: number;
+  /**
+   * Bounded fixture fault (never a product flag): after the REAL
+   * `preserveCandidate` success for the exact persisted `base_refresh` request
+   * (the prepared successor whose head equals the durable `resultId`), return
+   * exactly one `unavailable` so the parent can observe the interruption
+   * between remote preservation and the task push.
+   */
+  interruptBaseRefreshPreserve?: boolean;
 }
 
 export interface PortObservationV1 {
@@ -140,7 +148,23 @@ export interface CandidateHandoffObservationV1 {
   targetHead: GitSha | null;
   targetNextStep: string | null;
   targetIntentKind: string | null;
+  /** Exact durable `intent.resultId` (the prepared base-refresh successor). */
+  targetIntentResultId: string | null;
   targetWaitReason: string | null;
+  /** Fixture fault boundary reached in this child, or null. */
+  fault: string | null;
+  /** Prepared successor H2 from the exact interrupted base_refresh request. */
+  faultHead: GitSha | null;
+  /** Durable `resultId` observed while the exact request was interrupted. */
+  faultResultId: string | null;
+  /** Durable target head at the interruption (still the published H1). */
+  faultTargetHead: GitSha | null;
+  /** Retained descriptor head at the interruption (still H1). */
+  faultDescriptorHead: GitSha | null;
+  /** Durable published head at the interruption (still H1). */
+  faultPublishedHead: GitSha | null;
+  faultPreserveCalls: number;
+  faultUnavailableReturned: boolean;
   modelCalls: number;
   modelError: string | null;
   cycleStatus: string | null;
@@ -156,6 +180,10 @@ const STATIC_BRANCH = "candidate handoff scenario branch is not exact";
 const STATIC_CANDIDATE_INPUT = "candidate preservation request is invalid";
 const STATIC_CANDIDATE_LOCAL =
   "candidate preservation exact objects are unavailable";
+const STATIC_FAULT_SHAPE =
+  "base refresh preserve fault: durable binding is not the exact prepared request";
+const STATIC_FAULT_UNAVAILABLE =
+  "base refresh preserve fault: simulated interruption after remote preservation";
 
 /**
  * Trusted exact-object loader for the real preservation boundary.
@@ -374,7 +402,16 @@ export function failedObservation(
     targetHead: null,
     targetNextStep: null,
     targetIntentKind: null,
+    targetIntentResultId: null,
     targetWaitReason: null,
+    fault: null,
+    faultHead: null,
+    faultResultId: null,
+    faultTargetHead: null,
+    faultDescriptorHead: null,
+    faultPublishedHead: null,
+    faultPreserveCalls: 0,
+    faultUnavailableReturned: false,
     modelCalls: 0,
     modelError: null,
     cycleStatus: null,
@@ -505,6 +542,62 @@ export async function runCandidateHandoffWorker(
     }),
   });
 
+  // ---------------------------------------------------------------------
+  // Bounded fixture fault: the REAL preservation of the prepared successor
+  // H2 completes (its operation ref is actually created on the remote), then
+  // exactly one `unavailable` is returned before any task-branch push. The
+  // durable record still binds target/descriptor/published head H1 while the
+  // persisted `base_refresh` intent carries the exact resultId H2.
+  // ---------------------------------------------------------------------
+  let fault: string | null = null;
+  let faultHead: GitSha | null = null;
+  let faultResultId: string | null = null;
+  let faultTargetHead: GitSha | null = null;
+  let faultDescriptorHead: GitSha | null = null;
+  let faultPublishedHead: GitSha | null = null;
+  let faultPreserveCalls = 0;
+  let faultUnavailableReturned = false;
+  if (scenario.interruptBaseRefreshPreserve === true) {
+    const preserve = host.port.preserveCandidate;
+    host.port.preserveCandidate = async (request) => {
+      faultPreserveCalls += 1;
+      const result = await preserve(request);
+      if (!result.ok || faultUnavailableReturned) return result;
+      const read = await state.readRepair();
+      const record = read.ok && read.value.status === "found"
+        ? read.value.snapshot.work.find((work) => work.id === workId) ?? null
+        : null;
+      const intent = record?.intent ?? null;
+      const candidateState = record?.target.candidateState;
+      // Only the exact persisted `base_refresh` request may be interrupted:
+      // the request head must be the durable deterministic resultId.
+      if (
+        record === null || intent === null || intent.kind !== "base_refresh" ||
+        intent.resultId === null || intent.resultId !== request.candidate.head
+      ) {
+        throw new Error(STATIC_FAULT_SHAPE);
+      }
+      // While the successor is preserved the original H1 identities stay
+      // durable: target head, retained descriptor head and published head.
+      if (
+        candidateState === undefined || candidateState.preserved === null ||
+        intent.expectedHead !== record.target.head ||
+        candidateState.preserved.head !== record.target.head ||
+        candidateState.publishedHead !== record.target.head
+      ) {
+        throw new Error(STATIC_FAULT_SHAPE);
+      }
+      fault = "base_refresh_preserve_unavailable";
+      faultHead = request.candidate.head;
+      faultResultId = intent.resultId;
+      faultTargetHead = record.target.head;
+      faultDescriptorHead = candidateState.preserved.head;
+      faultPublishedHead = candidateState.publishedHead;
+      faultUnavailableReturned = true;
+      return portError("unavailable", STATIC_FAULT_UNAVAILABLE);
+    };
+  }
+
   // Hosted startup loads the moved base before any recovery: fetch ONLY the
   // base ref from the bare remote into this fresh object store, exactly like
   // `refreshDevelopment`, so the B1 objects the refresh needs actually exist
@@ -592,6 +685,7 @@ export async function runCandidateHandoffWorker(
   let targetHead: GitSha | null = null;
   let targetNextStep: string | null = null;
   let targetIntentKind: string | null = null;
+  let targetIntentResultId: string | null = null;
   let targetWaitReason: string | null = null;
   let reservations: BudgetReservationV1[] = [];
   const stateRead = await state.readRepair();
@@ -605,6 +699,7 @@ export async function runCandidateHandoffWorker(
       targetHead = record.target.head;
       targetNextStep = record.nextStep;
       targetIntentKind = record.intent?.kind ?? null;
+      targetIntentResultId = record.intent?.resultId ?? null;
       targetWaitReason = record.wait?.reason ?? null;
     }
   }
@@ -667,7 +762,9 @@ export async function runCandidateHandoffWorker(
   }
 
   let boundary = "reached_review_admission";
-  if (!restore.ok) boundary = "candidate_restore_unavailable";
+  if (faultUnavailableReturned) {
+    boundary = "base_refresh_preserve_unavailable";
+  } else if (!restore.ok) boundary = "candidate_restore_unavailable";
   else if (publishedHead === null) boundary = "candidate_branch_absent";
   else if (publishedHead === scenario.oldRemoteHead) {
     boundary = "candidate_not_published";
@@ -697,7 +794,16 @@ export async function runCandidateHandoffWorker(
     targetHead,
     targetNextStep,
     targetIntentKind,
+    targetIntentResultId,
     targetWaitReason,
+    fault,
+    faultHead,
+    faultResultId,
+    faultTargetHead,
+    faultDescriptorHead,
+    faultPublishedHead,
+    faultPreserveCalls,
+    faultUnavailableReturned,
     modelCalls,
     modelError,
     cycleStatus: outcome?.status ?? null,
