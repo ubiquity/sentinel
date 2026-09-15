@@ -1067,7 +1067,7 @@ async function makeEvidenceRig(
       model,
       budget,
     }, {
-      deadline: clock.now() + 1_800_000,
+      deadline: clock.now() + 2_400_000,
       stepLimit,
     });
   const snapshot = async () => {
