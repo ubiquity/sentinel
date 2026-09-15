@@ -15,11 +15,13 @@ import {
   createRepairStateStore,
 } from "../../src/state/mod.ts";
 import { asWorkItemId } from "../../src/contracts/brands.ts";
-import type { GitSha } from "../../src/contracts/brands.ts";
+import type { GitSha, WorkItemId } from "../../src/contracts/brands.ts";
 import { canonicalStringify } from "../../src/contracts/canonical.ts";
 import type {
   GitHubIssueV1,
+  GitHubPort,
   GitHubPullRequestV1,
+  LegacyBaseRefreshLossProofV1,
   PortResultV1,
 } from "../../src/contracts/ports.ts";
 import { portError, portOk } from "../../src/contracts/ports.ts";
@@ -34,6 +36,7 @@ import type { WorkRecordV1 } from "../../src/contracts/work-record.ts";
 import { parseRepositoryConfigV1 } from "../../src/contracts/repository-config.ts";
 import type { RepositoryConfigV1 } from "../../src/contracts/repository-config.ts";
 import {
+  baseRefreshIntentKey,
   candidateBranch,
   candidatePreservationRef,
   implementationIntentKey,
@@ -42,6 +45,7 @@ import {
 } from "../../src/repair/keys.ts";
 import { DurableGitHubCooldownGate } from "../../src/repair/github-cooldown.ts";
 import { runRepairCycle } from "../../src/repair/loop.ts";
+import type { RepairCycleDepsV1 } from "../../src/repair/loop.ts";
 import { runRepairEntrypoint } from "../../src/main.ts";
 import { persistHostedReceipt } from "../host/hosted-receipt-fixture.ts";
 import type { HostedReceiptPhaseV1 } from "../host/hosted-receipt-fixture.ts";
@@ -50,6 +54,7 @@ import { readHostedReleaseReceipt } from "../../src/host/actions-release.ts";
 import {
   DEP_0,
   DEP_2,
+  gitRun,
   incidentEvidence,
   incidentSummary,
   makeRemoteCtx,
@@ -60,6 +65,7 @@ import {
   reviewReceipt,
   SHA1,
   SHA2,
+  sha256Hex,
   SHA3,
   T0,
   testGitEnv,
@@ -127,6 +133,8 @@ async function makeCtx(prefix: string) {
   return {
     tmp,
     env,
+    bare: remote.bare,
+    work: remote.work,
     remoteUrl: remote.remoteUrl,
     cleanup: async () => {
       await Deno.remove(tmp, { recursive: true }).catch(() => {});
@@ -4423,5 +4431,925 @@ Deno.test(
     } finally {
       await rig.ctx.cleanup();
     }
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Legacy loss bridge (M14/V17): the bounded pre-ranking two-CAS recovery of a
+// proven lost legacy base-refresh candidate. Real Git state stores prove the
+// historical ancestry and the ordinary charged successor; cheap MemoryState
+// fixtures cover the refusal and scheduling variations. The optional proof
+// capability is attached through a GitHubPort-typed reference because the
+// concrete FakeGithub class does not declare it.
+// ---------------------------------------------------------------------------
+
+const LEGACY_ISSUE = 48;
+const LEGACY_PR = 51;
+const LEGACY_TASK = asWorkItemId("issue-48");
+const LEGACY_BRANCH = candidateBranch(LEGACY_TASK);
+const LEGACY_B0 = SHA1;
+const LEGACY_B1 = SHA2;
+const LEGACY_H1 = SHA3;
+const LEGACY_H0 = SHA4;
+const LEGACY_INTENT_KEY = baseRefreshIntentKey(LEGACY_PR, LEGACY_H1, LEGACY_B1);
+const LEGACY_REVIEW_ID = `review-receipt:${LEGACY_PR}:${LEGACY_H0}`;
+const LEGACY_DETAIL =
+  "legacy base-refresh candidate is missing; predecessor head pending";
+
+/** Original unprepared legacy base-refresh intent for one task id. */
+function legacyLossIntent(id: string, pr = LEGACY_PR) {
+  const branch = candidateBranch(asWorkItemId(id));
+  return {
+    kind: "base_refresh" as const,
+    key: baseRefreshIntentKey(pr, LEGACY_H1, LEGACY_B1),
+    startedAt: T0,
+    branch,
+    expectedHead: LEGACY_H1,
+    observedBase: LEGACY_B1,
+    pr,
+    requestId: null,
+    resultId: null,
+  };
+}
+
+/** Self scope-0 issue work-record overrides for one legacy-loss tuple. */
+function legacyLossOverrides(
+  id: string,
+  issueNumber: number,
+  extra: Record<string, unknown> = {},
+): Record<string, unknown> {
+  const taskId = asWorkItemId(id);
+  const branch = candidateBranch(taskId);
+  return {
+    repository: LOCAL_SENTINEL_REPO,
+    source: { kind: "issue", id: String(issueNumber), revision: LEGACY_B0 },
+    related: { incidentId: null, issueNumber },
+    target: {
+      base: LEGACY_B0,
+      branch,
+      checkpoint: { branch, sha: LEGACY_H1 },
+      head: LEGACY_H1,
+      pr: LEGACY_PR,
+    },
+    nextStep: "work",
+    counters: { attempts: 3, retries: 0, reviewRounds: 1 },
+    evidence: [{
+      kind: "review_receipt",
+      ref: `artifact://sentinel/legacy-loss/${issueNumber}`,
+    }],
+    intent: legacyLossIntent(id),
+    ...extra,
+  };
+}
+
+function legacyLossWork(
+  id: string,
+  issueNumber: number,
+  extra: Record<string, unknown> = {},
+): WorkRecordV1 {
+  return workRecord(id, legacyLossOverrides(id, issueNumber, extra));
+}
+
+/** Original submitted charge for the seeded attempts-3 legacy operation. */
+function legacyLossCharge(
+  id = "res-3",
+  overrides: Record<string, unknown> = {},
+) {
+  return reservation(id, {
+    repository: LOCAL_SENTINEL_REPO,
+    taskId: LEGACY_TASK,
+    attempt: 3,
+    head: LEGACY_B0,
+    purpose: "retry",
+    outcome: "submitted",
+    settledAt: T0 + 500,
+    ...overrides,
+  });
+}
+
+/** Completed review bound to one exact repository/PR/head/base tuple. */
+function legacyLossReview(
+  id: string,
+  head: GitSha,
+  base: GitSha,
+  overrides: Record<string, unknown> = {},
+): ReviewReceiptV1 {
+  return reviewReceipt(id, {
+    repository: LOCAL_SENTINEL_REPO,
+    pullRequest: { number: LEGACY_PR, head, base },
+    outcome: "completed",
+    resultId: "result-h0",
+    observedReviewer: "chatgpt-codex-connector[bot]",
+    submittedAt: T0,
+    completedAt: T0 + 1000,
+    observedAt: T0 + 1001,
+    findings: [{
+      id: "finding-h0",
+      severity: "P2",
+      path: "src/app.ts",
+      message: "legacy correction finding",
+      fingerprint: "a".repeat(64),
+      resolved: false,
+      resolutionEvidence: null,
+    }],
+    unresolvedSeverities: ["P2"],
+    ...overrides,
+  });
+}
+
+/** Runtime proof value bound to one exact task and authoritative state head. */
+function legacyLossProof(
+  taskId: WorkItemId,
+  stateHead: GitSha,
+  overrides: Partial<LegacyBaseRefreshLossProofV1> = {},
+): LegacyBaseRefreshLossProofV1 {
+  return {
+    taskId,
+    repository: { ...LOCAL_SENTINEL_REPO },
+    stateHead,
+    shape: "legacy_base_refresh",
+    lostBase: LEGACY_B0,
+    lostHead: LEGACY_H1,
+    predecessorHead: LEGACY_H0,
+    branch: candidateBranch(taskId),
+    pr: LEGACY_PR,
+    intentKey: LEGACY_INTENT_KEY,
+    reviewId: LEGACY_REVIEW_ID,
+    ...overrides,
+  };
+}
+
+/** The authoritative repair state head (never `snapshot.stateHead`). */
+async function repairStateHead(
+  state: RepairCycleDepsV1["state"],
+): Promise<GitSha> {
+  const read = await state.readRepair();
+  assert.ok(read.ok && read.value.status === "found");
+  if (!read.ok || read.value.status !== "found") {
+    throw new Error("no repair state");
+  }
+  return read.value.head;
+}
+
+/**
+ * Bounded direct-cycle driver for the legacy-loss bridge tests. `makeRig.run`
+ * fixes its step limit at 16; these tests assert one persisted transition per
+ * cycle, so they call the real loop with the same explicit self scope-0
+ * config/budget pair the rig uses. The generic rig API is not grown.
+ */
+function legacyLossCycles(
+  base: Pick<
+    RepairCycleDepsV1,
+    "clock" | "state" | "github" | "incidents" | "replay" | "model"
+  >,
+) {
+  const configs = repairConfigs({
+    sessionBound: { maxDurationMs: 240_000, maxOutputChars: 200_000 },
+  });
+  configs.push(localScopeConfig(configs[0]));
+  const budget = new RollingStartBudget({
+    clock: base.clock,
+    state: base.state,
+    configs,
+  });
+  const githubCooldown = new DurableGitHubCooldownGate({
+    state: base.state,
+    clock: base.clock,
+  });
+  const run = (stepLimit: number) =>
+    runRepairCycle({
+      clock: base.clock,
+      state: base.state,
+      configs,
+      controllerSha: SHA1,
+      github: base.github,
+      githubCooldown,
+      incidents: base.incidents,
+      replay: base.replay,
+      model: base.model,
+      budget,
+    }, { deadline: base.clock.now() + 60 * 60_000, stepLimit });
+  return { run };
+}
+
+/** Cheap MemoryState bridge rig with the self scope-0 config pair. */
+function legacyLossMemory() {
+  const clock = new FakeClock(T0);
+  const state = new MemoryState();
+  const github: GitHubPort = new FakeGithub({ baseSha: LEGACY_B0 });
+  const incidents = new FakeIncidents({ summaries: [], evidence: null });
+  const replay = new FakeReplay();
+  const model = new FakeModel({
+    head: LEGACY_H1,
+    changedPaths: ["src/app.ts"],
+  });
+  const { run } = legacyLossCycles({
+    clock,
+    state,
+    github,
+    incidents,
+    replay,
+    model,
+  });
+  const snapshot = async (): Promise<RepairStateSnapshotV1> => {
+    const read = await state.readRepair();
+    assert.ok(read.ok && read.value.status === "found");
+    if (!read.ok || read.value.status !== "found") {
+      throw new Error("no repair state");
+    }
+    return read.value.snapshot;
+  };
+  return { clock, state, github, model, run, snapshot };
+}
+
+/** Blocked tuple the discovery CAS writes (before any restoration). */
+function legacyLossBlockedExtras() {
+  return {
+    nextStep: "blocked",
+    blocker: {
+      kind: "missing_evidence",
+      message: LEGACY_DETAIL,
+      since: T0,
+    },
+  };
+}
+
+Deno.test(
+  "legacy loss bridge: two guarded CAS commits recover a lost legacy candidate into one charged retry",
+  async () => {
+    const port = new RelationsFakeGithub({ baseSha: LEGACY_B0 });
+    const rig = await makeRig("legacy-loss", {
+      summaries: false,
+      localScope: true,
+      githubPort: port,
+    });
+    try {
+      const github: GitHubPort = port;
+      let proofCalls = 0;
+      github.proveLegacyBaseRefreshLoss = async (taskId) => {
+        proofCalls++;
+        return portOk(
+          legacyLossProof(taskId, await repairStateHead(rig.store)),
+        );
+      };
+      const charge = legacyLossCharge();
+      const review = legacyLossReview(LEGACY_REVIEW_ID, LEGACY_H0, LEGACY_B0);
+      const seeded = seededSnapshot(
+        [legacyLossWork("issue-48", LEGACY_ISSUE)],
+        { reservations: [charge], reviews: [review] },
+      );
+      const written = await rig.store.writeRepair(seeded, null);
+      assert.ok(written.ok && written.value.status === "applied");
+      const seedHead = written.value.head;
+      const { run } = legacyLossCycles({
+        clock: rig.clock,
+        state: rig.store,
+        github,
+        incidents: rig.incidents,
+        replay: rig.replay,
+        model: rig.model,
+      });
+
+      // Cycle 1: ONLY the truthful loss discovery is committed. The blocked
+      // state head D retains the original H1/B0 tuple and every historical
+      // record; no model start and no reservation are created.
+      const first = await run(1);
+      assert.equal(first.status, "step_limit", JSON.stringify(first));
+      const afterFirst = await rig.snapshot();
+      const blocked = afterFirst.work[0]!;
+      assert.equal(blocked.nextStep, "blocked");
+      assert.equal(blocked.blocker?.kind, "missing_evidence");
+      assert.equal(blocked.blocker?.message, LEGACY_DETAIL);
+      assert.equal(blocked.target.head, LEGACY_H1);
+      assert.equal(blocked.target.base, LEGACY_B0);
+      assert.equal(blocked.target.branch, LEGACY_BRANCH);
+      assert.equal(blocked.target.pr, LEGACY_PR);
+      assert.deepEqual(blocked.target.checkpoint, {
+        branch: LEGACY_BRANCH,
+        sha: LEGACY_H1,
+      });
+      assert.equal(blocked.intent?.key, LEGACY_INTENT_KEY);
+      assert.deepEqual(blocked.counters, {
+        attempts: 3,
+        retries: 0,
+        reviewRounds: 1,
+      });
+      assert.equal(proofCalls, 1);
+      assert.equal(rig.model.requests.length, 0, "no model start in discovery");
+      assert.equal(afterFirst.reservations.length, 1);
+      assert.equal(afterFirst.reservations[0]!.outcome, "submitted");
+      assert.deepEqual(afterFirst.reviews.map((entry) => entry.id), [
+        LEGACY_REVIEW_ID,
+      ]);
+      assert.equal(afterFirst.stateHead, seedHead);
+      const D = await repairStateHead(rig.store);
+      assert.notEqual(D, seedHead);
+
+      // Cycle 2: the blocked tuple is independently proved at the NEW
+      // authoritative head and restored to the ordinary work tuple at H0/B0.
+      const second = await run(1);
+      assert.equal(second.status, "step_limit", JSON.stringify(second));
+      const afterSecond = await rig.snapshot();
+      const restored = afterSecond.work[0]!;
+      assert.equal(restored.nextStep, "work");
+      assert.equal(restored.target.head, LEGACY_H0);
+      assert.equal(restored.target.base, LEGACY_B0);
+      assert.equal(restored.target.branch, LEGACY_BRANCH);
+      assert.equal(restored.target.pr, LEGACY_PR);
+      assert.equal(restored.target.checkpoint, null);
+      assert.equal(restored.target.candidateState, undefined);
+      assert.equal(restored.intent, null);
+      assert.equal(restored.wait, null);
+      assert.equal(restored.blocker, null);
+      assert.deepEqual(restored.counters, {
+        attempts: 3,
+        retries: 0,
+        reviewRounds: 1,
+      });
+      assert.deepEqual(restored.evidence, blocked.evidence);
+      assert.equal(proofCalls, 2);
+      assert.equal(
+        rig.model.requests.length,
+        0,
+        "no model start in restoration",
+      );
+      const R = await repairStateHead(rig.store);
+      assert.notEqual(R, D);
+
+      // Both committed snapshots live in the ACTUAL state Git history: D is an
+      // ancestor of R, and D still carries the original intent/H1 record.
+      const ancestor = await gitRun(
+        rig.ctx.bare,
+        ["merge-base", "--is-ancestor", D, R],
+        rig.ctx.env,
+      );
+      assert.ok(ancestor.ok, `D must be an ancestor of R: ${ancestor.stderr}`);
+      const digest = await sha256Hex("issue-48");
+      const atDRaw = await gitRun(
+        rig.ctx.bare,
+        ["show", `${D}:work/${digest}.json`],
+        rig.ctx.env,
+      );
+      assert.ok(atDRaw.ok, atDRaw.stderr);
+      const atD = JSON.parse(atDRaw.stdout);
+      assert.equal(atD.nextStep, "blocked");
+      assert.equal(atD.target.head, LEGACY_H1);
+      assert.equal(atD.intent.key, LEGACY_INTENT_KEY);
+      assert.deepEqual(atD.counters, {
+        attempts: 3,
+        retries: 0,
+        reviewRounds: 1,
+      });
+      assert.equal(atD.evidence.length, 1);
+      const atRRaw = await gitRun(
+        rig.ctx.bare,
+        ["show", `${R}:work/${digest}.json`],
+        rig.ctx.env,
+      );
+      assert.ok(atRRaw.ok, atRRaw.stderr);
+      const atR = JSON.parse(atRRaw.stdout);
+      assert.equal(atR.target.head, LEGACY_H0);
+      assert.equal(atR.intent, null);
+      assert.equal(atR.blocker, null);
+      assert.deepEqual(afterSecond.reservations.map((entry) => entry.id), [
+        charge.id,
+      ]);
+      assert.deepEqual(afterSecond.reviews.map((entry) => entry.id), [
+        LEGACY_REVIEW_ID,
+      ]);
+
+      // Cycle 3: ordinary admission alone starts exactly one attempt-4 retry
+      // at head B0 with the H0 correction checkout; the run stops at the next
+      // bounded checkpoint and needs no publication/review infrastructure.
+      port.latest.set(
+        LEGACY_ISSUE,
+        issueRecord(LEGACY_ISSUE, {
+          relations: { subIssueCount: 0, openBlockers: [] },
+        }),
+      );
+      // The seeded original charge settled at T0+500; the retry cycle runs in
+      // real post-settlement time so admission is not clock-regression deferred.
+      rig.clock.advance(2000);
+      const third = await run(1);
+      assert.equal(third.status, "step_limit", JSON.stringify(third));
+      assert.equal(rig.model.requests.length, 1, "exactly one attempt-4 start");
+      const request = rig.model.requests[0]!;
+      assert.equal(request.taskId, "issue-48");
+      assert.equal(request.base, LEGACY_B0);
+      assert.equal(request.checkoutBase, LEGACY_H0);
+      const afterThird = await rig.snapshot();
+      const attempt4 = afterThird.reservations.find((entry) =>
+        entry.attempt === 4
+      );
+      assert.ok(attempt4, "attempt-4 reservation exists");
+      assert.equal(attempt4.purpose, "retry");
+      assert.equal(attempt4.head, LEGACY_B0);
+      assert.equal(attempt4.repository.installationId, 0);
+      assert.equal(afterThird.reservations.length, 2);
+      const original = afterThird.reservations.find((entry) =>
+        entry.id === charge.id
+      );
+      assert.ok(original, "the original submitted charge is preserved");
+      assert.equal(original.outcome, "submitted");
+      assert.equal(original.head, LEGACY_B0);
+    } finally {
+      await rig.ctx.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "legacy loss bridge: a cooldown-only state move between proof and CAS refuses the stale commit",
+  async () => {
+    const port = new RelationsFakeGithub({ baseSha: LEGACY_B0 });
+    const rig = await makeRig("legacy-loss-drift", {
+      summaries: false,
+      localScope: true,
+      githubPort: port,
+    });
+    try {
+      const github: GitHubPort = port;
+      const { run } = legacyLossCycles({
+        clock: rig.clock,
+        state: rig.store,
+        github,
+        incidents: rig.incidents,
+        replay: rig.replay,
+        model: rig.model,
+      });
+      const gate = new DurableGitHubCooldownGate({
+        state: rig.store,
+        clock: rig.clock,
+      });
+      let proofCalls = 0;
+      github.proveLegacyBaseRefreshLoss = async (taskId) => {
+        proofCalls++;
+        const head = await repairStateHead(rig.store);
+        // A valid cooldown-only update AFTER the proof bound its head: the
+        // authoritative head moves without any work-contents change.
+        const recorded = await gate.recordRateLimit(0, {
+          kind: "primary",
+          observedAt: rig.clock.now(),
+          retryNotBefore: rig.clock.now() + 60_000,
+          observationId: "c".repeat(64),
+          fallback: false,
+        });
+        assert.ok(recorded.ok);
+        return portOk(legacyLossProof(taskId, head));
+      };
+      const unrelated = workRecord("issue-9", {
+        repository: LOCAL_SENTINEL_REPO,
+        source: { kind: "issue", id: "9", revision: LEGACY_B0 },
+        related: { incidentId: null, issueNumber: 9 },
+        target: {
+          base: LEGACY_B0,
+          branch: null,
+          checkpoint: null,
+          head: null,
+          pr: null,
+        },
+        nextStep: "work",
+        counters: { attempts: 0, retries: 0, reviewRounds: 0 },
+      });
+      const seeded = seededSnapshot([
+        legacyLossWork("issue-48", LEGACY_ISSUE),
+        unrelated,
+      ], {
+        reviews: [legacyLossReview(LEGACY_REVIEW_ID, LEGACY_H0, LEGACY_B0)],
+      });
+      const written = await rig.store.writeRepair(seeded, null);
+      assert.ok(written.ok && written.value.status === "applied");
+
+      const outcome = await run(1);
+      assert.equal(outcome.status, "step_limit", JSON.stringify(outcome));
+      const state = await rig.snapshot();
+      assert.equal(proofCalls, 1, "one bounded proof attempt");
+      const legacy = state.work.find((work) => work.id === "issue-48")!;
+      assert.equal(legacy.nextStep, "work", "zero stale CAS or blocker");
+      assert.equal(legacy.blocker, null);
+      assert.equal(legacy.target.head, LEGACY_H1);
+      assert.equal(legacy.intent?.key, LEGACY_INTENT_KEY);
+      assert.deepEqual(legacy.counters, {
+        attempts: 3,
+        retries: 0,
+        reviewRounds: 1,
+      });
+      // The admitted cooldown-only write moved the authoritative head while
+      // the proof's bound head stayed stale: the committed state's own
+      // `stateHead` field is never the current head.
+      const head = await repairStateHead(rig.store);
+      assert.notEqual(state.stateHead, head);
+      // The unrelated eligible issue still advances normally in this run.
+      const advanced = state.work.find((work) => work.id === "issue-9")!;
+      assert.equal(
+        advanced.target.branch,
+        candidateBranch(asWorkItemId("issue-9")),
+      );
+      assert.equal(rig.model.requests.length, 0);
+      assert.equal(state.reservations.length, 0);
+    } finally {
+      await rig.ctx.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "legacy loss bridge: a null higher candidate never starves the later recoverable one",
+  async () => {
+    const rig = legacyLossMemory();
+    const calls: string[] = [];
+    rig.github.proveLegacyBaseRefreshLoss = async (taskId) => {
+      calls.push(taskId);
+      if (taskId === "issue-2") return portOk(null);
+      return portOk(legacyLossProof(taskId, await repairStateHead(rig.state)));
+    };
+    const unrelated = workRecord("issue-9", {
+      repository: LOCAL_SENTINEL_REPO,
+      source: { kind: "issue", id: "9", revision: LEGACY_B0 },
+      related: { incidentId: null, issueNumber: 9 },
+      classification: { severity: "P1", priority: null },
+      target: {
+        base: LEGACY_B0,
+        branch: null,
+        checkpoint: null,
+        head: null,
+        pr: null,
+      },
+      nextStep: "work",
+      counters: { attempts: 0, retries: 0, reviewRounds: 0 },
+    });
+    const seeded = seededSnapshot([
+      legacyLossWork("issue-2", 2),
+      legacyLossWork("issue-4", 4),
+      unrelated,
+    ], {
+      reviews: [legacyLossReview(LEGACY_REVIEW_ID, LEGACY_H0, LEGACY_B0)],
+    });
+    const written = await rig.state.writeRepair(seeded, null);
+    assert.ok(written.ok && written.value.status === "applied");
+
+    // Cycle 1: the null proof leaves the scan running, so the later
+    // recoverable candidate receives its discovery CAS.
+    const first = await rig.run(1);
+    assert.equal(first.status, "step_limit", JSON.stringify(first));
+    assert.deepEqual(calls, ["issue-2", "issue-4"], "one per phase");
+    let state = await rig.snapshot();
+    const higher = state.work.find((work) => work.id === "issue-2")!;
+    assert.equal(higher.nextStep, "work", "null proof is no-op");
+    assert.equal(higher.target.head, LEGACY_H1);
+    assert.equal(higher.intent?.key, LEGACY_INTENT_KEY);
+    const recovered = state.work.find((work) => work.id === "issue-4")!;
+    assert.equal(recovered.nextStep, "blocked");
+    assert.equal(recovered.blocker?.kind, "missing_evidence");
+    assert.equal(rig.model.requests.length, 0);
+    assert.equal(state.reservations.length, 0);
+
+    // Cycle 2: restoration, then the unrelated P1 issue advances normally in
+    // the same run. No model work is attributable to either bridge phase.
+    const second = await rig.run(2);
+    assert.equal(second.status, "step_limit", JSON.stringify(second));
+    assert.deepEqual(calls, [
+      "issue-2",
+      "issue-4",
+      "issue-2",
+      "issue-4",
+    ]);
+    state = await rig.snapshot();
+    const restored = state.work.find((work) => work.id === "issue-4")!;
+    assert.equal(restored.nextStep, "work");
+    assert.equal(restored.target.head, LEGACY_H0);
+    assert.equal(restored.intent, null);
+    const advanced = state.work.find((work) => work.id === "issue-9")!;
+    assert.equal(
+      advanced.target.branch,
+      candidateBranch(asWorkItemId("issue-9")),
+    );
+    assert.equal(rig.model.requests.length, 0);
+    assert.equal(state.reservations.length, 0);
+    assert.equal(
+      state.work.find((work) => work.id === "issue-2")!.nextStep,
+      "work",
+      "the null candidate is still untouched",
+    );
+  },
+);
+
+Deno.test(
+  "legacy loss bridge: an unavailable higher candidate never starves the later recoverable one",
+  async () => {
+    const rig = legacyLossMemory();
+    const calls: string[] = [];
+    rig.github.proveLegacyBaseRefreshLoss = async (taskId) => {
+      calls.push(taskId);
+      if (taskId === "issue-2") {
+        return portError("unavailable", "legacy loss proof unavailable");
+      }
+      return portOk(legacyLossProof(taskId, await repairStateHead(rig.state)));
+    };
+    const unrelated = workRecord("issue-9", {
+      repository: LOCAL_SENTINEL_REPO,
+      source: { kind: "issue", id: "9", revision: LEGACY_B0 },
+      related: { incidentId: null, issueNumber: 9 },
+      classification: { severity: "P1", priority: null },
+      target: {
+        base: LEGACY_B0,
+        branch: null,
+        checkpoint: null,
+        head: null,
+        pr: null,
+      },
+      nextStep: "work",
+      counters: { attempts: 0, retries: 0, reviewRounds: 0 },
+    });
+    const seeded = seededSnapshot([
+      legacyLossWork("issue-2", 2),
+      legacyLossWork("issue-4", 4),
+      unrelated,
+    ], {
+      reviews: [legacyLossReview(LEGACY_REVIEW_ID, LEGACY_H0, LEGACY_B0)],
+    });
+    const written = await rig.state.writeRepair(seeded, null);
+    assert.ok(written.ok && written.value.status === "applied");
+
+    // Cycle 1: the unavailable proof leaves the scan running, so the later
+    // recoverable candidate receives its discovery CAS.
+    const first = await rig.run(1);
+    assert.equal(first.status, "step_limit", JSON.stringify(first));
+    assert.deepEqual(calls, ["issue-2", "issue-4"], "one per phase");
+    let state = await rig.snapshot();
+    const higher = state.work.find((work) => work.id === "issue-2")!;
+    assert.equal(higher.nextStep, "work", "unavailable proof is no-op");
+    assert.equal(higher.target.head, LEGACY_H1);
+    assert.equal(higher.intent?.key, LEGACY_INTENT_KEY);
+    const recovered = state.work.find((work) => work.id === "issue-4")!;
+    assert.equal(recovered.nextStep, "blocked");
+    assert.equal(recovered.blocker?.kind, "missing_evidence");
+    assert.equal(rig.model.requests.length, 0);
+    assert.equal(state.reservations.length, 0);
+
+    // Cycle 2: restoration, then the unrelated P1 issue advances normally in
+    // the same run. No model work is attributable to either bridge phase.
+    const second = await rig.run(2);
+    assert.equal(second.status, "step_limit", JSON.stringify(second));
+    assert.deepEqual(calls, [
+      "issue-2",
+      "issue-4",
+      "issue-2",
+      "issue-4",
+    ]);
+    state = await rig.snapshot();
+    const restored = state.work.find((work) => work.id === "issue-4")!;
+    assert.equal(restored.nextStep, "work");
+    assert.equal(restored.target.head, LEGACY_H0);
+    assert.equal(restored.intent, null);
+    const advanced = state.work.find((work) => work.id === "issue-9")!;
+    assert.equal(
+      advanced.target.branch,
+      candidateBranch(asWorkItemId("issue-9")),
+    );
+    assert.equal(rig.model.requests.length, 0);
+    assert.equal(state.reservations.length, 0);
+    assert.equal(
+      state.work.find((work) => work.id === "issue-2")!.nextStep,
+      "work",
+      "the unavailable candidate is still untouched",
+    );
+  },
+);
+
+Deno.test(
+  "legacy loss bridge: an earlier clean H0 receipt keeps the tuple blocked",
+  async () => {
+    const rig = legacyLossMemory();
+    let proofCalls = 0;
+    rig.github.proveLegacyBaseRefreshLoss = async (taskId) => {
+      proofCalls++;
+      return portOk(legacyLossProof(taskId, await repairStateHead(rig.state)));
+    };
+    // The clean receipt sorts FIRST for this PR/head, exactly the order the
+    // existing headRejectedByReview helper reads (the real store's
+    // deterministic id order preserves it too).
+    const clean = legacyLossReview(
+      "review-receipt:00-clean-first",
+      LEGACY_H0,
+      LEGACY_B0,
+      {
+        resultId: "result-clean",
+        findings: [],
+        unresolvedSeverities: [],
+      },
+    );
+    const p2 = legacyLossReview(LEGACY_REVIEW_ID, LEGACY_H0, LEGACY_B0);
+    const seeded = seededSnapshot([
+      legacyLossWork("issue-48", LEGACY_ISSUE, legacyLossBlockedExtras()),
+    ], {
+      reviews: [clean, p2],
+      reservations: [legacyLossCharge()],
+    });
+    const written = await rig.state.writeRepair(seeded, null);
+    assert.ok(written.ok && written.value.status === "applied");
+    const writesBefore = rig.state.repairWrites;
+    const before = canonicalStringify((await rig.snapshot()).work[0]);
+
+    const outcome = await rig.run(1);
+    assert.equal(outcome.status, "idle", JSON.stringify(outcome));
+    const state = await rig.snapshot();
+    const record = state.work[0]!;
+    assert.equal(record.nextStep, "blocked");
+    assert.equal(record.blocker?.kind, "missing_evidence");
+    assert.equal(record.target.head, LEGACY_H1);
+    assert.equal(record.intent?.key, LEGACY_INTENT_KEY);
+    assert.deepEqual(record.counters, {
+      attempts: 3,
+      retries: 0,
+      reviewRounds: 1,
+    });
+    assert.equal(canonicalStringify(record), before);
+    assert.equal(proofCalls, 1);
+    assert.equal(rig.model.requests.length, 0);
+    assert.equal(state.reservations.length, 1);
+    assert.equal(state.reservations[0]!.outcome, "submitted");
+    assert.equal(
+      rig.state.repairWrites,
+      writesBefore,
+      "refusal writes no state",
+    );
+  },
+);
+
+Deno.test(
+  "legacy loss bridge: exhausted attempts get truthful discovery but never restoration",
+  async () => {
+    const rig = legacyLossMemory();
+    let proofCalls = 0;
+    rig.github.proveLegacyBaseRefreshLoss = async (taskId) => {
+      proofCalls++;
+      return portOk(legacyLossProof(taskId, await repairStateHead(rig.state)));
+    };
+    const seeded = seededSnapshot([
+      legacyLossWork("issue-48", LEGACY_ISSUE, {
+        counters: { attempts: 4, retries: 0, reviewRounds: 1 },
+      }),
+    ], {
+      reviews: [legacyLossReview(LEGACY_REVIEW_ID, LEGACY_H0, LEGACY_B0)],
+      reservations: [legacyLossCharge("res-4", { attempt: 4 })],
+    });
+    const written = await rig.state.writeRepair(seeded, null);
+    assert.ok(written.ok && written.value.status === "applied");
+
+    const first = await rig.run(1);
+    assert.equal(first.status, "step_limit", JSON.stringify(first));
+    assert.equal(proofCalls, 1);
+    let state = await rig.snapshot();
+    assert.equal(state.work[0]!.nextStep, "blocked");
+    assert.equal(state.work[0]!.blocker?.kind, "missing_evidence");
+    assert.equal(state.work[0]!.counters.attempts, 4);
+    assert.equal(rig.model.requests.length, 0);
+    assert.equal(state.reservations.length, 1);
+
+    // Exhaustion never authorizes a restore proof or a fourth-limit bypass.
+    const second = await rig.run(1);
+    assert.equal(second.status, "idle", JSON.stringify(second));
+    assert.equal(proofCalls, 1, "no restore proof for an exhausted task");
+    state = await rig.snapshot();
+    assert.equal(state.work[0]!.nextStep, "blocked");
+    assert.equal(state.work[0]!.blocker?.kind, "missing_evidence");
+    assert.equal(state.reservations.length, 1);
+    assert.equal(rig.model.requests.length, 0);
+  },
+);
+
+Deno.test(
+  "legacy loss bridge: new-format and unprepared/prepared foreign intents are never probed",
+  async () => {
+    const rig = legacyLossMemory();
+    let proofCalls = 0;
+    rig.github.proveLegacyBaseRefreshLoss = () => {
+      proofCalls++;
+      return Promise.resolve(portOk(null));
+    };
+    const blocked = legacyLossBlockedExtras();
+    const newFormatBranch = candidateBranch(asWorkItemId("issue-30"));
+    const newFormat = workRecord(
+      "issue-30",
+      legacyLossOverrides("issue-30", 30, {
+        ...blocked,
+        target: {
+          base: LEGACY_B0,
+          branch: newFormatBranch,
+          checkpoint: { branch: newFormatBranch, sha: LEGACY_H1 },
+          head: LEGACY_H1,
+          pr: LEGACY_PR,
+          candidateState: candidateStateFor(LEGACY_B0, LEGACY_H1),
+        },
+      }),
+    );
+    const preReceipt = workRecord(
+      "issue-31",
+      legacyLossOverrides("issue-31", 31, {
+        ...blocked,
+        intent: {
+          kind: "implementation",
+          key: implementationIntentKey("res-pre"),
+          startedAt: T0,
+          branch: candidateBranch(asWorkItemId("issue-31")),
+          expectedHead: null,
+          observedBase: LEGACY_B0,
+          pr: null,
+          requestId: "res-pre",
+          resultId: null,
+        },
+      }),
+    );
+    const prepared = workRecord(
+      "issue-32",
+      legacyLossOverrides("issue-32", 32, {
+        ...blocked,
+        intent: { ...legacyLossIntent("issue-32"), resultId: LEGACY_H1 },
+      }),
+    );
+    const seeded = seededSnapshot([newFormat, preReceipt, prepared]);
+    const written = await rig.state.writeRepair(seeded, null);
+    assert.ok(written.ok && written.value.status === "applied");
+    const writesBefore = rig.state.repairWrites;
+
+    const outcome = await rig.run(1);
+    assert.equal(outcome.status, "idle", JSON.stringify(outcome));
+    assert.equal(proofCalls, 0, "no unsupported record is proved");
+    const state = await rig.snapshot();
+    for (const id of ["issue-30", "issue-31", "issue-32"]) {
+      const before = canonicalStringify(seeded.work.find((w) => w.id === id));
+      const after = canonicalStringify(state.work.find((w) => w.id === id));
+      assert.equal(after, before, `${id} is untouched`);
+    }
+    assert.equal(rig.state.repairWrites, writesBefore, "no state write");
+    assert.equal(rig.model.requests.length, 0);
+    assert.equal(state.reservations.length, 0);
+  },
+);
+
+Deno.test(
+  "legacy loss bridge: a mismatched proof tuple stays untouched and uncharged",
+  async () => {
+    const rig = legacyLossMemory();
+    let proofCalls = 0;
+    rig.github.proveLegacyBaseRefreshLoss = async (taskId) => {
+      proofCalls++;
+      return portOk(legacyLossProof(taskId, await repairStateHead(rig.state), {
+        lostHead: LEGACY_B1,
+      }));
+    };
+    const seeded = seededSnapshot([
+      legacyLossWork("issue-48", LEGACY_ISSUE),
+    ], {
+      reviews: [legacyLossReview(LEGACY_REVIEW_ID, LEGACY_H0, LEGACY_B0)],
+      reservations: [legacyLossCharge()],
+    });
+    const written = await rig.state.writeRepair(seeded, null);
+    assert.ok(written.ok && written.value.status === "applied");
+    const writesBefore = rig.state.repairWrites;
+    const before = canonicalStringify((await rig.snapshot()).work[0]);
+
+    const outcome = await rig.run(1);
+    // The refused record is deferred for this run, so no eligible work remains.
+    assert.equal(outcome.status, "margin", JSON.stringify(outcome));
+    assert.equal(proofCalls, 1, "the phase is attempted once per run");
+    const state = await rig.snapshot();
+    assert.equal(canonicalStringify(state.work[0]), before);
+    assert.equal(rig.state.repairWrites, writesBefore, "no state write");
+    assert.equal(rig.model.requests.length, 0);
+    assert.equal(state.reservations.length, 1);
+    assert.equal(state.reservations[0]!.outcome, "submitted");
+  },
+);
+
+Deno.test(
+  "legacy loss bridge: an absent proof capability leaves generic behavior unchanged",
+  async () => {
+    const rig = legacyLossMemory();
+    const seeded = seededSnapshot([
+      legacyLossWork("issue-48", LEGACY_ISSUE),
+    ], {
+      reviews: [legacyLossReview(LEGACY_REVIEW_ID, LEGACY_H0, LEGACY_B0)],
+      reservations: [legacyLossCharge()],
+    });
+    const written = await rig.state.writeRepair(seeded, null);
+    assert.ok(written.ok && written.value.status === "applied");
+    const writesBefore = rig.state.repairWrites;
+
+    const outcome = await rig.run(1);
+    assert.equal(outcome.status, "step_limit", JSON.stringify(outcome));
+    const state = await rig.snapshot();
+    const record = state.work[0]!;
+    // The generic unprepared base-refresh path waits bounded; the bridge never
+    // writes its blocker and never touches the loss tuple.
+    assert.equal(record.nextStep, "work");
+    assert.equal(record.blocker, null);
+    assert.equal(record.target.head, LEGACY_H1);
+    assert.equal(record.intent?.key, LEGACY_INTENT_KEY);
+    assert.equal(record.wait?.reason, "unavailable");
+    assert.equal(rig.state.repairWrites, writesBefore + 1);
+    assert.equal(rig.model.requests.length, 0);
+    assert.equal(state.reservations.length, 1);
   },
 );

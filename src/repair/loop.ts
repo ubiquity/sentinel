@@ -22,6 +22,7 @@ import type {
   ImplementationPort,
   IncidentAdapter,
   IsolatedReplayResultV1,
+  LegacyBaseRefreshLossProofV1,
   MergeOutcomeV1,
   ModelRunReceiptV1,
   PortResultV1,
@@ -81,7 +82,11 @@ import {
   reviewOperationKey,
   reviewReceiptId,
 } from "./keys.ts";
-import { MAX_UNFINISHED_PRS, rankEligibleWork } from "./selection.ts";
+import {
+  isWaiting,
+  MAX_UNFINISHED_PRS,
+  rankEligibleWork,
+} from "./selection.ts";
 import {
   advanceToCorrection,
   advanceToDelivery,
@@ -340,6 +345,9 @@ export async function runRepairCycle(
   // bounds are deferred so that lower-ranked deterministic work still runs;
   // the run ends in the existing typed "margin" outcome when nothing remains.
   const deferred = new Set<string>();
+  // One run-local attempt per task and legacy-loss phase: a phase is never
+  // proved twice in the same run, even after a state reload.
+  const legacyLossAttempted = new Set<string>();
   // Intake is polled exactly once per run. A deferred (cooldown or bound)
   // iteration must never re-poll the sources: subsequent loop iterations reuse
   // the run-local deferral tracking instead of repeating intake reads.
@@ -418,6 +426,26 @@ export async function runRepairCycle(
 
     if (steps >= stepLimit) {
       return { status: "step_limit", steps };
+    }
+
+    // Bounded pre-ranking legacy-loss bridge (optional capability): a proven
+    // lost legacy candidate is committed as truthful missing_evidence BEFORE
+    // the generic ranking sees it; a successful CAS counts as the ordinary
+    // step and the outer loop reloads the authoritative state. Generic
+    // selection and blocked behavior stay unchanged.
+    const bridged = await bridgeLegacyLoss(
+      deps,
+      context,
+      legacyLossAttempted,
+      deferred,
+    );
+    if (bridged.kind === "state_error") {
+      return { status: "state_error", detail: bridged.detail };
+    }
+    if (bridged.kind === "progress") {
+      didWork = true;
+      steps++;
+      continue;
     }
 
     const rank = rankEligibleWork(
@@ -535,6 +563,7 @@ async function persistTransition(
   deps: RepairCycleDepsV1,
   context: LoopContextV1,
   mutate: (draft: RepairStateSnapshotV1) => void,
+  proofHead?: GitSha,
 ): Promise<StepResultV1> {
   // Safe snapshot synchronization: the durable cooldown gate writes
   // githubCooldowns through the SAME repair state store, so the authoritative
@@ -550,6 +579,16 @@ async function persistTransition(
     return {
       kind: "state_error",
       detail: "repair state moved with conflicting contents",
+    };
+  }
+  // A caller that carries a proof bound to one exact authoritative state head
+  // requires the reread to still BE that head. Even an admitted cooldown-only
+  // movement makes the proof stale, so the mutation is refused before the
+  // draft is built: no state is written and the caller defers the record.
+  if (proofHead !== undefined && synchronized.head !== proofHead) {
+    return {
+      kind: "deferred",
+      detail: "state head moved after the trusted proof was established",
     };
   }
   const base = synchronized.snapshot;
@@ -684,6 +723,305 @@ function persistWork(
   next: WorkRecordV1,
 ): Promise<StepResultV1> {
   return persistTransition(deps, context, replaceWorkMutation(next));
+}
+
+// ---------------------------------------------------------------------------
+// Legacy loss bridge: two guarded CAS commits turn ONE proven lost legacy
+// base-refresh candidate into an ordinary charged retry. The bounded pass is
+// strictly pre-ranking; the generic selector, blocked handling and every other
+// transition stay unchanged.
+// ---------------------------------------------------------------------------
+
+/** Truthful static detail for a proven lost legacy candidate. */
+const LEGACY_LOSS_DETAIL =
+  "legacy base-refresh candidate is missing; predecessor head pending";
+
+type LegacyLossPhaseV1 = "discover" | "restore";
+
+type LegacyLossBridgeResultV1 =
+  | { kind: "progress" }
+  | { kind: "none" }
+  | { kind: "state_error"; detail: string };
+
+/** Exact self scope-0 identity: `ubiquity/sentinel` under the no-App scope. */
+function isSelfScopeZero(repository: RepositoryIdentityV1): boolean {
+  return repository.installationId === 0 &&
+    repository.owner === "ubiquity" &&
+    repository.name === "sentinel";
+}
+
+function legacyDependenciesDone(
+  snapshot: RepairStateSnapshotV1,
+  record: WorkRecordV1,
+): boolean {
+  for (const dependency of record.dependencies) {
+    const dep = snapshot.work.find((work) => work.id === dependency);
+    if (dep === undefined || dep.nextStep !== "done") return false;
+  }
+  return true;
+}
+
+/**
+ * Structural eligibility for the legacy-loss bridge. It matches ONLY a self
+ * scope-0 issue with an absent candidateState and the original unprepared
+ * base_refresh intent whose branch/PR/head/key/observedBase bind exactly to
+ * the loaded record: implementation intents, new-format candidate records and
+ * every other lifecycle are never touched. Discovery covers ordinary `work`;
+ * restoration covers only the truthful missing_evidence blocker this bridge
+ * writes, while an implementation attempt remains.
+ */
+function legacyLossPhase(
+  deps: RepairCycleDepsV1,
+  snapshot: RepairStateSnapshotV1,
+  record: WorkRecordV1,
+  now: number,
+): LegacyLossPhaseV1 | null {
+  if (!isSelfScopeZero(record.repository)) return null;
+  if (record.source.kind !== "issue" || record.related.incidentId !== null) {
+    return null;
+  }
+  const issueNumber = record.related.issueNumber;
+  if (issueNumber === null || record.source.id !== String(issueNumber)) {
+    return null;
+  }
+  if (record.target.candidateState !== undefined) return null;
+  const intent = record.intent;
+  if (
+    intent === null || intent.kind !== "base_refresh" ||
+    intent.requestId !== null || intent.resultId !== null
+  ) {
+    return null;
+  }
+  const branch = record.target.branch;
+  const head = record.target.head;
+  const pr = record.target.pr;
+  const observedBase = intent.observedBase;
+  if (
+    branch === null || head === null || pr === null || observedBase === null
+  ) {
+    return null;
+  }
+  if (
+    branch !== candidateBranch(record.id) ||
+    intent.branch !== branch || intent.expectedHead !== head ||
+    intent.pr !== pr ||
+    intent.key !== baseRefreshIntentKey(pr, head, observedBase)
+  ) {
+    return null;
+  }
+  if (isWaiting(record, now) || !legacyDependenciesDone(snapshot, record)) {
+    return null;
+  }
+  if (configFor(deps, record.repository) === null) return null;
+  if (record.nextStep === "work") return "discover";
+  if (
+    record.nextStep === "blocked" &&
+    record.blocker?.kind === "missing_evidence" &&
+    record.counters.attempts < MAX_IMPLEMENTATION_ATTEMPTS
+  ) {
+    return "restore";
+  }
+  return null;
+}
+
+/**
+ * The proof's historical review must be the authentic completed H0/B0
+ * correction review: exact scope, PR, predecessor head and lost base, the
+ * configured trusted reviewer as both expected and observed identity, and at
+ * least one unresolved finding severity.
+ */
+function legacyLossReviewMatches(
+  snapshot: RepairStateSnapshotV1,
+  record: WorkRecordV1,
+  proof: LegacyBaseRefreshLossProofV1,
+  reviewer: string,
+): boolean {
+  const review = snapshot.reviews.find((entry) => entry.id === proof.reviewId);
+  if (review === undefined) return false;
+  return review.outcome === "completed" && review.resultId !== null &&
+    review.completedAt !== null && review.unresolvedSeverities.length > 0 &&
+    review.expectedReviewer === reviewer &&
+    review.observedReviewer === reviewer &&
+    review.pullRequest.number === proof.pr &&
+    review.pullRequest.head === proof.predecessorHead &&
+    review.pullRequest.base === proof.lostBase &&
+    sameRepositoryIdentity(review.repository, record.repository);
+}
+
+/**
+ * Independent re-validation of one runtime proof against the exact loaded
+ * record and this run's authoritative state head. The proof's `stateHead` must
+ * equal the head of the state read that produced the record — the snapshot's
+ * own `stateHead` field is never current-head evidence.
+ */
+function legacyLossProofMatches(
+  deps: RepairCycleDepsV1,
+  context: LoopContextV1,
+  record: WorkRecordV1,
+  proof: LegacyBaseRefreshLossProofV1,
+): boolean {
+  if (proof.shape !== "legacy_base_refresh") return false;
+  if (proof.taskId !== record.id) return false;
+  if (!sameRepositoryIdentity(proof.repository, record.repository)) {
+    return false;
+  }
+  if (proof.stateHead !== context.head) return false;
+  if (proof.lostBase !== record.target.base) return false;
+  if (proof.lostHead !== record.target.head) return false;
+  if (proof.branch !== record.target.branch) return false;
+  if (proof.pr !== record.target.pr) return false;
+  if (record.intent === null || proof.intentKey !== record.intent.key) {
+    return false;
+  }
+  if (proof.predecessorHead === proof.lostHead) return false;
+  return legacyLossReviewMatches(
+    context.snapshot,
+    record,
+    proof,
+    deps.github.reviewerIdentity,
+  );
+}
+
+/** Ordinary restored tuple: H0 at B0, same branch/PR, no intent or blocker. */
+function legacyLossRestoredRecord(
+  record: WorkRecordV1,
+  proof: LegacyBaseRefreshLossProofV1,
+  now: number,
+): WorkRecordV1 {
+  return {
+    ...record,
+    target: {
+      ...record.target,
+      base: proof.lostBase,
+      branch: proof.branch,
+      checkpoint: null,
+      head: proof.predecessorHead,
+      pr: proof.pr,
+    },
+    nextStep: "work",
+    wait: null,
+    blocker: null,
+    intent: null,
+    updatedAt: now,
+  };
+}
+
+/**
+ * Restoration is admitted only when the EXISTING head-rejection helper agrees
+ * for the proposed H0 record: it reads the FIRST completed receipt for the
+ * PR/head, so an earlier clean H0 receipt keeps the tuple blocked instead of
+ * delivering a head the ordinary gate would treat as publish-ready.
+ */
+function restoreLegacyLoss(
+  deps: RepairCycleDepsV1,
+  context: LoopContextV1,
+  record: WorkRecordV1,
+  proof: LegacyBaseRefreshLossProofV1,
+): Promise<StepResultV1> {
+  const now = deps.clock.now();
+  const proposed = legacyLossRestoredRecord(record, proof, now);
+  if (!headRejectedByReview(context.snapshot, proposed)) {
+    return Promise.resolve({
+      kind: "deferred",
+      detail: "legacy predecessor head is not rejected by review",
+    });
+  }
+  return persistTransition(
+    deps,
+    context,
+    replaceWorkMutation(proposed),
+    proof.stateHead,
+  );
+}
+
+/**
+ * Bounded pre-ranking pass over structurally eligible legacy records in stable
+ * id order. Each phase is attempted at most once per run, marked BEFORE its
+ * proof call. A shared state trust error stops the run; an ordinary cooldown
+ * deferral, a thrown/unavailable proof or any proof mismatch defers the active
+ * record and continues, so the first null/unavailable candidate can never
+ * starve a later recoverable one. Null means no loss state change. The pass
+ * stops at the first successful CAS (the caller reloads, counts the ordinary
+ * step and returns to normal ranking) or at exhaustion/deadline.
+ */
+async function bridgeLegacyLoss(
+  deps: RepairCycleDepsV1,
+  context: LoopContextV1,
+  attempted: Set<string>,
+  deferred: Set<string>,
+): Promise<LegacyLossBridgeResultV1> {
+  const prove = deps.github.proveLegacyBaseRefreshLoss;
+  if (prove === undefined) return { kind: "none" };
+  const now = deps.clock.now();
+  const ids = context.snapshot.work
+    .filter((record) =>
+      legacyLossPhase(deps, context.snapshot, record, now) !== null
+    )
+    .map((record) => record.id)
+    .sort();
+  for (const id of ids) {
+    // No probe begins at/after the total run deadline: the proof is awaited
+    // wall-clock work and every CAS must stay inside the same bound.
+    if (deps.clock.now() >= context.bounds.runDeadline) return { kind: "none" };
+    const record = context.snapshot.work.find((work) => work.id === id);
+    if (record === undefined) continue;
+    const phase = legacyLossPhase(deps, context.snapshot, record, now);
+    if (phase === null) continue;
+    const key = `${id}:${phase}`;
+    if (attempted.has(key)) continue;
+    attempted.add(key);
+    const cooling = await checkGithubCooldown(
+      deps,
+      record.repository,
+      context.bounds,
+    );
+    if (cooling.kind === "state_error") {
+      return { kind: "state_error", detail: cooling.detail };
+    }
+    if (cooling.kind === "deferred") {
+      deferred.add(id);
+      continue;
+    }
+    let proof: PortResultV1<LegacyBaseRefreshLossProofV1 | null>;
+    try {
+      proof = await prove.call(deps.github, record.id);
+    } catch {
+      deferred.add(id);
+      continue;
+    }
+    if (!proof.ok) {
+      deferred.add(id);
+      continue;
+    }
+    // Explicit "this record is not a legacy-loss case": no state change, and
+    // the scan continues to any later candidate.
+    if (proof.value === null) continue;
+    if (!legacyLossProofMatches(deps, context, record, proof.value)) {
+      deferred.add(id);
+      continue;
+    }
+    const persisted = phase === "discover"
+      ? await persistTransition(
+        deps,
+        context,
+        replaceWorkMutation(
+          markBlocked(
+            record,
+            "missing_evidence",
+            LEGACY_LOSS_DETAIL,
+            deps.clock.now(),
+          ),
+        ),
+        proof.value.stateHead,
+      )
+      : await restoreLegacyLoss(deps, context, record, proof.value);
+    if (persisted.kind === "progress") return { kind: "progress" };
+    if (persisted.kind === "state_error") {
+      return { kind: "state_error", detail: persisted.detail };
+    }
+    deferred.add(id);
+  }
+  return { kind: "none" };
 }
 
 // ---------------------------------------------------------------------------
