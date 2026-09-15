@@ -16,6 +16,7 @@ import {
 } from "../../src/state/mod.ts";
 import { asWorkItemId } from "../../src/contracts/brands.ts";
 import type { GitSha } from "../../src/contracts/brands.ts";
+import { canonicalStringify } from "../../src/contracts/canonical.ts";
 import type { GitHubIssueV1, PortResultV1 } from "../../src/contracts/ports.ts";
 import { portError, portOk } from "../../src/contracts/ports.ts";
 import { parseReviewReceiptV1 } from "../../src/contracts/review-receipt.ts";
@@ -2995,3 +2996,295 @@ Deno.test(
     }
   },
 );
+
+// ---------------------------------------------------------------------------
+// M15 V1 candidate state: the old reader parks new-format work without
+// mutating it, and unrelated legacy work still advances.
+// ---------------------------------------------------------------------------
+
+const CANDIDATE_REF = `refs/heads/sentinel-candidates/${"ab".repeat(32)}`;
+const PRODUCING_RESERVATION = "cd".repeat(32);
+/** Parked candidate head; distinct from the fake model's SHA3 candidate. */
+const PARKED_HEAD = SHA2;
+
+function candidateStateFor(
+  base: GitSha,
+  head: GitSha | null,
+): Record<string, unknown> {
+  return head === null ? { preserved: null, publishedHead: null } : {
+    preserved: {
+      operationKey: `impl:${PRODUCING_RESERVATION}`,
+      base,
+      head,
+      ref: CANDIDATE_REF,
+    },
+    publishedHead: head,
+  };
+}
+
+function parkedIssueWork(
+  id: string,
+  overrides: Record<string, unknown> = {},
+): WorkRecordV1 {
+  return workRecord(id, {
+    source: { kind: "issue", id, revision: SHA1 },
+    related: { incidentId: null, issueNumber: 1 },
+    target: {
+      base: SHA1,
+      branch: `sentinel/repair/${id}`,
+      checkpoint: null,
+      head: PARKED_HEAD,
+      pr: 7,
+      candidateState: candidateStateFor(SHA1, PARKED_HEAD),
+    },
+    ...overrides,
+  });
+}
+
+Deno.test("parked candidate records stay unselected, unmodified and uncharged", async () => {
+  const rig = await makeRig("candidate-parked", { summaries: false });
+  try {
+    const pushParked = parkedIssueWork("parked-push", {
+      nextStep: "work",
+      intent: {
+        kind: "push",
+        key: pushIntentKey(PARKED_HEAD),
+        startedAt: T0,
+        branch: "sentinel/repair/parked-push",
+        expectedHead: PARKED_HEAD,
+        observedBase: SHA1,
+        pr: null,
+        requestId: null,
+        resultId: null,
+      },
+    });
+    const implementationParked = parkedIssueWork("parked-impl", {
+      nextStep: "work",
+      intent: {
+        kind: "implementation",
+        key: `impl:${PRODUCING_RESERVATION}`,
+        startedAt: T0,
+        branch: "sentinel/repair/parked-impl",
+        expectedHead: PARKED_HEAD,
+        observedBase: SHA1,
+        pr: null,
+        requestId: PRODUCING_RESERVATION,
+        resultId: null,
+      },
+    });
+    const baseRefreshParked = parkedIssueWork("parked-refresh", {
+      nextStep: "delivery",
+      intent: {
+        kind: "base_refresh",
+        key: `push:${PARKED_HEAD}`,
+        startedAt: T0,
+        branch: "sentinel/repair/parked-refresh",
+        expectedHead: PARKED_HEAD,
+        observedBase: SHA1,
+        pr: 7,
+        requestId: null,
+        resultId: null,
+      },
+    });
+    const closureParked = parkedIssueWork("parked-closure", {
+      nextStep: "delivery",
+      intent: {
+        kind: "issue_closure",
+        key: "issue_closure:1",
+        startedAt: T0,
+        branch: null,
+        expectedHead: null,
+        observedBase: null,
+        pr: 7,
+        requestId: null,
+        resultId: null,
+      },
+    });
+    // An expired review wait does not make parked work eligible.
+    const reviewParked = parkedIssueWork("parked-review", {
+      nextStep: "review",
+      wait: { reason: "review_pending", since: T0 - 2, until: T0 - 1 },
+    });
+    // Null-preserved parked work (no head, no PR) is parked as well.
+    const nullParked = parkedIssueWork("parked-null", {
+      nextStep: "work",
+      target: {
+        base: SHA1,
+        branch: "sentinel/repair/parked-null",
+        checkpoint: null,
+        head: null,
+        pr: null,
+        candidateState: candidateStateFor(SHA1, null),
+      },
+    });
+    // Terminal/blocked parked records keep their exact bytes too.
+    const doneParked = parkedIssueWork("parked-done", { nextStep: "done" });
+    const blockedParked = parkedIssueWork("parked-blocked", {
+      nextStep: "blocked",
+      blocker: { kind: "missing_evidence", message: "parked", since: T0 },
+    });
+    const records = [
+      pushParked,
+      implementationParked,
+      baseRefreshParked,
+      closureParked,
+      reviewParked,
+      nullParked,
+      doneParked,
+      blockedParked,
+    ];
+    const before = new Map(
+      records.map((record) => [record.id, canonicalStringify(record)]),
+    );
+    const written = await rig.store.writeRepair(
+      seededSnapshot(records),
+      null,
+    );
+    assert.ok(written.ok && written.value.status === "applied");
+
+    const outcome = await rig.run();
+    assert.equal(outcome.status, "idle", JSON.stringify(outcome));
+    const state = await rig.snapshot();
+    assert.equal(state.sequence, 1, "parked records cause no state write");
+    assert.equal(state.work.length, records.length);
+    for (const record of records) {
+      const after = state.work.find((work) => work.id === record.id);
+      assert.ok(after, `parked record ${record.id} survives`);
+      assert.equal(
+        canonicalStringify(after),
+        before.get(record.id),
+        `${record.id} bytes are unchanged`,
+      );
+    }
+    assert.equal(rig.model.requests.length, 0, "no model start");
+    assert.equal(rig.replay.requests.length, 0, "no replay run");
+    assert.equal(rig.github.pushes.length, 0, "no push");
+    assert.deepEqual(rig.github.calls, ["listOpenIssues"], "no effect calls");
+  } finally {
+    await rig.ctx.cleanup();
+  }
+});
+
+Deno.test("changed incident intake cannot mutate parked work and legacy work still advances", async () => {
+  const rig = await makeRig("candidate-intake", {
+    github: {
+      openIssues: [issueRecord(55), issueRecord(101)],
+      issues: [issueRecord(101)],
+    },
+  });
+  try {
+    const parkedIncident = workRecord("incident-parked", {
+      source: { kind: "incident", id: "inc-a", revision: SHA2 },
+      related: { incidentId: "inc-a", issueNumber: null },
+      fingerprint: FINGERPRINT,
+      failingRevision: SHA2,
+      nextStep: "review",
+      wait: { reason: "review_pending", since: T0 - 2, until: T0 - 1 },
+      target: {
+        base: SHA1,
+        branch: candidateBranch(asWorkItemId("incident-parked")),
+        checkpoint: null,
+        head: PARKED_HEAD,
+        pr: 7,
+        candidateState: candidateStateFor(SHA1, PARKED_HEAD),
+      },
+    });
+    // A parked ISSUE task must be found by the whole-snapshot issue lookup and
+    // never recreated from the incoming issue list.
+    const parkedIssue = parkedIssueWork("issue-55", {
+      source: { kind: "issue", id: "55", revision: SHA1 },
+      related: { incidentId: null, issueNumber: 55 },
+      nextStep: "work",
+    });
+    const storedSummary = summaryFixture();
+    const written = await rig.store.writeRepair(
+      seededSnapshot([parkedIncident, parkedIssue], {
+        incidents: [storedSummary],
+      }),
+      null,
+    );
+    assert.ok(written.ok && written.value.status === "applied");
+    const beforeIncident = canonicalStringify(parkedIncident);
+    const beforeIssue = canonicalStringify(parkedIssue);
+    const beforeSummary = canonicalStringify(storedSummary);
+
+    // The source now reports a changed summary for the parked incident. The
+    // old reader must skip it entirely, preserving the stored summary and the
+    // parked work bytes.
+    rig.incidents.setSummaries([
+      incidentSummary("inc-a", {
+        fingerprint: FINGERPRINT,
+        severity: "P0",
+        count: 9,
+        firstSeenAt: storedSummary.firstSeenAt,
+        lastSeenAt: T0 + 900_000,
+        failingRevision: SHA2,
+        context: {
+          message: "changed upstream failure",
+          location: null,
+          sample: [],
+        },
+        evidenceRef: storedSummary.evidenceRef,
+      }),
+    ]);
+
+    const outcome = await rig.run();
+    assert.equal(outcome.status, "idle", JSON.stringify(outcome));
+    const state = await rig.snapshot();
+
+    const afterIncident = state.work.find((work) =>
+      work.id === parkedIncident.id
+    );
+    const afterIssue = state.work.find((work) => work.id === parkedIssue.id);
+    assert.ok(afterIncident && afterIssue);
+    assert.equal(canonicalStringify(afterIncident), beforeIncident);
+    assert.equal(canonicalStringify(afterIssue), beforeIssue);
+    assert.equal(
+      canonicalStringify(state.incidents[0]),
+      beforeSummary,
+      "the stored incident summary is preserved",
+    );
+    assert.equal(
+      state.work.length,
+      3,
+      "the parked issue task was not recreated",
+    );
+
+    // The unrelated legacy issue advanced through the real loop.
+    const legacy = state.work.find((work) =>
+      work.source.kind === "issue" && work.source.id === "101"
+    );
+    assert.ok(legacy, "the legacy issue task exists");
+    assert.equal(legacy?.nextStep, "review");
+    assert.equal(legacy?.wait?.reason, "review_pending");
+    assert.equal(legacy?.target.head, SHA3);
+    assert.equal(legacy?.target.pr, 7);
+    assert.equal(legacy?.counters.attempts, 1);
+    assert.equal(
+      rig.model.requests.length,
+      1,
+      "exactly one model start, for the legacy task",
+    );
+    assert.equal(rig.github.pushes.length, 1, "one legacy candidate push");
+    assert.equal(
+      rig.github.calls.filter((call) => call === "createPr").length,
+      1,
+    );
+    assert.equal(
+      rig.github.calls.filter((call) => call === "requestReview").length,
+      1,
+    );
+    assert.equal(
+      rig.github.calls.filter((call) => call === "merge").length,
+      0,
+      "no merge for the parked incident",
+    );
+    assert.equal(
+      rig.github.calls.filter((call) => call === "observeReview").length,
+      0,
+      "the expired parked review wait is never observed",
+    );
+  } finally {
+    await rig.ctx.cleanup();
+  }
+});
