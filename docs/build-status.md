@@ -2,12 +2,25 @@
 
 ## Active task register — Astra owned
 
-Updated 2026-09-15 22:27 UTC. This is the only authoritative acceptance ledger.
+Updated 2026-09-15 22:31 UTC. This is the only authoritative acceptance ledger.
 The goal remains incomplete: autonomous GitHub Actions repair against Sentinel,
 then the separately authorized ai.ubq.fi target. Only the current GPT-6 Astra
 integration owner may change scope, status, acceptance or write ownership here.
 
 ### Current checkpoint
+
+- At22:31 the M14 durability and repair-fixture checkpoint8493511d78dc4af46568590dc33ad6a261de715d
+  is integrated by ancestry as8ec1abe80d023b31c669bef9874367a4e95dc679. This is
+  development integration, not release acceptance or installation. V13b settled
+  exec62696/PID135724, sessiondeb35b94/stream982ce29c,6calls/3edits; exact
+  production/Flash/max/workspace-write/ask verified. No checks/formatter/children
+  ran; its required plan read was absent from the tool record. Primary read the
+  full plan and independently verified the exact scoped correction. GPT
+  567594b0-81a5-412f-9956-623b6f75d635 passed9/failed0, child0,5765ms.
+  Combine with unchanged passing cases in88197184; no whole-suite repeat needed.
+  V14 next owns the eight integration fixture files only, after canonical
+  ancestry is reconciled into M14. Production and real destructive fixtures are
+  frozen. Existing PR70 approval remains pending; no live review/install occurs.
 
 - At22:28 fresh fixture_last_failure_audit confirmed a fixture-only correction:
   legacy publication now has exact no-op PREPARED/PREPARED, changing next/PREPARED,
