@@ -123,7 +123,7 @@ function scoreKey(record: WorkRecordV1, now: number): string[] {
     case 0: {
       // Delivery bookkeeping: outstanding merges/closure first, oldest last
       // update first; the same bucket never races a new repair.
-      return [`0`, String(record.updatedAt), tie(record)];
+      return [`0`, zeroPad(record.updatedAt), tie(record)];
     }
     case 1: {
       // Active incidents: severity, then oldest first seen.
@@ -155,7 +155,7 @@ function scoreKey(record: WorkRecordV1, now: number): string[] {
       // String-safe ordering: fixed-width ascending keys, missing = maximum.
       const priorityKey = record.classification.priority === null
         ? "9".repeat(20)
-        : zeroPad(1_000_000 - record.classification.priority);
+        : zeroPad(Number.MAX_SAFE_INTEGER - record.classification.priority);
       return [
         `5`,
         priorityKey,
