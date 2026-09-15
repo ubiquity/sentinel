@@ -2,12 +2,75 @@
 
 ## Active task register — Astra owned
 
-Updated 2026-09-15 23:29 UTC. This is the only authoritative acceptance ledger.
+Updated 2026-09-15 23:57 UTC. This is the only authoritative acceptance ledger.
 The goal remains incomplete: autonomous GitHub Actions repair against Sentinel,
 then the separately authorized ai.ubq.fi target. Only the current GPT-6 Astra
 integration owner may change scope, status, acceptance or write ownership here.
 
 ### Current checkpoint
+
+- At23:57 V17b settled exec78508/PID278808 exit0/completed,16calls/3edits,
+  one permitted single-file formatter pass, no checks/children. Persisted
+  df99d107/stream2b75c32a and live attestation prove required exact launch.
+  GPT38e760ef-5e5c-4bd8-8e49-2e733f8dba39 passes all9 bridge cases, child0,
+  5428ms: real two-CAS Git ancestry, ordinary charged attempt4 atB0/H0,
+  null/unavailable scan progress, unrelated eligible advancement, stale-proof
+  refusal and exclusions. Lint920ab2f3 and formatdc95d3d5 pass. Primary verified
+  fixture-only correction scope and unchanged audited source; V17 accepted
+  for canonical ancestry integration. Live normal recovery remains unproved.
+  PR67 runtime review preflight atf617e17 vs8c861f5 measured diff1,392,000bytes
+  and prompt3,213,117bytes (each limit1,048,576); old ledger blob723,363bytes
+  exceeds524,288. No override/filter/chunk route exists; altering only the new
+  ledger cannot fix the old blob. PR70 measured772,393promptbytes fits but its
+  extra-review authority remains unanswered. No review, limit change or live
+  state mutation occurred. Stage2 parser requirement V18 is next independent
+  source work; no formal-review cycle is reset by these integrations.
+
+- At23:54 fresh legacy_loss_loop_audit PASSED V17 source contract and found
+  fixture-only corrections: charge settledT0+500 exceeds fake clockT0, so the
+  budget correctly defers; three seeded legacy PR records fill WIP3 and make
+  unrelated issue9 ineligible. V17b owns only loop_test.ts to advance fake time
+  before cycle3, split null/unavailable scheduling variants to two legacy PRs
+  each, and replace sole lint no-await callback with Promise.resolve. Source
+  frozen; assertions/accounting/selector preserved. Immutable35-call assignment,
+  playbook hashfc44ca6e unchanged. Review-snapshot preflight also found existing
+  aggregate size blockers; no limits, review gates or source scope are altered.
+
+- At23:49 V17 settled exit0/completed,140calls/18edits, one permitted formatter
+  pass. The primary prepared bounded stop after repeated post-format inspection;
+  live guard found a terminal record before signaling, so NO signal was sent.
+  Exact PID263638 and parent263624 exited, no descendants. Two files changed;
+  frozen patch91d27bdf. GPT3e40055a-f2ef-4b32-b233-7825926f0938 ran all eight
+  bridge cases:6passed/2failed child1,7725ms. Real loss/restore/ancestry passes
+  until third cycle expects attempt4 but sees0model calls; starvation restores
+  the legacy tuple but unrelated issue9.branch staysnull. Fresh no-history
+  Astra legacy_loss_loop_audit diagnoses these two failures plus source contract
+  before correction. Format69f706ea-f61b-458d-8e5f-bf8f10d6cbbf passed. No
+  writer/test active after lint settlement; no repeated test without correction.
+  Both f617e17 CI runs now pass13m14s/15m2s. Stage2 Issue69 parser syntax remains
+  an independently verified two-file prerequisite; consumer bindings already
+  checked. Its unlaunched V18 draft is private; existing valid fixture keys
+  need no coordinated changes. Formal reader review/install remains paused.
+
+- V17 launched23:35 as exec26383/PID263638; m14-launch-v17.json proves exact
+  cwd/production/credential presence, persistedbb6d55ca/streamafd6c2d7 proves
+  Flash/max/workspace-write/ask. PID263624 is its parent shell. Frozen candidate
+  inputs remain untested while the sole writer works. Fresh review-accounting
+  audit confirms PR67 cannot replenish the exhausted reader cycle by changing
+  PR number; formal reader review/merge/install remains paused. Independent
+  M14 implementation, deterministic acceptance and read-only audits continue.
+  Both canonical f617e17 CI runs35036149897/35036153552 are pending. Only issues
+  48/61 are opted in; no artificial queue entries or additional Pro calls.
+
+- Canonical/M14 are both clean/pushed f617e17511d70883eab11995a26ff79c7021b667
+  before this checkpoint; accepted proof56f2cbf is integrated by ancestry.
+  Read-only lifecycle_fixture_scope passed the V17 assignment and real-store
+  fixture seams. Frozen m14-assignment-v17-loop.md now pins that exact base;
+  sole writer owns loop.ts and loop_test.ts only,140calls, normal two-CAS
+  recovery plus historical-state and scheduling proof. Helpers and all host
+  proof source stay frozen. DSH rules hashfc44ca6e unchanged and rechecked.
+  The next acceptance is normal loss->restore->charged successor; no live
+  action or PR70 permission change is implied by this development assignment.
 
 - At23:32 V16c settled exec34788/PID258323 exit0/completed,17calls/4edits,
   one permitted two-file formatter pass, no tests/probes/children. Persisted
