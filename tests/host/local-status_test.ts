@@ -543,11 +543,11 @@ Deno.test("status projection: 0/199/200/201 records keep complete totals", async
         assert.equal(R.chargedHour, size);
         assert.equal(R.chargedSevenDays, size);
         // All charges sit one second inside the rolling hour and are
-        // simultaneous; 199/200/201 exceed the 168 seven-day cap, so the
-        // weekly threshold is the later exact retry, not the hourly one.
+        // simultaneous; 199/200/201 exceed the 120 hourly cap, so the hourly
+        // threshold is the exact retry.
         assert.equal(
           produced.status.nextEligibleStartAt,
-          FINISHED - 1000 + WEEK,
+          FINISHED - 1000 + HOUR,
         );
       }
       if (size === 199 || size === 201) {
@@ -636,50 +636,50 @@ Deno.test("status projection: exact rolling hour and seven-day semantics", async
     assert.equal(reservationAggregates(none.status).chargedHour, 0);
     assert.equal(none.status.nextEligibleStartAt, null);
 
-    // 59 charges leave the rolling hour below its 60-start cap.
+    // 119 charges leave the rolling hour below its 120-start cap.
     const underHour = await status(
-      chargedReservations("hour-under", 59, FINISHED - 1000),
+      chargedReservations("hour-under", 119, FINISHED - 1000),
     );
     const underHourAgg = reservationAggregates(underHour.status);
-    assert.equal(underHourAgg.chargedHour, 59);
-    assert.equal(underHourAgg.chargedSevenDays, 59);
+    assert.equal(underHourAgg.chargedHour, 119);
+    assert.equal(underHourAgg.chargedSevenDays, 119);
     assert.equal(underHour.status.nextEligibleStartAt, null);
 
-    // 60 charges reach the cap: the oldest charge retires first.
+    // 120 charges reach the cap: the oldest charge retires first.
     const atHour = await status(
-      chargedReservations("hour-at", 60, FINISHED - 1000),
+      chargedReservations("hour-at", 120, FINISHED - 1000),
     );
     const atHourAgg = reservationAggregates(atHour.status);
-    assert.equal(atHourAgg.chargedHour, 60);
-    assert.equal(atHourAgg.chargedSevenDays, 60);
+    assert.equal(atHourAgg.chargedHour, 120);
+    assert.equal(atHourAgg.chargedSevenDays, 120);
     assert.equal(atHour.status.nextEligibleStartAt, FINISHED - 1000 + HOUR);
 
-    // 61 charges use the 60th most recent charge: the newest and the oldest
+    // 121 charges use the 120th most recent charge: the newest and the oldest
     // charge alone would each give a false retry.
     const overHour = await status([
       chargedReservation("hour-new", FINISHED - 100),
-      ...chargedReservations("hour-mid", 59, FINISHED - 2000),
+      ...chargedReservations("hour-mid", 119, FINISHED - 2000),
       chargedReservation("hour-old", FINISHED - 5000),
     ]);
     const overHourAgg = reservationAggregates(overHour.status);
-    assert.equal(overHourAgg.chargedHour, 61);
-    assert.equal(overHourAgg.chargedSevenDays, 61);
+    assert.equal(overHourAgg.chargedHour, 121);
+    assert.equal(overHourAgg.chargedSevenDays, 121);
     assert.equal(overHour.status.nextEligibleStartAt, FINISHED - 2000 + HOUR);
 
     // Window is (finishedAt - HOUR, finishedAt]: the exact lower bound is out.
     const atBoundary = await status(
-      chargedReservations("hour-boundary", 60, FINISHED - HOUR),
+      chargedReservations("hour-boundary", 120, FINISHED - HOUR),
     );
     assert.equal(reservationAggregates(atBoundary.status).chargedHour, 0);
     assert.equal(atBoundary.status.nextEligibleStartAt, null);
     const justOutside = await status(
-      chargedReservations("hour-outside", 60, FINISHED - HOUR - 1),
+      chargedReservations("hour-outside", 120, FINISHED - HOUR - 1),
     );
     assert.equal(reservationAggregates(justOutside.status).chargedHour, 0);
     const justInside = await status(
-      chargedReservations("hour-inside", 60, FINISHED - HOUR + 1),
+      chargedReservations("hour-inside", 120, FINISHED - HOUR + 1),
     );
-    assert.equal(reservationAggregates(justInside.status).chargedHour, 60);
+    assert.equal(reservationAggregates(justInside.status).chargedHour, 120);
     assert.equal(
       justInside.status.nextEligibleStartAt,
       FINISHED - HOUR + 1 + HOUR,
@@ -687,14 +687,15 @@ Deno.test("status projection: exact rolling hour and seven-day semantics", async
 
     // Exactly the observation timestamp is inside both windows.
     const atNow = await status(
-      chargedReservations("hour-now", 60, FINISHED),
+      chargedReservations("hour-now", 120, FINISHED),
     );
     const atNowAgg = reservationAggregates(atNow.status);
-    assert.equal(atNowAgg.chargedHour, 60);
-    assert.equal(atNowAgg.chargedSevenDays, 60);
+    assert.equal(atNowAgg.chargedHour, 120);
+    assert.equal(atNowAgg.chargedSevenDays, 120);
     assert.equal(atNow.status.nextEligibleStartAt, FINISHED + HOUR);
 
-    // 167/168/169 charges inside the week but outside the hour.
+    // 167/168/169 charges inside the week but outside the hour: retained as
+    // historical seven-day usage only, never a weekly deferral.
     const weekly = (count: number) =>
       Array.from({ length: count }, (_value, index) =>
         chargedReservation(
@@ -708,16 +709,32 @@ Deno.test("status projection: exact rolling hour and seven-day semantics", async
     const atWeekAgg = reservationAggregates(atWeek.status);
     assert.equal(atWeekAgg.chargedSevenDays, 168);
     assert.equal(atWeekAgg.chargedHour, 0);
-    const weekThreshold = FINISHED - HOUR - 1000 - 167 * 60_000;
-    assert.equal(atWeek.status.nextEligibleStartAt, weekThreshold + WEEK);
+    assert.equal(atWeek.status.nextEligibleStartAt, null);
     const overWeek = await status(weekly(169));
     assert.equal(reservationAggregates(overWeek.status).chargedSevenDays, 169);
-    // With 169 charges the 168th most recent is still the limiting one, so the
-    // exact retry time is the same as at 168: no clipping, no false permission.
-    assert.equal(overWeek.status.nextEligibleStartAt, weekThreshold + WEEK);
+    // More weekly history than the retired 168 cap still never defers while
+    // the rolling hour has room.
+    assert.equal(overWeek.status.nextEligibleStartAt, null);
     assert.equal(
       overWeek.status.nextEligibleStartAt,
       atWeek.status.nextEligibleStartAt,
+    );
+    // The embedded renderer accepts and renders that historical usage with no
+    // weekly deferral and a clear "no weekly cap" label, never "of null".
+    const overWeekRendered = await expectRecorded(
+      overWeek.fileText,
+      "GREEN",
+      "Rolling usage: 0 of 120 in the last hour; 169 charged in the last seven days (historical usage, no weekly cap)",
+    );
+    assert.ok(
+      overWeekRendered.summary.includes(
+        "Next eligible local start (UTC): none recorded (the rolling hour has room)",
+      ),
+      overWeekRendered.summary,
+    );
+    assert.ok(
+      !overWeekRendered.summary.includes("of null"),
+      overWeekRendered.summary,
     );
 
     // Weekly lower bound: (finishedAt - WEEK, finishedAt].
@@ -756,41 +773,30 @@ Deno.test("status projection: exact rolling hour and seven-day semantics", async
       reservationAggregates(weekInsideBoundary.status).chargedHour,
       0,
     );
-    assert.equal(
-      weekInsideBoundary.status.nextEligibleStartAt,
-      FINISHED - WEEK + 1 + WEEK,
-    );
-    // 168 charges exactly at the observation time combine both caps; the
-    // seven-day threshold is the later exact retry.
+    assert.equal(weekInsideBoundary.status.nextEligibleStartAt, null);
+    // 168 historical charges exactly at the observation time fill the rolling
+    // hour, so only the hourly threshold sets the exact retry.
     const weekAtNow = await status(weekBoundary(FINISHED));
     const weekAtNowAgg = reservationAggregates(weekAtNow.status);
     assert.equal(weekAtNowAgg.chargedHour, 168);
     assert.equal(weekAtNowAgg.chargedSevenDays, 168);
-    assert.equal(weekAtNow.status.nextEligibleStartAt, FINISHED + WEEK);
+    assert.equal(weekAtNow.status.nextEligibleStartAt, FINISHED + HOUR);
 
-    // Both caps: the later of the two exact retry times wins. The 60 hourly
-    // charges precede the weekly 168, so the 168th most recent charge overall
-    // is weekly index 107 and its retirement is the weekly threshold.
+    // In-hour charges inside a large weekly history: the hourly threshold is
+    // the only admission bound; the weekly total stays a historical count.
     const bothHourCandidate = FINISHED - 4000 + HOUR;
     const both = await status([
-      ...chargedReservations("both-hour", 60, FINISHED - 4000),
+      ...chargedReservations("both-hour", 120, FINISHED - 4000),
       ...weekly(168),
     ]);
     const bothAgg = reservationAggregates(both.status);
-    assert.equal(bothAgg.chargedHour, 60);
-    assert.equal(bothAgg.chargedSevenDays, 228);
-    const bothWeeklyThreshold = FINISHED - HOUR - 1000 - 107 * 60_000;
-    assert.ok(
-      bothWeeklyThreshold + WEEK > bothHourCandidate,
-      "the weekly cap is the limiting retry in this case",
-    );
-    assert.equal(
-      both.status.nextEligibleStartAt,
-      Math.max(bothHourCandidate, bothWeeklyThreshold + WEEK),
-    );
+    assert.equal(bothAgg.chargedHour, 120);
+    assert.equal(bothAgg.chargedSevenDays, 288);
+    assert.equal(both.status.nextEligibleStartAt, bothHourCandidate);
 
-    // Outcomes: only a confirmed non-submission is refunded. Sixty charged
-    // outcomes reach the hour cap; the refunded entry does not count.
+    // Outcomes: only a confirmed non-submission is refunded. One hundred and
+    // twenty charged outcomes reach the hour cap; the refunded entry does not
+    // count.
     const outcomes = await status([
       chargedReservation("out-reserved", FINISHED - 1000),
       chargedReservation("out-submitted", FINISHED - 1000, {
@@ -801,7 +807,7 @@ Deno.test("status projection: exact rolling hour and seven-day semantics", async
         outcome: "ambiguous",
         settledAt: FINISHED - 500,
       }),
-      ...chargedReservations("out-charged", 57, FINISHED - 1000),
+      ...chargedReservations("out-charged", 117, FINISHED - 1000),
       chargedReservation("out-refunded", FINISHED - 1000, {
         outcome: "confirmed_not_submitted",
         settledAt: FINISHED - 500,
@@ -809,10 +815,10 @@ Deno.test("status projection: exact rolling hour and seven-day semantics", async
       }),
     ]);
     const outcomesAgg = reservationAggregates(outcomes.status);
-    assert.equal(outcomesAgg.total, 61);
-    assert.equal(outcomesAgg.open, 58);
+    assert.equal(outcomesAgg.total, 121);
+    assert.equal(outcomesAgg.open, 118);
     assert.equal(outcomesAgg.settled, 3);
-    assert.equal(outcomesAgg.chargedHour, 60);
+    assert.equal(outcomesAgg.chargedHour, 120);
     assert.equal(outcomes.status.nextEligibleStartAt, FINISHED - 1000 + HOUR);
   } finally {
     await Deno.remove(root, { recursive: true });
@@ -1000,7 +1006,7 @@ Deno.test("status projection: blocked work survives byte pressure before reserva
     assert.equal(produced.status.summary, "truncated");
     assert.equal(
       produced.status.nextEligibleStartAt,
-      FINISHED - 1000 + WEEK,
+      FINISHED - 1000 + HOUR,
     );
     const rendered = await expectRecorded(
       produced.fileText,
@@ -1321,8 +1327,28 @@ Deno.test("embedded renderer: real producer output renders complete and RED repo
       repairSnapshot([work("w-1", "work", 1)]),
       root,
     );
-    await expectRecorded(complete.fileText, "GREEN", "Local state: available");
-    await expectRecorded(complete.fileText, "GREEN", "Rolling usage: 0 of 60");
+    const completeRendered = await expectRecorded(
+      complete.fileText,
+      "GREEN",
+      "Local state: available",
+    );
+    assert.ok(
+      completeRendered.summary.includes(
+        "Admission limits: 120 starts per rolling hour, no weekly cap",
+      ),
+      completeRendered.summary,
+    );
+    assert.ok(
+      completeRendered.summary.includes(
+        "Rolling usage: 0 of 120 in the last hour; 0 charged in the last seven days (historical usage, no weekly cap)",
+      ),
+      completeRendered.summary,
+    );
+    assert.ok(
+      !completeRendered.summary.includes("of null"),
+      completeRendered.summary,
+    );
+    await expectRecorded(complete.fileText, "GREEN", "Rolling usage: 0 of 120");
     await expectRecorded(complete.fileText, "GREEN", "Report detail: complete");
 
     const unavailable = await produce(new StatusState(null, true), root);
@@ -1335,7 +1361,7 @@ Deno.test("embedded renderer: real producer output renders complete and RED repo
     const blocked = await produceSnapshot(
       repairSnapshot(
         [blockedWork("blk-1", 9)],
-        chargedReservations("r-cap", 60, FINISHED - 1000),
+        chargedReservations("r-cap", 120, FINISHED - 1000),
       ),
       root,
     );
@@ -1345,7 +1371,7 @@ Deno.test("embedded renderer: real producer output renders complete and RED repo
       "RED",
       "blocked work is present",
     );
-    assert.ok(rendered.summary.includes("Rolling usage: 60 of 60"));
+    assert.ok(rendered.summary.includes("Rolling usage: 120 of 120"));
     assert.ok(rendered.summary.includes("Next eligible local start (UTC):"));
   } finally {
     await Deno.remove(root, { recursive: true });
@@ -1473,18 +1499,18 @@ Deno.test("embedded renderer: rejects incompatible or inconsistent shapes", asyn
       mutated(base, (status) => {
         status.nextEligibleStartAt = FINISHED + 1000;
       }),
-      "while both rolling caps have room",
+      "while the rolling hour cap has room",
     );
 
     const atCap = await produceSnapshot(
-      repairSnapshot([], chargedReservations("r-cap", 60, FINISHED - 1000)),
+      repairSnapshot([], chargedReservations("r-cap", 120, FINISHED - 1000)),
       root,
     );
     await expectRejected(
       mutated(atCap, (status) => {
         status.nextEligibleStartAt = null;
       }),
-      "missing while a rolling cap is reached",
+      "missing while the rolling hour cap is reached",
     );
     await expectRejected(
       mutated(atCap, (status) => {
@@ -1500,15 +1526,15 @@ Deno.test("embedded renderer: rejects incompatible or inconsistent shapes", asyn
           };
         };
         status.reservations = [];
-        aggregates.reservations.total = 60;
+        aggregates.reservations.total = 120;
         aggregates.reservations.open = 0;
-        aggregates.reservations.settled = 60;
-        aggregates.reservations.omitted = 60;
+        aggregates.reservations.settled = 120;
+        aggregates.reservations.omitted = 120;
         aggregates.reservations.chargedHour = 0;
         aggregates.reservations.chargedSevenDays = 0;
         status.summary = "truncated";
       }),
-      "next eligible start is set while both rolling caps have room",
+      "next eligible start is set while the rolling hour cap has room",
     );
     await expectRejected(undefined, "status input is missing");
     await expectRejected("not json", "not valid JSON");
@@ -1587,7 +1613,7 @@ Deno.test("embedded renderer: rejects contradictory aggregate counts", async () 
     const recent = await produceSnapshot(
       repairSnapshot(
         [],
-        chargedReservations("r-recent", 60, FINISHED - 1000),
+        chargedReservations("r-recent", 120, FINISHED - 1000),
       ),
       root,
     );
@@ -1607,7 +1633,7 @@ Deno.test("embedded renderer: rejects contradictory aggregate counts", async () 
       mutated(recent, (status) => {
         status.nextEligibleStartAt = FINISHED - 1000 + HOUR + 1;
       }),
-      "next eligible start is not the exact retry under both rolling caps",
+      "next eligible start is not the exact retry under the rolling hour cap",
     );
   } finally {
     await Deno.remove(root, { recursive: true });
@@ -1782,16 +1808,16 @@ Deno.test("embedded renderer: truncated detail keeps complete counts and bounded
         [
           chargedReservation("r-000-oldest", FINISHED - 4000),
           chargedReservation("r-001-second", FINISHED - 3990),
-          ...chargedReservations("r-100-mid", 58, FINISHED - 2000),
+          ...chargedReservations("r-100-mid", 118, FINISHED - 2000),
           chargedReservation("r-999-newest", FINISHED - 1000),
         ],
       ),
       root,
     );
     const R = reservationAggregates(base.status);
-    assert.equal(R.total, 61);
+    assert.equal(R.total, 121);
     assert.equal(R.omitted, 0);
-    assert.equal(R.chargedHour, 61);
+    assert.equal(R.chargedHour, 121);
     assert.equal(base.status.nextEligibleStartAt, FINISHED - 3990 + HOUR);
 
     // A valid truncated report: the newest charge is omitted from the bounded
@@ -1808,10 +1834,10 @@ Deno.test("embedded renderer: truncated detail keeps complete counts and bounded
       "blocked work is present",
     );
     assert.ok(!rendered.summary.includes("NOT RECORDED"), rendered.summary);
-    assert.ok(rendered.summary.includes("61 total"), rendered.summary);
+    assert.ok(rendered.summary.includes("121 total"), rendered.summary);
     assert.ok(rendered.summary.includes("1 omitted"), rendered.summary);
     assert.ok(
-      rendered.summary.includes("Rolling usage: 61 of 60"),
+      rendered.summary.includes("Rolling usage: 121 of 120"),
       rendered.summary,
     );
 
@@ -1845,7 +1871,7 @@ Deno.test("embedded renderer: truncated detail keeps complete counts and bounded
       mutated(base, (status) => {
         status.nextEligibleStartAt = FINISHED - 1000 + HOUR + 1;
       }),
-      "next eligible start is not the exact retry under both rolling caps",
+      "next eligible start is not the exact retry under the rolling hour cap",
     );
     await expectRejected(
       mutated(base, (status) => {
@@ -1863,29 +1889,30 @@ Deno.test("embedded renderer: rejects an omitted hourly charge hidden by visible
   try {
     const produced = await produceSnapshot(
       repairSnapshot([], [
-        ...chargedReservations("r-hour", 60, FINISHED - 1),
+        ...chargedReservations("r-hour", 120, FINISHED - 1),
         ...chargedReservations("r-wk", 60, FINISHED - 2 * HOUR),
       ]),
       root,
     );
     const R = reservationAggregates(produced.status);
-    assert.equal(R.total, 120);
-    assert.equal(R.open, 120);
-    assert.equal(R.chargedHour, 60);
-    assert.equal(R.chargedSevenDays, 120);
+    assert.equal(R.total, 180);
+    assert.equal(R.open, 180);
+    assert.equal(R.chargedHour, 120);
+    assert.equal(R.chargedSevenDays, 180);
     assert.equal(produced.status.nextEligibleStartAt, FINISHED - 1 + HOUR);
     const visibleIds = detail(produced.status, "reservations").map((entry) =>
       entry.taskId
     );
-    assert.equal(visibleIds.length, 120);
+    assert.equal(visibleIds.length, 180);
     assert.equal(visibleIds[0], "task:r-hour-000");
-    assert.equal(visibleIds[119], "task:r-wk-059");
+    assert.equal(visibleIds[119], "task:r-hour-119");
+    assert.equal(visibleIds[179], "task:r-wk-059");
 
     // Truncated dispatch: only the older weekly-only charges stay visible, the
     // newer hourly charges are omitted, and the weekly aggregate is lowered to
     // match the visible detail. Every per-category bound still passes, but the
     // pair is impossible because each omitted hourly charge must also be an
-    // omitted weekly charge, so the weekly aggregate cannot drop to 60.
+    // omitted weekly charge, so the weekly aggregate cannot drop to 120.
     const truncated = mutated(produced, (status) => {
       const visible = status.reservations as Array<Record<string, unknown>>;
       status.reservations = visible.filter((entry) =>
@@ -1894,8 +1921,8 @@ Deno.test("embedded renderer: rejects an omitted hourly charge hidden by visible
       const reservations = (status.aggregates as {
         reservations: { omitted: number; chargedSevenDays: number };
       }).reservations;
-      reservations.omitted = 60;
-      reservations.chargedSevenDays = 60;
+      reservations.omitted = 120;
+      reservations.chargedSevenDays = 120;
       status.summary = "truncated";
     });
     await expectRejected(
