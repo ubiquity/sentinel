@@ -17,6 +17,7 @@ import {
 import type { GitSha } from "../../.sentinel-policy-source/src/contracts/brands.ts";
 import { canonicalStringify } from "../../.sentinel-policy-source/src/contracts/canonical.ts";
 import { parseBudgetReservationV1 } from "../../.sentinel-policy-source/src/contracts/budget-reservation.ts";
+import type { BudgetReservationV1 } from "../../.sentinel-policy-source/src/contracts/budget-reservation.ts";
 import { parseReleaseRequestV1 } from "../../.sentinel-policy-source/src/contracts/release.ts";
 import type { ReleaseRequestV1 } from "../../.sentinel-policy-source/src/contracts/release.ts";
 import { parseReviewReceiptV1 } from "../../.sentinel-policy-source/src/contracts/review-receipt.ts";
@@ -34,7 +35,10 @@ import type {
   HostedRuntimeRecordV1,
 } from "../../.sentinel-policy-source/src/contracts/hosted-supervisor.ts";
 import { HOSTED_RUNTIME_ID } from "../../.sentinel-policy-source/src/contracts/hosted-supervisor.ts";
-import { portOk } from "../../.sentinel-policy-source/src/contracts/ports.ts";
+import {
+  portError,
+  portOk,
+} from "../../.sentinel-policy-source/src/contracts/ports.ts";
 import type {
   Clock,
   GitHubPullRequestV1,
@@ -51,13 +55,35 @@ import type {
   StateWriteResultV1,
 } from "../../.sentinel-policy-source/src/contracts/ports.ts";
 import { deriveReservationId } from "../../.sentinel-policy-source/src/budget/mod.ts";
-import { renderReviewJournalBody } from "../../.sentinel-policy-source/src/github/review-journal.ts";
-import type { ReviewJournalV1 } from "../../.sentinel-policy-source/src/github/review-journal.ts";
+import {
+  renderReviewJournalBody,
+  reviewResultDigest,
+} from "../../.sentinel-policy-source/src/github/review-journal.ts";
+import type {
+  ReviewJournalReadyV1,
+  ReviewJournalV1,
+} from "../../.sentinel-policy-source/src/github/review-journal.ts";
 import {
   deriveReviewReceiptV1,
   reviewRecordId,
 } from "../../.sentinel-policy-source/src/github/review-normalize.ts";
 import type { GitHubReviewWireV1 } from "../../.sentinel-policy-source/src/github/wire.ts";
+import type { CodexReviewPrepareCapabilityV1 } from "../../.sentinel-policy-source/src/github/codex-review-transport.ts";
+import type {
+  PreparedStructuredReviewV1,
+  StructuredReviewCloseV1,
+  StructuredReviewOutcomeV1,
+  StructuredReviewPrepareV1,
+} from "../../.sentinel-policy-source/src/github/codex-reviewer.ts";
+import {
+  REVIEW_MODEL,
+  REVIEW_REASONING,
+} from "../../.sentinel-policy-source/src/github/review-journal.ts";
+import type {
+  ReviewJournalExecutionV1,
+  ReviewResultV1,
+} from "../../.sentinel-policy-source/src/github/review-journal.ts";
+import type { ReviewSnapshotV1 } from "../../.sentinel-policy-source/src/github/review-snapshot.ts";
 import {
   releaseRequestId,
   reviewOperationKey,
@@ -74,6 +100,7 @@ import {
   workRecord,
 } from "../../.sentinel-policy-source/tests/state/helpers.ts";
 import {
+  DiagnosticReviewPrepareCapabilityV1,
   MAINTENANCE_JOB,
   MAINTENANCE_REVIEWER,
   type MaintenanceGitHubReadsV1,
@@ -82,27 +109,45 @@ import {
   PULL_REQUEST,
   readMaintenanceRootHead,
   REPOSITORY,
+  type ReviewDiagnosticRecordV1,
   REVIEWED_BASE,
   REVIEWED_HEAD,
   runMaintenanceEntrypoint,
   STATIC_IDENTITY,
   STATIC_OBSERVATION,
   STATIC_PR,
+  STATIC_PRIOR,
   STATIC_RECEIPT,
   STATIC_RELEASE,
   STATIC_REQUEST,
   STATIC_SOURCE,
 } from "../../ops/development-budget-maintenance.ts";
 
-const T0 = 1786000000000;
+const T0 = 1789478800000;
 const LAUNCHER_SHA = "d".repeat(40) as GitSha;
 const MERGE_SHA = "b".repeat(40) as GitSha;
 const OTHER_SHA = "c".repeat(40) as GitSha;
-const OPERATION_KEY = reviewOperationKey(PULL_REQUEST, REVIEWED_HEAD);
+/** Immutable prior attempt-1 key; the successor binds a suffixed key. */
+const PRIOR_OPERATION_KEY = reviewOperationKey(PULL_REQUEST, REVIEWED_HEAD);
+const OPERATION_KEY = `${PRIOR_OPERATION_KEY}:attempt-2`;
 const REQUEST_ID = "review-request-1";
 const REQUESTED_AT = T0 + 5_000;
 const WORKFLOW_REF =
   "ubiquity/sentinel/.github/workflows/supervisor.yml@refs/heads/sentinel-supervisor";
+
+/** Immutable published attempt-1 evidence (never retimestamped by tests). */
+const PRIOR_RESERVATION_ID =
+  "b87d501ae3da4911c1943bc50f2c662cd31bd15cd538cc1fe3b2617ee65941fd";
+const PRIOR_REVIEW_ID = 5210219310;
+const PRIOR_REQUEST_ID =
+  "review-review:54:969edbdfd80d8c8723364038dbf3176bb1a027ce";
+const PRIOR_REQUESTED_AT = 1789477005005;
+const PRIOR_COMPLETED_AT = 1789477588103;
+const PRIOR_WIRE_SUBMITTED_AT = 1789477601000;
+const PRIOR_RESULT_SUMMARY =
+  "structured review unavailable: the review did not produce a validated result";
+const PRIOR_RESULT_DIGEST =
+  "23c88a4968014d3a0c778bde81cfb6b9129af33a45dad7f58c72a0640f3b4fb0";
 
 function headFor(sequence: number): GitSha {
   return sequence.toString(16).padStart(40, "0") as GitSha;
@@ -337,6 +382,86 @@ class FakeReads implements MaintenanceGitHubReadsV1 {
 // Valid fixtures built through the frozen parsers
 // ---------------------------------------------------------------------------
 
+/**
+ * The exact published attempt-1 reservation. It is immutable evidence for the
+ * attempt-2 admission gate and is preserved byte-for-byte by every test.
+ */
+function priorReservation(): BudgetReservationV1 {
+  return parseBudgetReservationV1({
+    version: "v1",
+    kind: "budget_reservation",
+    repository: REPOSITORY,
+    id: PRIOR_RESERVATION_ID,
+    taskId: "pr-ubiquity-sentinel-54",
+    attempt: 1,
+    head: REVIEWED_HEAD,
+    purpose: "review_request",
+    createdAt: 1789476994016,
+    outcome: "submitted",
+    settledAt: 1789477027883,
+    proofRef: null,
+  });
+}
+
+/** The exact published terminal attempt-1 ready journal. */
+async function priorJournal(): Promise<ReviewJournalReadyV1> {
+  const result: ReviewResultV1 = {
+    verdict: "unavailable",
+    summary: PRIOR_RESULT_SUMMARY,
+    findings: [],
+  };
+  return {
+    version: "v1",
+    phase: "ready",
+    repository: { owner: REPOSITORY.owner, name: REPOSITORY.name },
+    prNumber: PULL_REQUEST,
+    expectedHead: REVIEWED_HEAD,
+    expectedBase: REVIEWED_BASE,
+    operationKey: PRIOR_OPERATION_KEY,
+    publisher: MAINTENANCE_REVIEWER,
+    requestId: PRIOR_REQUEST_ID,
+    requestedAt: PRIOR_REQUESTED_AT,
+    reviewId: PRIOR_REVIEW_ID,
+    completedAt: PRIOR_COMPLETED_AT,
+    result,
+    resultDigest: await reviewResultDigest(result),
+    execution: null,
+  };
+}
+
+/** Explicit mismatch override for the prior terminal journal fixture. */
+interface PriorJournalOverrideV1 {
+  completedAt?: number;
+  reviewId?: number;
+}
+
+/** The exact prior journal body, with explicit mismatch overrides allowed. */
+async function priorJournalBody(
+  overrides: PriorJournalOverrideV1 = {},
+): Promise<string> {
+  const journal = await priorJournal();
+  return renderReviewJournalBody({
+    ...journal,
+    completedAt: overrides.completedAt ?? journal.completedAt,
+    reviewId: overrides.reviewId ?? journal.reviewId,
+  });
+}
+
+/** Tiny prior wire helper; defaults are the exact published attempt-1 wire. */
+async function priorReviewWire(
+  overrides: Partial<GitHubReviewWireV1> = {},
+  journalOverrides: PriorJournalOverrideV1 = {},
+): Promise<GitHubReviewWireV1> {
+  return {
+    id: overrides.id ?? PRIOR_REVIEW_ID,
+    state: overrides.state ?? "commented",
+    body: overrides.body ?? await priorJournalBody(journalOverrides),
+    author: overrides.author ?? MAINTENANCE_REVIEWER,
+    commitSha: overrides.commitSha ?? REVIEWED_HEAD,
+    submittedAt: overrides.submittedAt ?? PRIOR_WIRE_SUBMITTED_AT,
+  };
+}
+
 function repairSnapshot(
   overrides: Record<string, unknown> = {},
 ): RepairStateSnapshotV1 {
@@ -349,7 +474,7 @@ function repairSnapshot(
     incidents: [],
     evidence: [],
     work: [],
-    reservations: [],
+    reservations: [priorReservation()],
     reviews: [],
     replays: [],
     releaseRequests: [],
@@ -531,7 +656,7 @@ async function duplicateReservation() {
     repository: REPOSITORY,
     taskId,
     head: REVIEWED_HEAD,
-    attempt: 1,
+    attempt: 2,
     purpose: "review_request",
   });
   return parseBudgetReservationV1({
@@ -540,7 +665,7 @@ async function duplicateReservation() {
     repository: REPOSITORY,
     id,
     taskId,
-    attempt: 1,
+    attempt: 2,
     head: REVIEWED_HEAD,
     purpose: "review_request",
     createdAt: T0,
@@ -596,7 +721,7 @@ async function withHarness(
     );
     const reads = new FakeReads(
       options.pull ?? openPullRequest(),
-      options.reviews ?? [],
+      options.reviews ?? [await priorReviewWire()],
     );
     const process = new ScriptedProcess(
       new Map([
@@ -826,6 +951,9 @@ Deno.test("maintenance charges exactly one review and appends the exact receipt"
     if (outcome.status !== "reviewed") return;
     assert.equal(outcome.admission, "admitted");
     assert.equal(outcome.operationKey, OPERATION_KEY);
+    assert.equal(outcome.operationKey, `${PRIOR_OPERATION_KEY}:attempt-2`);
+    assert.notEqual(outcome.operationKey, PRIOR_OPERATION_KEY);
+    assert.equal(harness.review.submitted?.operationKey, OPERATION_KEY);
     assert.equal(outcome.requestId, REQUEST_ID);
     assert.equal(outcome.releaseReady, false);
     assert.equal(outcome.findingsCount, 1);
@@ -842,21 +970,33 @@ Deno.test("maintenance charges exactly one review and appends the exact receipt"
     assert.equal(harness.review.drainCalls, 2);
     assert.equal(harness.review.settleCalls, 1);
 
-    // Exactly one charged reservation for this fixed operation.
+    // Both charges exist: the immutable attempt-1 reservation is preserved
+    // byte-for-byte and the separately charged attempt 2 is new and distinct.
     const after = harness.state.repair;
-    assert.equal(after.reservations.length, 1);
-    const reservation = after.reservations[0];
+    assert.equal(after.reservations.length, 2);
+    const priorCharge = after.reservations.find((entry) =>
+      entry.id === PRIOR_RESERVATION_ID
+    );
+    const reservation = after.reservations.find((entry) => entry.attempt === 2);
+    if (priorCharge === undefined || reservation === undefined) {
+      throw new Error("attempt-2 admission evidence is missing");
+    }
+    assert.equal(
+      canonicalStringify(priorCharge),
+      canonicalStringify(priorReservation()),
+    );
     assert.equal(reservation.outcome, "submitted");
     assert.equal(reservation.head, REVIEWED_HEAD);
-    assert.equal(reservation.attempt, 1);
+    assert.equal(reservation.attempt, 2);
     assert.equal(reservation.purpose, "review_request");
+    assert.notEqual(reservation.id, PRIOR_RESERVATION_ID);
     assert.equal(
       reservation.id,
       await deriveReservationId({
         repository: REPOSITORY,
         taskId: workItemIdForPullRequest(REPOSITORY, PULL_REQUEST),
         head: REVIEWED_HEAD,
-        attempt: 1,
+        attempt: 2,
         purpose: "review_request",
       }),
     );
@@ -868,6 +1008,7 @@ Deno.test("maintenance charges exactly one review and appends the exact receipt"
       receipt.id,
       reviewRecordId(OPERATION_KEY),
     );
+    assert.notEqual(receipt.id, reviewRecordId(PRIOR_OPERATION_KEY));
     assert.equal(receipt.requestId, REQUEST_ID);
     assert.equal(receipt.submittedAt, REQUESTED_AT);
     assert.equal(receipt.observedReviewer, MAINTENANCE_REVIEWER);
@@ -898,31 +1039,55 @@ Deno.test("maintenance charges exactly one review and appends the exact receipt"
     assert.equal(harness.review.requestCalls, requestCalls);
     assert.equal(harness.state.writes, writes);
     assert.equal(canonicalStringify(harness.state.repair), snapshot);
+    assert.equal(
+      canonicalStringify(
+        harness.state.repair.reservations.find((entry) =>
+          entry.id === PRIOR_RESERVATION_ID
+        ),
+      ),
+      canonicalStringify(priorReservation()),
+    );
   });
 });
 
-Deno.test("maintenance reconciles a duplicate reservation without resubmitting", async () => {
+Deno.test("maintenance reconciles a duplicate attempt-2 reservation without resubmitting", async () => {
   const body = renderReviewJournalBody(journalIntent());
   const reservation = await duplicateReservation();
   await withHarness({
-    repair: repairSnapshot({ reservations: [reservation] }),
+    repair: repairSnapshot({
+      reservations: [priorReservation(), reservation],
+    }),
     pull: openPullRequest(),
     observation: completedObservation(),
-    reviews: [journalReview(body)],
+    reviews: [await priorReviewWire(), journalReview(body)],
   }, async (harness) => {
     const outcome = await runMaintenanceEntrypoint(inputFor(harness));
     assert.equal(outcome.status, "reviewed");
     if (outcome.status !== "reviewed") return;
     assert.equal(outcome.admission, "duplicate");
+    assert.equal(outcome.operationKey, OPERATION_KEY);
     assert.equal(harness.review.requestCalls, 0);
     // One settlement write plus one receipt append; no resubmission.
     assert.equal(harness.state.writes, 2);
 
     const after = harness.state.repair;
-    assert.equal(after.reservations.length, 1);
-    assert.equal(after.reservations[0].outcome, "submitted");
-    assert.equal(after.reservations[0].createdAt, T0);
+    assert.equal(after.reservations.length, 2);
+    const priorCharge = after.reservations.find((entry) =>
+      entry.id === PRIOR_RESERVATION_ID
+    );
+    const duplicate = after.reservations.find((entry) => entry.attempt === 2);
+    if (priorCharge === undefined || duplicate === undefined) {
+      throw new Error("duplicate attempt-2 evidence is missing");
+    }
+    assert.equal(
+      canonicalStringify(priorCharge),
+      canonicalStringify(priorReservation()),
+    );
+    assert.equal(duplicate.id, reservation.id);
+    assert.equal(duplicate.outcome, "submitted");
+    assert.equal(duplicate.createdAt, T0);
     assert.equal(after.reviews.length, 1);
+    assert.equal(after.reviews[0].id, reviewRecordId(OPERATION_KEY));
     // The recovered timestamp is the genuine published journal value, never a
     // value invented by this runner.
     assert.equal(after.reviews[0].submittedAt, REQUESTED_AT);
@@ -932,7 +1097,9 @@ Deno.test("maintenance reconciles a duplicate reservation without resubmitting",
 Deno.test("maintenance defers with no write when the durable review journal is missing", async () => {
   const reservation = await duplicateReservation();
   await withHarness({
-    repair: repairSnapshot({ reservations: [reservation] }),
+    repair: repairSnapshot({
+      reservations: [priorReservation(), reservation],
+    }),
     pull: openPullRequest(),
     observation: pendingObservation(),
     clockStepMs: 60_000,
@@ -946,9 +1113,94 @@ Deno.test("maintenance defers with no write when the durable review journal is m
     });
     assert.equal(harness.review.requestCalls, 0);
     assert.equal(harness.state.writes, 0);
-    assert.equal(harness.state.repair.reservations[0].outcome, "reserved");
+    assert.equal(harness.state.repair.reservations.length, 2);
+    assert.equal(
+      harness.state.repair.reservations.find((entry) => entry.attempt === 2)
+        ?.outcome,
+      "reserved",
+    );
+    assert.equal(
+      canonicalStringify(
+        harness.state.repair.reservations.find((entry) =>
+          entry.id === PRIOR_RESERVATION_ID
+        ),
+      ),
+      canonicalStringify(priorReservation()),
+    );
     assert.equal(harness.state.repair.reviews.length, 0);
   });
+});
+
+Deno.test("maintenance refuses an inexact prior reservation before any attempt-2 charge", async () => {
+  const cases: { label: string; reservations: BudgetReservationV1[] }[] = [
+    { label: "missing", reservations: [] },
+    {
+      label: "mismatched-outcome",
+      reservations: [{ ...priorReservation(), outcome: "ambiguous" }],
+    },
+    {
+      label: "mismatched-time",
+      reservations: [{
+        ...priorReservation(),
+        createdAt: priorReservation().createdAt + 1,
+      }],
+    },
+  ];
+  for (const testCase of cases) {
+    await withHarness({
+      repair: repairSnapshot({ reservations: testCase.reservations }),
+      pull: openPullRequest(),
+      observation: completedObservation(),
+    }, async (harness) => {
+      const before = canonicalStringify(harness.state.repair);
+      await assert.rejects(
+        () => runMaintenanceEntrypoint(inputFor(harness)),
+        (error: unknown) =>
+          error instanceof Error && error.message === STATIC_PRIOR,
+        `prior reservation ${testCase.label}`,
+      );
+      assert.equal(harness.review.requestCalls, 0);
+      assert.equal(harness.state.writes, 0);
+      assert.equal(canonicalStringify(harness.state.repair), before);
+    });
+  }
+});
+
+Deno.test("maintenance refuses an inexact prior terminal journal before any attempt-2 charge", async () => {
+  // The constructed fixture is the exact published attempt-1 evidence.
+  assert.equal((await priorJournal()).resultDigest, PRIOR_RESULT_DIGEST);
+  const cases: { label: string; reviews: GitHubReviewWireV1[] }[] = [
+    { label: "missing", reviews: [] },
+    {
+      label: "mismatched-completed-at",
+      reviews: [
+        await priorReviewWire({}, { completedAt: PRIOR_COMPLETED_AT + 1 }),
+      ],
+    },
+    {
+      label: "mismatched-review-id",
+      reviews: [await priorReviewWire({}, { reviewId: PRIOR_REVIEW_ID + 1 })],
+    },
+  ];
+  for (const testCase of cases) {
+    await withHarness({
+      repair: repairSnapshot(),
+      pull: openPullRequest(),
+      observation: completedObservation(),
+      reviews: testCase.reviews,
+    }, async (harness) => {
+      const before = canonicalStringify(harness.state.repair);
+      await assert.rejects(
+        () => runMaintenanceEntrypoint(inputFor(harness)),
+        (error: unknown) =>
+          error instanceof Error && error.message === STATIC_PRIOR,
+        `prior journal ${testCase.label}`,
+      );
+      assert.equal(harness.review.requestCalls, 0);
+      assert.equal(harness.state.writes, 0);
+      assert.equal(canonicalStringify(harness.state.repair), before);
+    });
+  }
 });
 
 Deno.test("maintenance fails closed on a mismatched PR head and a mismatched stored receipt", async () => {
@@ -1009,6 +1261,9 @@ Deno.test("maintenance fails closed on a mismatched PR head and a mismatched sto
 
 Deno.test("maintenance appends the exact release request for a merged PR without a new review", async () => {
   const receipt = derivedReceipt(completedObservation({ findings: [] }));
+  // The merged release path re-proves the suffixed attempt-2 receipt only.
+  assert.equal(receipt.id, reviewRecordId(OPERATION_KEY));
+  assert.notEqual(receipt.id, reviewRecordId(PRIOR_OPERATION_KEY));
   await withHarness({
     repair: repairSnapshot({
       sequence: 2,
@@ -1129,4 +1384,449 @@ Deno.test("maintenance fails closed when the merged review no longer matches its
     assert.equal(harness.state.writes, 0);
     assert.equal(harness.review.requestCalls, 0);
   });
+});
+
+// ---------------------------------------------------------------------------
+// Bounded prepare/start/close review diagnostics
+// ---------------------------------------------------------------------------
+
+/** Allowlisted static archive detail used for a captured-detail assertion. */
+const DIAGNOSTIC_UNAVAILABLE_DETAIL =
+  "structured review unavailable: the owned transport reported a fatal failure";
+/** Arbitrary secret/payload that must never reach a diagnostic line. */
+const DIAGNOSTIC_SECRET = "diagnostic-secret-payload-7f3a";
+
+const DIAGNOSTIC_EXECUTION: ReviewJournalExecutionV1 = {
+  ownerRunId: "owner-run",
+  invocationId: "invocation-1",
+  threadId: "diag-thread",
+  submittedProvider: "uos",
+  model: REVIEW_MODEL,
+  reasoning: REVIEW_REASONING,
+  startMayOccur: true,
+};
+
+function diagnosticPrepareRequest(): StructuredReviewPrepareV1 {
+  return {
+    snapshot: {} as ReviewSnapshotV1,
+    requestId: "review-request-diag",
+    invocationId: "invocation-1",
+    ownerRunId: "owner-run",
+    latestStartAt: T0 + 1_000,
+    settleBy: T0 + 2_000,
+  };
+}
+
+function diagnosticRecords(lines: string[]): ReviewDiagnosticRecordV1[] {
+  return lines.map((line) => JSON.parse(line) as ReviewDiagnosticRecordV1);
+}
+
+function cleanOutcome(): StructuredReviewOutcomeV1 {
+  return {
+    status: "clean",
+    result: null,
+    resultId: null,
+    actual: null,
+    execution: null,
+    detail: null,
+  };
+}
+
+function closeOutcome(
+  settled: boolean,
+  timedOut: boolean,
+  failure: string | null,
+): StructuredReviewCloseV1 {
+  return { settled, timedOut, failure };
+}
+
+function prepareCapability(
+  prepare: (
+    request: StructuredReviewPrepareV1,
+  ) => Promise<PortResultV1<PreparedStructuredReviewV1>>,
+): CodexReviewPrepareCapabilityV1 {
+  return { prepare };
+}
+
+/** Small fake prepared handle: prototype methods and known immutable fields. */
+class FakePreparedStructuredReviewV1 implements PreparedStructuredReviewV1 {
+  readonly execution: ReviewJournalExecutionV1 = DIAGNOSTIC_EXECUTION;
+  readonly threadId = "diag-thread";
+  readonly invocationId = "invocation-1";
+  readonly requestId = "review-request-diag";
+  readonly ownerRunId = "owner-run";
+  readonly latestStartAt = T0 + 1_000;
+  readonly settleBy = T0 + 2_000;
+  startCalls = 0;
+  closeCalls = 0;
+  private attempted = false;
+
+  constructor(
+    private readonly startValue: PortResultV1<StructuredReviewOutcomeV1>,
+    private readonly closeValue: StructuredReviewCloseV1,
+  ) {}
+
+  startAttempted(): boolean {
+    return this.attempted;
+  }
+
+  start(): Promise<PortResultV1<StructuredReviewOutcomeV1>> {
+    this.startCalls += 1;
+    this.attempted = true;
+    return Promise.resolve(this.startValue);
+  }
+
+  close(): Promise<StructuredReviewCloseV1> {
+    this.closeCalls += 1;
+    return Promise.resolve(this.closeValue);
+  }
+}
+
+/** Fake handle whose delegated start/close reject with original errors. */
+class ThrowingPreparedStructuredReviewV1
+  extends FakePreparedStructuredReviewV1 {
+  constructor(
+    private readonly startError: Error,
+    private readonly closeError: Error,
+  ) {
+    super(portOk(cleanOutcome()), closeOutcome(true, false, null));
+  }
+
+  override start(): Promise<PortResultV1<StructuredReviewOutcomeV1>> {
+    return Promise.reject(this.startError);
+  }
+
+  override close(): Promise<StructuredReviewCloseV1> {
+    return Promise.reject(this.closeError);
+  }
+}
+
+Deno.test("diagnostic prepare delegates once and forwards every immutable handle field", async () => {
+  const prepared = new FakePreparedStructuredReviewV1(
+    portOk(cleanOutcome()),
+    closeOutcome(true, false, null),
+  );
+  const lines: string[] = [];
+  let prepareCalls = 0;
+  let received: StructuredReviewPrepareV1 | null = null;
+  const wrapper = new DiagnosticReviewPrepareCapabilityV1(
+    prepareCapability((request) => {
+      prepareCalls += 1;
+      received = request;
+      return Promise.resolve(portOk(prepared));
+    }),
+    (line) => lines.push(line),
+  );
+  const request = diagnosticPrepareRequest();
+  const result = await wrapper.prepare(request);
+  assert.equal(prepareCalls, 1);
+  assert.ok(received === request);
+  if (!result.ok) throw new Error("diagnostic prepare unexpectedly rejected");
+  const handle = result.value;
+  assert.notEqual(handle, prepared);
+  assert.equal(handle.execution, prepared.execution);
+  assert.equal(handle.threadId, prepared.threadId);
+  assert.equal(handle.invocationId, prepared.invocationId);
+  assert.equal(handle.requestId, prepared.requestId);
+  assert.equal(handle.ownerRunId, prepared.ownerRunId);
+  assert.equal(handle.latestStartAt, prepared.latestStartAt);
+  assert.equal(handle.settleBy, prepared.settleBy);
+  assert.equal(handle.startAttempted(), false);
+  assert.deepEqual(diagnosticRecords(lines), [{
+    stage: "prepare",
+    outcome: "prepared",
+    status: null,
+    detail: null,
+    settled: null,
+    timedOut: null,
+    hasFailure: null,
+    classification: null,
+  }]);
+});
+
+Deno.test("diagnostic wrapper keeps rejected/start/close PortResult identity and exact delegation counts", async () => {
+  const rejection = portError("unavailable", DIAGNOSTIC_UNAVAILABLE_DETAIL);
+  const rejectedLines: string[] = [];
+  let prepareCalls = 0;
+  const rejectedWrapper = new DiagnosticReviewPrepareCapabilityV1(
+    prepareCapability(() => {
+      prepareCalls += 1;
+      return Promise.resolve(rejection);
+    }),
+    (line) => rejectedLines.push(line),
+  );
+  const rejected = await rejectedWrapper.prepare(diagnosticPrepareRequest());
+  assert.equal(prepareCalls, 1);
+  assert.ok(rejected === rejection);
+  assert.equal(rejected.ok, false);
+  const rejectedRecord = diagnosticRecords(rejectedLines)[0];
+  assert.equal(rejectedRecord.outcome, "rejected");
+  assert.equal(rejectedRecord.status, "unavailable");
+  assert.equal(rejectedRecord.detail, DIAGNOSTIC_UNAVAILABLE_DETAIL);
+
+  const startValue = portOk(cleanOutcome());
+  const closeValue = closeOutcome(true, false, null);
+  const prepared = new FakePreparedStructuredReviewV1(startValue, closeValue);
+  const lines: string[] = [];
+  const wrapper = new DiagnosticReviewPrepareCapabilityV1(
+    prepareCapability(() => Promise.resolve(portOk(prepared))),
+    (line) => lines.push(line),
+  );
+  const preparedResult = await wrapper.prepare(diagnosticPrepareRequest());
+  if (!preparedResult.ok) {
+    throw new Error("diagnostic prepare unexpectedly rejected");
+  }
+  const handle = preparedResult.value;
+  const firstStart = await handle.start();
+  const secondStart = await handle.start();
+  assert.ok(firstStart === startValue);
+  assert.ok(secondStart === startValue);
+  assert.equal(prepared.startCalls, 2);
+  const firstClose = await handle.close();
+  const secondClose = await handle.close();
+  assert.ok(firstClose === closeValue);
+  assert.ok(secondClose === closeValue);
+  assert.equal(prepared.closeCalls, 2);
+  assert.equal(prepared.startAttempted(), true);
+  const startRecord = diagnosticRecords(lines).find((record) =>
+    record.stage === "start"
+  );
+  assert.equal(startRecord?.status, "clean");
+  assert.equal(startRecord?.detail, null);
+});
+
+Deno.test("diagnostic wrapper reports only unavailable for non-unavailable transport errors", async () => {
+  const nonUnavailable = portError("rate_limited", DIAGNOSTIC_SECRET);
+  const rejectedLines: string[] = [];
+  const rejectedWrapper = new DiagnosticReviewPrepareCapabilityV1(
+    prepareCapability(() => Promise.resolve(nonUnavailable)),
+    (line) => rejectedLines.push(line),
+  );
+  const rejected = await rejectedWrapper.prepare(diagnosticPrepareRequest());
+  assert.ok(rejected === nonUnavailable);
+  const rejectedRecord = diagnosticRecords(rejectedLines)[0];
+  assert.equal(rejectedRecord.status, "unavailable");
+  assert.equal(rejectedRecord.detail, "unknown-detail");
+
+  const closeValue = closeOutcome(true, false, null);
+  const prepared = new FakePreparedStructuredReviewV1(
+    nonUnavailable,
+    closeValue,
+  );
+  const lines: string[] = [];
+  const wrapper = new DiagnosticReviewPrepareCapabilityV1(
+    prepareCapability(() => Promise.resolve(portOk(prepared))),
+    (line) => lines.push(line),
+  );
+  const result = await wrapper.prepare(diagnosticPrepareRequest());
+  if (!result.ok) throw new Error("diagnostic prepare unexpectedly rejected");
+  const started = await result.value.start();
+  assert.ok(started === nonUnavailable);
+  const closed = await result.value.close();
+  assert.ok(closed === closeValue);
+  const records = diagnosticRecords(lines);
+  const startRecord = records.find((record) => record.stage === "start");
+  const closeRecord = records.find((record) => record.stage === "close");
+  assert.equal(startRecord?.status, "unavailable");
+  assert.equal(startRecord?.detail, "unknown-detail");
+  assert.equal(closeRecord?.classification, "unavailable");
+  for (const line of lines) {
+    assert.ok(!line.includes(DIAGNOSTIC_SECRET));
+  }
+});
+
+Deno.test("diagnostic wrapper captures allowlisted static detail and redacts arbitrary payloads", async () => {
+  const prepared = new FakePreparedStructuredReviewV1(
+    portOk({
+      status: "clean",
+      result: { summary: DIAGNOSTIC_SECRET } as unknown as ReviewResultV1,
+      resultId: null,
+      actual: null,
+      execution: null,
+      detail: DIAGNOSTIC_SECRET,
+    }),
+    closeOutcome(false, false, DIAGNOSTIC_SECRET),
+  );
+  const lines: string[] = [];
+  const wrapper = new DiagnosticReviewPrepareCapabilityV1(
+    prepareCapability(() => Promise.resolve(portOk(prepared))),
+    (line) => lines.push(line),
+  );
+  const preparedResult = await wrapper.prepare(diagnosticPrepareRequest());
+  if (!preparedResult.ok) {
+    throw new Error("diagnostic prepare unexpectedly rejected");
+  }
+  const startResult = await preparedResult.value.start();
+  assert.equal(startResult.ok, true);
+  const closeResult = await preparedResult.value.close();
+  assert.equal(closeResult.settled, false);
+  const records = diagnosticRecords(lines);
+  const startRecord = records.find((record) => record.stage === "start");
+  const closeRecord = records.find((record) => record.stage === "close");
+  if (startRecord === undefined || closeRecord === undefined) {
+    throw new Error("missing diagnostic stage records");
+  }
+  assert.equal(startRecord.status, "clean");
+  assert.equal(startRecord.detail, "unknown-detail");
+  assert.equal(closeRecord.settled, false);
+  assert.equal(closeRecord.timedOut, false);
+  assert.equal(closeRecord.hasFailure, true);
+  for (const line of lines) {
+    assert.ok(!line.includes(DIAGNOSTIC_SECRET));
+  }
+
+  const rejectedLines: string[] = [];
+  const rejectedWrapper = new DiagnosticReviewPrepareCapabilityV1(
+    prepareCapability(() =>
+      Promise.resolve(portError("unavailable", DIAGNOSTIC_SECRET))
+    ),
+    (line) => rejectedLines.push(line),
+  );
+  const rejected = await rejectedWrapper.prepare(diagnosticPrepareRequest());
+  assert.equal(rejected.ok, false);
+  assert.equal(diagnosticRecords(rejectedLines)[0].detail, "unknown-detail");
+  for (const line of rejectedLines) {
+    assert.ok(!line.includes(DIAGNOSTIC_SECRET));
+  }
+
+  const allowedLines: string[] = [];
+  const allowedWrapper = new DiagnosticReviewPrepareCapabilityV1(
+    prepareCapability(() =>
+      Promise.resolve(portError("unavailable", DIAGNOSTIC_UNAVAILABLE_DETAIL))
+    ),
+    (line) => allowedLines.push(line),
+  );
+  const allowed = await allowedWrapper.prepare(diagnosticPrepareRequest());
+  assert.equal(allowed.ok, false);
+  assert.equal(
+    diagnosticRecords(allowedLines)[0].detail,
+    DIAGNOSTIC_UNAVAILABLE_DETAIL,
+  );
+});
+
+Deno.test("diagnostic close classification reports dirty-close invalidation without changing returned values", async () => {
+  const startValue = portOk(cleanOutcome());
+  const dirtyClose = closeOutcome(false, true, null);
+  const prepared = new FakePreparedStructuredReviewV1(startValue, dirtyClose);
+  const lines: string[] = [];
+  const wrapper = new DiagnosticReviewPrepareCapabilityV1(
+    prepareCapability(() => Promise.resolve(portOk(prepared))),
+    (line) => lines.push(line),
+  );
+  const preparedResult = await wrapper.prepare(diagnosticPrepareRequest());
+  if (!preparedResult.ok) {
+    throw new Error("diagnostic prepare unexpectedly rejected");
+  }
+  const handle = preparedResult.value;
+  const started = await handle.start();
+  const closed = await handle.close();
+  assert.ok(started === startValue);
+  assert.ok(closed === dirtyClose);
+  const records = diagnosticRecords(lines);
+  const startRecord = records.find((record) => record.stage === "start");
+  const closeRecord = records.find((record) => record.stage === "close");
+  if (startRecord === undefined || closeRecord === undefined) {
+    throw new Error("missing diagnostic stage records");
+  }
+  assert.equal(startRecord.status, "clean");
+  assert.equal(closeRecord.settled, false);
+  assert.equal(closeRecord.timedOut, true);
+  assert.equal(closeRecord.hasFailure, false);
+  assert.equal(closeRecord.classification, "unavailable");
+
+  const cleanPrepared = new FakePreparedStructuredReviewV1(
+    startValue,
+    closeOutcome(true, false, null),
+  );
+  const cleanLines: string[] = [];
+  const cleanWrapper = new DiagnosticReviewPrepareCapabilityV1(
+    prepareCapability(() => Promise.resolve(portOk(cleanPrepared))),
+    (line) => cleanLines.push(line),
+  );
+  const cleanResult = await cleanWrapper.prepare(diagnosticPrepareRequest());
+  if (!cleanResult.ok) {
+    throw new Error("diagnostic prepare unexpectedly rejected");
+  }
+  await cleanResult.value.start();
+  await cleanResult.value.close();
+  const cleanClose = diagnosticRecords(cleanLines).find((record) =>
+    record.stage === "close"
+  );
+  assert.equal(cleanClose?.classification, "clean");
+});
+
+Deno.test("diagnostic wrapper preserves original throws and tolerates a throwing reporter", async () => {
+  const prepareError = new Error(`${DIAGNOSTIC_SECRET}:prepare`);
+  const startError = new Error(`${DIAGNOSTIC_SECRET}:start`);
+  const closeError = new Error(`${DIAGNOSTIC_SECRET}:close`);
+  const throwingReporter = () => {
+    throw new Error("reporter unavailable");
+  };
+  let prepareCalls = 0;
+  const wrapper = new DiagnosticReviewPrepareCapabilityV1(
+    prepareCapability(() => {
+      prepareCalls += 1;
+      return Promise.reject(prepareError);
+    }),
+    throwingReporter,
+  );
+  let caughtPrepare: unknown = null;
+  try {
+    await wrapper.prepare(diagnosticPrepareRequest());
+  } catch (error) {
+    caughtPrepare = error;
+  }
+  assert.ok(caughtPrepare === prepareError);
+  assert.equal(prepareCalls, 1);
+
+  const prepared = new ThrowingPreparedStructuredReviewV1(
+    startError,
+    closeError,
+  );
+  const throwingWrapper = new DiagnosticReviewPrepareCapabilityV1(
+    prepareCapability(() => Promise.resolve(portOk(prepared))),
+    throwingReporter,
+  );
+  const throwingResult = await throwingWrapper.prepare(
+    diagnosticPrepareRequest(),
+  );
+  if (!throwingResult.ok) {
+    throw new Error("diagnostic prepare unexpectedly rejected");
+  }
+  assert.equal(throwingResult.value.startAttempted(), false);
+  let caughtStart: unknown = null;
+  try {
+    await throwingResult.value.start();
+  } catch (error) {
+    caughtStart = error;
+  }
+  assert.ok(caughtStart === startError);
+  let caughtClose: unknown = null;
+  try {
+    await throwingResult.value.close();
+  } catch (error) {
+    caughtClose = error;
+  }
+  assert.ok(caughtClose === closeError);
+
+  const healthy = new FakePreparedStructuredReviewV1(
+    portOk(cleanOutcome()),
+    closeOutcome(true, false, null),
+  );
+  const healthyWrapper = new DiagnosticReviewPrepareCapabilityV1(
+    prepareCapability(() => Promise.resolve(portOk(healthy))),
+    throwingReporter,
+  );
+  const healthyResult = await healthyWrapper.prepare(
+    diagnosticPrepareRequest(),
+  );
+  if (!healthyResult.ok) {
+    throw new Error("diagnostic prepare unexpectedly rejected");
+  }
+  const started = await healthyResult.value.start();
+  assert.equal(started.ok, true);
+  assert.equal(healthy.startCalls, 1);
+  const closed = await healthyResult.value.close();
+  assert.equal(closed.settled, true);
+  assert.equal(healthy.closeCalls, 1);
 });

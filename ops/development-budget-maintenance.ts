@@ -34,6 +34,10 @@
 import { isGitSha } from "../.sentinel-policy-source/src/contracts/brands.ts";
 import type { GitSha } from "../.sentinel-policy-source/src/contracts/brands.ts";
 import {
+  parseBudgetReservationV1,
+} from "../.sentinel-policy-source/src/contracts/budget-reservation.ts";
+import type { BudgetReservationV1 } from "../.sentinel-policy-source/src/contracts/budget-reservation.ts";
+import {
   portOk,
   SystemClock,
 } from "../.sentinel-policy-source/src/contracts/ports.ts";
@@ -74,7 +78,6 @@ import {
 } from "../.sentinel-policy-source/src/host/hosted-runtime.ts";
 import { ACTIONS_UOS_BASE_URL } from "../.sentinel-policy-source/src/host/actions.ts";
 import {
-  composeLocalGitHub,
   createLocalRepositoryConfig,
   ensurePrivateDir,
   ensureReviewClient,
@@ -82,6 +85,22 @@ import {
   joinPath,
   LocalSessionTracker,
 } from "../.sentinel-policy-source/src/host/local.ts";
+import { composeGitHubHost } from "../.sentinel-policy-source/src/host/github.ts";
+import type { GitHubAuthProviderV1 } from "../.sentinel-policy-source/src/github/auth.ts";
+import {
+  CodexStructuredReviewer,
+  finalizeReviewCompletion,
+} from "../.sentinel-policy-source/src/github/codex-reviewer.ts";
+import type {
+  PreparedStructuredReviewV1,
+  StructuredReviewCloseV1,
+  StructuredReviewOutcomeV1,
+  StructuredReviewPrepareV1,
+} from "../.sentinel-policy-source/src/github/codex-reviewer.ts";
+import type { CodexReviewPrepareCapabilityV1 } from "../.sentinel-policy-source/src/github/codex-review-transport.ts";
+import { GitHubCodexReviewTransport } from "../.sentinel-policy-source/src/github/codex-review-transport.ts";
+import { GitReviewSnapshot } from "../.sentinel-policy-source/src/github/review-snapshot.ts";
+import { CodexSubprocessSession } from "../.sentinel-policy-source/src/repair/codex-transport.ts";
 import {
   createRepairStateStore,
   DenoGitRunner,
@@ -132,6 +151,12 @@ export const REPOSITORY: RepositoryIdentityV1 = {
 const REMOTE_URL = "https://github.com/ubiquity/sentinel.git";
 const API_BASE_URL = "https://api.github.com";
 const INVOCATION_ID = "sentinel-development-budget-pr54-v3";
+/** The prior published attempt-1 key; verification only, never a new artifact. */
+const PRIOR_OPERATION_KEY = reviewOperationKey(PULL_REQUEST, REVIEWED_HEAD);
+/** The one fixed operation key every attempt-2 artifact binds. */
+const ATTEMPT_2_OPERATION_KEY = `${PRIOR_OPERATION_KEY}:attempt-2`;
+/** The separately charged successor is exactly attempt 2: never attempt 3. */
+const ATTEMPT_2 = 2;
 const REVIEW_START_WINDOW_MS = 120_000;
 const REVIEW_SETTLE_BY_MS = REVIEW_TRANSPORT_TOTAL_MS;
 const REVIEW_OVERALL_MS = REVIEW_TRANSPORT_TOTAL_MS + 180_000;
@@ -165,6 +190,8 @@ export const STATIC_VERIFY =
   "sentinel maintenance merge verification did not pass";
 export const STATIC_SETTLEMENT =
   "sentinel maintenance review sessions did not settle";
+export const STATIC_PRIOR =
+  "sentinel maintenance prior review attempt is not exact";
 export const STATIC_FAILED = "sentinel maintenance operator failed closed";
 const STATIC_MESSAGES: ReadonlySet<string> = new Set([
   STATIC_IDENTITY,
@@ -181,6 +208,7 @@ const STATIC_MESSAGES: ReadonlySet<string> = new Set([
   STATIC_REQUEST,
   STATIC_VERIFY,
   STATIC_SETTLEMENT,
+  STATIC_PRIOR,
   STATIC_FAILED,
 ]);
 
@@ -194,6 +222,300 @@ const REPAIR_COLLECTIONS = [
   "releaseRequests",
   "githubCooldowns",
 ] as const;
+
+/**
+ * Bounded per-stage review diagnostics for the fixed maintenance operator.
+ *
+ * One bounded JSON line is reported for each prepare/start/close stage so a
+ * future separately charged review attempt can distinguish a transport or
+ * journal-render fault from a genuine reviewer failure. The reporter is a
+ * local test seam only: it is never read from the environment, CLI or any
+ * runtime configuration, and a throwing reporter is swallowed so diagnostics
+ * can never alter review flow. Records carry only static stage/status literals
+ * and an allowlisted archive detail; review results, findings, request input,
+ * exception text, paths, tokens and arbitrary payloads are never included.
+ */
+export type ReviewDiagnosticReporterV1 = (line: string) => void;
+
+export interface ReviewDiagnosticRecordV1 {
+  /** Fixed stage identity. */
+  stage: "prepare" | "start" | "close";
+  /** Fixed per-stage disposition; never payload-derived. */
+  outcome: "prepared" | "rejected" | "threw" | "ok" | "error" | "closed";
+  /** Fixed diagnostic status (clean/findings/unavailable); null when N/A. */
+  status: string | null;
+  /** Allowlisted static archive detail or the fixed unknown marker. */
+  detail: string | null;
+  /** Close-only settlement proof; null for prepare/start. */
+  settled: boolean | null;
+  /** Close-only bounded-wait marker; null for prepare/start. */
+  timedOut: boolean | null;
+  /** Close-only transport-failure presence; null for prepare/start. */
+  hasFailure: boolean | null;
+  /**
+   * Close-only `finalizeReviewCompletion` classification
+   * (clean/findings/unavailable) used for diagnosis only; null when no start
+   * result exists.
+   */
+  classification: string | null;
+}
+
+/** Fixed marker for a nonallowlisted or non-string detail. */
+const REVIEW_UNKNOWN_DETAIL = "unknown-detail";
+
+/**
+ * Finite allowlist of the exact static failure details defined by the archived
+ * reviewer (including its static close-failure marker). Any other string is
+ * reported as the fixed unknown marker, so arbitrary values can never reach
+ * the diagnostic journal.
+ */
+const REVIEW_SAFE_DETAILS: ReadonlySet<string> = new Set([
+  "structured review unavailable: the configured provider is not a nonempty finite string",
+  "structured review unavailable: the configured permission profile is not a valid named profile",
+  "structured review unavailable: the supplied absolute deadlines do not admit a bounded start",
+  "structured review unavailable: the prepare request identity is missing or over bound",
+  "structured review unavailable: the complete review prompt exceeded its finite bound",
+  "structured review unavailable: app-server preparation failed",
+  "structured review unavailable: app-server preparation failed and the owned session did not settle",
+  "structured review start rejected: the single start attempt was already consumed",
+  "structured review unavailable: latestStartAt elapsed before turn submission",
+  "structured review unavailable: the settlement deadline elapsed before turn submission",
+  "structured review unavailable: notification registration failed",
+  "structured review unavailable: the session issued a forbidden server request",
+  "structured review unavailable: the single turn submission was not acknowledged",
+  "structured review unavailable: the turn submission response had no exact turn id",
+  "structured review unavailable: the session event bound was exceeded",
+  "structured review unavailable: early session buffering exceeded its finite bound",
+  "structured review unavailable: a session item identity was malformed",
+  "structured review unavailable: a forbidden or unsupported session item was reported",
+  "structured review unavailable: the echoed user message was not the exact submitted input",
+  "structured review unavailable: an agent message was malformed",
+  "structured review unavailable: the agent message bound was exceeded",
+  "structured review unavailable: terminal evidence was malformed",
+  "structured review unavailable: contradictory duplicate terminal evidence",
+  "structured review unavailable: routing evidence was malformed",
+  "structured review unavailable: routing evidence exceeded its bound",
+  "structured review unavailable: the run was routed off the required Luna/max",
+  "structured review unavailable: the owned session was closed before completion",
+  "structured review unavailable: no exact runtime terminal was observed",
+  "structured review unavailable: the runtime terminal was not completed",
+  "structured review unavailable: no final agent message was delivered",
+  "structured review unavailable: the final agent message was ambiguous or duplicated",
+  "structured review unavailable: the structured result was malformed",
+  "structured review unavailable: the structured result exceeded the accepted bound",
+  "structured review unavailable: a finding does not reference a changed candidate file",
+  "structured review unavailable: a finding line range is outside the candidate file",
+  "structured review unavailable: the request/runtime receipt could not be verified",
+  "structured review unavailable: the owned transport reported a fatal failure",
+  "structured review unavailable: the review reported insufficient evidence",
+  "structured review unavailable: the owned session did not settle cleanly after completion",
+  "close_failed",
+]);
+
+/** Map any detail to an allowlisted static string or the fixed unknown marker. */
+function safeReviewDetail(detail: unknown): string {
+  return typeof detail === "string" && REVIEW_SAFE_DETAILS.has(detail)
+    ? detail
+    : REVIEW_UNKNOWN_DETAIL;
+}
+
+/** One bounded diagnostic line; a failing reporter never alters review flow. */
+function writeReviewDiagnostic(
+  reporter: ReviewDiagnosticReporterV1,
+  record: ReviewDiagnosticRecordV1,
+): void {
+  try {
+    reporter(JSON.stringify(record));
+  } catch {
+    // Diagnostics are observational only; never let them change flow.
+  }
+}
+
+/** Production reporter: one bounded static JSON line per stage. */
+function logReviewDiagnostic(line: string): void {
+  console.log(line);
+}
+
+function emptyDiagnostic(
+  stage: ReviewDiagnosticRecordV1["stage"],
+  outcome: ReviewDiagnosticRecordV1["outcome"],
+  status: string | null,
+  detail: string | null,
+): ReviewDiagnosticRecordV1 {
+  return {
+    stage,
+    outcome,
+    status,
+    detail,
+    settled: null,
+    timedOut: null,
+    hasFailure: null,
+    classification: null,
+  };
+}
+
+/**
+ * Diagnostic wrapper over a prepared review handle. Every immutable field is
+ * forwarded explicitly (never spread: the original is a class instance whose
+ * prototype methods would disappear) and `startAttempted` stays bound to the
+ * original handle. `start`/`close` delegate exactly once per caller call and
+ * return the original values unchanged by identity.
+ */
+class DiagnosticPreparedStructuredReviewV1
+  implements PreparedStructuredReviewV1 {
+  readonly execution: PreparedStructuredReviewV1["execution"];
+  readonly threadId: string;
+  readonly invocationId: string;
+  readonly requestId: string;
+  readonly ownerRunId: string;
+  readonly latestStartAt: number;
+  readonly settleBy: number;
+
+  private readonly original: PreparedStructuredReviewV1;
+  private readonly startAttemptedOriginal: () => boolean;
+  private readonly reporter: ReviewDiagnosticReporterV1;
+  private startResult: PortResultV1<StructuredReviewOutcomeV1> | null = null;
+
+  constructor(
+    original: PreparedStructuredReviewV1,
+    reporter: ReviewDiagnosticReporterV1,
+  ) {
+    this.original = original;
+    this.execution = original.execution;
+    this.threadId = original.threadId;
+    this.invocationId = original.invocationId;
+    this.requestId = original.requestId;
+    this.ownerRunId = original.ownerRunId;
+    this.latestStartAt = original.latestStartAt;
+    this.settleBy = original.settleBy;
+    this.startAttemptedOriginal = original.startAttempted.bind(original);
+    this.reporter = reporter;
+  }
+
+  startAttempted(): boolean {
+    return this.startAttemptedOriginal();
+  }
+
+  /** Exactly-once (per caller call) delegated start; original identity kept. */
+  async start(): Promise<PortResultV1<StructuredReviewOutcomeV1>> {
+    let result: PortResultV1<StructuredReviewOutcomeV1>;
+    try {
+      result = await this.original.start();
+    } catch (error) {
+      writeReviewDiagnostic(
+        this.reporter,
+        emptyDiagnostic("start", "threw", null, REVIEW_UNKNOWN_DETAIL),
+      );
+      throw error;
+    }
+    this.startResult = result;
+    writeReviewDiagnostic(this.reporter, {
+      stage: "start",
+      outcome: result.ok ? "ok" : "error",
+      status: result.ok ? result.value.status : "unavailable",
+      detail: result.ok
+        ? (result.value.detail === null
+          ? null
+          : safeReviewDetail(result.value.detail))
+        : safeReviewDetail(result.error.detail),
+      settled: null,
+      timedOut: null,
+      hasFailure: null,
+      classification: null,
+    });
+    return result;
+  }
+
+  /**
+   * Delegated idempotent close; original close result identity is kept. The
+   * finalize classification is diagnostic only and never substitutes an
+   * outcome or changes the returned close value.
+   */
+  async close(): Promise<StructuredReviewCloseV1> {
+    let result: StructuredReviewCloseV1;
+    try {
+      result = await this.original.close();
+    } catch (error) {
+      writeReviewDiagnostic(
+        this.reporter,
+        emptyDiagnostic("close", "threw", null, REVIEW_UNKNOWN_DETAIL),
+      );
+      throw error;
+    }
+    const finalized = this.startResult === null
+      ? null
+      : finalizeReviewCompletion(this.startResult, result);
+    writeReviewDiagnostic(this.reporter, {
+      stage: "close",
+      outcome: "closed",
+      status: null,
+      detail: null,
+      settled: result.settled,
+      timedOut: result.timedOut,
+      hasFailure: result.failure !== null,
+      classification: finalized === null
+        ? null
+        : (finalized.ok ? finalized.value.status : "unavailable"),
+    });
+    return result;
+  }
+}
+
+/**
+ * Bounded diagnostic wrapper over the existing prepare capability. It never
+ * changes review results, deadlines, authority or result acceptance: rejected
+ * PortResult objects and thrown exceptions are returned/rethrown unchanged,
+ * successful prepares wrap the handle, and start/close values keep their
+ * original identity.
+ */
+export class DiagnosticReviewPrepareCapabilityV1
+  implements CodexReviewPrepareCapabilityV1 {
+  private readonly inner: CodexReviewPrepareCapabilityV1;
+  private readonly reporter: ReviewDiagnosticReporterV1;
+
+  constructor(
+    inner: CodexReviewPrepareCapabilityV1,
+    reporter: ReviewDiagnosticReporterV1 = logReviewDiagnostic,
+  ) {
+    this.inner = inner;
+    this.reporter = reporter;
+  }
+
+  async prepare(
+    request: StructuredReviewPrepareV1,
+  ): Promise<PortResultV1<PreparedStructuredReviewV1>> {
+    let result: PortResultV1<PreparedStructuredReviewV1>;
+    try {
+      result = await this.inner.prepare(request);
+    } catch (error) {
+      writeReviewDiagnostic(
+        this.reporter,
+        emptyDiagnostic("prepare", "threw", null, REVIEW_UNKNOWN_DETAIL),
+      );
+      throw error;
+    }
+    if (!result.ok) {
+      writeReviewDiagnostic(this.reporter, {
+        stage: "prepare",
+        outcome: "rejected",
+        status: "unavailable",
+        detail: safeReviewDetail(result.error.detail),
+        settled: null,
+        timedOut: null,
+        hasFailure: null,
+        classification: null,
+      });
+      return result;
+    }
+    writeReviewDiagnostic(
+      this.reporter,
+      emptyDiagnostic("prepare", "prepared", null, null),
+    );
+    return portOk(
+      new DiagnosticPreparedStructuredReviewV1(result.value, this.reporter),
+    );
+  }
+}
 
 /** Native identity read for this one job (named reads only). */
 export interface MaintenanceIdentityV1 {
@@ -623,6 +945,111 @@ async function recoverRequestedAt(
   return requestedAt;
 }
 
+/**
+ * Immutable published attempt-1 evidence. The reservation and its
+ * authenticated terminal `ready` journal are exact public records of one real
+ * completed attempt; the reservation is never reset, refunded or rewritten and
+ * exists only to prove that the separately charged attempt 2 is admissible.
+ * Every literal below is fixed: nothing is selected by time or list order.
+ */
+const PRIOR_REVIEW_ID = 5_210_219_310;
+const PRIOR_REQUEST_ID =
+  "review-review:54:969edbdfd80d8c8723364038dbf3176bb1a027ce";
+const PRIOR_REQUESTED_AT = 1_789_477_005_005;
+const PRIOR_COMPLETED_AT = 1_789_477_588_103;
+const PRIOR_SUBMITTED_AT = 1_789_477_601_000;
+const PRIOR_RESULT_SUMMARY =
+  "structured review unavailable: the review did not produce a validated result";
+const PRIOR_RESULT_DIGEST =
+  "23c88a4968014d3a0c778bde81cfb6b9129af33a45dad7f58c72a0640f3b4fb0";
+
+/** The exact durable attempt-1 reservation this operator must not alter. */
+function priorReservationV1(): BudgetReservationV1 {
+  return parseBudgetReservationV1({
+    version: "v1",
+    kind: "budget_reservation",
+    repository: REPOSITORY,
+    id: "b87d501ae3da4911c1943bc50f2c662cd31bd15cd538cc1fe3b2617ee65941fd",
+    taskId: "pr-ubiquity-sentinel-54",
+    attempt: 1,
+    head: REVIEWED_HEAD,
+    purpose: "review_request",
+    createdAt: 1_789_476_994_016,
+    outcome: "submitted",
+    settledAt: 1_789_477_027_883,
+    proofRef: null,
+  });
+}
+
+/**
+ * Small fixed admission gate for the separately charged attempt 2: the exact
+ * attempt-1 reservation and its exact authenticated terminal journal must both
+ * already be published before any attempt-2 charge or model call. Any missing,
+ * malformed or mismatched evidence refuses with the fixed sanitized message and
+ * no write. This is not a generic retry framework and not a review-id-only
+ * guard: the prior record identity and every journal field are exact.
+ */
+async function requirePriorUnavailableAttempt(
+  before: RepairStateSnapshotV1,
+  reads: MaintenanceGitHubReadsV1,
+): Promise<void> {
+  const expected = priorReservationV1();
+  const charged = before.reservations.filter((entry) =>
+    canonicalStringify(entry) === canonicalStringify(expected)
+  );
+  if (charged.length !== 1) throw new Error(STATIC_PRIOR);
+
+  let reviews: PortResultV1<GitHubReviewWireV1[]>;
+  try {
+    reviews = await reads.readReviews(PULL_REQUEST);
+  } catch {
+    throw new Error(STATIC_PRIOR);
+  }
+  if (!reviews.ok) throw new Error(STATIC_PRIOR);
+  const selected = reviews.value.filter((review) =>
+    review.id === PRIOR_REVIEW_ID
+  );
+  if (selected.length !== 1) throw new Error(STATIC_PRIOR);
+  const wire = selected[0];
+  if (
+    wire.state !== "commented" ||
+    wire.author !== MAINTENANCE_REVIEWER ||
+    wire.commitSha !== REVIEWED_HEAD ||
+    wire.submittedAt !== PRIOR_SUBMITTED_AT ||
+    wire.body === null
+  ) {
+    throw new Error(STATIC_PRIOR);
+  }
+  let journal: ReviewJournalV1;
+  try {
+    journal = await parseReviewJournalBody(wire.body);
+  } catch {
+    throw new Error(STATIC_PRIOR);
+  }
+  if (
+    journal.version !== "v1" ||
+    journal.phase !== "ready" ||
+    journal.repository.owner !== REPOSITORY.owner ||
+    journal.repository.name !== REPOSITORY.name ||
+    journal.prNumber !== PULL_REQUEST ||
+    journal.expectedHead !== REVIEWED_HEAD ||
+    journal.expectedBase !== REVIEWED_BASE ||
+    journal.operationKey !== PRIOR_OPERATION_KEY ||
+    journal.publisher !== MAINTENANCE_REVIEWER ||
+    journal.requestId !== PRIOR_REQUEST_ID ||
+    journal.requestedAt !== PRIOR_REQUESTED_AT ||
+    journal.reviewId !== PRIOR_REVIEW_ID ||
+    journal.completedAt !== PRIOR_COMPLETED_AT ||
+    journal.execution !== null ||
+    journal.resultDigest !== PRIOR_RESULT_DIGEST ||
+    journal.result.verdict !== "unavailable" ||
+    journal.result.summary !== PRIOR_RESULT_SUMMARY ||
+    journal.result.findings.length !== 0
+  ) {
+    throw new Error(STATIC_PRIOR);
+  }
+}
+
 /** Append exactly this receipt with one expected-head CAS and one readback. */
 async function appendReceipt(
   state: StateReadView & RepairStateWriter,
@@ -812,11 +1239,14 @@ interface ReviewFlowInputV1 {
   runAttempt: number;
 }
 
-/** Open PR54: exactly one real review (or a reconcile-only duplicate). */
+/**
+ * Open PR54: the separately charged attempt 2 (or a reconcile-only duplicate)
+ * after the exact terminal attempt-1 evidence. Never an automatic attempt 3.
+ */
 async function runReviewFlow(
   input: ReviewFlowInputV1,
 ): Promise<MaintenanceOutcomeV1> {
-  const operationKey = reviewOperationKey(PULL_REQUEST, REVIEWED_HEAD);
+  const operationKey = ATTEMPT_2_OPERATION_KEY;
   const receiptId = reviewRecordId(operationKey);
   const before = await readStrictRepair(input.state);
   const existing =
@@ -852,11 +1282,15 @@ async function runReviewFlow(
     };
   }
 
+  // The successor start is admissible only against the exact published
+  // terminal attempt-1 evidence, before any attempt-2 charge or model call.
+  await requirePriorUnavailableAttempt(before.snapshot, input.reads);
+
   const reserved = await input.budget.reserveModelStart({
     repository: REPOSITORY,
     taskId: workItemIdForPullRequest(REPOSITORY, PULL_REQUEST),
     head: REVIEWED_HEAD,
-    attempt: 1,
+    attempt: ATTEMPT_2,
     purpose: "review_request",
   });
   if (reserved.status !== "admitted" && reserved.status !== "duplicate") {
@@ -979,7 +1413,7 @@ async function runReleaseFlow(
   input: ReviewFlowInputV1,
   pull: GitHubPullRequestV1,
 ): Promise<MaintenanceOutcomeV1> {
-  const operationKey = reviewOperationKey(PULL_REQUEST, REVIEWED_HEAD);
+  const operationKey = ATTEMPT_2_OPERATION_KEY;
   const receiptId = reviewRecordId(operationKey);
   const repair = await readStrictRepair(input.state);
   const receipt = repair.snapshot.reviews.find((entry) =>
@@ -1223,45 +1657,83 @@ async function composeMaintenancePorts(input: ComposeInputV1): Promise<{
     baseUrl: ACTIONS_UOS_BASE_URL,
   });
   const tracker = new LocalSessionTracker();
-  const github = composeLocalGitHub({
-    clock: input.clock,
-    state: input.state,
-    gate,
-    http: input.http,
-    token: input.token,
-    login: MAINTENANCE_REVIEWER,
-    invocationId: input.invocationId,
-    sourcePath: input.candidateDir,
-    scratch: joinPath(input.stateRoot, "state-scratch"),
-    reviewCheckout,
-    reviewClientHome,
-    reviewTmpDir,
-    reviewDenoDir,
-    trustedPath: input.trustedPath,
-    codexExecutable,
-    tracker,
-    modelBaseUrl: ACTIONS_UOS_BASE_URL,
-  });
-  if (github.reviewerIdentity !== MAINTENANCE_REVIEWER) {
-    throw new Error(STATIC_IDENTITY);
-  }
+  const auth: GitHubAuthProviderV1 = {
+    authorizationHeader: () => Promise.resolve(portOk(`Bearer ${input.token}`)),
+  };
   const client = new GitHubApiClient({
     repository: REPOSITORY,
     apiBaseUrl: API_BASE_URL,
     http: input.http,
-    auth: {
-      authorizationHeader: () =>
-        Promise.resolve(portOk(`Bearer ${input.token}`)),
-    },
+    auth,
     cooldownGate: gate,
     clock: input.clock,
+    includeIssueRelations: true,
   });
+  const snapshot = new GitReviewSnapshot({
+    trustedPath: input.trustedPath,
+    repositoryDir: input.candidateDir,
+    gitExecutable: "/usr/bin/git",
+  });
+  const reviewer = new CodexStructuredReviewer({
+    provider: "uos",
+    sessionCwd: reviewCheckout,
+    permissionProfile: "sentinel-review",
+    openSession: ({ cwd }) =>
+      tracker.open(() =>
+        new CodexSubprocessSession({
+          command: [codexExecutable, "app-server"],
+          cwd,
+          env: {
+            PATH: input.trustedPath,
+            HOME: reviewClientHome,
+            CODEX_HOME: reviewClientHome,
+            TMPDIR: reviewTmpDir,
+            DENO_DIR: reviewDenoDir,
+          },
+          operationDeadlineMs: 1_200_000,
+        })
+      ),
+  });
+  const reviewService = new GitHubCodexReviewTransport({
+    client,
+    repository: REPOSITORY,
+    publisher: MAINTENANCE_REVIEWER,
+    clock: input.clock,
+    ownerRunId: input.invocationId,
+    snapshot,
+    reviewer: new DiagnosticReviewPrepareCapabilityV1(reviewer),
+    maxActiveReviews: 1,
+  });
+  const host = composeGitHubHost({
+    repository: REPOSITORY,
+    http: input.http,
+    auth,
+    cooldownGate: gate,
+    clock: input.clock,
+    reviewService,
+    trustedPrAuthor: MAINTENANCE_REVIEWER,
+    trustedReviewer: MAINTENANCE_REVIEWER,
+    trustedResolutionAuthors: [MAINTENANCE_REVIEWER],
+    git: {
+      localDir: input.candidateDir,
+      remoteUrl: REMOTE_URL,
+      gitHome: joinPath(input.stateRoot, "state-scratch"),
+      extraEnv: githubGitAuthEnv(input.token),
+      gitPath: "/usr/bin/git",
+      timeoutMs: 120_000,
+      maxOutputBytes: 1_048_576,
+    },
+    includeIssueRelations: true,
+  });
+  if (host.port.reviewerIdentity !== MAINTENANCE_REVIEWER) {
+    throw new Error(STATIC_IDENTITY);
+  }
   return {
     review: {
-      reviewerIdentity: github.reviewerIdentity,
-      requestReview: (request) => github.requestReview(request),
-      observeReview: (request) => github.observeReview(request),
-      drainReviews: (request) => github.drainReviews(request),
+      reviewerIdentity: host.port.reviewerIdentity,
+      requestReview: (request) => host.port.requestReview(request),
+      observeReview: (request) => host.port.observeReview(request),
+      drainReviews: (request) => host.port.drainReviews(request),
       settle: () => tracker.settleAll(),
     },
     reads: {
