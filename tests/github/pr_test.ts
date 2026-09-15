@@ -34,6 +34,12 @@ function createRequest(
 }
 
 Deno.test("createPullRequest: publishes with source body preserved except close keywords", async () => {
+  const sourceBody = "Keep this surrounding text.\n" +
+    "Fix #101, FIXES: #102, fixed ubiquity/sentinel#103; " +
+    "close:#104, Closes: #105, CLOSES: #106, " +
+    "closed: ubiquity/sentinel#107; " +
+    "resolve #108, RESOLVES: #109, resolved ubiquity/sentinel#110.\n" +
+    "References #111 and ubiquity/sentinel#112 remain.";
   const { port, transport } = makePort({
     script: [
       httpRespond("GET", "/git/ref/heads/sentinel/fix-1", 200, refWire(SHA1)),
@@ -49,7 +55,9 @@ Deno.test("createPullRequest: publishes with source body preserved except close 
       ),
     ],
   });
-  const result = await port.createPullRequest(createRequest());
+  const result = await port.createPullRequest(
+    createRequest({ body: sourceBody }),
+  );
   assert.ok(result.ok);
   if (!result.ok) return;
   assert.deepEqual(result.value, {
@@ -63,7 +71,14 @@ Deno.test("createPullRequest: publishes with source body preserved except close 
   assert.equal(body.head, "ubiquity:sentinel/fix-1");
   assert.equal(body.base, "development");
   assert.equal(body.title, "fix the bug");
-  assert.equal(body.body, "Body with #123 mention.");
+  assert.equal(
+    body.body,
+    "Keep this surrounding text.\n" +
+      "#101, #102, ubiquity/sentinel#103; " +
+      "#104, #105, #106, ubiquity/sentinel#107; " +
+      "#108, #109, ubiquity/sentinel#110.\n" +
+      "References #111 and ubiquity/sentinel#112 remain.",
+  );
 });
 
 Deno.test("createPullRequest: missing or mismatched head branch fails closed", async () => {
@@ -387,6 +402,14 @@ Deno.test("sanitizeAutoCloseKeywords: removes close keywords, preserves everythi
   assert.equal(
     sanitizeAutoCloseKeywords(body),
     "#9\n\nBody paragraph remains.",
+  );
+  assert.equal(
+    sanitizeAutoCloseKeywords("Fixes: ubiquity/sentinel#123"),
+    "ubiquity/sentinel#123",
+  );
+  assert.equal(
+    sanitizeAutoCloseKeywords("ordinary prose and references #123 remain"),
+    "ordinary prose and references #123 remain",
   );
 });
 
