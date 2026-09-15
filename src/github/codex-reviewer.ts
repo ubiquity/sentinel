@@ -66,8 +66,8 @@ import {
   verifyReviewSnapshotDigest,
 } from "./review-snapshot.ts";
 
-/** Hard whole-review bound including owned settlement: ten minutes. */
-export const MAX_REVIEW_TOTAL_MS = 600_000;
+/** Hard whole-review bound including owned settlement: twenty minutes. */
+export const MAX_REVIEW_TOTAL_MS = 1_200_000;
 /** Finite interrupt/close grace reserved inside the caller's settleBy. */
 export const CLOSE_RESERVE_MS = 10_000;
 /** Bounded settle grace after the turn deadline interrupt. */

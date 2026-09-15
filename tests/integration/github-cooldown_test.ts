@@ -156,7 +156,7 @@ Deno.test("cooldown ambiguity: lost response keeps durable intent, cooldown and 
             state: rig.store,
             configs,
           }),
-        }, { deadline: rig.clock.now() + 1800000, stepLimit: 16 });
+        }, { deadline: rig.clock.now() + 2400000, stepLimit: 16 });
       const throttle = () =>
         gate.recordRateLimit(7, {
           kind: "secondary",
