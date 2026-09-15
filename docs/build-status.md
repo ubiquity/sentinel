@@ -2,12 +2,66 @@
 
 ## Active task register — Astra owned
 
-Updated 2026-09-15 22:48 UTC. This is the only authoritative acceptance ledger.
+Updated 2026-09-15 23:06 UTC. This is the only authoritative acceptance ledger.
 The goal remains incomplete: autonomous GitHub Actions repair against Sentinel,
 then the separately authorized ai.ubq.fi target. Only the current GPT-6 Astra
 integration owner may change scope, status, acceptance or write ownership here.
 
 ### Current checkpoint
+
+- V15b settled exit0/completed at23:04, nine calls/one edit, no checks/probes/
+  formatter/children. Persisted dda71563/stream16cd1bc8 and live PID228453
+  prove Flash/max/workspace-write/ask/production; PID228437 in the launch
+  attestation is its parent shell, not the DSH process. GPT88cd442a-034c-4cbe-
+  a1c6-daf760bfc808 passed all five causal cases, zero ignored, child0,34975ms.
+  Linux real causal consumer, proof negatives, publication and review now have
+  executed evidence. Primary accepted and committed dc3faba in M14; canonical
+  ancestry integration follows. Existing destructive proofs are not rerun.
+  Legacy-loss design is frozen in the existing proposal after scope audit:
+  one proof capability, pre-ranking two-CAS bridge, exact proof-head guard,
+  no schema discriminator, new-format/pre-receipt exclusions. Implement the
+  read-only proof first, then its normal loop consumer. No live state changed.
+
+- At23:03 lifecycle_fixture_scope proved the sole positive failure is its
+ 30-minute hard deadline: entrypoint5min + review20min + review margin5min
+ leaves latestStartAt equal toT0, correctly refusing review. V15b owns only
+ that positive call's explicit60-minute window; all assertions and other cases
+ remain frozen. Immutable m14-assignment-v15b-review-window.md,30calls,
+ no formatter/probes/checks. GPT will rerun the five-case file after settlement.
+
+- At22:59 causal capture0a8c3509-d030-49d1-805f-0aa9b08d3677 settled:
+  four passed, one failed, zero ignored, child1,53088ms. The positive case
+  returned margin instead of idle at line1436; read-only lifecycle_fixture_scope
+  is diagnosing the selected action and downstream setup before correction.
+  No test/writer remains active. Preserve V15's narrow diff and passing cases.
+  Postflight found minor unauthorized environment probes (deno execPath and
+  version) in V15; no tests, model calls or source writes occurred. Preserve
+  this qualification and prohibit those probes in the next assignment.
+
+- Continuation verified at 22:58: canonical 5476bd5121813a1ca9d219b2ee3cb226ced045d7
+  and the recorded M14 lane both match their assigned identities. Only this
+  primary-owned ledger is dirty in canonical. V15 exec42914/PID211535 settled
+  exit0/completed; no writer or descendants survive. Persisted 4ff38128 and
+  stream33c6eb4f prove Flash/max/workspace-write/ask; m14-launch-v15.json proves
+  exact cwd/production/credential presence. It used 47 calls and seven edits,
+  with one permitted single-file formatter pass. Only causal-capture_test.ts
+  changed; primary inspected the real Linux isolation injection and retained
+  Darwin/consumer/negative assertions. GPT capture m14-causal-capture-linux
+  started at22:57, exec95570, expected four minutes; its inputs are frozen.
+  Legacy-loss flow design continues independently with read-only scope mapping.
+  Existing PR70 extra-review permission remains unanswered; no review, merge,
+  installation or hosted state operation has been started.
+
+- Canonical5476bd5121813a1ca9d219b2ee3cb226ced045d7 contains accepted M14
+  integration-fixture tip1bb3bfe1eb1cba040cf0aa1fe6fa5a1ade3b1745; both pushed.
+  M14 fast-forwarded to5476bd5 for its next single-writer assignment. Fresh
+  read-only lifecycle_fixture_scope found a real missing Linux isolation
+  injection in makeConcreteVerifier, not stale ignore metadata. GPT real
+  Linux isolation prerequisite8ef43567-4f6e-4259-b276-4606f25f9f7d passed,
+  child0,5306ms. V15 owns only causal-capture_test.ts to inject the existing
+  production LinuxReplayIsolation and assert its real boundary, keeping Darwin
+  assertions and every causal proof/negative case. Immutable V15 assignment,
+  120calls; no source, state, review or deployment changes authorized by it.
 
 - At22:48 V14b settled exit0/completed,8calls/2edits, no tests/formatter/children.
   Persistedfeb0810a-f3d1-46db-a31f-2104ecd60d8c/streame07cdaa7 proves

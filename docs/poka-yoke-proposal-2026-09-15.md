@@ -202,6 +202,51 @@ the behavior exists; it is not an ignored test or part of the reader-only releas
 These release steps are infrastructure delivery and do not count as autonomous
 application canaries.
 
+## Frozen legacy-loss bridge
+
+The first legacy bridge covers only self-repository scope-0 issue records with
+an original, unprepared base_refresh intent and no candidateState. New-format
+preservation records and ambiguous pre-receipt implementation intents are
+excluded. In particular, Issue61 is not an instance of this recovery.
+
+Add one optional trusted GitHubPort capability, proveLegacyBaseRefreshLoss.
+Its transient proof binds taskId, repository, StateReadResultV1.head (not the
+snapshot's prior stateHead), shape legacy_base_refresh, lostBase B0, lostHead H1,
+predecessorHead H0, branch, PR, original intentKey and historical reviewId.
+It writes no state or remote ref, starts no model and creates no review.
+
+Require the current scoped issue to remain open and eligible, recorded work
+dependencies to be done, and exactly one submitted implementation/retry
+reservation for this task's current attempt at B0. Read the exact task branch
+and owned open PR at H0, with the configured base branch. The PR's current base
+SHA need not equal historical B0. Require a completed historical H0 correction
+review bound to the same repository, PR, B0 and trusted reviewer, with nonempty
+unresolved severities. Fetch the exact branch into a new trusted object store,
+verify H0 and B0 ancestry, and prove H1 absent there. The existing exact local
+candidate loader must also return not_found; present or unknown is not loss.
+There is no legacy preservation ref to infer or require absent.
+
+The normal loop performs a bounded deterministic pass before ranking, leaving
+generic blocked selection unchanged. Track discovery/restoration separately
+per task in that run. A successful discovery first commits missing_evidence
+while retaining H1/B0, original intent, checkpoint, counters and all historical
+records. Continue through a fresh state read and independently prove the same
+loss and predecessor before restoration. Only then, if attempts remain, commit
+ordinary work at H0/B0 with null checkpoint/intent/wait/blocker. Preserve the
+branch, PR, source, counters, reservations, reviews and evidence. Normal model
+admission then separately charges the next attempt; H0's correction review
+prevents treating it as a deliverable candidate.
+
+Both commits require the exact proof state head even after the ordinary
+cooldown synchronization step. Any drift defers this task. Null/unavailable
+proofs cause no restore or model start; an active task with an unavailable proof
+is also deferred for that run so its old refresh cannot immediately repeat.
+Other eligible tasks continue. The committed loss snapshot remains in state
+Git ancestry. No new persistent discriminator or manual state rewrite is needed.
+
+This narrow proof establishes recoverable scoped legacy loss. It does not
+claim global remote-object absence or classify cases without a verifiable H0.
+
 ## Review and source evidence
 
 One owner-authorized GPT Pro request completed on2026-09-15 at17:59:02 UTC:
