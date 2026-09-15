@@ -4,6 +4,15 @@ Owner planning session: 2026-09-06 America/New_York; created across 2026-09-07 0
 
 ## 1. Outcome and scope
 
+Owner development policy update, 2026-09-15: use 120 shared Luna model starts
+per rolling hour and no rolling-seven-day cap during development, including
+supervised GitHub Actions runs. This supersedes all earlier 60/hour and
+168/seven-day limits below for development. Preserve every historical charge,
+shared accounting for implementation/review/retry/continuation, Luna/max,
+exclusive runtime ownership and reviewed installation. A source change alone
+does not establish the effective hosted policy.
+The owner reaffirmed that Sentinel is a cron-triggered GitHub Actions job.
+
 Owner policy update, 2026-09-14 14:17 UTC: raise the shared Luna model-start
 cap from one to 60 per rolling hour. This supersedes the one-start hourly cap
 below. Keep gpt-5.6-luna with max reasoning, 168 starts per rolling seven days,
