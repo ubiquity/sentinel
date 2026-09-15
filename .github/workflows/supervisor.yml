@@ -19,8 +19,48 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  prepare:
+
+  # One-shot issue-48 recovery. It holds the existing sentinel-repair lock (the
+  # same group the repair job uses) and runs before prepare under the protected
+  # ref, so no scheduled legacy run can race it; it never installs or starts a
+  # model and uses only the repository github.token.
+  maintenance:
     if: github.ref == 'refs/heads/sentinel-supervisor'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: read
+    concurrency:
+      group: sentinel-repair
+      cancel-in-progress: false
+    steps:
+      - name: Checkout protected supervisor source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.sha }}
+          # Full history so the helper can bind the actual checked-out HEAD to
+          # the dispatched GITHUB_SHA.
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        with:
+          deno-version: v2.x
+      - name: Run one-shot issue48 hosted recovery
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          deno run --no-lock
+          --allow-read
+          --allow-write
+          --allow-run=git
+          --allow-net=api.github.com
+          --allow-env=HOME,PATH,GITHUB_TOKEN,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_REPOSITORY,GITHUB_REF,GITHUB_SHA,GITHUB_WORKFLOW_SHA,GITHUB_WORKFLOW_REF,GITHUB_JOB
+          ops/issue48-recovery.ts
+
+  prepare:
+    needs: maintenance
+    if: always() && github.ref == 'refs/heads/sentinel-supervisor'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment:
@@ -56,7 +96,7 @@ jobs:
 
   repair:
     needs: prepare
-    if: github.ref == 'refs/heads/sentinel-supervisor' && needs.prepare.outputs.run == 'true'
+    if: ${{ !cancelled() && needs.prepare.result == 'success' && github.ref == 'refs/heads/sentinel-supervisor' && needs.prepare.outputs.run == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
     permissions:
