@@ -9,6 +9,7 @@ import type { GitSha } from "../../src/contracts/brands.ts";
 import type { RepairStateSnapshotV1 } from "../../src/contracts/state-snapshots.ts";
 import type { WorkRecordV1 } from "../../src/contracts/work-record.ts";
 import {
+  isEligible,
   MAX_UNFINISHED_PRS,
   rankEligibleWork,
 } from "../../src/repair/selection.ts";
@@ -325,4 +326,173 @@ Deno.test("selection: an existing-PR correction is never WIP-skipped", () => {
     "the correction of an already-owned PR remains eligible at the cap",
   );
   assert.equal(ranked.skipped[correction.id], undefined);
+});
+
+// ---------------------------------------------------------------------------
+// M15 V1 candidate state: parked records never execute, never free WIP and
+// never unblock dependents; only hasCandidateState decides parking.
+// ---------------------------------------------------------------------------
+
+const CANDIDATE_REF = `refs/heads/sentinel-candidates/${"ab".repeat(32)}`;
+const PRODUCING_RESERVATION = "cd".repeat(32);
+
+function candidateStateFor(
+  base: GitSha,
+  head: GitSha | null,
+): Record<string, unknown> {
+  return head === null ? { preserved: null, publishedHead: null } : {
+    preserved: {
+      operationKey: `impl:${PRODUCING_RESERVATION}`,
+      base,
+      head,
+      ref: CANDIDATE_REF,
+    },
+    publishedHead: head,
+  };
+}
+
+function parkedTarget(
+  head: GitSha | null,
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    base: SHA1,
+    branch: "sentinel/repair/parked",
+    checkpoint: null,
+    head,
+    pr: head === null ? null : 7,
+    candidateState: candidateStateFor(SHA1, head),
+    ...overrides,
+  };
+}
+
+function parkedWork(id: string, overrides: Record<string, unknown> = {}) {
+  return workRecord(id, {
+    source: { kind: "issue", id, revision: SHA2 },
+    related: { incidentId: null, issueNumber: 1 },
+    ...overrides,
+  });
+}
+
+Deno.test("selection: parked candidate records are excluded with an explicit reason", () => {
+  const workPhase = parkedWork("parked-work", {
+    nextStep: "work",
+    target: parkedTarget(SHA2),
+  });
+  const reviewExpired = parkedWork("parked-review", {
+    nextStep: "review",
+    wait: { reason: "review_pending", since: T0, until: NOW - 1 },
+    target: parkedTarget(SHA2),
+  });
+  const delivery = parkedWork("parked-delivery", {
+    nextStep: "delivery",
+    target: parkedTarget(SHA2),
+  });
+  // preserved === null is parked work, never "no candidate state".
+  const nullPreserved = parkedWork("parked-null", {
+    nextStep: "work",
+    target: parkedTarget(null, { branch: "sentinel/repair/parked-null" }),
+  });
+  // The preservation intent alone parks the record as well.
+  const intentParked = parkedWork("parked-intent", {
+    nextStep: "work",
+    target: parkedTarget(SHA2, {
+      candidateState: candidateStateFor(SHA1, null),
+    }),
+    intent: {
+      kind: "candidate_preservation",
+      key: `impl:${PRODUCING_RESERVATION}`,
+      startedAt: T0,
+      branch: CANDIDATE_REF,
+      expectedHead: SHA2,
+      observedBase: SHA1,
+      pr: null,
+      requestId: PRODUCING_RESERVATION,
+      resultId: null,
+    },
+  });
+  const legacy = workRecord("legacy", {
+    classification: { severity: "P2", priority: 5 },
+    target: { base: SHA1, branch: "b", checkpoint: null, head: SHA2, pr: 7 },
+  });
+  const parked = [
+    workPhase,
+    reviewExpired,
+    delivery,
+    nullPreserved,
+    intentParked,
+  ];
+  const snap = snapshot([...parked, legacy]);
+  const ranked = rankEligibleWork(snap, repairConfigs(), NOW);
+  assert.deepEqual(ranked.ordered, [legacy.id]);
+  for (const record of parked) {
+    assert.equal(
+      ranked.skipped[record.id],
+      "candidate_writer_unavailable",
+      record.id,
+    );
+    assert.equal(isEligible(record, snap, NOW), false, record.id);
+  }
+  assert.equal(isEligible(legacy, snap, NOW), true);
+});
+
+Deno.test("selection: parking does not free WIP and dependencies still see parked records", () => {
+  const parkedPrs = Array.from(
+    { length: MAX_UNFINISHED_PRS },
+    (_, index) =>
+      parkedWork(`parked-pr-${index}`, {
+        source: { kind: "issue", id: `p${index}`, revision: SHA2 },
+        related: { incidentId: null, issueNumber: 10 + index },
+        nextStep: "review",
+        wait: { reason: "review_pending", since: T0, until: NOW - 1 },
+        target: parkedTarget(SHA2, { pr: 20 + index }),
+      }),
+  );
+  const fresh = workRecord("fresh", {
+    classification: { severity: "P2", priority: 9 },
+  });
+  const dependent = workRecord("dependent", {
+    dependencies: ["parked-pr-0"],
+    classification: { severity: "P1", priority: null },
+  });
+  const ranked = rankEligibleWork(
+    snapshot([...parkedPrs, fresh, dependent]),
+    repairConfigs(),
+    NOW,
+  );
+  assert.deepEqual(ranked.ordered, []);
+  for (const record of parkedPrs) {
+    assert.equal(ranked.skipped[record.id], "candidate_writer_unavailable");
+  }
+  assert.equal(
+    ranked.skipped[fresh.id],
+    "wip",
+    "three parked PRs still occupy the unfinished-PR cap",
+  );
+  assert.equal(
+    ranked.skipped[dependent.id],
+    "dependency",
+    "a parked dependency is not complete and does not unblock work",
+  );
+});
+
+Deno.test("selection: done and blocked parked records are reported as parked", () => {
+  const done = parkedWork("parked-done", {
+    nextStep: "done",
+    target: parkedTarget(SHA2),
+  });
+  const blocked = parkedWork("parked-blocked", {
+    nextStep: "blocked",
+    blocker: { kind: "missing_evidence", message: "parked", since: T0 },
+    target: parkedTarget(null, { branch: "sentinel/repair/parked-blocked" }),
+  });
+  const snap = snapshot([done, blocked]);
+  const ranked = rankEligibleWork(snap, repairConfigs(), NOW);
+  assert.deepEqual(ranked.ordered, []);
+  // Every candidate-state record carries the explicit parking reason; legacy
+  // terminal/blocked records keep their existing reasons (asserted above).
+  assert.equal(ranked.skipped[done.id], "candidate_writer_unavailable");
+  assert.equal(ranked.skipped[blocked.id], "candidate_writer_unavailable");
+  assert.equal(isEligible(done, snap, NOW), false);
+  assert.equal(isEligible(blocked, snap, NOW), false);
 });

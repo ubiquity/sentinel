@@ -25,7 +25,7 @@ import type {
 } from "../../src/github/http.ts";
 import { runActionsCiApproval } from "../../src/host/actions-ci.ts";
 import { FakeClock, MemoryState } from "../repair/helpers.ts";
-import { SHA1, SHA3, T0, workRecord } from "../state/helpers.ts";
+import { SHA1, SHA2, SHA3, T0, workRecord } from "../state/helpers.ts";
 
 const SELF_REPO = {
   owner: "ubiquity",
@@ -653,3 +653,90 @@ Deno.test(
 );
 
 type RigV1 = ReturnType<typeof makeRig>;
+
+// ---------------------------------------------------------------------------
+// M15 V1 candidate state: parked new-format records are filtered BEFORE the
+// bounded slice, so they are never auto-approved and never starve a later
+// eligible legacy PR.
+// ---------------------------------------------------------------------------
+
+const CANDIDATE_REF = `refs/heads/sentinel-candidates/${"ab".repeat(32)}`;
+const PRODUCING_RESERVATION = "cd".repeat(32);
+
+/** Parked scope-0 self candidate: valid PR/head/branch plus candidateState. */
+function parkedCandidateRecord(index: number): WorkRecordV1 {
+  const pr = 40 + index;
+  const head = SHA2;
+  return workRecord(`parked-${index}`, {
+    repository: { ...SELF_REPO },
+    source: { kind: "issue", id: `${100 + index}`, revision: SHA1 },
+    related: { incidentId: null, issueNumber: 100 + index },
+    target: {
+      base: SHA1,
+      branch: `sentinel/repair/parked-${index}`,
+      checkpoint: null,
+      head,
+      pr,
+      candidateState: {
+        preserved: {
+          operationKey: `impl:${PRODUCING_RESERVATION}`,
+          base: SHA1,
+          head,
+          ref: CANDIDATE_REF,
+        },
+        publishedHead: head,
+      },
+    },
+    nextStep: "review",
+    counters: { attempts: 1, retries: 0, reviewRounds: 1 },
+  });
+}
+
+Deno.test(
+  "ci approval: parked records are filtered before the three-candidate slice",
+  async () => {
+    const parked = [0, 1, 2].map(parkedCandidateRecord);
+    // The legacy candidate is LAST: without pre-slice filtering the three
+    // parked records would occupy every approval slot.
+    const rig = makeRig([...parked, candidateRecord()]);
+    let parkedPrReads = 0;
+    for (const record of parked) {
+      const pr = record.target.pr as number;
+      const head = record.target.head as string;
+      const headRef = record.target.branch as string;
+      rig.http.on(
+        "GET",
+        `/repos/ubiquity/sentinel/pulls/${pr}`,
+        () => {
+          parkedPrReads++;
+          return response(
+            200,
+            pullBody({ number: pr, headSha: head, headRef }),
+          );
+        },
+      );
+    }
+    const summary = await rig.run();
+    assert.deepEqual(summary, { approved: 1, pending: 0, unavailable: 0 });
+    assert.equal(parkedPrReads, 0, "no API call for a parked PR");
+    assert.equal(rig.http.posts().length, 1, "one approval POST");
+    assert.equal(
+      new URL(rig.http.posts()[0]!.url).pathname,
+      APPROVE_PATH,
+      "the legacy candidate is approved",
+    );
+    assert.deepEqual(
+      rig.http.calls.map((call) =>
+        `${call.method} ${new URL(call.url).pathname}`
+      ),
+      [
+        `GET ${PULL_PATH}`,
+        `GET ${LIST_PATH}`,
+        `GET ${RUN_PATH}`,
+        `GET ${PULL_PATH}`,
+        `POST ${APPROVE_PATH}`,
+      ],
+      "only the legacy PR is ever read",
+    );
+  },
+);

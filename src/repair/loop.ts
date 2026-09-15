@@ -63,6 +63,7 @@ import type {
   IncompleteOperationV1,
   WorkRecordV1,
 } from "../contracts/work-record.ts";
+import { hasCandidateState } from "../contracts/work-record.ts";
 import type { BudgetControllerV1 } from "../budget/mod.ts";
 import { MAX_REVIEW_TOTAL_MS } from "../github/codex-reviewer.ts";
 import {
@@ -137,6 +138,12 @@ const MAX_IMPLEMENTATION_ATTEMPTS = 4;
 const MAX_OUTPUT_LIMIT_BYTES = 4096;
 const MODEL_ID = "gpt-5.6-luna" as const;
 const REASONING = "max" as const;
+/**
+ * Static parking detail for a V1 candidate-state record. The old reader has no
+ * preservation writer, so the step is deferred without any task mutation,
+ * model admission, push, review, merge or closure.
+ */
+const CANDIDATE_WRITER_UNAVAILABLE = "candidate writer unavailable";
 
 function isCausalReplayResult(
   result: ReplayResultV1,
@@ -774,6 +781,12 @@ async function pollIntake(
       const work = context.snapshot.work.find(
         (record) => record.fingerprint === summary.fingerprint,
       ) ?? null;
+      // Old reader: a record carrying V1 candidate state is parked. Its
+      // stored summary and record bytes must not change, so this incoming
+      // summary is skipped entirely BEFORE any newSummaries.set or
+      // applyIncidentSummary. The record lookup above still searches the
+      // entire snapshot, so the parked task is never recreated.
+      if (work !== null && hasCandidateState(work)) continue;
       if (existing !== null && existing !== undefined) {
         // Nondecreasing refresh of the stored summary.
         if (
@@ -1037,6 +1050,15 @@ function executeStep(
   context: LoopContextV1,
   record: WorkRecordV1,
 ): Promise<StepResultV1> {
+  // Backstop before dispatch: even if selection ever admitted a parked record,
+  // no work/review/delivery path may execute for it. This returns a static
+  // deferral — never a persisted blocker or wait.
+  if (hasCandidateState(record)) {
+    return Promise.resolve({
+      kind: "deferred",
+      detail: CANDIDATE_WRITER_UNAVAILABLE,
+    });
+  }
   switch (record.nextStep) {
     case "work":
       return executeWorkStep(deps, context, record);
