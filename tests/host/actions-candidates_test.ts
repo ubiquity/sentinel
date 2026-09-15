@@ -10,13 +10,23 @@ import type { GitSha, WorkItemId } from "../../src/contracts/brands.ts";
 import type { GitHubRateLimitV1 } from "../../src/contracts/github-cooldown.ts";
 import type {
   GitHubCooldownGateV1,
+  GitHubIssueV1,
   GitHubPort,
+  GitHubPullRequestV1,
+  GitHubRefV1,
+  LegacyBaseRefreshLossProofV1,
   PortResultV1,
+  StateReadResultV1,
+  StateReadView,
 } from "../../src/contracts/ports.ts";
 import { portError, portOk } from "../../src/contracts/ports.ts";
+import type { ReviewReceiptV1 } from "../../src/contracts/review-receipt.ts";
 import { parseRepairStateSnapshotV1 } from "../../src/contracts/state-snapshots.ts";
 import type { RepairStateSnapshotV1 } from "../../src/contracts/state-snapshots.ts";
-import type { CandidatePreservationV1 } from "../../src/contracts/work-record.ts";
+import type {
+  CandidatePreservationV1,
+  WorkRecordV1,
+} from "../../src/contracts/work-record.ts";
 import { DenoGitExecutor } from "../../src/github/git-executor.ts";
 import type { DenoGitExecutorOptions } from "../../src/github/git-executor.ts";
 import type {
@@ -28,10 +38,16 @@ import { GitReviewSnapshot } from "../../src/github/review-snapshot.ts";
 import {
   createActionsCandidateRestorer,
   createCandidatePreserver,
+  createLegacyBaseRefreshLossProver,
 } from "../../src/host/actions-candidates.ts";
 import { composeGitHubHost } from "../../src/host/github.ts";
 import {
+  createLocalCandidateLoader,
+  localCheckoutKey,
+} from "../../src/host/local.ts";
+import {
   baseRefreshIntentKey,
+  candidateBranch,
   candidatePreservationRef,
 } from "../../src/repair/keys.ts";
 import type {
@@ -42,7 +58,16 @@ import type {
 import { DenoReplayRuntime } from "../../src/replay/runtime.ts";
 import { FakeAuthProvider, FakeReviewService } from "../github/helpers.ts";
 import { FakeClock, MemoryState } from "../repair/helpers.ts";
-import { reservation, SHA1, T0, workRecord } from "../state/helpers.ts";
+import {
+  REPO,
+  reservation,
+  reviewReceipt,
+  SHA1,
+  SHA2,
+  SHA3,
+  T0,
+  workRecord,
+} from "../state/helpers.ts";
 
 const HERE = new URL(import.meta.url);
 if (HERE.protocol !== "file:") throw new Error("expected a file: test module");
@@ -2085,6 +2110,1430 @@ Deno.test(
       ).ensure({ base: ctx.base, head: ctx.head });
       assert.ok(pending.ok, JSON.stringify(pending));
       assert.equal(await objectPresent(pendingClone, ctx.env, ctx.head), true);
+    } finally {
+      await ctx.cleanup();
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Legacy base-refresh candidate loss: the REAL prover factory, the REAL
+// createLocalCandidateLoader and REAL bounded Git fetch into a new empty store.
+// Only the authenticated GitHub read port is scripted; nothing is written.
+// ---------------------------------------------------------------------------
+
+const LEGACY_TASK_ID = CANDIDATE_TASK_ID;
+const LEGACY_BRANCH = candidateBranch(CANDIDATE_TASK_ID);
+const LEGACY_PR = 12;
+const LEGACY_AUTHOR = "sentinel[bot]";
+const LEGACY_REVIEWER = "chatgpt-codex-connector[bot]";
+const LEGACY_STORE_PREFIX = "sentinel-legacy-loss-store-";
+
+/** Scripted read-only GitHub port over explicit observations. */
+class LegacyLossPort {
+  readonly reviewerIdentity = LEGACY_REVIEWER;
+  readonly calls: string[] = [];
+  issue: PortResultV1<GitHubIssueV1 | null>;
+  pull: PortResultV1<GitHubPullRequestV1 | null>;
+  ref: PortResultV1<GitHubRefV1 | null>;
+
+  constructor(init: {
+    issue: PortResultV1<GitHubIssueV1 | null>;
+    pull: PortResultV1<GitHubPullRequestV1 | null>;
+    ref: PortResultV1<GitHubRefV1 | null>;
+  }) {
+    this.issue = init.issue;
+    this.pull = init.pull;
+    this.ref = init.ref;
+  }
+
+  readIssue(issueNumber: number): Promise<PortResultV1<GitHubIssueV1 | null>> {
+    this.calls.push(`issue:${issueNumber}`);
+    return Promise.resolve(this.issue);
+  }
+
+  readPullRequest(
+    number: number,
+  ): Promise<PortResultV1<GitHubPullRequestV1 | null>> {
+    this.calls.push(`pr:${number}`);
+    return Promise.resolve(this.pull);
+  }
+
+  readRef(ref: string): Promise<PortResultV1<GitHubRefV1 | null>> {
+    this.calls.push(`ref:${ref}`);
+    return Promise.resolve(this.ref);
+  }
+}
+
+/** Bounded runtime that records every git argv and never spawns. */
+class CountingRuntime implements ReplayRuntimeV1 {
+  calls = 0;
+  run(_input: ReplayCommandInputV1): Promise<ReplayCommandResultV1> {
+    this.calls++;
+    return Promise.resolve({
+      outcome: "spawn_failed",
+      exitCode: null,
+      stdout: new Uint8Array(),
+      stderr: new Uint8Array(),
+      truncated: false,
+      settled: true,
+      detail: "unexpected legacy-loss git run",
+    });
+  }
+}
+
+/** Real runtime wrapper that records every git argv. */
+class RecordingRuntime implements ReplayRuntimeV1 {
+  readonly calls: string[][] = [];
+  constructor(private readonly delegate: ReplayRuntimeV1) {}
+  run(input: ReplayCommandInputV1): Promise<ReplayCommandResultV1> {
+    this.calls.push([...input.args]);
+    return this.delegate.run(input);
+  }
+}
+
+/** Real state wrapper whose SECOND read reports a different authoritative head. */
+class DriftingLossState implements StateReadView {
+  reads = 0;
+  constructor(
+    private readonly inner: MemoryState,
+    private readonly secondHead: GitSha,
+  ) {}
+  readRepair(): Promise<
+    PortResultV1<StateReadResultV1<RepairStateSnapshotV1>>
+  > {
+    this.reads++;
+    return this.inner.readRepair().then((result) => {
+      if (this.reads === 1 || !result.ok || result.value.status !== "found") {
+        return result;
+      }
+      return portOk({ ...result.value, head: this.secondHead });
+    });
+  }
+  readRelease(): Promise<PortResultV1<StateReadResultV1<never>>> {
+    return this.inner.readRelease();
+  }
+}
+
+/** Real loader whose calls are counted (the loader itself is unchanged). */
+function countingCandidateLoader(): {
+  load: (taskId: WorkItemId, head: GitSha) => Promise<PortResultV1<void>>;
+  calls: { taskId: string; head: GitSha }[];
+} {
+  const calls: { taskId: string; head: GitSha }[] = [];
+  return {
+    calls,
+    load: (taskId, head) => {
+      calls.push({ taskId, head });
+      return Promise.resolve(portError("not_found", "candidate is absent"));
+    },
+  };
+}
+
+function legacyIssue(overrides: Partial<GitHubIssueV1> = {}): GitHubIssueV1 {
+  return {
+    number: 1,
+    title: "legacy loss",
+    body: "<!-- sentinel:repair -->\n",
+    state: "open",
+    author: null,
+    labels: [],
+    createdAt: T0,
+    updatedAt: T0,
+    closedAt: null,
+    relations: { openBlockers: [], subIssueCount: 0 },
+    ...overrides,
+  };
+}
+
+function legacyPull(input: {
+  predecessor: GitSha;
+  base?: GitSha;
+  overrides?: Partial<GitHubPullRequestV1>;
+}): GitHubPullRequestV1 {
+  return {
+    number: LEGACY_PR,
+    title: "legacy loss",
+    body: "",
+    state: "open",
+    head: input.predecessor,
+    base: input.base ?? SHA1,
+    mergeSha: null,
+    headRef: LEGACY_BRANCH,
+    baseRef: "development",
+    author: LEGACY_AUTHOR,
+    createdAt: T0,
+    updatedAt: T0,
+    mergedAt: null,
+    reviewDecision: "none",
+    ...input.overrides,
+  };
+}
+
+function legacyReview(input: {
+  id: string;
+  head: GitSha;
+  base: GitSha;
+  overrides?: Record<string, unknown>;
+}): ReviewReceiptV1 {
+  return reviewReceipt(input.id, {
+    expectedReviewer: LEGACY_REVIEWER,
+    observedReviewer: LEGACY_REVIEWER,
+    repository: { ...SELF_REPO },
+    pullRequest: { number: LEGACY_PR, head: input.head, base: input.base },
+    outcome: "completed",
+    resultId: "result-1",
+    summary: null,
+    findings: [{
+      id: "finding-1",
+      severity: "P2",
+      path: null,
+      message: "correction required",
+      fingerprint: "a".repeat(64),
+      resolved: false,
+      resolutionEvidence: null,
+    }],
+    findingsUncounted: 0,
+    unresolvedSeverities: ["P2"],
+    submittedAt: T0 + 1000,
+    completedAt: T0 + 2000,
+    observedAt: T0 + 3000,
+    ...input.overrides,
+  });
+}
+
+/** Exact covered legacy record; overrides stay explicit per test. */
+function legacyRecord(input: {
+  lost: GitSha;
+  base: GitSha;
+  observedBase: GitSha;
+  nextStep?: "work" | "blocked" | "review" | "delivery";
+  blocker?: unknown;
+  dependencies?: string[];
+  target?: Record<string, unknown>;
+  intent?: Record<string, unknown>;
+  workOverrides?: Record<string, unknown>;
+}): WorkRecordV1 {
+  return workRecord(CANDIDATE_TASK_ID, {
+    repository: { ...SELF_REPO },
+    source: { kind: "issue", id: "1", revision: SHA1 },
+    related: { incidentId: null, issueNumber: 1 },
+    dependencies: input.dependencies ?? [],
+    target: {
+      base: input.base,
+      branch: LEGACY_BRANCH,
+      checkpoint: null,
+      head: input.lost,
+      pr: LEGACY_PR,
+      ...input.target,
+    },
+    nextStep: input.nextStep ?? "work",
+    blocker: input.blocker ?? null,
+    counters: { attempts: 1, retries: 0, reviewRounds: 1 },
+    intent: {
+      kind: "base_refresh",
+      key: baseRefreshIntentKey(LEGACY_PR, input.lost, input.observedBase),
+      startedAt: T0,
+      branch: LEGACY_BRANCH,
+      expectedHead: input.lost,
+      observedBase: input.observedBase,
+      pr: LEGACY_PR,
+      requestId: null,
+      resultId: null,
+      ...input.intent,
+    },
+    updatedAt: T0 + 1000,
+    ...input.workOverrides,
+  });
+}
+
+/** Exact submitted implementation reservation for one legacy attempt. */
+const LEGACY_RESERVATION_ID = "a".repeat(64);
+
+function legacyReservation(
+  record: WorkRecordV1,
+  overrides: Record<string, unknown> = {},
+) {
+  return reservation(LEGACY_RESERVATION_ID, {
+    repository: { ...SELF_REPO },
+    taskId: record.id,
+    attempt: record.counters.attempts,
+    head: record.target.base,
+    purpose: "implementation",
+    outcome: "submitted",
+    settledAt: T0 + 5,
+    proofRef: null,
+    ...overrides,
+  });
+}
+
+/** Parsed durable snapshot with explicit reviews and distinct heads. */
+function legacyState(
+  work: RepairStateSnapshotV1["work"],
+  reservations: RepairStateSnapshotV1["reservations"],
+  reviews: RepairStateSnapshotV1["reviews"] = [],
+  heads: { snapshotHead?: GitSha; readHead?: GitSha } = {},
+): MemoryState {
+  const state = new MemoryState();
+  const parsed = snapshot(work, reservations);
+  parsed.reviews = reviews;
+  parsed.stateHead = heads.snapshotHead ?? SHA1;
+  state.repair = parsed;
+  state.repairHead = heads.readHead ?? SHA1;
+  return state;
+}
+
+/** Real fixture: B0, moved base B1, reviewed predecessor H0 on the exact task
+ * branch, and a lost correction H1 that exists in no trusted store. */
+async function makeLegacyLossCtx(): Promise<{
+  ctx: CandidateCtxV1;
+  branch: string;
+  movedBase: GitSha;
+  lost: GitSha;
+  sourcePath: string;
+  stateRoot: string;
+  producer: string;
+}> {
+  const ctx = await makeCandidateCtx();
+  try {
+    const work = `${ctx.tmp}/work`;
+    const branch = LEGACY_BRANCH;
+    assert.ok(
+      (await gitRun(
+        work,
+        ["push", "-q", "origin", `${ctx.head}:refs/heads/${branch}`],
+        ctx.env,
+      )).ok,
+    );
+    // The configured base advances to B1 while B0 stays H0's parent.
+    assert.ok(
+      (await gitRun(work, ["checkout", "-q", "development"], ctx.env)).ok,
+    );
+    const movedBase = await commitIn(work, ctx.env, "moved-base");
+    assert.ok(
+      (await gitRun(work, ["push", "-q", "origin", "development"], ctx.env)).ok,
+    );
+    // H1 is produced in a disposable clone and published nowhere; the clone is
+    // deleted, so H1 exists in no trusted store afterwards.
+    const lostDir = `${ctx.tmp}/lost`;
+    assert.ok(
+      (await gitRun(
+        ctx.tmp,
+        ["clone", "-q", "--no-hardlinks", `file://${ctx.bare}`, lostDir],
+        ctx.env,
+      )).ok,
+    );
+    assert.ok(
+      (await gitRun(lostDir, ["checkout", "-q", ctx.base], ctx.env)).ok,
+    );
+    const lost = await commitIn(lostDir, ctx.env, "lost-correction");
+    await Deno.remove(lostDir, { recursive: true });
+    assert.notEqual(lost, ctx.base);
+    assert.notEqual(lost, ctx.head);
+    assert.notEqual(lost, movedBase);
+    // The trusted source mirror and the exact mapped producer checkout are
+    // real repositories that both lack H1.
+    const sourcePath = await mirror(ctx);
+    const stateRoot = `${ctx.tmp}/state`;
+    const key = await localCheckoutKey(CANDIDATE_TASK_ID);
+    const checkouts = `${stateRoot}/checkouts`;
+    await Deno.mkdir(checkouts, { recursive: true });
+    const producer = `${checkouts}/${key}`;
+    const cloned = await gitRun(
+      ctx.tmp,
+      ["clone", "-q", "--no-hardlinks", work, producer],
+      ctx.env,
+    );
+    assert.ok(cloned.ok, cloned.stderr);
+    await Deno.writeTextFile(
+      `${checkouts}/${key}.json`,
+      JSON.stringify({
+        version: "v1",
+        kind: "local_checkout",
+        taskId: CANDIDATE_TASK_ID,
+        key,
+        base: ctx.base,
+      }),
+    );
+    return {
+      ctx,
+      branch,
+      movedBase,
+      lost,
+      sourcePath,
+      stateRoot,
+      producer,
+    };
+  } catch (error) {
+    await ctx.cleanup();
+    throw error;
+  }
+}
+
+/** The real prover factory over one real fixture remote. */
+function legacyProver(input: {
+  ctx: CandidateCtxV1;
+  state: StateReadView;
+  port: LegacyLossPort;
+  ensure: (taskId: WorkItemId, head: GitSha) => Promise<PortResultV1<void>>;
+  gate?: FakeGate;
+  runtime?: ReplayRuntimeV1;
+  scratch?: string;
+  remoteUrl?: string;
+}) {
+  return createLegacyBaseRefreshLossProver({
+    state: input.state,
+    port: input.port,
+    gate: input.gate ?? new FakeGate(),
+    token: "dummy-token",
+    scratch: input.scratch ?? `${input.ctx.tmp}/home`,
+    trustedPath: TRUSTED_PATH,
+    gitExecutable: "git",
+    baseBranch: "development",
+    trustedPrAuthor: LEGACY_AUTHOR,
+    ensureLocalCandidate: input.ensure,
+    runtime: input.runtime,
+    remoteUrl: input.remoteUrl ?? `file://${input.ctx.bare}`,
+  });
+}
+
+function legacyStoreLeftovers(scratch: string): string[] {
+  return [...Deno.readDirSync(scratch)]
+    .filter((entry) => entry.name.startsWith(LEGACY_STORE_PREFIX))
+    .map((entry) => entry.name)
+    .sort();
+}
+
+Deno.test(
+  "legacy loss: proves the exact scoped legacy candidate loss over the real loader and a fresh store",
+  async () => {
+    const fixture = await makeLegacyLossCtx();
+    const { ctx } = fixture;
+    try {
+      const taskId = CANDIDATE_TASK_ID;
+      const refsBefore = await gitRun(
+        ctx.bare,
+        ["for-each-ref", "--format=%(refname) %(objectname)"],
+        ctx.env,
+      );
+      assert.ok(refsBefore.ok);
+      const loader = createLocalCandidateLoader({
+        stateRoot: fixture.stateRoot,
+        sourcePath: fixture.sourcePath,
+        scratch: `${ctx.tmp}/home`,
+        trustedPath: TRUSTED_PATH,
+      });
+      let loaderCalls = 0;
+      const countedLoader = (id: WorkItemId, head: GitSha) => {
+        loaderCalls++;
+        return loader(id, head);
+      };
+      // The trusted source and the exact producer checkout really lack H1.
+      assert.equal(
+        await objectPresent(fixture.sourcePath, ctx.env, fixture.lost),
+        false,
+      );
+      assert.equal(
+        await objectPresent(fixture.producer, ctx.env, fixture.lost),
+        false,
+      );
+      // B0 is an ancestor of H0 while the PR's current base differs from B0.
+      assert.notEqual(fixture.movedBase, ctx.base);
+      assert.equal(
+        (await gitRun(
+          ctx.bare,
+          ["merge-base", "--is-ancestor", ctx.base, ctx.head],
+          ctx.env,
+        )).code,
+        0,
+      );
+      const reviews = [
+        legacyReview({ id: "review-b", head: ctx.head, base: ctx.base }),
+        legacyReview({ id: "review-a", head: ctx.head, base: ctx.base }),
+      ];
+      const record = legacyRecord({
+        lost: fixture.lost,
+        base: ctx.base,
+        observedBase: fixture.movedBase,
+      });
+      // The snapshot's own stateHead deliberately differs from the read head.
+      const state = legacyState(
+        [record],
+        [legacyReservation(record)],
+        reviews,
+        {
+          snapshotHead: SHA2,
+          readHead: SHA1,
+        },
+      );
+      const durableBefore = structuredClone(state.repair);
+      const port = new LegacyLossPort({
+        issue: portOk(legacyIssue()),
+        pull: portOk(legacyPull({
+          predecessor: ctx.head,
+          base: fixture.movedBase,
+        })),
+        ref: portOk({ ref: `refs/heads/${fixture.branch}`, sha: ctx.head }),
+      });
+      const result = await legacyProver({
+        ctx,
+        state,
+        port,
+        ensure: countedLoader,
+        runtime: new DenoReplayRuntime(TRUSTED_PATH),
+      })(taskId);
+      assert.ok(result.ok, JSON.stringify(result));
+      if (!result.ok) throw new Error("unreachable");
+      const expected: LegacyBaseRefreshLossProofV1 = {
+        taskId,
+        repository: { ...SELF_REPO },
+        stateHead: SHA1,
+        shape: "legacy_base_refresh",
+        lostBase: ctx.base,
+        lostHead: fixture.lost,
+        predecessorHead: ctx.head,
+        branch: fixture.branch,
+        pr: LEGACY_PR,
+        intentKey: baseRefreshIntentKey(
+          LEGACY_PR,
+          fixture.lost,
+          fixture.movedBase,
+        ),
+        reviewId: "review-a",
+      };
+      assert.deepEqual(result.value, expected);
+
+      // The blocked+missing_evidence shape proves the identical loss.
+      const blockedRecord = legacyRecord({
+        lost: fixture.lost,
+        base: ctx.base,
+        observedBase: fixture.movedBase,
+        nextStep: "blocked",
+        blocker: {
+          kind: "missing_evidence",
+          message: "candidate is unavailable for review",
+          since: T0,
+        },
+      });
+      const blockedState = legacyState(
+        [blockedRecord],
+        [legacyReservation(blockedRecord)],
+        reviews,
+        { snapshotHead: SHA2, readHead: SHA1 },
+      );
+      const blockedPort = new LegacyLossPort({
+        issue: portOk(legacyIssue()),
+        pull: portOk(legacyPull({
+          predecessor: ctx.head,
+          base: fixture.movedBase,
+        })),
+        ref: portOk({ ref: `refs/heads/${fixture.branch}`, sha: ctx.head }),
+      });
+      const blocked = await legacyProver({
+        ctx,
+        state: blockedState,
+        port: blockedPort,
+        ensure: countedLoader,
+        runtime: new DenoReplayRuntime(TRUSTED_PATH),
+      })(taskId);
+      assert.ok(blocked.ok, JSON.stringify(blocked));
+      if (!blocked.ok) throw new Error("unreachable");
+      assert.deepEqual(blocked.value, expected);
+      assert.equal(loaderCalls, 4, "both shapes drove the real loader twice");
+
+      // No state, remote or candidate-ref write of any kind.
+      assert.equal(state.repairWrites, 0);
+      assert.equal(blockedState.repairWrites, 0);
+      assert.deepEqual(state.repair, durableBefore);
+      assert.deepEqual(
+        (await gitRun(
+          ctx.bare,
+          ["for-each-ref", "--format=%(refname) %(objectname)"],
+          ctx.env,
+        )).stdout,
+        refsBefore.stdout,
+        "no remote ref changed",
+      );
+      const candidateRefs = await gitRun(
+        ctx.bare,
+        [
+          "for-each-ref",
+          "--format=%(refname)",
+          "refs/heads/sentinel-candidates",
+        ],
+        ctx.env,
+      );
+      assert.equal(candidateRefs.stdout.trim(), "");
+      assert.deepEqual(legacyStoreLeftovers(`${ctx.tmp}/home`), []);
+      assert.deepEqual(port.calls, [
+        "issue:1",
+        `ref:refs/heads/${fixture.branch}`,
+        `pr:${LEGACY_PR}`,
+        "issue:1",
+        `ref:refs/heads/${fixture.branch}`,
+        `pr:${LEGACY_PR}`,
+      ]);
+    } finally {
+      await ctx.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "legacy loss: unsupported shapes and cheap binding negatives refuse before local or remote work",
+  async () => {
+    const ctx = await makeCandidateCtx();
+    try {
+      const base = SHA1;
+      const lost = SHA2;
+      const observed = SHA3;
+      const valid = () => legacyRecord({ lost, base, observedBase: observed });
+      const emptyState = new MemoryState();
+      emptyState.repair = snapshot([]);
+      emptyState.repairHead = SHA1;
+      const withRecord = (
+        record: WorkRecordV1,
+        options: {
+          extra?: WorkRecordV1[];
+          reservations?: ReturnType<typeof reservation>[];
+        } = {},
+      ) =>
+        legacyState(
+          [record, ...(options.extra ?? [])],
+          options.reservations ?? [legacyReservation(record)],
+        );
+      const withVariant = (
+        build: (record: WorkRecordV1) => {
+          extra?: WorkRecordV1[];
+          reservations?: ReturnType<typeof reservation>[];
+        },
+      ) => {
+        const record = valid();
+        return withRecord(record, build(record));
+      };
+      const rows: {
+        name: string;
+        expect: "null" | "error";
+        state: StateReadView;
+      }[] = [
+        { name: "no record", expect: "null", state: emptyState },
+        {
+          name: "new-format candidate state",
+          expect: "null",
+          state: withRecord(legacyRecord({
+            lost,
+            base,
+            observedBase: observed,
+            target: {
+              candidateState: { preserved: null, publishedHead: null },
+            },
+          })),
+        },
+        {
+          name: "pre-receipt implementation intent",
+          expect: "null",
+          state: withRecord(legacyRecord({
+            lost,
+            base,
+            observedBase: observed,
+            intent: {
+              kind: "implementation",
+              key: `impl:${"b".repeat(64)}`,
+              requestId: null,
+            },
+          })),
+        },
+        {
+          name: "prepared base refresh",
+          expect: "null",
+          state: withRecord(legacyRecord({
+            lost,
+            base,
+            observedBase: observed,
+            intent: { resultId: SHA3 },
+          })),
+        },
+        {
+          name: "source id mismatch",
+          expect: "error",
+          state: withRecord(legacyRecord({
+            lost,
+            base,
+            observedBase: observed,
+            workOverrides: {
+              source: { kind: "issue", id: "2", revision: SHA1 },
+            },
+          })),
+        },
+        {
+          name: "incident-related record",
+          expect: "error",
+          state: withRecord(legacyRecord({
+            lost,
+            base,
+            observedBase: observed,
+            workOverrides: {
+              related: { incidentId: "inc-1", issueNumber: 1 },
+            },
+          })),
+        },
+        {
+          name: "missing dependency",
+          expect: "error",
+          state: withRecord(legacyRecord({
+            lost,
+            base,
+            observedBase: observed,
+            dependencies: ["other-1"],
+          })),
+        },
+        {
+          name: "unfinished dependency",
+          expect: "error",
+          state: withRecord(
+            legacyRecord({
+              lost,
+              base,
+              observedBase: observed,
+              dependencies: ["other-1"],
+            }),
+            { extra: [workRecord("other-1", { nextStep: "work" })] },
+          ),
+        },
+        {
+          name: "non-deterministic branch",
+          expect: "error",
+          state: withRecord(legacyRecord({
+            lost,
+            base,
+            observedBase: observed,
+            target: { branch: "sentinel/repair/other" },
+          })),
+        },
+        {
+          name: "intent key mismatch",
+          expect: "error",
+          state: withRecord(legacyRecord({
+            lost,
+            base,
+            observedBase: observed,
+            intent: { key: baseRefreshIntentKey(LEGACY_PR, lost, base) },
+          })),
+        },
+        {
+          name: "intent expected head mismatch",
+          expect: "error",
+          state: withRecord(legacyRecord({
+            lost,
+            base,
+            observedBase: observed,
+            intent: { expectedHead: base },
+          })),
+        },
+        {
+          name: "intent branch mismatch",
+          expect: "error",
+          state: withRecord(legacyRecord({
+            lost,
+            base,
+            observedBase: observed,
+            intent: { branch: "sentinel/repair/other" },
+          })),
+        },
+        {
+          name: "intent PR mismatch",
+          expect: "error",
+          state: withRecord(legacyRecord({
+            lost,
+            base,
+            observedBase: observed,
+            intent: { pr: 13 },
+          })),
+        },
+        {
+          name: "no submitted reservation",
+          expect: "error",
+          state: withVariant(() => ({ reservations: [] })),
+        },
+        {
+          name: "reservation attempt mismatch",
+          expect: "error",
+          state: withVariant((record) => ({
+            reservations: [legacyReservation(record, { attempt: 2 })],
+          })),
+        },
+        {
+          name: "unsubmitted reservation",
+          expect: "error",
+          state: withVariant((record) => ({
+            reservations: [legacyReservation(record, {
+              outcome: "reserved",
+              settledAt: null,
+            })],
+          })),
+        },
+        {
+          name: "foreign reservation repository",
+          expect: "error",
+          state: withVariant((record) => ({
+            reservations: [legacyReservation(record, { repository: REPO })],
+          })),
+        },
+        {
+          name: "reservation base mismatch",
+          expect: "error",
+          state: withVariant((record) => ({
+            reservations: [legacyReservation(record, { head: SHA2 })],
+          })),
+        },
+        {
+          name: "continuation reservation",
+          expect: "error",
+          state: withVariant((record) => ({
+            reservations: [
+              legacyReservation(record, { purpose: "continuation" }),
+            ],
+          })),
+        },
+        {
+          name: "lifecycle review",
+          expect: "null",
+          state: withRecord(legacyRecord({
+            lost,
+            base,
+            observedBase: observed,
+            nextStep: "review",
+          })),
+        },
+        {
+          name: "lifecycle delivery",
+          expect: "null",
+          state: withRecord(legacyRecord({
+            lost,
+            base,
+            observedBase: observed,
+            nextStep: "delivery",
+          })),
+        },
+        {
+          name: "blocked by another kind",
+          expect: "null",
+          state: withRecord(legacyRecord({
+            lost,
+            base,
+            observedBase: observed,
+            nextStep: "blocked",
+            blocker: {
+              kind: "dependency",
+              message: "waiting for another work item",
+              since: T0,
+            },
+          })),
+        },
+      ];
+      for (const row of rows) {
+        const loader = countingCandidateLoader();
+        const runtime = new CountingRuntime();
+        const port = new LegacyLossPort({
+          issue: portOk(legacyIssue()),
+          pull: portOk(legacyPull({ predecessor: ctx.head })),
+          ref: portOk({
+            ref: `refs/heads/${LEGACY_BRANCH}`,
+            sha: ctx.head,
+          }),
+        });
+        const result = await legacyProver({
+          ctx,
+          state: row.state,
+          port,
+          ensure: loader.load,
+          runtime,
+        })(LEGACY_TASK_ID);
+        if (row.expect === "null") {
+          assert.ok(result.ok, `${row.name}: expected an explicit null`);
+          assert.equal(result.ok ? result.value : "error", null, row.name);
+        } else {
+          assert.equal(result.ok, false, `${row.name}: expected a refusal`);
+        }
+        assert.equal(port.calls.length, 0, `${row.name}: no remote read`);
+        assert.equal(loader.calls.length, 0, `${row.name}: no local loader`);
+        assert.equal(runtime.calls, 0, `${row.name}: no git run`);
+        assert.deepEqual(
+          legacyStoreLeftovers(`${ctx.tmp}/home`),
+          [],
+          row.name,
+        );
+      }
+    } finally {
+      await ctx.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "legacy loss: source, ref and PR boundaries stop before the fresh-store proof",
+  async () => {
+    const ctx = await makeCandidateCtx();
+    try {
+      const record = legacyRecord({
+        lost: SHA2,
+        base: SHA1,
+        observedBase: SHA3,
+      });
+      const reviews = [
+        legacyReview({ id: "review-a", head: ctx.head, base: SHA1 }),
+      ];
+      const state = legacyState(
+        [record],
+        [legacyReservation(record)],
+        reviews,
+      );
+      const refName = `refs/heads/${LEGACY_BRANCH}`;
+      const cases: {
+        name: string;
+        expectKind: string;
+        issue?: PortResultV1<GitHubIssueV1 | null>;
+        pull?: PortResultV1<GitHubPullRequestV1 | null>;
+        ref?: PortResultV1<GitHubRefV1 | null>;
+      }[] = [
+        {
+          name: "closed source issue",
+          expectKind: "conflict",
+          issue: portOk(legacyIssue({ state: "closed", closedAt: T0 + 1 })),
+        },
+        {
+          name: "unscoped source issue",
+          expectKind: "unavailable",
+          issue: portOk(null),
+        },
+        {
+          name: "unknown issue relations",
+          expectKind: "unavailable",
+          issue: portOk(legacyIssue({ relations: undefined })),
+        },
+        {
+          name: "subissues present",
+          expectKind: "conflict",
+          issue: portOk(legacyIssue({
+            relations: { openBlockers: [], subIssueCount: 1 },
+          })),
+        },
+        {
+          name: "open blocker",
+          expectKind: "conflict",
+          issue: portOk(legacyIssue({
+            relations: {
+              openBlockers: [{
+                owner: "ubiquity",
+                name: "sentinel",
+                number: 9,
+              }],
+              subIssueCount: 0,
+            },
+          })),
+        },
+        {
+          name: "wrong issue number",
+          expectKind: "unavailable",
+          issue: portOk(legacyIssue({ number: 2 })),
+        },
+        {
+          name: "missing task branch",
+          expectKind: "unavailable",
+          ref: portOk(null),
+        },
+        {
+          name: "branch carries the lost head",
+          expectKind: "conflict",
+          ref: portOk({ ref: refName, sha: SHA2 }),
+        },
+        {
+          name: "branch and PR disagree",
+          expectKind: "conflict",
+          ref: portOk({ ref: refName, sha: ctx.head }),
+          pull: portOk(legacyPull({ predecessor: SHA2 })),
+        },
+        {
+          name: "missing PR",
+          expectKind: "unavailable",
+          pull: portOk(null),
+        },
+        {
+          name: "wrong PR number",
+          expectKind: "conflict",
+          pull: portOk(legacyPull({
+            predecessor: ctx.head,
+            overrides: { number: 13 },
+          })),
+        },
+        {
+          name: "moved PR head",
+          expectKind: "conflict",
+          pull: portOk(legacyPull({
+            predecessor: ctx.head,
+            overrides: { head: SHA1 },
+          })),
+        },
+        {
+          name: "wrong PR head branch",
+          expectKind: "conflict",
+          pull: portOk(legacyPull({
+            predecessor: ctx.head,
+            overrides: { headRef: "sentinel/repair/other" },
+          })),
+        },
+        {
+          name: "wrong PR base branch",
+          expectKind: "conflict",
+          pull: portOk(legacyPull({
+            predecessor: ctx.head,
+            overrides: { baseRef: "main" },
+          })),
+        },
+        {
+          name: "untrusted PR author",
+          expectKind: "conflict",
+          pull: portOk(legacyPull({
+            predecessor: ctx.head,
+            overrides: { author: "stranger" },
+          })),
+        },
+        {
+          name: "merged PR",
+          expectKind: "conflict",
+          pull: portOk(legacyPull({
+            predecessor: ctx.head,
+            overrides: {
+              state: "merged",
+              mergeSha: ctx.head,
+              mergedAt: T0,
+            },
+          })),
+        },
+      ];
+      for (const entry of cases) {
+        const loader = countingCandidateLoader();
+        const runtime = new CountingRuntime();
+        const port = new LegacyLossPort({
+          issue: entry.issue ?? portOk(legacyIssue()),
+          pull: entry.pull ??
+            portOk(legacyPull({ predecessor: ctx.head, base: SHA3 })),
+          ref: entry.ref ?? portOk({ ref: refName, sha: ctx.head }),
+        });
+        const result = await legacyProver({
+          ctx,
+          state,
+          port,
+          ensure: loader.load,
+          runtime,
+        })(LEGACY_TASK_ID);
+        assert.equal(result.ok, false, entry.name);
+        assert.equal(
+          result.ok ? "" : result.error.kind,
+          entry.expectKind,
+          entry.name,
+        );
+        assert.equal(
+          loader.calls.length,
+          1,
+          `${entry.name}: local absence checked once`,
+        );
+        assert.equal(runtime.calls, 0, `${entry.name}: no git run`);
+        assert.deepEqual(
+          legacyStoreLeftovers(`${ctx.tmp}/home`),
+          [],
+          entry.name,
+        );
+      }
+    } finally {
+      await ctx.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "legacy loss: invalid historical review evidence is never loss",
+  async () => {
+    const ctx = await makeCandidateCtx();
+    try {
+      const record = legacyRecord({
+        lost: SHA2,
+        base: SHA1,
+        observedBase: SHA3,
+      });
+      const cases: { name: string; reviews: ReviewReceiptV1[] }[] = [
+        { name: "no review receipt", reviews: [] },
+        {
+          name: "pending review",
+          reviews: [legacyReview({
+            id: "review-a",
+            head: ctx.head,
+            base: SHA1,
+            overrides: {
+              outcome: "pending",
+              observedReviewer: null,
+              resultId: null,
+              completedAt: null,
+              findings: [],
+              unresolvedSeverities: [],
+            },
+          })],
+        },
+        {
+          name: "untrusted reviewer",
+          reviews: [legacyReview({
+            id: "review-a",
+            head: ctx.head,
+            base: SHA1,
+            overrides: {
+              expectedReviewer: "stranger[bot]",
+              observedReviewer: "stranger[bot]",
+            },
+          })],
+        },
+        {
+          name: "foreign repository",
+          reviews: [legacyReview({
+            id: "review-a",
+            head: ctx.head,
+            base: SHA1,
+            overrides: { repository: REPO },
+          })],
+        },
+        {
+          name: "wrong reviewed head",
+          reviews: [legacyReview({ id: "review-a", head: SHA1, base: SHA1 })],
+        },
+        {
+          name: "wrong reviewed base",
+          reviews: [
+            legacyReview({ id: "review-a", head: ctx.head, base: SHA3 }),
+          ],
+        },
+        {
+          name: "no unresolved severities",
+          reviews: [legacyReview({
+            id: "review-a",
+            head: ctx.head,
+            base: SHA1,
+            overrides: { findings: [], unresolvedSeverities: [] },
+          })],
+        },
+      ];
+      for (const entry of cases) {
+        const loader = countingCandidateLoader();
+        const runtime = new CountingRuntime();
+        const port = new LegacyLossPort({
+          issue: portOk(legacyIssue()),
+          pull: portOk(legacyPull({ predecessor: ctx.head, base: SHA3 })),
+          ref: portOk({
+            ref: `refs/heads/${LEGACY_BRANCH}`,
+            sha: ctx.head,
+          }),
+        });
+        const result = await legacyProver({
+          ctx,
+          state: legacyState(
+            [record],
+            [legacyReservation(record)],
+            entry.reviews,
+          ),
+          port,
+          ensure: loader.load,
+          runtime,
+        })(LEGACY_TASK_ID);
+        assert.equal(result.ok, false, entry.name);
+        assert.equal(
+          result.ok ? "" : result.error.kind,
+          "unavailable",
+          entry.name,
+        );
+        assert.equal(
+          loader.calls.length,
+          1,
+          `${entry.name}: local absence checked once`,
+        );
+        assert.equal(runtime.calls, 0, `${entry.name}: no git run`);
+      }
+    } finally {
+      await ctx.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "legacy loss: local candidate availability is never absence",
+  async () => {
+    const ctx = await makeCandidateCtx();
+    try {
+      const record = legacyRecord({
+        lost: SHA2,
+        base: SHA1,
+        observedBase: SHA3,
+      });
+      const state = legacyState([record], [legacyReservation(record)]);
+      const portFor = () =>
+        new LegacyLossPort({
+          issue: portOk(legacyIssue()),
+          pull: portOk(legacyPull({ predecessor: ctx.head })),
+          ref: portOk({
+            ref: `refs/heads/${LEGACY_BRANCH}`,
+            sha: ctx.head,
+          }),
+        });
+      // Present locally: an explicit null, no remote read and no git run.
+      const presentLoader = countingCandidateLoader();
+      presentLoader.load = (taskId, head) => {
+        presentLoader.calls.push({ taskId, head });
+        return Promise.resolve(portOk(undefined));
+      };
+      const presentRuntime = new CountingRuntime();
+      const presentPort = portFor();
+      const present = await legacyProver({
+        ctx,
+        state,
+        port: presentPort,
+        ensure: presentLoader.load,
+        runtime: presentRuntime,
+      })(LEGACY_TASK_ID);
+      assert.ok(present.ok, JSON.stringify(present));
+      assert.equal(present.ok ? present.value : "error", null);
+      assert.equal(presentLoader.calls.length, 1);
+      assert.equal(presentPort.calls.length, 0);
+      assert.equal(presentRuntime.calls, 0);
+
+      // Unknown local availability passes through unchanged.
+      const unknownLoader = countingCandidateLoader();
+      unknownLoader.load = (taskId, head) => {
+        unknownLoader.calls.push({ taskId, head });
+        return Promise.resolve(portError("unavailable", "loader unavailable"));
+      };
+      const unknownRuntime = new CountingRuntime();
+      const unknownPort = portFor();
+      const unknown = await legacyProver({
+        ctx,
+        state,
+        port: unknownPort,
+        ensure: unknownLoader.load,
+        runtime: unknownRuntime,
+      })(LEGACY_TASK_ID);
+      assert.equal(unknown.ok, false);
+      assert.equal(unknown.ok ? "" : unknown.error.kind, "unavailable");
+      assert.equal(unknownPort.calls.length, 0);
+      assert.equal(unknownRuntime.calls, 0);
+
+      // Any other typed error is forwarded with its own identity.
+      const conflictLoader = countingCandidateLoader();
+      conflictLoader.load = (taskId, head) => {
+        conflictLoader.calls.push({ taskId, head });
+        return Promise.resolve(portError("conflict", "loader conflict"));
+      };
+      const conflict = await legacyProver({
+        ctx,
+        state,
+        port: portFor(),
+        ensure: conflictLoader.load,
+        runtime: new CountingRuntime(),
+      })(LEGACY_TASK_ID);
+      assert.equal(conflict.ok, false);
+      assert.equal(conflict.ok ? "" : conflict.error.kind, "conflict");
+      assert.equal(conflict.ok ? "" : conflict.error.detail, "loader conflict");
+    } finally {
+      await ctx.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "legacy loss: a recorded head reachable from the fetched branch is never absence",
+  async () => {
+    const ctx = await makeCandidateCtx();
+    try {
+      const work = `${ctx.tmp}/work`;
+      assert.ok(
+        (await gitRun(
+          work,
+          ["push", "-q", "origin", `${ctx.head}:refs/heads/${LEGACY_BRANCH}`],
+          ctx.env,
+        )).ok,
+      );
+      // A shallow trusted source really lacks H1 = B0 while the full history
+      // the fresh fetch carries contains it.
+      const shallow = `${ctx.tmp}/shallow`;
+      const cloned = await gitRun(
+        ctx.tmp,
+        [
+          "clone",
+          "-q",
+          "--depth=1",
+          "--single-branch",
+          "--branch",
+          LEGACY_BRANCH,
+          `file://${ctx.bare}`,
+          shallow,
+        ],
+        ctx.env,
+      );
+      assert.ok(cloned.ok, cloned.stderr);
+      const record = legacyRecord({
+        lost: ctx.base,
+        base: ctx.base,
+        observedBase: SHA3,
+      });
+      const reviews = [
+        legacyReview({ id: "review-a", head: ctx.head, base: ctx.base }),
+      ];
+      const state = legacyState(
+        [record],
+        [legacyReservation(record)],
+        reviews,
+      );
+      // The exact loader root exists but has no mapping or checkout at all.
+      await Deno.mkdir(`${ctx.tmp}/empty-state`, { recursive: true });
+      const loader = createLocalCandidateLoader({
+        stateRoot: `${ctx.tmp}/empty-state`,
+        sourcePath: shallow,
+        scratch: `${ctx.tmp}/home`,
+        trustedPath: TRUSTED_PATH,
+      });
+      const runtime = new RecordingRuntime(new DenoReplayRuntime(TRUSTED_PATH));
+      const port = new LegacyLossPort({
+        issue: portOk(legacyIssue()),
+        pull: portOk(legacyPull({ predecessor: ctx.head, base: ctx.base })),
+        ref: portOk({ ref: `refs/heads/${LEGACY_BRANCH}`, sha: ctx.head }),
+      });
+      const result = await legacyProver({
+        ctx,
+        state,
+        port,
+        ensure: loader,
+        runtime,
+      })(LEGACY_TASK_ID);
+      assert.equal(result.ok, false);
+      assert.equal(result.ok ? "" : result.error.kind, "conflict");
+      assert.ok(
+        runtime.calls.some((args) => args.includes("fetch")),
+        "the fresh fetch really ran",
+      );
+      assert.deepEqual(legacyStoreLeftovers(`${ctx.tmp}/home`), []);
+    } finally {
+      await ctx.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "legacy loss: a refused cooldown never fetches and never claims loss",
+  async () => {
+    const fixture = await makeLegacyLossCtx();
+    const { ctx } = fixture;
+    try {
+      const record = legacyRecord({
+        lost: fixture.lost,
+        base: ctx.base,
+        observedBase: fixture.movedBase,
+      });
+      const reviews = [
+        legacyReview({ id: "review-a", head: ctx.head, base: ctx.base }),
+      ];
+      const state = legacyState(
+        [record],
+        [legacyReservation(record)],
+        reviews,
+        { snapshotHead: SHA2, readHead: SHA1 },
+      );
+      const loader = createLocalCandidateLoader({
+        stateRoot: fixture.stateRoot,
+        sourcePath: fixture.sourcePath,
+        scratch: `${ctx.tmp}/home`,
+        trustedPath: TRUSTED_PATH,
+      });
+      const gate = new FakeGate();
+      gate.deny = true;
+      const runtime = new RecordingRuntime(new DenoReplayRuntime(TRUSTED_PATH));
+      const port = new LegacyLossPort({
+        issue: portOk(legacyIssue()),
+        pull: portOk(legacyPull({
+          predecessor: ctx.head,
+          base: fixture.movedBase,
+        })),
+        ref: portOk({ ref: `refs/heads/${fixture.branch}`, sha: ctx.head }),
+      });
+      const result = await legacyProver({
+        ctx,
+        state,
+        port,
+        ensure: loader,
+        runtime,
+        gate,
+      })(CANDIDATE_TASK_ID);
+      assert.equal(result.ok, false);
+      assert.equal(result.ok ? "" : result.error.kind, "rate_limited");
+      assert.equal(
+        runtime.calls.some((args) => args.includes("fetch")),
+        false,
+        "no fetch without admission",
+      );
+      assert.ok(runtime.calls.length > 0, "the owned store was initialized");
+      assert.equal(gate.admissions.length, 1);
+      assert.deepEqual(legacyStoreLeftovers(`${ctx.tmp}/home`), []);
+    } finally {
+      await ctx.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "legacy loss: a moved durable state head refuses after the proof",
+  async () => {
+    const fixture = await makeLegacyLossCtx();
+    const { ctx } = fixture;
+    try {
+      const record = legacyRecord({
+        lost: fixture.lost,
+        base: ctx.base,
+        observedBase: fixture.movedBase,
+      });
+      const reviews = [
+        legacyReview({ id: "review-a", head: ctx.head, base: ctx.base }),
+      ];
+      const inner = legacyState(
+        [record],
+        [legacyReservation(record)],
+        reviews,
+        { snapshotHead: SHA2, readHead: SHA1 },
+      );
+      const drifting = new DriftingLossState(inner, SHA2);
+      const loader = createLocalCandidateLoader({
+        stateRoot: fixture.stateRoot,
+        sourcePath: fixture.sourcePath,
+        scratch: `${ctx.tmp}/home`,
+        trustedPath: TRUSTED_PATH,
+      });
+      const runtime = new RecordingRuntime(new DenoReplayRuntime(TRUSTED_PATH));
+      const port = new LegacyLossPort({
+        issue: portOk(legacyIssue()),
+        pull: portOk(legacyPull({
+          predecessor: ctx.head,
+          base: fixture.movedBase,
+        })),
+        ref: portOk({ ref: `refs/heads/${fixture.branch}`, sha: ctx.head }),
+      });
+      const result = await legacyProver({
+        ctx,
+        state: drifting,
+        port,
+        ensure: loader,
+        runtime,
+      })(CANDIDATE_TASK_ID);
+      assert.equal(result.ok, false);
+      assert.equal(result.ok ? "" : result.error.kind, "conflict");
+      assert.equal(drifting.reads, 2, "both state reads really happened");
+      assert.ok(
+        runtime.calls.some((args) => args.includes("fetch")),
+        "the proof ran before the drift refusal",
+      );
+      assert.deepEqual(legacyStoreLeftovers(`${ctx.tmp}/home`), []);
     } finally {
       await ctx.cleanup();
     }
