@@ -383,7 +383,9 @@ export class FakeGithub implements GitHubPort {
       }
       const tracked = this.candidateRefs.get(ref);
       return Promise.resolve(portOk(
-        tracked === undefined || tracked === null ? null : { ref, sha: tracked },
+        tracked === undefined || tracked === null
+          ? null
+          : { ref, sha: tracked },
       ));
     }
     if (
@@ -588,7 +590,9 @@ export class FakeGithub implements GitHubPort {
     return Promise.resolve(portOk(this.reviewObservation()));
   }
 
-  mergePullRequest(request: MergeRequestV1): Promise<PortResultV1<MergeOutcomeV1>> {
+  mergePullRequest(
+    request: MergeRequestV1,
+  ): Promise<PortResultV1<MergeOutcomeV1>> {
     this.calls.push("merge");
     if (this.options.mergeFailNext) {
       this.options.mergeFailNext = false;

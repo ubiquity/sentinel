@@ -66,7 +66,6 @@ import type {
   PullRequestCreateV1,
   PullRequestPublishV1,
 } from "../../src/contracts/ports.ts";
-import { portOk } from "../../src/contracts/ports.ts";
 import type { RepositoryConfigV1 } from "../../src/contracts/repository-config.ts";
 import { parseRepositoryConfigV1 } from "../../src/contracts/repository-config.ts";
 import type { RepositoryIdentityV1 } from "../../src/contracts/shared.ts";

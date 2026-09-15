@@ -1,5 +1,6 @@
 /**
- * Hosted candidate-object restorer and trusted candidate preserver.
+ * Hosted candidate-object restorer, trusted candidate preserver and legacy
+ * candidate-loss prover.
  *
  * A fresh hosted Actions clone contains only the development history: a
  * durable candidate produced by an earlier run has no local objects, so a
@@ -13,9 +14,14 @@
  * retrieve the exact objects. It revalidates the durable operation binding
  * before any external read, validates publication in the trusted source mirror
  * BEFORE sending any object, reuses the SAME port readRef/pushHead methods and
- * never forces, overwrites or deletes a ref. Neither helper mutates work/budget
- * state, starts a model, contacts a PR/review/release surface or runs before
- * deterministic bookkeeping.
+ * never forces, overwrites or deletes a ref.
+ *
+ * The legacy-loss prover is the narrow read-only bridge for records that
+ * predate candidate preservation: it revalidates the exact durable legacy
+ * binding, proves the recorded lost head absent in a NEW empty object store
+ * fetched from the fixed remote, and writes nothing. None of these helpers
+ * mutates work/budget state, starts a model, contacts a PR/review/release
+ * write surface or runs before deterministic bookkeeping.
  */
 
 import { isGitSha } from "../contracts/brands.ts";
@@ -25,12 +31,19 @@ import type {
   CandidatePreservationRequestV1,
   Clock,
   GitHubCooldownGateV1,
+  GitHubIssueV1,
   GitHubPort,
+  GitHubPullRequestV1,
+  LegacyBaseRefreshLossProofV1,
   PortResultV1,
+  StateReadResultV1,
   StateReadView,
 } from "../contracts/ports.ts";
 import { portError, portOk } from "../contracts/ports.ts";
+import type { ReviewReceiptV1 } from "../contracts/review-receipt.ts";
 import type { RepositoryIdentityV1 } from "../contracts/shared.ts";
+import type { RepairStateSnapshotV1 } from "../contracts/state-snapshots.ts";
+import { hasCandidateState } from "../contracts/work-record.ts";
 import type {
   CandidatePreservationV1,
   WorkRecordV1,
@@ -40,6 +53,7 @@ import type { HttpTransportV1 } from "../github/http.ts";
 import { GitReviewSnapshot } from "../github/review-snapshot.ts";
 import {
   baseRefreshIntentKey,
+  candidateBranch,
   candidatePreservationRef,
   implementationIntentKey,
 } from "../repair/keys.ts";
@@ -1093,4 +1107,598 @@ async function freshStoreProof(input: {
       await Deno.remove(store, { recursive: true }).catch(() => {});
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Legacy candidate-loss proof (read-only scoped absence evidence)
+// ---------------------------------------------------------------------------
+
+const STATIC_LOSS_INPUT = "legacy loss proof task id is invalid";
+const STATIC_LOSS_BINDING =
+  "legacy loss proof has no exact legacy durable binding";
+const STATIC_LOSS_SOURCE = "legacy loss proof source issue is not eligible";
+const STATIC_LOSS_REF = "legacy loss proof task branch is not the predecessor";
+const STATIC_LOSS_PR = "legacy loss proof PR identity is not exact";
+const STATIC_LOSS_AUTHOR = "legacy loss proof PR author is not trusted";
+const STATIC_LOSS_REVIEW =
+  "legacy loss proof historical correction review is unavailable";
+const STATIC_LOSS_PRESENT =
+  "legacy loss proof found the lost candidate present";
+const STATIC_LOSS_LOCAL =
+  "legacy loss proof local candidate availability is unknown";
+const STATIC_LOSS_PROOF = "legacy loss proof fresh fetch did not verify";
+const STATIC_LOSS_DRIFT = "legacy loss proof durable state moved";
+/** Exact owned scratch prefix of one legacy-loss proof store. */
+const LEGACY_LOSS_STORE_PREFIX = "sentinel-legacy-loss-store-";
+
+/** Transient proof function returned by the trusted factory. */
+export type LegacyBaseRefreshLossProverV1 = (
+  taskId: WorkItemId,
+) => Promise<PortResultV1<LegacyBaseRefreshLossProofV1 | null>>;
+
+/**
+ * Trusted legacy candidate-loss prover input. `port` is THE same host port the
+ * host publishes and reads through, never a second API client: the issue read
+ * is resolved dynamically at invocation, so the exact local scope wrapper that
+ * replaces `readIssue` after composition remains authoritative.
+ */
+export interface ActionsLegacyLossProverInputV1 {
+  state: StateReadView;
+  /** THE same host port instance: scoped reads only, no write capability. */
+  port: Pick<
+    GitHubPort,
+    "readIssue" | "readPullRequest" | "readRef" | "reviewerIdentity"
+  >;
+  gate: GitHubCooldownGateV1;
+  token: string;
+  /** Private owned scratch root for the one fresh empty object store. */
+  scratch: string;
+  trustedPath: string;
+  gitExecutable: string;
+  /** Exact configured base branch the owned PR must target. */
+  baseBranch: string;
+  /** Trusted PR author login for this scope. */
+  trustedPrAuthor: string;
+  /**
+   * Trusted exact-object loader. `not_found` is a proven scoped absence;
+   * every other error is unproven availability and passes through unchanged.
+   */
+  ensureLocalCandidate(
+    taskId: WorkItemId,
+    head: GitSha,
+  ): Promise<PortResultV1<void>>;
+  /** Injectable bounded subprocess runtime; default `DenoReplayRuntime`. */
+  runtime?: ReplayRuntimeV1;
+  /** Fixed self remote; overridden ONLY by tests with a fixture file:// URL. */
+  remoteUrl?: string;
+}
+
+/**
+ * The exact historical predecessor correction review: completed with machine-
+ * verifiable result/completion identity, bound to the same full repository and
+ * PR, the observed predecessor head H0 and the original base B0, reviewed by
+ * the trusted reviewer, with nonempty unresolved severities. More than one
+ * match is resolved deterministically by review id — never by time or list
+ * order.
+ */
+function historicalCorrectionReview(
+  reviews: readonly ReviewReceiptV1[],
+  repository: RepositoryIdentityV1,
+  pr: number,
+  predecessor: GitSha,
+  base: GitSha,
+  reviewer: string,
+): ReviewReceiptV1 | null {
+  const matching = reviews.filter((review) =>
+    review.outcome === "completed" &&
+    review.resultId !== null &&
+    review.completedAt !== null &&
+    review.unresolvedSeverities.length > 0 &&
+    review.expectedReviewer === reviewer &&
+    review.observedReviewer === reviewer &&
+    review.pullRequest.number === pr &&
+    review.pullRequest.head === predecessor &&
+    review.pullRequest.base === base &&
+    sameRepository(review.repository, repository)
+  );
+  if (matching.length === 0) return null;
+  return matching.slice().sort((left, right) =>
+    left.id < right.id ? -1 : left.id > right.id ? 1 : 0
+  )[0]!;
+}
+
+/** Open exact-number issue with known relations and no blocking metadata. */
+function eligibleSourceIssue(
+  issue: GitHubIssueV1,
+  issueNumber: number,
+): PortResultV1<void> {
+  if (issue.number !== issueNumber) {
+    return portError("unavailable", STATIC_LOSS_SOURCE);
+  }
+  if (issue.state !== "open") {
+    return portError("conflict", STATIC_LOSS_SOURCE);
+  }
+  const relations = issue.relations;
+  if (relations === undefined) {
+    return portError("unavailable", STATIC_LOSS_SOURCE);
+  }
+  if (relations.subIssueCount !== 0 || relations.openBlockers.length !== 0) {
+    return portError("conflict", STATIC_LOSS_SOURCE);
+  }
+  return portOk(undefined);
+}
+
+/** Exact owned open PR on the predecessor head and configured base branch. */
+function exactOwnedPullRequest(
+  pull: GitHubPullRequestV1,
+  expected: {
+    pr: number;
+    predecessor: GitSha;
+    branch: string;
+    baseBranch: string;
+    trustedPrAuthor: string;
+  },
+): PortResultV1<void> {
+  if (pull.number !== expected.pr || pull.head !== expected.predecessor) {
+    return portError("conflict", STATIC_LOSS_PR);
+  }
+  if (
+    pull.headRef !== expected.branch || pull.baseRef !== expected.baseBranch
+  ) {
+    return portError("conflict", STATIC_LOSS_PR);
+  }
+  if (pull.author !== expected.trustedPrAuthor) {
+    return portError("conflict", STATIC_LOSS_AUTHOR);
+  }
+  if (
+    pull.state !== "open" || pull.mergeSha !== null || pull.mergedAt !== null
+  ) {
+    return portError("conflict", STATIC_LOSS_PR);
+  }
+  return portOk(undefined);
+}
+
+/**
+ * H1 must be absent as BOTH a commit and an object in the fetched store. Only a
+ * normal, fully settled exit 1 with empty stdout proves absence; a present
+ * object of any type is `conflict`, and every other exit, throw, truncation or
+ * unproved settlement is unavailable.
+ */
+async function provedAbsentObject(
+  runGit: PreserverGitRunV1,
+  store: string,
+  lost: GitSha,
+): Promise<PortResultV1<void>> {
+  for (const peeled of [`${lost}^{commit}`, `${lost}^{object}`]) {
+    const read = await runGit(
+      store,
+      ["rev-parse", "--verify", "--quiet", peeled],
+      false,
+    );
+    if (read === null) return portError("unavailable", STATIC_LOSS_PROOF);
+    if (read.code === 0) return portError("conflict", STATIC_LOSS_PRESENT);
+    if (read.code !== 1 || read.stdout.trim() !== "") {
+      return portError("unavailable", STATIC_LOSS_PROOF);
+    }
+  }
+  return portOk(undefined);
+}
+
+/**
+ * One bounded read-only absence proof. A NEW empty bare object store is created
+ * in owned scratch; exactly the fixed remote and the exact task branch are
+ * fetched with bounded credential-scoped Git after the durable cooldown;
+ * `FETCH_HEAD` must equal the predecessor H0, the lost base B0 must be a
+ * present commit and an ancestor of H0, H1 must be absent as both a commit and
+ * an object, and shallow/replace/alternate masking is refused. Nothing is
+ * pushed, executed or validated. Only the exact task-owned store is removed,
+ * and only after every child process was proved settled.
+ */
+async function legacyLossAbsenceProof(input: {
+  runGit: PreserverGitRunV1;
+  gate: GitHubCooldownGateV1;
+  remoteUrl: string;
+  branch: string;
+  base: GitSha;
+  lost: GitSha;
+  predecessor: GitSha;
+  scratch: string;
+}): Promise<PortResultV1<void>> {
+  const { gate, remoteUrl, branch, base, lost, predecessor, scratch } = input;
+  let store: string;
+  try {
+    store = await Deno.makeTempDir({
+      dir: scratch,
+      prefix: LEGACY_LOSS_STORE_PREFIX,
+    });
+  } catch {
+    return portError("unavailable", STATIC_LOSS_PROOF);
+  }
+  // True when any child run could not be proved settled: the exact task-owned
+  // store is then preserved for diagnosis instead of removed.
+  let uncertain = false;
+  const run: PreserverGitRunV1 = async (cwd, args, credentials) => {
+    const result = await input.runGit(cwd, args, credentials);
+    if (result === null || !result.settled) {
+      uncertain = true;
+      return null;
+    }
+    if (!result.exited || result.truncated) return null;
+    return result;
+  };
+  try {
+    const init = await run(store, ["init", "--bare", "-q"], false);
+    if (init === null || init.code !== 0) {
+      return portError("unavailable", STATIC_LOSS_PROOF);
+    }
+    // Durable cooldown immediately before the one credential-scoped fetch.
+    let cooled: PortResultV1<void>;
+    try {
+      cooled = await gate.beforeRequest(SELF_REPOSITORY.installationId);
+    } catch {
+      return portError("unavailable", STATIC_LOSS_PROOF);
+    }
+    if (!cooled.ok) return cooled;
+    const fetched = await run(
+      store,
+      ["fetch", "--no-tags", remoteUrl, `refs/heads/${branch}`],
+      true,
+    );
+    if (fetched === null || fetched.code !== 0) {
+      return portError("unavailable", STATIC_LOSS_PROOF);
+    }
+    const head = await run(
+      store,
+      ["rev-parse", "--verify", "--quiet", "FETCH_HEAD^{commit}"],
+      false,
+    );
+    if (
+      head === null || head.code !== 0 || head.stdout.trim() !== predecessor
+    ) {
+      return portError("unavailable", STATIC_LOSS_PROOF);
+    }
+    const basePresent = await exactCommitAt(run, store, base);
+    if (basePresent === null || !basePresent) {
+      return portError("unavailable", STATIC_LOSS_PROOF);
+    }
+    const ancestry = await run(
+      store,
+      ["merge-base", "--is-ancestor", base, predecessor],
+      false,
+    );
+    if (ancestry === null || ancestry.code !== 0) {
+      return portError("unavailable", STATIC_LOSS_PROOF);
+    }
+    // No shallow, replace-object or alternate masking may hide a present
+    // object or a different object graph.
+    const shallow = await run(
+      store,
+      ["rev-parse", "--is-shallow-repository"],
+      false,
+    );
+    if (
+      shallow === null || shallow.code !== 0 ||
+      shallow.stdout.trim() !== "false"
+    ) {
+      return portError("unavailable", STATIC_LOSS_PROOF);
+    }
+    const replaced = await run(
+      store,
+      ["for-each-ref", "--format=%(refname)", "refs/replace"],
+      false,
+    );
+    if (
+      replaced === null || replaced.code !== 0 || replaced.stdout.trim() !== ""
+    ) {
+      return portError("unavailable", STATIC_LOSS_PROOF);
+    }
+    const alternates = await pathPresent(`${store}/objects/info/alternates`);
+    if (alternates === null || alternates) {
+      return portError("unavailable", STATIC_LOSS_PROOF);
+    }
+    const absent = await provedAbsentObject(run, store, lost);
+    if (!absent.ok) return absent;
+    return portOk(undefined);
+  } finally {
+    // Clean only the exact task-owned store after every child run settled; an
+    // unproved settlement keeps the owned scratch intact.
+    if (!uncertain) {
+      await Deno.remove(store, { recursive: true }).catch(() => {});
+    }
+  }
+}
+
+/**
+ * Trusted legacy candidate-loss prover.
+ *
+ * It reads the exact durable state FIRST and returns an explicit `null` when
+ * the unique self-scope record for the task is not the covered legacy shape
+ * (new-format candidate state, another intent, prepared refresh, ineligible
+ * lifecycle). For the covered shape every later unprovable identity is a typed
+ * refusal — never a null absence: the exact target/intent binding, a
+ * deterministic task branch, all recorded dependencies done, exactly one
+ * submitted implementation/retry reservation at the current attempt bound to
+ * the task/repository/B0, scoped local absence (ONLY `not_found`; a loadable
+ * candidate is an explicit null, other errors pass through), the open eligible
+ * source issue read through the same (later scope-wrapped) port, the exact task
+ * branch and owned open PR at the predecessor H0 != H1, the historical
+ * completed H0/B0 correction review, a fresh empty-store proof that H1 is
+ * absent as both a commit and an object, and finally re-observed issue/branch/
+ * PR, local absence and an UNMOVED authoritative state head. The returned proof
+ * is bound to `StateReadResultV1.head`, never `snapshot.stateHead`. No push,
+ * code execution, candidate validation, model, review or state write occurs.
+ */
+export function createLegacyBaseRefreshLossProver(
+  input: ActionsLegacyLossProverInputV1,
+): LegacyBaseRefreshLossProverV1 {
+  const remoteUrl = input.remoteUrl ?? ACTIONS_CANDIDATES_REMOTE_URL;
+  const runtime = input.runtime ?? new DenoReplayRuntime(input.trustedPath);
+  const runGit: PreserverGitRunV1 = async (cwd, args, credentials) => {
+    let result;
+    try {
+      result = await runtime.run({
+        executable: input.gitExecutable,
+        args: ["-c", "core.hooksPath=/dev/null", ...args],
+        cwd,
+        env: {
+          PATH: input.trustedPath,
+          HOME: input.scratch,
+          GIT_CONFIG_GLOBAL: "/dev/null",
+          GIT_CONFIG_SYSTEM: "/dev/null",
+          GIT_TERMINAL_PROMPT: "0",
+          ...(credentials ? githubGitAuthEnv(input.token) : {}),
+        },
+        maxDurationMs: GIT_TIMEOUT_MS,
+        maxOutputBytes: GIT_MAX_OUTPUT_BYTES,
+      });
+    } catch {
+      // A runtime throw leaves settlement unproven: it is carried as a null
+      // (unsettled) result instead of being discarded as a plain failure.
+      return null;
+    }
+    return {
+      code: result.exitCode ?? 1,
+      stdout: result.outcome === "exited"
+        ? new TextDecoder().decode(result.stdout)
+        : "",
+      settled: result.settled,
+      truncated: result.truncated,
+      exited: result.outcome === "exited",
+    };
+  };
+
+  return async (
+    taskId: WorkItemId,
+  ): Promise<PortResultV1<LegacyBaseRefreshLossProofV1 | null>> => {
+    if (typeof taskId !== "string" || taskId.length === 0) {
+      return portError("invalid", STATIC_LOSS_INPUT);
+    }
+    // 1. Exact durable state FIRST; the proof binds this read's authoritative
+    //    head, never the snapshot's prior stateHead.
+    let snapshot: RepairStateSnapshotV1;
+    let stateHead: GitSha;
+    try {
+      const read: PortResultV1<StateReadResultV1<RepairStateSnapshotV1>> =
+        await input.state.readRepair();
+      if (!read.ok) return portError("unavailable", STATIC_LOSS_BINDING);
+      if (read.value.status !== "found") {
+        return portError("unavailable", STATIC_LOSS_BINDING);
+      }
+      snapshot = read.value.snapshot;
+      stateHead = read.value.head;
+    } catch {
+      return portError("unavailable", STATIC_LOSS_BINDING);
+    }
+    // 2. Exactly one self-scope record for this task; absence is not a loss
+    //    case and is never inferred from an error.
+    const matches = snapshot.work.filter((work) =>
+      isSelfRepository(work.repository) && work.id === taskId
+    );
+    if (matches.length === 0) return portOk(null);
+    if (matches.length !== 1) {
+      return portError("unavailable", STATIC_LOSS_BINDING);
+    }
+    const record = matches[0]!;
+    // 3. New-format/present candidate state and every non-legacy intent are
+    //    outside this bridge: an explicit "not a legacy-loss case".
+    if (hasCandidateState(record)) return portOk(null);
+    const intent = record.intent;
+    if (
+      intent === null || intent.kind !== "base_refresh" ||
+      intent.resultId !== null
+    ) {
+      return portOk(null);
+    }
+    // 4. From here the record claims the covered legacy base-refresh shape:
+    //    every unprovable input is a typed refusal, never a null absence.
+    const issueNumber = record.related.issueNumber;
+    if (
+      record.source.kind !== "issue" || issueNumber === null ||
+      record.related.incidentId !== null ||
+      record.source.id !== String(issueNumber)
+    ) {
+      return portError("unavailable", STATIC_LOSS_BINDING);
+    }
+    if (
+      record.nextStep !== "work" &&
+      !(record.nextStep === "blocked" &&
+        record.blocker?.kind === "missing_evidence")
+    ) {
+      return portOk(null);
+    }
+    const base = record.target.base;
+    const lostHead = record.target.head;
+    const branch = record.target.branch;
+    const pr = record.target.pr;
+    const observedBase = intent.observedBase;
+    if (
+      lostHead === null || branch === null || pr === null ||
+      observedBase === null
+    ) {
+      return portError("unavailable", STATIC_LOSS_BINDING);
+    }
+    if (
+      branch !== candidateBranch(record.id) ||
+      intent.requestId !== null ||
+      intent.expectedHead !== lostHead ||
+      intent.branch !== branch || intent.pr !== pr ||
+      intent.key !== baseRefreshIntentKey(pr, lostHead, observedBase)
+    ) {
+      return portError("unavailable", STATIC_LOSS_BINDING);
+    }
+    // 5. Every recorded dependency must exist exactly once and be done.
+    for (const dependency of record.dependencies) {
+      const found = snapshot.work.filter((work) => work.id === dependency);
+      if (found.length !== 1 || found[0]!.nextStep !== "done") {
+        return portError("unavailable", STATIC_LOSS_BINDING);
+      }
+    }
+    // 6. Exactly one submitted implementation/retry reservation for the
+    //    current attempt bound to the task, the full repository and B0. No
+    //    spare attempt is required: loss can be recorded even when none
+    //    remains.
+    const reservations = snapshot.reservations.filter((entry) =>
+      entry.taskId === record.id &&
+      sameRepository(entry.repository, record.repository) &&
+      entry.attempt === record.counters.attempts &&
+      (entry.purpose === "implementation" || entry.purpose === "retry") &&
+      entry.head === base &&
+      entry.outcome === "submitted"
+    );
+    if (reservations.length !== 1) {
+      return portError("unavailable", STATIC_LOSS_BINDING);
+    }
+    // 7. Scoped local availability BEFORE the expensive proof: a loadable
+    //    candidate is not a loss, and ONLY `not_found` proves absence.
+    let local: PortResultV1<void>;
+    try {
+      local = await input.ensureLocalCandidate(taskId, lostHead);
+    } catch {
+      return portError("unavailable", STATIC_LOSS_LOCAL);
+    }
+    if (local.ok) return portOk(null);
+    if (local.error.kind !== "not_found") return local;
+    // 8. The exact source issue through the SAME port, resolved at invocation
+    //    so the later scope wrapper remains authoritative.
+    const issue = await input.port.readIssue(issueNumber);
+    if (!issue.ok) return issue;
+    if (issue.value === null) {
+      return portError("unavailable", STATIC_LOSS_SOURCE);
+    }
+    const issueCheck = eligibleSourceIssue(issue.value, issueNumber);
+    if (!issueCheck.ok) return issueCheck;
+    // 9. The exact task branch at the predecessor head H0 != H1.
+    const ref = `refs/heads/${branch}`;
+    const branchRead = await input.port.readRef(ref);
+    if (!branchRead.ok) return branchRead;
+    if (branchRead.value === null) {
+      return portError("unavailable", STATIC_LOSS_REF);
+    }
+    const predecessor = branchRead.value.sha;
+    if (predecessor === lostHead) {
+      return portError("conflict", STATIC_LOSS_PRESENT);
+    }
+    // 10. The exact owned open PR on that same predecessor head. The PR's
+    //     current base SHA is deliberately NOT required to equal B0.
+    const pullRead = await input.port.readPullRequest(pr);
+    if (!pullRead.ok) return pullRead;
+    if (pullRead.value === null) {
+      return portError("unavailable", STATIC_LOSS_PR);
+    }
+    const pullCheck = exactOwnedPullRequest(pullRead.value, {
+      pr,
+      predecessor,
+      branch,
+      baseBranch: input.baseBranch,
+      trustedPrAuthor: input.trustedPrAuthor,
+    });
+    if (!pullCheck.ok) return pullCheck;
+    // 11. The historical completed H0 correction review bound to B0.
+    const review = historicalCorrectionReview(
+      snapshot.reviews,
+      record.repository,
+      pr,
+      predecessor,
+      base,
+      input.port.reviewerIdentity,
+    );
+    if (review === null) {
+      return portError("unavailable", STATIC_LOSS_REVIEW);
+    }
+    // 12. Read-only fresh-store absence proof for the exact branch.
+    const proved = await legacyLossAbsenceProof({
+      runGit,
+      gate: input.gate,
+      remoteUrl,
+      branch,
+      base,
+      lost: lostHead,
+      predecessor,
+      scratch: input.scratch,
+    });
+    if (!proved.ok) return proved;
+    // 13. Re-observe every external identity after the proof: any movement
+    //     refuses, retaining the same predecessor and eligibility.
+    const issueAfter = await input.port.readIssue(issueNumber);
+    if (!issueAfter.ok) return issueAfter;
+    if (issueAfter.value === null) {
+      return portError("unavailable", STATIC_LOSS_SOURCE);
+    }
+    const issueAfterCheck = eligibleSourceIssue(issueAfter.value, issueNumber);
+    if (!issueAfterCheck.ok) return issueAfterCheck;
+    const branchAfter = await input.port.readRef(ref);
+    if (!branchAfter.ok) return branchAfter;
+    if (branchAfter.value === null || branchAfter.value.sha !== predecessor) {
+      return portError("conflict", STATIC_LOSS_REF);
+    }
+    const pullAfter = await input.port.readPullRequest(pr);
+    if (!pullAfter.ok) return pullAfter;
+    if (pullAfter.value === null) {
+      return portError("unavailable", STATIC_LOSS_PR);
+    }
+    const pullAfterCheck = exactOwnedPullRequest(pullAfter.value, {
+      pr,
+      predecessor,
+      branch,
+      baseBranch: input.baseBranch,
+      trustedPrAuthor: input.trustedPrAuthor,
+    });
+    if (!pullAfterCheck.ok) return pullAfterCheck;
+    // 14. The scoped local absence must still hold.
+    let localAfter: PortResultV1<void>;
+    try {
+      localAfter = await input.ensureLocalCandidate(taskId, lostHead);
+    } catch {
+      return portError("unavailable", STATIC_LOSS_LOCAL);
+    }
+    if (localAfter.ok) return portError("conflict", STATIC_LOSS_PRESENT);
+    if (localAfter.error.kind !== "not_found") return localAfter;
+    // 15. The durable state head must not have moved since the first read.
+    let confirmHead: GitSha;
+    try {
+      const read = await input.state.readRepair();
+      if (!read.ok || read.value.status !== "found") {
+        return portError("unavailable", STATIC_LOSS_DRIFT);
+      }
+      confirmHead = read.value.head;
+    } catch {
+      return portError("unavailable", STATIC_LOSS_DRIFT);
+    }
+    if (confirmHead !== stateHead) {
+      return portError("conflict", STATIC_LOSS_DRIFT);
+    }
+    return portOk({
+      taskId: record.id,
+      repository: { ...record.repository },
+      stateHead,
+      shape: "legacy_base_refresh",
+      lostBase: base,
+      lostHead,
+      predecessorHead: predecessor,
+      branch,
+      pr,
+      intentKey: intent.key,
+      reviewId: review.id,
+    });
+  };
 }

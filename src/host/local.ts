@@ -81,7 +81,10 @@ import { DurableGitHubCooldownGate } from "../repair/github-cooldown.ts";
 import type { RepairCycleOutcomeV1 } from "../repair/loop.ts";
 import { DenoReplayRuntime } from "../replay/runtime.ts";
 import { composeGitHubHost } from "./github.ts";
-import { createCandidatePreserver } from "./actions-candidates.ts";
+import {
+  createCandidatePreserver,
+  createLegacyBaseRefreshLossProver,
+} from "./actions-candidates.ts";
 import { runRepairEntrypoint } from "../main.ts";
 
 /** Fixed local target identity (explicit no-App owner credential scope). */
@@ -1366,6 +1369,27 @@ export function composeLocalGitHub(input: LocalGitHubInputV1): GitHubPort {
     gitExecutable: trustedGitPath(input.trustedPath),
     port: host.port,
     protectedPaths: createLocalRepositoryConfig().protectedPaths,
+    ensureLocalCandidate: createLocalCandidateLoader({
+      stateRoot: input.stateRoot,
+      sourcePath: input.sourcePath,
+      scratch: input.scratch,
+      trustedPath: input.trustedPath,
+    }),
+  });
+  // The legacy candidate-loss proof is composed on the SAME port identity and
+  // the SAME exact loader inputs as preservation. The port object is passed
+  // BEFORE the scope wrapper replaces `readIssue`, so the prover resolves the
+  // scoped reader dynamically at invocation and never captures a pre-scope one.
+  host.port.proveLegacyBaseRefreshLoss = createLegacyBaseRefreshLossProver({
+    state: input.state,
+    port: host.port,
+    gate,
+    token: input.token,
+    scratch: input.scratch,
+    trustedPath: input.trustedPath,
+    gitExecutable: trustedGitPath(input.trustedPath),
+    baseBranch: LOCAL_BASE_BRANCH,
+    trustedPrAuthor: input.login,
     ensureLocalCandidate: createLocalCandidateLoader({
       stateRoot: input.stateRoot,
       sourcePath: input.sourcePath,
