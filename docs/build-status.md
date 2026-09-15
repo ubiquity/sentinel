@@ -2,12 +2,51 @@
 
 ## Active task register — Astra owned
 
-Updated 2026-09-15 21:13 UTC. This is the only authoritative acceptance ledger.
+Updated 2026-09-15 21:34 UTC. This is the only authoritative acceptance ledger.
 The goal remains incomplete: autonomous GitHub Actions repair against Sentinel,
 then the separately authorized ai.ubq.fi target. Only the current GPT-6 Astra
 integration owner may change scope, status, acceptance or write ownership here.
 
 ### Current checkpoint
+
+- Canonical4620b203a9f1d43f05474c334630eec96f83454a is clean/pushed before this
+  ledger update. M15 corrected PR70 head864d7a0cbb595616b4e90293338f496788b8321a
+  is committed, pushed and integrated. P1 source predicates match exact incident
+  and repository; GPT150 other reader checks passed in c0b7794c, and all3 intake
+  cases passed after one ref-expectation correction in807db572-72ac-4a53-bcf1-
+  34edf56b7c26, child0/executed13052ms. Both CI runs35025797252/35025801940 passed
+  at the exact corrected head (5m41s and5m49s). Review permission remains pending.
+- PR70 REVIEW ALLOWANCE EXHAUSTED: fresh no-history Astra audit proved3 distinct
+  completed local source-only/window/fixture reviews, plus earlier integrated
+  review. MASTER-PLAN156/215 forbid another round or a new-commit reset. Owner
+  question sent21:28:31 asks one additional local+authentic acceptance round;
+  answer pending. Do not launch either review, merge or install before permission.
+  M14 independent implementation/tests continue. No new review charge exists.
+- M14 base54402340a98c4625267ad4018b2b9ce5cd1a4d7f has only two dirty V10 fixture
+  files; no active writer. V10b's genuine unapplied-ack error/eight-step/null
+  initial-result fixes settled. First capture f0b8889a failed only2 TS2322 before
+  test execution. V10c exec49342/PID4168380 settled exit0/completed; live/header
+  production/Flash/max/workspace-write/ask verified, session81ec7d71-8b1e-43b5-
+  85fc-4848444630e5/stream8e3d4036. Four resultId observation types corrected to
+  string|null; all exact runtime equality assertions retained. New three-case
+  capture runs as exec68792, expected roughly7minutes. Earlier ordinary proof
+  54670e80 remains valid; crash cuts are not yet accepted.
+- M17 V6 exec35282/PID4167047 settled exit0/completed; live/header verified,
+  session3eb1e615-b049-4d48-829a-789b3564d598/stream678f23fa. Primary proved exact
+  literal-only mapping to864d7a0/source-v5/private root reader-install-pr70-v5,
+  review reservation attempt3. Typecheckd6bf382d-d4c3-4694-a4da-cf4fe15ff3d9 passed
+  child0/executed7860ms. Clones are clean at864d7a0; release clone is placeholder.
+  No live marker, invocation or reservation; prepared operators await permission.
+- M15 V2 fast one-assertion writer exited before live process attestation;
+  production launch command and persisted Flash/max/workspace-write/ask proved.
+  Preserve this qualification. No repeated paid run solely to recreate attestation.
+- Live queue at repaire409631: issue48 is due base_refresh wait on lost H1;
+  issue61 is blocked with unresolved implementation intent; issue21 is blocked,
+  issues18/58 are done. Only open issues48/61 carry the explicit repair opt-in.
+  There is spare WIP capacity but no additional opted-in task to dispatch; do not
+  create redundant runs or alter admission markers to claim queue saturation.
+
+Earlier continuation checkpoint (superseded only by the exact items above):
 
 - Canonical43c8171cb9f9c077f8863f9582edd2797a248657 includes final M15e5053e0
   and accepted M16 ancestry. The M16 merge retained exactly the canonical tree
@@ -46,6 +85,38 @@ or superseded drafts, is retained in this file at Git commit
 `74e67ec5a55fdd273f5ef2b56a477ddb27bd3072`. Read it with
 `git show 74e67ec5a55fdd273f5ef2b56a477ddb27bd3072:docs/build-status.md`.
 This compaction changes no acceptance decision and creates no second ledger.
+
+Continuation verification at21:17: canonical eef0d5b is clean and pushed.
+M14 lifecycle checkpoint f160f08 is committed; canonical ancestry merged as
+54402340a98c4625267ad4018b2b9ce5cd1a4d7f. Its real destructive test passed as
+recorded above. M15 remains clean e5053e0; fresh Astra confirmed P1 and mapped
+exact repository/incident matches for BOTH intake lookups, preserving dedupe.
+New disjoint assignments: M15 m15-assignment-p1-intake-v1.md owns only loop.ts
+and loop_test.ts. M14 m14-assignment-v10-crash-fixture.md owns only the two
+candidate-handoff fixture files. M14 source/other tests are frozen. Primary
+integrates accepted M15 before serial M14 unit updates; keep M14 out of Stage1.
+No live review/operator active, no release request; prior review charge retained.
+M15 P1 launch exec23066/PID4110122, persisted sessioncd75284c-01d1-4fec-beae-
+b73718da1d6a/stream5c93477a; M14 V10 launch exec49494/PID4110152, persisted
+session40866b2f-41c2-407f-bcd6-7f0773a37191/stream400897e8. Both exact cwd,
+production and credential-presence attestations saved in
+launch-m14-v10-m15-p1-v1.json. Both headers confirm Flash/max/workspace-write/ask.
+M14 clean checkpoint5440234 is pushed; current V10 remains unaccepted.
+Latest read-only hosted check: supervisor35024154550 succeeded at launcher
+a076b17f; repaire409631/releasea63128f, development8c861f5 unchanged. Recheck
+these historical refs before the next live operation.
+At21:26 M15 P1 V1 settled exit0 in52calls; primary inspected exact source/test
+diff. GPT c0b7794c-fa63-4d52-837b-47045ec4d420 passed150/failed1, child1,
+executed137090ms. Only new test expected short branch rather than full Git ref.
+M15 V2 exec60475 owns that one assertion in loop_test.ts; source stays frozen.
+M14 V10 settled exit0/completed in55calls with two dirty fixture files. Primary
+found three fixture-contract corrections before first execution: never return
+applied for an unapplied acknowledgement, remove two iterations beyond the
+eight-step cap, and allow the initial refresh intent's resultId to be null
+before preparation. V10b exec99518 owns only candidate-handoff_test.ts for these
+three changes; real child exact-H2 preservation predicate stays unchanged.
+Fresh read-only review-round audit is reconciling PR70's used acceptance rounds.
+Do not launch another review before that count is resolved; source work proceeds.
 
 Continuation verification at20:34: canonical3536daf is clean; M15 remains clean
 at9cc379d; M14 has only its ten owned changes; no process has a worker-lane cwd.

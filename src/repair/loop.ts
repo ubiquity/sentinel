@@ -772,10 +772,17 @@ async function pollIntake(
     }
     for (const summary of page.value.items) {
       const existing = context.snapshot.incidents.find(
-        (incident) => incident.fingerprint === summary.fingerprint,
+        (incident) =>
+          incident.id === summary.id &&
+          incident.fingerprint === summary.fingerprint &&
+          sameRepositoryIdentity(incident.repository, summary.repository),
       );
       const work = context.snapshot.work.find(
-        (record) => record.fingerprint === summary.fingerprint,
+        (record) =>
+          record.source.kind === "incident" &&
+          record.related.incidentId === summary.id &&
+          record.fingerprint === summary.fingerprint &&
+          sameRepositoryIdentity(record.repository, summary.repository),
       ) ?? null;
       if (existing !== null && existing !== undefined) {
         // Nondecreasing refresh of the stored summary.
