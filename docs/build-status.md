@@ -2,12 +2,33 @@
 
 ## Active task register — Astra owned
 
-Updated 2026-09-15 22:40 UTC. This is the only authoritative acceptance ledger.
+Updated 2026-09-15 22:48 UTC. This is the only authoritative acceptance ledger.
 The goal remains incomplete: autonomous GitHub Actions repair against Sentinel,
 then the separately authorized ai.ubq.fi target. Only the current GPT-6 Astra
 integration owner may change scope, status, acceptance or write ownership here.
 
 ### Current checkpoint
+
+- At22:48 V14b settled exit0/completed,8calls/2edits, no tests/formatter/children.
+  Persistedfeb0810a-f3d1-46db-a31f-2104ecd60d8c/streame07cdaa7 proves
+  Flash/max/workspace-write/ask; production is proved by the launch command,
+  but this fast writer exited before live environment attestation. Preserve
+  that qualification; no repeat paid run. GPT fc16dcb2-32a5-4a88-9d75-2bbbb7510a1d
+  passed4/failed0, child0,20559ms. Primary verified only SHA2 import/one expected
+  head changed from V14. Combined with unchanged passing03d081a7 cases, this
+  accepts the eight-file integration-fixture checkpoint for canonical merging.
+  The four pre-existing Darwin-only causal tests remain unproved on this VPS.
+  No implementation writer/test active, no new live review or state operation.
+
+- At22:45 integration capture03d081a7-d0e9-4216-b3e8-41dd9688da2c settled:
+  31passed/1failed/4ignored, child1,166301ms. Actual entrypoint, two-task,
+  composed release/closure, lost-response cooldown and replay cases passed.
+  Only final cooldown admission expects SHA3 while direct FakeModel emits SHA2.
+  V14b owns only that fixture's expected head/import; immutable assignment,
+  30calls, source and seven other dirty fixtures frozen. GPT will run only the
+  affected four-case file after settlement. Four causal-capture cases retain
+  pre-existing Darwin-only skips; lifecycle_fixture_scope audits the platform
+  reason without writes or execution. These skips are not acceptance evidence.
 
 - V14 settled at22:40 exit0/completed,102calls/35edits, stream483809ae-e2ba-
   4d75-86fb-feaa814168ea, persistedfbff67d0. All eight owned integration fixtures
