@@ -63,6 +63,60 @@ No original terminal review/charge reset. Private review-run-v1.log records prog
 M14 V9 exec74094/PID4064500 remains the only implementation writer; live cwd,
 production/credential presence and session9e8200ce-3a5a-428a-a2b0-2991bd5e12d7
 Flash/max/workspace-write/ask verified. No test claim until settlement.
+V3 authentic review admission79a4a43befc0af282f1280c7192e2476a3b6a2f4864dee01a72fbd783c7b74b6
+returned unavailable BEFORE a request: requestId/requestedAtnull, static detail
+"review transport: the immutable review snapshot is unavailable". Preserve
+operationreview:70:e5053e0de4b7db8365b95aa723b951af0bf6969a and its charge;
+no resubmission. Local snapshotdd0ae111 passed on M15, so fresh read-only audit
+is diagnosing the actual operator/clone capture difference. Operator still owns
+its bounded observation/settlement until exit; no merge/release permitted.
+At20:50 exec22585 settled exit1; exact PID4066307 absent. Terminal static error
+is incomplete review observation. Request never supplied an ID; saved initial
+failure is immutable snapshot unavailable. All V3 artifacts and reservation
+remain intact. No replacement or second invocation of that operation launched.
+Permission cause confirmed: exact restricted capture20af195a-3fbd-4df8-836a-
+7fdc8e63d766 failed73ms; adding only existing NODE_V8_COVERAGE env read permission
+passed441ms in0dfde365-a93b-4647-9dd8-29113a7d88cd. No credential/model/network
+call in either diagnostic. The earlier deno eval check did not test this envelope.
+Fresh source audit proves DETAIL_SNAPSHOT occurs before journal/preparation/start
+and supports separately charged attempt2 on SAME head/canonical operation key.
+Primary assigns M17 V5 under m17-assignment-v5.md: two private root/invocation
+bindings and attempt2 only; keep original attempt1 ambiguous and fully charged.
+No source-only commit or refund to obtain new identity. Verify unused attempt2
+and fresh hosted ownership before launch; exact corrected permission is required.
+M14 V9 settled naturally exit0 at20:54 before a planned bounded stop could signal
+it. Six owned files only, one formatter;138+calls exceeded100, recorded deviation.
+Existing destructive fixture now runs as exec61688; fresh no-history Astra
+ordinary_lifecycle_acceptance_audit audits exact six-file diff independently.
+M14 evidenced8b8b0fd-7fe3-44ef-ad50-dc29413da904 failed1test at preservation
+acknowledgement (19237ms): parsed intermediate state attached descriptor before
+clearing candidate_preservation intent. Fresh audit requires that nesting fix
+and six bounded CHECK_POLL_MS publication/PR/read error waits; null waits prevent
+later reconciliation. No second intermediate-parser error found in remaining
+transitions. V9b owns only loop.ts under m14-assignment-v9b.md; fixtures unchanged.
+M17 V5 exec57589/PID4082937 settled exit0; session89bec53d-a083-44d1-8242-
+9fd0a914d26c/streame6cc7868-d7cd-4848-ab8c-7fa6f31f2c34, required live/header
+settings verified and primary literal diff matched. Typecheck3c5ccaf6-776f-4e36-
+8b29-7c936ac9c773 passed2769ms. Fresh state showed only attempt1 for e5053e0.
+V4 live operator exec94145 launched20:58 with corrected permission and fresh
+repair97374a1/releasea63128f ownership. Attempt2 reservation
+91851f73acb75e5f3c4e023c946f25c93c6f59a70575018d0f24f7ee770f08b9 admitted,
+request applied at1789505937790, requestId review-review:70:e5053e0de4b7db8365b95aa723b951af0bf6969a.
+This is the first actual request for that operation; attempt1 remains charged.
+Await exact completed receipt; no merge/release claim.
+V4 review5215687932 is PENDING with exact e5053e0/base8c861f5, canonical operation,
+submitted provideruos/modelgpt-5.6-luna/reasoningmax and thread01a0a6dd-c220-7383-
+a81c-258edebfde2c. This is correlated running-request evidence, not completion.
+M14 V9b exec84661/PID4088743 settled exit0; sessioncd877aa5-e184-4945-ac01-
+9ec98cdbf3bf/stream739015f5-ebda-4e27-a4d2-9851f068cfae, live/header verified.
+Primary confirmed intended acknowledgement nesting and unchanged parser/fixture.
+Corrected destructive check runs as exec12233; previous failure retained.
+
+M16 ancestry reconciliation: accepted019fc75 changes only work-record.ts and
+records_test.ts. Canonical parser is identical; canonical tests contain the exact
+M16 tests plus98lines of accepted no-weekly-cap coverage. Normal merge calculation
+conflicts at the shared insertion. Primary will preserve canonical tree with an
+ancestry-only ours merge after this exact patch-containment proof; no source loss.
 
 ## Canonical identity and policy
 
