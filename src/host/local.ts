@@ -232,7 +232,7 @@ export function createLocalRepositoryConfig(): RepositoryConfigV1 {
     ],
     build: { projectId: null, acceptance: null },
     secretRef: "secret://host/injected/sentinel-local-owner",
-    liveStartLimits: { perHour: 60, perSevenDays: 168 },
+    liveStartLimits: { perHour: 120, perSevenDays: null },
     sessionBound: { maxDurationMs: 1_200_000, maxOutputChars: 4_000_000 },
     retention: null,
     stabilityPolicy: null,
@@ -2202,8 +2202,8 @@ const STATUS_MAX_TEXT_BYTES = 50_000;
 const STATUS_MAX_DETAIL_ITEMS = 200;
 /** Conservative workflow-dispatch transport bound (GitHub documents 65,535). */
 const STATUS_MAX_DISPATCH_BYTES = 65_535;
-/** Fixed report admission semantics. */
-const STATUS_POLICY_LIMITS = { perHour: 60, perSevenDays: 168 } as const;
+/** Fixed report admission semantics: 120 starts per rolling hour, no weekly cap. */
+const STATUS_POLICY_LIMITS = { perHour: 120, perSevenDays: null } as const;
 const STATUS_KNOWN_STEPS = [
   "work",
   "review",

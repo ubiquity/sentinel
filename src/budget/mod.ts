@@ -22,7 +22,7 @@
  * "reserved", "submitted" and "ambiguous" reservation charges globally. Only
  * "confirmed_not_submitted" with a validated restricted proof ref is
  * refunded. Windows never reset on process restart or midnight, and the
- * earliest retryAt under both caps is computed by sorting charged
+ * earliest retryAt across the enforced caps is computed by sorting charged
  * reservation timestamps rather than assuming one excess entry; timestamps
  * and sequence arithmetic must stay inside the safe-integer range, and an
  * overflow is a typed failure that writes nothing.
@@ -34,11 +34,12 @@
  *
  * Admission policy is one trusted complete repository configuration set: the
  * configured repository must belong to the set, and every supplied config
- * must carry non-null caps and session bounds with all caps equal and
- * positive. Missing, null or mismatched policies disable admission; no
- * default/fallback caps are guessed. Workflow single-writer serialization and
- * one deployed config are required by the caller — this controller never
- * invents distributed policy negotiation.
+ * must carry an always-enforced positive hourly cap, an optional numeric
+ * weekly cap disabled only by explicit null, and session bounds; all shared
+ * policy fields must agree exactly. Missing, non-positive or mismatched
+ * policies disable admission; no default/fallback caps are guessed. Workflow
+ * single-writer serialization and one deployed config are required by the
+ * caller — this controller never invents distributed policy negotiation.
  *
  * The controller contains no inference transport and no retry loop; after an
  * ambiguous or conflicting write the caller reconciles by rereading.
@@ -523,7 +524,13 @@ export class RollingStartBudget implements BudgetControllerV1 {
         );
       }
       const limits = parsed.liveStartLimits;
-      if (limits.perHour < 1 || limits.perSevenDays < 1) {
+      // Hour is always a finite positive safe integer for admission. The
+      // weekly cap is enforced only when numeric: explicit null means no
+      // weekly admission cap, never a wildcard and never Infinity/zero.
+      if (
+        limits.perHour < 1 ||
+        (limits.perSevenDays !== null && limits.perSevenDays < 1)
+      ) {
         return disabledPolicy("live start caps must be positive integers");
       }
       if (first === null) {
@@ -718,16 +725,19 @@ export function isCharged(
 }
 
 /**
- * Earliest retry time under both rolling caps at `now` for the given
+ * Earliest retry time under the rolling caps at `now` for the given
  * reservations. Windows are (x - windowMs, x]; refunded
  * confirmed_not_submitted reservations never charge. Entries are sorted by
  * their charge timestamp (createdAt) and the earliest x >= now that admits
- * one more start is the max of both per-window results.
+ * one more start is the max of every enforced per-window result. A numeric
+ * weekly cap is enforced; explicit null enforces the hourly cap only.
  *
  * Exported for deterministic use and boundary tests. Invalid input (a
- * malformed reservation, a non-safe `now`, non-positive or mismatched caps)
- * and arithmetic overflow throw one fixed sanitized RangeError that never
- * echoes input values; callers catch it at their boundary and fail closed.
+ * malformed reservation, a non-safe `now`, a non-positive hour cap, a
+ * malformed weekly cap, or a numeric hour cap that exceeds a numeric weekly
+ * cap) and arithmetic overflow throw one fixed sanitized RangeError that
+ * never echoes input values; callers catch it at their boundary and fail
+ * closed.
  */
 export function earliestRetryAt(
   reservations: readonly BudgetReservationV1[],
@@ -739,8 +749,9 @@ export function earliestRetryAt(
   }
   if (
     !isPositiveSafeInt(limits.perHour) ||
-    !isPositiveSafeInt(limits.perSevenDays) ||
-    limits.perHour > limits.perSevenDays
+    (limits.perSevenDays !== null &&
+      !isPositiveSafeInt(limits.perSevenDays)) ||
+    (limits.perSevenDays !== null && limits.perHour > limits.perSevenDays)
   ) {
     throw new RangeError("earliestRetryAt: invalid limits");
   }
@@ -765,15 +776,19 @@ export function earliestRetryAt(
     retryAt,
     perWindowRetryAt(descending, limits.perHour, HOUR_WINDOW_MS, now),
   );
-  retryAt = Math.max(
-    retryAt,
-    perWindowRetryAt(
-      descending,
-      limits.perSevenDays,
-      SEVEN_DAY_WINDOW_MS,
-      now,
-    ),
-  );
+  // A numeric weekly cap still defers; explicit null has no weekly admission
+  // cap, so only the hourly result bounds admission.
+  if (limits.perSevenDays !== null) {
+    retryAt = Math.max(
+      retryAt,
+      perWindowRetryAt(
+        descending,
+        limits.perSevenDays,
+        SEVEN_DAY_WINDOW_MS,
+        now,
+      ),
+    );
+  }
   return retryAt;
 }
 

@@ -142,6 +142,65 @@ Deno.test("budget: refunded reservations never charge; only proof-valid refunds"
   assert.equal(isCharged(seededReservation("res")), true);
 });
 
+Deno.test("budget: explicit null weekly cap enforces only the rolling hour", () => {
+  const limits = { perHour: 120, perSevenDays: null };
+  const inHour = Array.from(
+    { length: 119 },
+    (_value, index) =>
+      seededReservation(`h-${String(index).padStart(3, "0")}`, {
+        createdAt: NOW - 1_000,
+      }),
+  );
+  // 119 charges inside the strict hour window leave room for one more start.
+  assert.equal(earliestRetryAt(inHour, NOW, limits), NOW);
+  // The 120th in-hour charge reaches the hourly cap: admission defers until
+  // the oldest relevant charge exits at exactly its createdAt + one hour.
+  const atCap = [
+    ...inHour,
+    seededReservation("h-119", { createdAt: NOW - 1_000 }),
+  ];
+  assert.equal(
+    earliestRetryAt(atCap, NOW, limits),
+    NOW - 1_000 + HOUR_WINDOW_MS,
+  );
+  // Several excess in-hour charges keep the exact threshold, never a guess.
+  assert.equal(
+    earliestRetryAt(
+      [...atCap, seededReservation("h-120", { createdAt: NOW - 500 })],
+      NOW,
+      limits,
+    ),
+    NOW - 1_000 + HOUR_WINDOW_MS,
+  );
+  // The hour boundary stays strict: exactly one hour ago is outside.
+  assert.equal(
+    earliestRetryAt(
+      [seededReservation("boundary", { createdAt: NOW - HOUR_WINDOW_MS })],
+      NOW,
+      limits,
+    ),
+    NOW,
+  );
+  // More charged history than the retired 168 weekly cap, all inside the week
+  // but outside the hour: historical usage only, never a weekly deferral.
+  const olderInWeek = Array.from(
+    { length: 200 },
+    (_value, index) =>
+      seededReservation(`w-${String(index).padStart(3, "0")}`, {
+        createdAt: NOW - 2 * HOUR_WINDOW_MS - index * 60_000,
+      }),
+  );
+  assert.equal(earliestRetryAt(olderInWeek, NOW, limits), NOW);
+  // The same history still defers when a numeric weekly cap is configured.
+  assert.ok(
+    earliestRetryAt(
+      olderInWeek,
+      NOW,
+      { perHour: 120, perSevenDays: 168 },
+    ) > NOW,
+  );
+});
+
 Deno.test("budget: retryAt is exact at the safe-integer bound and overflows typed", () => {
   const MAX = Number.MAX_SAFE_INTEGER;
   const limits = { perHour: 1, perSevenDays: 10 };
@@ -214,6 +273,30 @@ Deno.test("budget: earliestRetryAt rejects invalid inputs with a fixed sanitized
           perHour: 2,
           perSevenDays: Number.MAX_SAFE_INTEGER + 1,
         }),
+    },
+    {
+      name: "missing weekly cap",
+      call: () =>
+        earliestRetryAt([], NOW, { perHour: 2 } as unknown as {
+          perHour: number;
+          perSevenDays: number | null;
+        }),
+    },
+    {
+      name: "malformed weekly cap",
+      call: () =>
+        earliestRetryAt(
+          [],
+          NOW,
+          { perHour: 2, perSevenDays: "168" } as unknown as {
+            perHour: number;
+            perSevenDays: number | null;
+          },
+        ),
+    },
+    {
+      name: "zero hour cap with a null weekly cap",
+      call: () => earliestRetryAt([], NOW, { perHour: 0, perSevenDays: null }),
     },
     {
       name: "hour cap exceeds week cap",

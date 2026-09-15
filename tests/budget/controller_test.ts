@@ -297,7 +297,7 @@ Deno.test("budget: clock regression defers reserve and settle; future timestamps
 Deno.test("budget: missing, null, mismatched or unowned policies disable admission", async () => {
   const cfg = (
     repo: typeof REPO_2,
-    limits: { perHour: number; perSevenDays: number },
+    limits: { perHour: number; perSevenDays: number | null },
     overrides: Record<string, unknown> = {},
   ) => repositoryConfig(repo as never, limits, overrides);
   const OTHER = {
@@ -354,6 +354,14 @@ Deno.test("budget: missing, null, mismatched or unowned policies disable admissi
       requestRepo: REPO_2,
     },
     {
+      name: "null weekly cap versus numeric weekly cap across the complete set",
+      configs: [
+        cfg(REPO_2, { perHour: 120, perSevenDays: null }),
+        cfg(REPO_2, { perHour: 120, perSevenDays: 168 }),
+      ],
+      requestRepo: REPO_2,
+    },
+    {
       name: "requested repository is not configured",
       configs: [cfg(REPO_2, { perHour: 2, perSevenDays: 3 })],
       requestRepo: OTHER,
@@ -397,6 +405,74 @@ Deno.test("budget: at cap the controller defers with the exact retryAt and write
   }
   assert.equal(state.writes, 0);
   assert.equal(state.current().snapshot?.reservations.length, 1);
+});
+
+Deno.test("budget: 120 per hour with a null weekly cap admits the 120th and preserves history", async () => {
+  const LIMITS = { perHour: 120, perSevenDays: null } as const;
+  const clock = new FakeClock(T0);
+  const state = new MemoryRepairState();
+  const inHour = Array.from(
+    { length: 119 },
+    (_value, index) =>
+      seededReservation(`in-hour-${String(index).padStart(3, "0")}`, {
+        createdAt: T0 - 1_000,
+      }),
+  );
+  // More charged history than the retired 168 weekly cap, all inside the week
+  // but outside the hour: historical usage that never defers admission.
+  const olderInWeek = Array.from(
+    { length: 200 },
+    (_value, index) =>
+      seededReservation(`older-${String(index).padStart(3, "0")}`, {
+        createdAt: T0 - 2 * HOUR_WINDOW_MS - index * 60_000,
+      }),
+  );
+  const seeded = [...inHour, ...olderInWeek];
+  state.seed(snapshot({ reservations: seeded }));
+  // Two configured repositories share one charging set under the same policy.
+  const controller = budget(clock, state, [
+    repositoryConfig(REPO as never, LIMITS),
+    repositoryConfig(REPO_2 as never, LIMITS),
+  ]);
+
+  const admitted = await controller.reserveModelStart(
+    reserveRequest("task:budget-120", {
+      repository: REPO_2 as never,
+      purpose: "review_request",
+    }),
+  );
+  assert.equal(admitted.status, "admitted", JSON.stringify(admitted));
+  const current = state.current().snapshot;
+  assert.equal(current?.reservations.length, seeded.length + 1);
+  // Every historical charge stays present byte-for-byte; the new admission is
+  // appended and no earlier record is rewritten.
+  assert.deepEqual(
+    current?.reservations.slice(0, seeded.length).map((entry) =>
+      JSON.stringify(entry)
+    ),
+    seeded.map((entry) => JSON.stringify(entry)),
+  );
+
+  // The hour now holds exactly 120 charges (the 200 older ones are historical
+  // usage only): the next start defers until the oldest relevant in-hour
+  // charge exits at exactly its createdAt + one hour.
+  const deferred = await controller.reserveModelStart(
+    reserveRequest("task:budget-121"),
+  );
+  assert.equal(deferred.status, "deferred");
+  if (deferred.status === "deferred") {
+    assert.equal(deferred.reason, "cap_limit");
+    assert.equal(deferred.retryAt, T0 - 1_000 + HOUR_WINDOW_MS);
+  }
+  assert.equal(
+    state.current().snapshot?.reservations.length,
+    seeded.length + 1,
+  );
+  clock.set(T0 - 1_000 + HOUR_WINDOW_MS);
+  const afterExit = await controller.reserveModelStart(
+    reserveRequest("task:budget-122"),
+  );
+  assert.equal(afterExit.status, "admitted", JSON.stringify(afterExit));
 });
 
 Deno.test("budget: settlement machine preserves createdAt, idempotence and immutability", async () => {

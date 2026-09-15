@@ -44,8 +44,13 @@ export type StabilityMetricV1 =
 export interface LiveStartLimitsV1 {
   /** Rolling one-hour model-start cap (required before inference is enabled). */
   perHour: number;
-  /** Rolling seven-day model-start cap. */
-  perSevenDays: number;
+  /**
+   * Rolling seven-day model-start cap, or explicit null for no weekly
+   * admission cap. Null is never a wildcard and never a permissive fallback:
+   * it only bypasses the weekly checks, and every configured repository must
+   * still agree on it. Missing/undefined/malformed values stay invalid.
+   */
+  perSevenDays: number | null;
 }
 
 export interface SessionBoundV1 {
@@ -278,6 +283,7 @@ export function parseRepositoryConfigV1(input: unknown): RepositoryConfigV1 {
 
   if (
     liveStartLimits !== null &&
+    liveStartLimits.perSevenDays !== null &&
     liveStartLimits.perHour > liveStartLimits.perSevenDays
   ) {
     fail(
@@ -392,7 +398,12 @@ function parseLiveStartLimits(input: unknown, path: string): LiveStartLimitsV1 {
   const obj = expectRecord(input, path);
   expectExactKeys(obj, LIMITS_KEYS, path);
   const perHour = expectCount(obj.perHour, `${path}.perHour`);
-  const perSevenDays = expectCount(obj.perSevenDays, `${path}.perSevenDays`);
+  // Explicit null means no weekly admission cap. A missing, undefined or
+  // malformed weekly value stays invalid: the frozen key check rejects a
+  // missing key and expectCount rejects every non-numeric present value.
+  const perSevenDays = obj.perSevenDays === null
+    ? null
+    : expectCount(obj.perSevenDays, `${path}.perSevenDays`);
   return { perHour, perSevenDays };
 }
 
@@ -493,7 +504,9 @@ function parseStabilityThreshold(
 /**
  * Global budget policy is one owner configuration across all repositories.
  * This refuses to infer a policy when configured limits conflict; per-repo
- * independent caps are never used.
+ * independent caps are never used. Agreement covers both `perHour` and the
+ * nullable `perSevenDays`: explicit null (no weekly cap) is one policy, and a
+ * null/numeric mix across repositories is a conflict, never a fallback.
  */
 export type GlobalLiveStartLimitsV1 =
   | { status: "disabled" }

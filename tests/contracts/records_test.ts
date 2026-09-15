@@ -846,3 +846,101 @@ Deno.test("global live start limits: one policy, conflicts refuse inference", as
   ]);
   assert.equal(conflict.status, "conflict");
 });
+
+Deno.test("live start limits: explicit null weekly cap is valid, missing or malformed is not", async () => {
+  const base = structuredClone(
+    await readFixture("valid", "repository-config-v1.json"),
+  ) as Record<string, unknown>;
+
+  // Explicit null is the owner policy: 120 per rolling hour, no weekly cap.
+  const accepted = tryParse(parseRepositoryConfigV1, {
+    ...base,
+    liveStartLimits: { perHour: 120, perSevenDays: null },
+  });
+  assert.equal(accepted.ok, true);
+  if (accepted.ok) {
+    assert.deepEqual(accepted.value.liveStartLimits, {
+      perHour: 120,
+      perSevenDays: null,
+    });
+  }
+
+  // A wholly null liveStartLimits still means inference is not enabled.
+  const disabled = tryParse(parseRepositoryConfigV1, {
+    ...base,
+    liveStartLimits: null,
+  });
+  assert.equal(disabled.ok, true);
+  if (disabled.ok) assert.equal(disabled.value.liveStartLimits, null);
+
+  // Missing, undefined or malformed weekly values are invalid, never a
+  // permissive fallback to "unlimited".
+  const { perSevenDays: _dropped, ...withoutWeekly } = base
+    .liveStartLimits as Record<string, unknown>;
+  const missing = tryParse(parseRepositoryConfigV1, {
+    ...base,
+    liveStartLimits: withoutWeekly,
+  });
+  assert.equal(missing.ok, false);
+  if (!missing.ok) {
+    assert.equal(
+      missing.issues[0]?.path,
+      "$.liveStartLimits.perSevenDays",
+    );
+  }
+  for (const malformed of [undefined, "168", -1, 1.5, true, Number.NaN]) {
+    const result = tryParse(parseRepositoryConfigV1, {
+      ...base,
+      liveStartLimits: { perHour: 120, perSevenDays: malformed },
+    });
+    assert.equal(result.ok, false, `weekly ${String(malformed)} is invalid`);
+    if (!result.ok) {
+      assert.equal(result.issues[0]?.path, "$.liveStartLimits.perSevenDays");
+    }
+  }
+
+  // Numeric weekly limits keep the hour <= week invariant.
+  const inverted = tryParse(parseRepositoryConfigV1, {
+    ...base,
+    liveStartLimits: { perHour: 120, perSevenDays: 60 },
+  });
+  assert.equal(inverted.ok, false);
+  if (!inverted.ok) assert.equal(inverted.issues[0]?.path, "$.liveStartLimits");
+
+  // Explicit null bypasses only the weekly checks: the hour cap is still a
+  // required finite positive safe integer.
+  const badHour = tryParse(parseRepositoryConfigV1, {
+    ...base,
+    liveStartLimits: { perHour: 0, perSevenDays: null },
+  });
+  // The parser accepts a nonnegative safe integer here, but the budget policy
+  // below (and admission) still refuses a zero hour cap.
+  assert.equal(badHour.ok, true);
+
+  const nullLimits = { perHour: 120, perSevenDays: null } as const;
+  const nullPolicy = resolveGlobalLiveStartLimits([
+    {
+      ...parseRepositoryConfigV1(base),
+      liveStartLimits: nullLimits,
+    },
+    {
+      ...parseRepositoryConfigV1(base),
+      liveStartLimits: { ...nullLimits },
+    },
+  ]);
+  assert.equal(nullPolicy.status, "enabled");
+  if (nullPolicy.status === "enabled") {
+    assert.deepEqual(nullPolicy.limits, { perHour: 120, perSevenDays: null });
+  }
+
+  // A null weekly cap in one repository and a numeric one in another are two
+  // different policies: shared admission is disabled, never inferred.
+  const mixedPolicy = resolveGlobalLiveStartLimits([
+    { ...parseRepositoryConfigV1(base), liveStartLimits: nullLimits },
+    {
+      ...parseRepositoryConfigV1(base),
+      liveStartLimits: { perHour: 120, perSevenDays: 168 },
+    },
+  ]);
+  assert.equal(mixedPolicy.status, "conflict");
+});
