@@ -2,27 +2,40 @@
 
 ## Active task register — Astra owned
 
-Updated 2026-09-15 21:06 UTC. This is the only authoritative acceptance ledger.
+Updated 2026-09-15 21:13 UTC. This is the only authoritative acceptance ledger.
 The goal remains incomplete: autonomous GitHub Actions repair against Sentinel,
 then the separately authorized ai.ubq.fi target. Only the current GPT-6 Astra
 integration owner may change scope, status, acceptance or write ownership here.
 
 ### Current checkpoint
 
-- Canonical4a1f6d0f54a3dc8f130712688af1ecec7bb77717 includes final M15e5053e0
+- Canonical43c8171cb9f9c077f8863f9582edd2797a248657 includes final M15e5053e0
   and accepted M16 ancestry. The M16 merge retained exactly the canonical tree
   c09c63cf8f693d19e705e5ecdd04066bbfa720e7; its parser/tests were already present.
 - PR70e5053e0: both CI runs and local review passed. Authentic review5215687932
-  runs under exec94145, Luna/max, V4 private root, separately charged attempt2
-  reservation91851f73. Prior attempt1 reservation79a4a43 remains ambiguous/charged.
-  Runtime is still20aae115/generation5; no reader runtime installation claim.
+  completed with one P1: fingerprint-only parked incident lookup can suppress an
+  unrelated repository or incident. Exec94145 settled exit0; receipt applied,
+  releaseReady false. Luna/max V4 attempt2 reservation91851f73 remains charged;
+  attempt1 reservation79a4a43 remains ambiguous/charged. Fresh read-only Astra
+  scope audit is checking the correction before DSH writes. No merge or release.
+  Runtime remains20aae115/generation5; reader runtime is not installed.
 - M14 stays at133b52d plus six dirty V9 files. V9/V9b writers settled. Current
   fixture6ab4bb96-0946-4d68-a5d6-07e0b432b4c4 failed after131612ms: H1 was
   preserved remotely before producer+mirror deletion; child restoration then
   returned unavailable. Child args still allow-run=git and envHOME,PATH while
   production DenoReplayRuntime needs full group signaling and NODE_V8_COVERAGE
-  permission. Independent bounded audit is confirming this fixture-only fix.
-  No unchanged rerun; no preservation/production guard relaxation.
+  permission. Independent audit confirmed exactly those two fixture substitutions.
+  V9c exec7974/PID4095994 settled exit0/completed; live attestation preserved,
+  persisted session07b2a4a8-4a32-4951-8787-fea860925ea2 and streamc85a1439 confirm
+  Flash/max/workspace-write/ask. Primary reviewed the exact two substitutions.
+  Corrected destructive fixture54670e80-e873-4986-8407-f504c03665fd passed:
+  one test, zero failures, child0/executed134129ms; exec27563 settled. Primary
+  verified remote H1 retention, producer/mirror deletion, fresh-process empty
+  store restoration, real publication/base refresh and review admission with
+  no new implementation. No M14 writer is active. Six-file lifecycle checkpoint
+  is ready for crash cuts and affected fixture updates; not installed/accepted.
+  No preservation/production guard relaxation. Crash-cut scope mapping proceeds
+  independently while M15's P1 is diagnosed.
 - M17 V5 private files are settled and typechecked; no DSH writer active. Only
   the live review operator owns its temporary root. No release request yet.
 - Legacy loss disposition, crash cuts, unit fixture updates, Stage2 installation,
