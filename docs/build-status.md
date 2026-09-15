@@ -27,6 +27,43 @@ Primary reread playbook hashfc44ca6e and assigns those exact edits under immutab
 m15-assignment-review-fixtures-v1.md. No other M15 writer is active.
 M17 V3 settled; wait for corrected final PR70 head before one literal rebind.
 
+At20:38 M15 fixture writer exec42740/PID3987029 settled exit0; live production,
+credential presence and exact cwd verified. Persisted4d339454-13a6-42c8-b1fc-
+9909adfb919c confirms Flash/max/workspace-write/ask and completed. Seventeen
+calls include required plan reads; exact diff is six literals in three files.
+GPT evidence59d29119-dedb-422e-a445-d1d64503db1a passed23tests/0failures,
+child0/executed93560ms. Committed/pushed e5053e0de4b7db8365b95aa723b951af0bf6969a,
+integrated as canonical302e9427bcaca04db19f09bdd2f46adedc2e1666. Local review
+exec23424 and new CI pending. M17 V4 owns only its two ignored operators under
+m17-assignment-v4.md, rebinding to this head and source-v4 clones; no live call.
+M14 prerequisite committed b234fdafaff7ff5d3d5360eb3b16add415330c07; compact
+canonical874e11c ancestry merged into its lane as133b52db35e0b71e05d912deec5147d8d9657da0.
+It stays outside Stage1 because the lifecycle fixture is intentionally red.
+At20:43 primary received the existing V9 read-only map after stopping a
+nonproductive nine-minute resend turn; no source was changed by that auditor.
+M14 V9 now owns only loop/transitions/selection/actions-ci and the two existing
+candidate-handoff fixture files, exact base133b52d, immutable m14-assignment-v9.md.
+First checkpoint is ordinary destructive handoff; separate serial crash-cut and
+unit-fixture update follows. Legacy-loss replacement remains excluded.
+M17 V4 exec33956/PID4026138 settled exit0; sessiond4400e39-00c5-47b8-aad1-
+12bd5c4ba1ac, streamc7672e60-b207-4b35-8d95-a63da4214cc0. Required live/header
+settings verified; primary confirmed exact literal-only mapping for both files.
+Typecheck2726d842-4706-4b78-9a70-cf1beb664630 passed7723ms/child0/executed.
+PR70 local reviewexec23424 passed with no actionable findings; reviewer ran
+122focused tests in evidence7d014e69-d1ec-4dac-88a3-86552fd221ed. Final snapshot
+dd0ae111-8f7f-439e-b67c-a51133adefbd passed505ms,14files/750684prompt bytes.
+CI35020878223/35020885836 pending; authentic review not yet launched.
+At20:47 both exact PR70 CI runs passed (5m37s/5m33s), local review is clean.
+Ordinary run35021091739 settled success; fresh releasea63128f shows runtime20aae,
+generation5/executionnull and four accepted releases. Repair9652ffc and launcher
+a076b17f rechecked; PR70 exacte5053e0/base8c861f5 and three active workflows
+confirmed. Primary created exclusive fresh V3 review ownership marker and
+launched authentic operator exec22585 at20:47, expected20-minute transport bound.
+No original terminal review/charge reset. Private review-run-v1.log records progress.
+M14 V9 exec74094/PID4064500 remains the only implementation writer; live cwd,
+production/credential presence and session9e8200ce-3a5a-428a-a2b0-2991bd5e12d7
+Flash/max/workspace-write/ask verified. No test claim until settlement.
+
 ## Canonical identity and policy
 
 - Canonical path: `/home/codex/repos/ubiquity/sentinel/.codex-worktrees/master-plan-gfa795549e5`.
