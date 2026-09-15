@@ -2,10 +2,44 @@
 
 ## Active task register — Astra owned
 
-Updated 2026-09-15 20:34 UTC. This is the only authoritative acceptance ledger.
+Updated 2026-09-15 21:13 UTC. This is the only authoritative acceptance ledger.
 The goal remains incomplete: autonomous GitHub Actions repair against Sentinel,
 then the separately authorized ai.ubq.fi target. Only the current GPT-6 Astra
 integration owner may change scope, status, acceptance or write ownership here.
+
+### Current checkpoint
+
+- Canonical43c8171cb9f9c077f8863f9582edd2797a248657 includes final M15e5053e0
+  and accepted M16 ancestry. The M16 merge retained exactly the canonical tree
+  c09c63cf8f693d19e705e5ecdd04066bbfa720e7; its parser/tests were already present.
+- PR70e5053e0: both CI runs and local review passed. Authentic review5215687932
+  completed with one P1: fingerprint-only parked incident lookup can suppress an
+  unrelated repository or incident. Exec94145 settled exit0; receipt applied,
+  releaseReady false. Luna/max V4 attempt2 reservation91851f73 remains charged;
+  attempt1 reservation79a4a43 remains ambiguous/charged. Fresh read-only Astra
+  scope audit is checking the correction before DSH writes. No merge or release.
+  Runtime remains20aae115/generation5; reader runtime is not installed.
+- M14 stays at133b52d plus six dirty V9 files. V9/V9b writers settled. Current
+  fixture6ab4bb96-0946-4d68-a5d6-07e0b432b4c4 failed after131612ms: H1 was
+  preserved remotely before producer+mirror deletion; child restoration then
+  returned unavailable. Child args still allow-run=git and envHOME,PATH while
+  production DenoReplayRuntime needs full group signaling and NODE_V8_COVERAGE
+  permission. Independent audit confirmed exactly those two fixture substitutions.
+  V9c exec7974/PID4095994 settled exit0/completed; live attestation preserved,
+  persisted session07b2a4a8-4a32-4951-8787-fea860925ea2 and streamc85a1439 confirm
+  Flash/max/workspace-write/ask. Primary reviewed the exact two substitutions.
+  Corrected destructive fixture54670e80-e873-4986-8407-f504c03665fd passed:
+  one test, zero failures, child0/executed134129ms; exec27563 settled. Primary
+  verified remote H1 retention, producer/mirror deletion, fresh-process empty
+  store restoration, real publication/base refresh and review admission with
+  no new implementation. No M14 writer is active. Six-file lifecycle checkpoint
+  is ready for crash cuts and affected fixture updates; not installed/accepted.
+  No preservation/production guard relaxation. Crash-cut scope mapping proceeds
+  independently while M15's P1 is diagnosed.
+- M17 V5 private files are settled and typechecked; no DSH writer active. Only
+  the live review operator owns its temporary root. No release request yet.
+- Legacy loss disposition, crash cuts, unit fixture updates, Stage2 installation,
+  second autonomous delivery, rollback and full observation remain incomplete.
 
 The complete earlier record, including all execution qualifications and rejected
 or superseded drafts, is retained in this file at Git commit
@@ -26,6 +60,97 @@ forty minutes restores former admission headroom without weakening guards.
 Primary reread playbook hashfc44ca6e and assigns those exact edits under immutable
 m15-assignment-review-fixtures-v1.md. No other M15 writer is active.
 M17 V3 settled; wait for corrected final PR70 head before one literal rebind.
+
+At20:38 M15 fixture writer exec42740/PID3987029 settled exit0; live production,
+credential presence and exact cwd verified. Persisted4d339454-13a6-42c8-b1fc-
+9909adfb919c confirms Flash/max/workspace-write/ask and completed. Seventeen
+calls include required plan reads; exact diff is six literals in three files.
+GPT evidence59d29119-dedb-422e-a445-d1d64503db1a passed23tests/0failures,
+child0/executed93560ms. Committed/pushed e5053e0de4b7db8365b95aa723b951af0bf6969a,
+integrated as canonical302e9427bcaca04db19f09bdd2f46adedc2e1666. Local review
+exec23424 and new CI pending. M17 V4 owns only its two ignored operators under
+m17-assignment-v4.md, rebinding to this head and source-v4 clones; no live call.
+M14 prerequisite committed b234fdafaff7ff5d3d5360eb3b16add415330c07; compact
+canonical874e11c ancestry merged into its lane as133b52db35e0b71e05d912deec5147d8d9657da0.
+It stays outside Stage1 because the lifecycle fixture is intentionally red.
+At20:43 primary received the existing V9 read-only map after stopping a
+nonproductive nine-minute resend turn; no source was changed by that auditor.
+M14 V9 now owns only loop/transitions/selection/actions-ci and the two existing
+candidate-handoff fixture files, exact base133b52d, immutable m14-assignment-v9.md.
+First checkpoint is ordinary destructive handoff; separate serial crash-cut and
+unit-fixture update follows. Legacy-loss replacement remains excluded.
+M17 V4 exec33956/PID4026138 settled exit0; sessiond4400e39-00c5-47b8-aad1-
+12bd5c4ba1ac, streamc7672e60-b207-4b35-8d95-a63da4214cc0. Required live/header
+settings verified; primary confirmed exact literal-only mapping for both files.
+Typecheck2726d842-4706-4b78-9a70-cf1beb664630 passed7723ms/child0/executed.
+PR70 local reviewexec23424 passed with no actionable findings; reviewer ran
+122focused tests in evidence7d014e69-d1ec-4dac-88a3-86552fd221ed. Final snapshot
+dd0ae111-8f7f-439e-b67c-a51133adefbd passed505ms,14files/750684prompt bytes.
+CI35020878223/35020885836 pending; authentic review not yet launched.
+At20:47 both exact PR70 CI runs passed (5m37s/5m33s), local review is clean.
+Ordinary run35021091739 settled success; fresh releasea63128f shows runtime20aae,
+generation5/executionnull and four accepted releases. Repair9652ffc and launcher
+a076b17f rechecked; PR70 exacte5053e0/base8c861f5 and three active workflows
+confirmed. Primary created exclusive fresh V3 review ownership marker and
+launched authentic operator exec22585 at20:47, expected20-minute transport bound.
+No original terminal review/charge reset. Private review-run-v1.log records progress.
+M14 V9 exec74094/PID4064500 remains the only implementation writer; live cwd,
+production/credential presence and session9e8200ce-3a5a-428a-a2b0-2991bd5e12d7
+Flash/max/workspace-write/ask verified. No test claim until settlement.
+V3 authentic review admission79a4a43befc0af282f1280c7192e2476a3b6a2f4864dee01a72fbd783c7b74b6
+returned unavailable BEFORE a request: requestId/requestedAtnull, static detail
+"review transport: the immutable review snapshot is unavailable". Preserve
+operationreview:70:e5053e0de4b7db8365b95aa723b951af0bf6969a and its charge;
+no resubmission. Local snapshotdd0ae111 passed on M15, so fresh read-only audit
+is diagnosing the actual operator/clone capture difference. Operator still owns
+its bounded observation/settlement until exit; no merge/release permitted.
+At20:50 exec22585 settled exit1; exact PID4066307 absent. Terminal static error
+is incomplete review observation. Request never supplied an ID; saved initial
+failure is immutable snapshot unavailable. All V3 artifacts and reservation
+remain intact. No replacement or second invocation of that operation launched.
+Permission cause confirmed: exact restricted capture20af195a-3fbd-4df8-836a-
+7fdc8e63d766 failed73ms; adding only existing NODE_V8_COVERAGE env read permission
+passed441ms in0dfde365-a93b-4647-9dd8-29113a7d88cd. No credential/model/network
+call in either diagnostic. The earlier deno eval check did not test this envelope.
+Fresh source audit proves DETAIL_SNAPSHOT occurs before journal/preparation/start
+and supports separately charged attempt2 on SAME head/canonical operation key.
+Primary assigns M17 V5 under m17-assignment-v5.md: two private root/invocation
+bindings and attempt2 only; keep original attempt1 ambiguous and fully charged.
+No source-only commit or refund to obtain new identity. Verify unused attempt2
+and fresh hosted ownership before launch; exact corrected permission is required.
+M14 V9 settled naturally exit0 at20:54 before a planned bounded stop could signal
+it. Six owned files only, one formatter;138+calls exceeded100, recorded deviation.
+Existing destructive fixture now runs as exec61688; fresh no-history Astra
+ordinary_lifecycle_acceptance_audit audits exact six-file diff independently.
+M14 evidenced8b8b0fd-7fe3-44ef-ad50-dc29413da904 failed1test at preservation
+acknowledgement (19237ms): parsed intermediate state attached descriptor before
+clearing candidate_preservation intent. Fresh audit requires that nesting fix
+and six bounded CHECK_POLL_MS publication/PR/read error waits; null waits prevent
+later reconciliation. No second intermediate-parser error found in remaining
+transitions. V9b owns only loop.ts under m14-assignment-v9b.md; fixtures unchanged.
+M17 V5 exec57589/PID4082937 settled exit0; session89bec53d-a083-44d1-8242-
+9fd0a914d26c/streame6cc7868-d7cd-4848-ab8c-7fa6f31f2c34, required live/header
+settings verified and primary literal diff matched. Typecheck3c5ccaf6-776f-4e36-
+8b29-7c936ac9c773 passed2769ms. Fresh state showed only attempt1 for e5053e0.
+V4 live operator exec94145 launched20:58 with corrected permission and fresh
+repair97374a1/releasea63128f ownership. Attempt2 reservation
+91851f73acb75e5f3c4e023c946f25c93c6f59a70575018d0f24f7ee770f08b9 admitted,
+request applied at1789505937790, requestId review-review:70:e5053e0de4b7db8365b95aa723b951af0bf6969a.
+This is the first actual request for that operation; attempt1 remains charged.
+Await exact completed receipt; no merge/release claim.
+V4 review5215687932 is PENDING with exact e5053e0/base8c861f5, canonical operation,
+submitted provideruos/modelgpt-5.6-luna/reasoningmax and thread01a0a6dd-c220-7383-
+a81c-258edebfde2c. This is correlated running-request evidence, not completion.
+M14 V9b exec84661/PID4088743 settled exit0; sessioncd877aa5-e184-4945-ac01-
+9ec98cdbf3bf/stream739015f5-ebda-4e27-a4d2-9851f068cfae, live/header verified.
+Primary confirmed intended acknowledgement nesting and unchanged parser/fixture.
+Corrected destructive check runs as exec12233; previous failure retained.
+
+M16 ancestry reconciliation: accepted019fc75 changes only work-record.ts and
+records_test.ts. Canonical parser is identical; canonical tests contain the exact
+M16 tests plus98lines of accepted no-weekly-cap coverage. Normal merge calculation
+conflicts at the shared insertion. Primary will preserve canonical tree with an
+ancestry-only ours merge after this exact patch-containment proof; no source loss.
 
 ## Canonical identity and policy
 

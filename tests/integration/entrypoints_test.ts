@@ -1012,7 +1012,7 @@ Deno.test(
     // (1) Successful cycle + successful drain: the original outcome returns.
     const rig = await makeRepairRig("drain-preserve-outcome");
     try {
-      const outcome = await rig.run(30 * 60_000);
+      const outcome = await rig.run(40 * 60_000);
       assert.equal(outcome.status, "idle", JSON.stringify(outcome));
       assert.equal(rig.github.drains.length, 1);
       assert.equal(rig.github.drains[0].interrupt, true);
@@ -1061,7 +1061,7 @@ Deno.test(
         interrupted: true,
         completedAt: T0,
       });
-      await assert.rejects(() => rig.run(30 * 60_000), (error: unknown) => {
+      await assert.rejects(() => rig.run(40 * 60_000), (error: unknown) => {
         assert.ok(error instanceof RepairReviewDrainError);
         assert.equal(error.message, REPAIR_REVIEW_DRAIN_ERROR_MESSAGE);
         assert.equal(error.report?.ok, false);
@@ -1182,7 +1182,7 @@ Deno.test(
       rig.incidents.setSummaries([summaryFixture(), secondIncidentSummary()]);
       rig.incidents.setEvidence([evidenceFixture(), secondIncidentEvidence()]);
 
-      const first = await rig.run(30 * 60_000);
+      const first = await rig.run(40 * 60_000);
       assert.equal(first.status, "idle", JSON.stringify(first));
       const afterFirst = await rig.snapshot();
       assert.equal(afterFirst.work.length, 2, "two work records");
@@ -1215,7 +1215,7 @@ Deno.test(
       // reviews still pending adds no start, no duplicate review request and
       // no new budget reservation.
       rig.clock.advance(15 * 60_000 + 1);
-      const second = await rig.run(30 * 60_000);
+      const second = await rig.run(40 * 60_000);
       assert.equal(second.status, "idle", JSON.stringify(second));
       assert.equal(rig.model.requests.length, 2, "no duplicate model start");
       const afterSecond = await rig.snapshot();
