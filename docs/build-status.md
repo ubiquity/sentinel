@@ -2,6 +2,151 @@
 
 ## Active task register — Astra owned
 
+19:54 UTC continuation re-anchored the exact canonical path and branch at
+80b58f66440cae044bb043b81bca2c52019c6e85. Only this ledger is dirty. Read the
+master plan, current register, frozen proposal and existing Pro answer; the one
+authorized Pro submission remains consumed. PR70 head af366697 and base8c861f5
+are unchanged; both CI checks passed, authentic review5215017092 is still
+pending on the original operation and charge (exec43357). Do not resubmit.
+M14 V8 exec73703/PID3929686 remains active with useful edits in all10owned
+files; no writer transfer or acceptance yet. Read-only delivery_history_audit
+is checking the compact-register content; issue48_application_candidate_audit
+returned the next serial lifecycle wiring map. Preserve the complete current
+ledger in Git history before replacing working content with current facts.
+
+
+19:46 UTC focused reader PR70 is open ataf3666976241c0739f72e13cb18fc224fc6a7cad,
+base8c861f5. Source-only Codex reviewexec7514 settled exit0/no actionable defects;
+push CI35014681751 passed. Actual snapshot evidence537804bytes/9files remains
+valid. M17 V2 settledexec17982 exit0; persisted4d4f52d7/b39527b8 Flash/max and
+production PID3928801 verified. It changes binding literals/import paths and
+formatter whitespace only; guard algorithms remain unchanged. Typecheck
+ea133197-e993-46ed-aec0-632ffe0b79d4 passed6983ms/child0. Note V2 appended
+verification commands after its final formatter; no extra test/model/side effect.
+
+PR70 authentic review launched19:44 UTC as exec43357 from M17, outside harness.
+Fresh marker binds repair004b63ffddcfa0dd3ce17a1b1c238bb5b7307043 and
+releasefd5d353fe5d5208d50d9a5958e2b775ab73f518f, idle runtime20aae115/gen5,
+launchera076b17f and all3workflowsactive. Log proves identity/live checks and
+admission; completed review/receipt remain pending. Exact private root
+poka-yoke/reader-install-pr70-v1. Review-source-v2 is exactaf366697; release-source-v2
+remains only a typecheck placeholder until the actual PR70 merge is verified.
+No duplicate PR67 review or changed historical reservation.
+
+M14 V8 is RUNNING from exactcd0ff053 in the same recorded lane, exec73703/
+PID3929686 since19:42 UTC. Immutable m14-assignment-v8.md owns10explicit paths
+for port/key/trusted storage/restoration/composition/model receipt preservation
+and focused fixtures. No loop/state-schema/validator/ledger/workflow edits.
+m14-launch-v8.json proves cwd/production; persistedae3061c7/stream75149d26 proves
+Flash/max/workspace-write/ask. Registered GPT targetm14-candidate-preserver.
+First edit5minutes/handback20minutes/max100calls; no probes or worker checks.
+
+19:38 UTC M14 publication-validation prerequisite is READY and committed only
+in its existing lane ascd0ff053a89c981b77de8e8c9ab4302ce5ad95d1. GPT capture
+883c409f-038a-4cca-b637-26e985886a36 passed26tests/0failed7282ms. V6 andV7
+settled exit0; exact launches3915516/3919518 and Flash/max headers verified.
+V7 stopped at its15-call bound without formatting; retain that qualification.
+No live writes or full M14 acceptance. Next bounded source phase owns the trusted
+preservation adapter, required port/key, real empty-store fetch tests and model
+receipt import accounting. The red lifecycle fixture remains intentionally red
+until loop wiring is complete; do not include it in the Stage1 release.
+
+M17 PR67 review bridge failed before any model request: immutable snapshot
+refused changed docs/build-status.md (739526bytes; per-file limit524288).
+exec42518 settled exit1 with no requestId, observation unavailable, and original
+reservation60faee7dace1395d5e7d9d3760aa2c544c1c60a749416ec95c4b6d60b3039f6f
+retained ambiguous. Do not retry/reset it or claim a completed review.
+Private evidence is reader-install-v1/{review-request,review-observation}.json
+and complete stdout/stderr. This is not a new provider failure.
+
+Read-only delivery_history_audit APPROVED using the EXISTING M15 branch/head
+af3666976241c0739f72e13cb18fc224fc6a7cad as a focused runtime source PR.
+It is based on8c861f5 and already an ancestor of canonical80b58f6; all9source/test
+blobs equal PR67, excluding only2docs. Actual credential-free production snapshot
+capture7d6cb66c-1b28-4bf5-8996-65ec173c76fd passed332ms,537804prompt bytes/9files.
+The branch is pushed unchanged. Source-only local Codex review is running as
+exec7514. Preserve canonical PR67 and lane; integrate its aggregate history after
+the focused runtime installation. New PR/head receives its own ordinary review
+reservation and private invocation; no reviewer bound or historical state changes.
+
+19:30 UTC M17 V1 settled exec66701 exit0/completed with both owned private
+scripts adapted. GPT typecheck06d1a926-ee20-4c14-8af5-8ef129f7f227 passed7200ms,
+child0, credential-free. delivery_history_audit PASSED exact source/marker/live
+workflow/launcher/initial state/terminal release gates and one-CAS readback.
+Fixed local Git source reads have no explicit timeout: availability qualification
+accepted for these trusted clean clones, before model admission or writes.
+Primary will create a fresh marker and run one authentic PR67 review outside
+the test harness; normal shared120/hour charging and observation-only recovery.
+No workflow disable or runtime-pointer write. PR67 minor operation-key syntax
+finding is P3, independently audited as non-executable in the parking reader;
+tracked in issue69 and linked/replied on PR67. Its exact head remains80b58f6.
+
+M14 V5 settled exec31327 exit0/completed; exact production launch3912291 and
+persistede63d90ed/c4d8519d header proved Flash/max. Corrected protected identity
+and both missing regressions passed static audit. Capture4a19ee27-fdc1-446a-b89d-df760bb7147d
+failed typecheck2057ms at four .detail versus .error.detail accesses; no tests
+ran. V6 now makes only those four substitutions, exec99126/PID3915516,
+m14-launch-v6.json independently verified. Auditor additionally requires a final
+NUL terminator in the exact-entry parser; apply that narrowly after V6 settles.
+No acceptance is inferred from the previous23-test pass.
+
+19:22 UTC M14 V4 settled exec80009 exit0, persistedbc378c53 and
+streamba154c09 completed; exact Flash/max/workspace-write/ask independently
+verified. GPT captureeced0a62-a473-4f82-905b-07aaea514eb8 passed23tests/0failed,
+7145ms/child0; full archive poka-yoke/m14-publication-v4-evidence.json. Fresh
+no-history candidate_publication_validation_audit found a required correction:
+leaf-filtered protected diff misses replacing a parent when the protected leaf
+was absent in both trees. Primary independently agrees. No live state writes
+or acceptance of the whole preservation slice. V4 ran temporary Git probes and
+two formatter passes despite one assigned; preserve output, record deviation,
+and prohibit probes in the next bounded correction. No project Git ref changed.
+
+M17 V1 launched19:19 UTC in the recorded lane, exec66701/PID3908110;
+m17-launch-v1.json proves exact cwd/production/nonempty credential presence.
+Persistede90c18d2/stream09d1264f proves Flash/max/workspace-write/ask. Owns only
+the two private copied operators; immutable m17-assignment-v1.md binds PR67,
+launcher a076b17f, active workflows and all audited guards. Clean review-source
+clone is exact80b58f6; release-source is a type-check placeholder at that same
+head and must be rebound to the exact verified merge before live release.
+Neither operator has executed. GPT registered m17-reader-install-operator-check.
+
+19:17 UTC continuation re-anchored canonical80b58f66440cae044bb043b81bca2c52019c6e85
+on its recorded lane; root/development remains8c861f5. Canonical was clean.
+M15 is integrated through80b58f6; full integrated evidence4677b0ee-2c30-4fde-b6a6-fbff9e981501
+passed1127tests/84steps/0failures/9existing ignores, and independent reviewer
+evidencee7c2b4af-54cd-4483-aea5-d5ff173a95cd passed149focused tests. Local
+Codex reviewm15-review-r1 completed exit0/no actionable defects. PR67 remains
+open at this exact head/base8c861f5; push35010219740 and PR35011441184 CI passed.
+Keep its published head fixed through the authentic runtime installation review.
+
+M16 source PR68 merged19:11:25 as a076b17f426a0a590806cd2f1e066d5f494bc9f2;
+live sentinel-supervisor ref independently matches. Head019fc75, both source CI
+runs35010860232/35011444318, and local Codex review passed. Source parser matches
+M15 byte-exactly. Source ancestry integration remains due after PR67 installation.
+Runtime reader installation remains pending; no application-delivery claim.
+
+M14 V4 remains the sole writer in its recorded lane at3935771a858cebb351dcc368f8e024818dfce7b8.
+PID3901414 is live, with edits to its two assigned publication-validation files.
+Persistedbc378c53 header independently confirms DeepSeek Flash/max; earlier
+m14-launch-v4.json binds exact cwd/production. Its immutable assignment permits
+local prerequisite authoring beside Stage1 installation, not new live candidate
+state writes. Both reader identities must be installed before such writes.
+
+Ad hoc module m17-reader-install-operator is PLANNED at canonical80b58f6:
+lane master-plan-m17-reader-install-operator-a8a5557444a, branch
+codex/master-plan-m17-reader-install-operator-a8a5557444a, worktree
+/home/codex/repos/ubiquity/sentinel/.codex-worktrees/master-plan-m17-reader-install-operator-a8a5557444a.
+DSH owns only its new private .sentinel-reader-install-operator scripts, adapting
+the historical fixed-input operators; originals remain immutable. Primary owns
+clean exact source snapshots, fresh ownership bindings, credential-free checks,
+and live operations outside the local harness. Read-only delivery_history_audit
+confirmed active-workflow checks, launcher binding, initial repair-head binding,
+idle exact release identity/all releases terminal, and fresh short-lived markers.
+No extra ordinary-run proof is required before request creation: the existing
+supervisor obtains fresh prior proof before promotion. No workflow pause or
+manual runtime pointer change is authorized by this bridge. DSH rules hash
+fc44ca6ec8e008328b59199fda05bf46f6ca536db8ccad7739d7ef8143ca5377 re-read.
+
 18:48 UTC M15 focused acceptance is READY for integration. The first executable
 suite capture27289784-2900-4b77-bd73-1c6f56dc7a86 passed148 and failed only the
 new legacy-intake fixture (114078ms). Fresh static fixture audit found its missing
