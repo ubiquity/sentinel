@@ -49,6 +49,7 @@ import {
   T0 as GATEWAY_T0,
 } from "../adapters/gateway/helpers.ts";
 import {
+  exactCandidateLifecycle,
   gatewayLimits,
   makeGatewayRig,
   makeIntegrationCtx,
@@ -671,6 +672,12 @@ Deno.test(
     const afterRig = await makeEvidenceRig("bundle-candidate", {
       summaries: [],
       evidence: null,
+      // The seeded candidate must reach publication and review: the exact
+      // lifecycle supplies the preservation capability (asserting head SHA3)
+      // and the trusted base-refresh capability the review gate requires.
+      github: {
+        candidateLifecycle: exactCandidateLifecycle({ head: SHA3 }),
+      },
       seed: {
         work: [incidentWorkRecord(workId, {
           target: {
@@ -1016,6 +1023,7 @@ async function makeEvidenceRig(
     evidence?: IncidentEvidenceV1 | null;
     replay?: ConstructorParameters<typeof FakeReplay>[0];
     seed?: Partial<RepairStateSnapshotV1>;
+    github?: ConstructorParameters<typeof FakeGithub>[0];
   } = {},
 ): Promise<EvidenceRigV1> {
   const ctx = await makeIntegrationCtx(prefix);
@@ -1029,7 +1037,7 @@ async function makeEvidenceRig(
     sessionBound: { maxDurationMs: 240_000, maxOutputChars: 200_000 },
   });
   const budget = new RollingStartBudget({ clock, state: store, configs });
-  const github = new FakeGithub({ baseSha: SHA1 });
+  const github = new FakeGithub({ baseSha: SHA1, ...options.github });
   const incidents = new ScriptedIncidents(
     options.summaries ?? [incidentSummary(INCIDENT_A, {
       fingerprint: FINGERPRINT_A,

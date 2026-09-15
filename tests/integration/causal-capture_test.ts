@@ -61,7 +61,10 @@ import type {
 } from "../../src/contracts/brands.ts";
 import type {
   MergeOutcomeV1,
+  MergeRequestV1,
   PortResultV1,
+  PullRequestCreateV1,
+  PullRequestPublishV1,
 } from "../../src/contracts/ports.ts";
 import { portOk } from "../../src/contracts/ports.ts";
 import type { RepositoryConfigV1 } from "../../src/contracts/repository-config.ts";
@@ -116,6 +119,7 @@ import {
   sha256hex,
 } from "../adapters/gateway/helpers.ts";
 import {
+  exactCandidateLifecycle,
   FakeClock,
   FakeGithub,
   makeIntegrationCtx,
@@ -914,10 +918,10 @@ function sessionVerifier(evidence: {
   return null;
 }
 
-/** Exact-head fake GitHub: each head gets its own PR number. */
+/** Exact-head fake GitHub: each head gets its own PR number. The inherited
+ * lifecycle maps own the exact PR/ref observations, so create and merge
+ * delegate to super and every read observes the same exact objects. */
 class ExactHeadFakeGithub extends FakeGithub {
-  private prByHead = new Map<GitSha, number>();
-  private nextPr = 7;
   readonly mergedHeads: GitSha[] = [];
   readonly publishedHeads: GitSha[] = [];
 
@@ -930,35 +934,25 @@ class ExactHeadFakeGithub extends FakeGithub {
     return super.pushHead(ref, sha, expectedRef);
   }
 
-  override createPullRequest(_request: unknown): Promise<
-    PortResultV1<{
-      outcome: "applied" | "ambiguous";
-      number: number | null;
-      head: GitSha | null;
-    }>
-  > {
-    const request = _request as { expectedHeadRef: GitSha };
-    const head = request.expectedHeadRef;
-    let number = this.prByHead.get(head);
-    if (number === undefined) {
-      number = this.nextPr++;
-      this.prByHead.set(head, number);
+  override async createPullRequest(
+    request: PullRequestCreateV1,
+  ): Promise<PortResultV1<PullRequestPublishV1>> {
+    const published = await super.createPullRequest(request);
+    // Keep the exact per-head PR allocation in the call recording; the
+    // inherited lifecycle fake already allocated it deterministically.
+    if (published.ok && published.value.number !== null) {
+      this.calls.push(`createPr:${published.value.number}`);
     }
-    this.calls.push(`createPr:${number}`);
-    return Promise.resolve(portOk({ outcome: "applied", number, head }));
+    return published;
   }
 
-  override mergePullRequest(_request: unknown): Promise<
-    PortResultV1<MergeOutcomeV1>
-  > {
-    const request = _request as { expectedHead: GitSha };
-    const head = request.expectedHead;
-    this.mergedHeads.push(head);
-    return Promise.resolve(portOk({
-      outcome: "merged",
-      head,
-      mergeSha: head,
-    }));
+  override async mergePullRequest(
+    request: MergeRequestV1,
+  ): Promise<PortResultV1<MergeOutcomeV1>> {
+    this.mergedHeads.push(request.expectedHead);
+    // The inherited lifecycle merge closes the exact requested PR on the exact
+    // requested head; the merge receipt is never the global last push.
+    return await super.mergePullRequest(request);
   }
 }
 
@@ -1076,7 +1070,24 @@ async function makeCausalRig(
     remoteUrl: ctx.remoteUrl,
   });
   const configs = [composedConfig(REPO)];
-  const github = new ExactHeadFakeGithub({ baseSha: toy.originalSha });
+  let candidateHead: GitSha | null = null;
+  // The positive candidate head depends on the composed fixture bytes and is
+  // resolved after this rig is built, so the exact preservation assertion
+  // reads it at call time (always set before the positive run).
+  const github = new ExactHeadFakeGithub({
+    baseSha: toy.originalSha,
+    candidateLifecycle: exactCandidateLifecycle({
+      base: toy.originalSha,
+      head: () => {
+        const head = candidateHead;
+        assert.ok(
+          head !== null,
+          "candidate head must be set before preservation",
+        );
+        return head;
+      },
+    }),
+  });
   const keyBytes = hexToBytes(
     JSON.parse(
       await Deno.readTextFile(
@@ -1128,7 +1139,6 @@ async function makeCausalRig(
   const opened = await gatewayStore.open();
   assert.ok(opened.ok, `store open failed: ${JSON.stringify(opened)}`);
 
-  let candidateHead: GitSha | null = null;
   const sessions: FakeCodexSession[] = [];
   const replayRuntime = new RecordingReplayRuntime(
     new DenoReplayRuntime(Deno.env.get("PATH") ?? "/usr/bin:/bin"),
