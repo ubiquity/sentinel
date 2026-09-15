@@ -66,6 +66,25 @@ Deno.test("selection: delivery bookkeeping outranks new incident work", () => {
   assert.deepEqual(ranked.ordered, [delivery.id, incident.id]);
 });
 
+Deno.test("selection: delivery updates use numeric ordering across digit boundaries", () => {
+  const updatedNine = work("delivery-9", {
+    nextStep: "delivery",
+    createdAt: 0,
+    updatedAt: 9,
+  });
+  const updatedTen = work("delivery-10", {
+    nextStep: "delivery",
+    createdAt: 0,
+    updatedAt: 10,
+  });
+  const ranked = rankEligibleWork(
+    snapshot([updatedTen, updatedNine]),
+    repairConfigs(),
+    NOW,
+  );
+  assert.deepEqual(ranked.ordered, [updatedNine.id, updatedTen.id]);
+});
+
 Deno.test("selection: active incidents by severity then oldest first seen", () => {
   const p0 = work("incident-p0", {
     source: { kind: "incident", id: "p0", revision: SHA2 },
@@ -148,6 +167,36 @@ Deno.test("selection: numeric priority descending, missing priority last", () =>
     NOW,
   );
   assert.deepEqual(ranked.ordered, [high.id, low.id, none.id]);
+});
+
+Deno.test("selection: priority ordering supports contract-safe values above one million", () => {
+  const maximum = work("issue-maximum", {
+    classification: { severity: "P2", priority: Number.MAX_SAFE_INTEGER },
+  });
+  const aboveMillion = work("issue-1000002", {
+    classification: { severity: "P2", priority: 1_000_002 },
+  });
+  const millionAndOne = work("issue-1000001", {
+    classification: { severity: "P2", priority: 1_000_001 },
+  });
+  const minimum = work("issue-minimum", {
+    classification: { severity: "P2", priority: 1 },
+  });
+  const none = work("issue-missing", {
+    classification: { severity: "P2", priority: null },
+  });
+  const ranked = rankEligibleWork(
+    snapshot([none, millionAndOne, maximum, minimum, aboveMillion]),
+    repairConfigs(),
+    NOW,
+  );
+  assert.deepEqual(ranked.ordered, [
+    maximum.id,
+    aboveMillion.id,
+    millionAndOne.id,
+    minimum.id,
+    none.id,
+  ]);
 });
 
 Deno.test("selection: stable repository/source tie-break, never selection by list order", () => {
