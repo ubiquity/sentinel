@@ -2,6 +2,57 @@
 
 ## Active task register — Astra owned
 
+17:28 UTC hosted recovery is APPLIED and58 is autonomously CLOSED. Source PR64
+merged17:17:19 as3e10378598a45a8bbdfac06781626a83eb419363, exact parents848f26f
+and eebaa57. Tree39855392aec8cc4eba53d33f2eebbc321f37274a equals reviewed
+eebaa57. Push CI34999123540 and PR CI34999674046 both passed1085tests/0failed/
+9ignored. Installed source is3e103785; runtime remains20aae115/generation5 with
+the accepted120/hour/no-weekly-cap policy. Source installation did not replace
+the active runtime or its admission policy.
+
+The scheduled dispatcher started35000353688 at17:17:40 on new source3e103785
+before a manual dispatch was needed. Maintenance104486936442 passed; native
+log m13-maintenance-35000353688.log line166 proves applied17:17:58.4266078,
+before71dd998 and appliedb0de49f2671ceca0f1a2caa4ea3cae7a2d40b662. Fresh
+no-history issue48_hosted_recovery_acceptance PASSED independent GitHub/source/
+log/whole-state verification. The sole transition changes48 nextStep, blocker,
+intent and updatedAt plus manifest metadata. All19reservations,8reviews,
+4release requests, counters/targets and unrelated work survive exactly. The
+frozen snapshot digest matches726f662b. Primary archived the immutable compare
+as applied-recovery-compare.json. No local ownership-guard bypass occurred.
+
+Prepare104487041940 passed and ordinary repair104487151243 began17:18:22.
+Issue58 closure intent was persisted in fb30f021 at17:19:18; GitHub event
+31190993641 proves github-actions[bot] closed58 at17:19:29, then8fff11df
+persisted done with null intent/wait/blocker17:19:31. Independent prior
+issue58_hosted_delivery_audit completed this closure boundary; accepted release
+proof remains valid. Event is archived as issue58-closure-event.json.
+
+Repair9e13f48a63f4abeb68220102af165ea6507800f3 reserves48 attempt3 separately
+at17:19:41.930, reservation48b133323b0a37e0ad7afd91a66d10a2db8b9957fc47fb5210c322e20df4e573,
+purpose retry, outcome reserved, observed base1d618965. Implementation intent
+started17:19:45.310 with retainedPR51/head0e689889. Work/reservation JSON is
+archived as issue48-attempt3-*.json. At17:28 the real job remains running, no
+new candidate or terminal result yet; its configured session limit is20minutes.
+Do not resubmit unchanged work or call this application delivery.61 remains
+blocked at counters2/0/1 with its prior intent and ambiguous charge preserved.
+
+Canonical integration c63642738f66aa33a592c5c24658d5f17e11e313 retained both
+df6601d and eebaa57 ancestry, resolving only the two workflow conflicts to the
+exact reviewed m13 workflow. Independent integration audit passed. Fresh
+canonical12-test evidence1b19a60e-3a62-478e-988a-ca78eb8aaf9c passed18417ms;
+local exact-candidate Codex review exited0/no actionable defects, retained as
+canonical-codex-review-r1.*. Reviewer also executed12tests in7bc9e8be-3b03-480e-
+bcfa-cfbca5022dff,14473ms/child0. PushCI35000060495 and PRCI35000800311 both
+passed the full1114tests/0failed/9ignored harness. PR65 merged17:28:03 as
+5537b440da65c6f5d83e8afc779f762879dde8e6; canonical and root fast-forwarded.
+Source3e103785 integration adds ancestry only: staged source tree is unchanged
+from5537b44. This ledger records the new receipt boundary; no implementation
+writer owns any local lane. All current recovery evidence is under
+/home/codex/.local/state/sentinel-reporting/2026-09-15/issue48-current-recovery/,
+with durable test copies in accepted-m13. Full two-task/captured-regression,
+gateway, rollback and observation acceptance remains incomplete.
+
 17:12 UTC source PR64 targets sentinel-supervisor848f26f at eebaa57. Push
 CI34999123540/job104482809525 passed1085tests/0failed/9ignored with complete
 credential-free harness; full native log is m13-push-ci-34999123540.log.
