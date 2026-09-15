@@ -205,6 +205,10 @@ function runsBody(runs: unknown[], total = runs.length): unknown {
   return { total_count: total, workflow_runs: runs };
 }
 
+/** M15 V1 self-candidate preservation identity for the CI fixtures. */
+const CANDIDATE_REF = `refs/heads/sentinel-candidates/${"ab".repeat(32)}`;
+const PRODUCING_RESERVATION = "cd".repeat(32);
+
 function candidateRecord(
   overrides: Record<string, unknown> = {},
 ): WorkRecordV1 {
@@ -218,6 +222,18 @@ function candidateRecord(
       checkpoint: null,
       head: HEAD,
       pr: PR_NUMBER,
+      // Valid Stage2 candidate state: the preserved descriptor and the
+      // published head both bind to the exact target base/head, so the
+      // ordinary CI tests exercise the real candidate eligibility path.
+      candidateState: {
+        preserved: {
+          operationKey: `impl:${PRODUCING_RESERVATION}`,
+          base: SHA1,
+          head: HEAD,
+          ref: CANDIDATE_REF,
+        },
+        publishedHead: HEAD,
+      },
     },
     nextStep: "review",
     counters: { attempts: 1, retries: 0, reviewRounds: 1 },
@@ -655,37 +671,26 @@ Deno.test(
 type RigV1 = ReturnType<typeof makeRig>;
 
 // ---------------------------------------------------------------------------
-// M15 V1 candidate state: parked new-format records are filtered BEFORE the
-// bounded slice, so they are never auto-approved and never starve a later
-// eligible legacy PR.
+// M15 V1 candidate state: incomplete (unpreserved/unpublished) new-format
+// records are filtered BEFORE the bounded slice, so they are never
+// auto-approved and never starve a later eligible candidate.
 // ---------------------------------------------------------------------------
 
-const CANDIDATE_REF = `refs/heads/sentinel-candidates/${"ab".repeat(32)}`;
-const PRODUCING_RESERVATION = "cd".repeat(32);
-
-/** Parked scope-0 self candidate: valid PR/head/branch plus candidateState. */
-function parkedCandidateRecord(index: number): WorkRecordV1 {
+/** Incomplete self candidate: valid PR/head/branch but nothing preserved. */
+function incompleteCandidateRecord(index: number): WorkRecordV1 {
   const pr = 40 + index;
   const head = SHA2;
-  return workRecord(`parked-${index}`, {
+  return workRecord(`incomplete-${index}`, {
     repository: { ...SELF_REPO },
     source: { kind: "issue", id: `${100 + index}`, revision: SHA1 },
     related: { incidentId: null, issueNumber: 100 + index },
     target: {
       base: SHA1,
-      branch: `sentinel/repair/parked-${index}`,
+      branch: `sentinel/repair/incomplete-${index}`,
       checkpoint: null,
       head,
       pr,
-      candidateState: {
-        preserved: {
-          operationKey: `impl:${PRODUCING_RESERVATION}`,
-          base: SHA1,
-          head,
-          ref: CANDIDATE_REF,
-        },
-        publishedHead: head,
-      },
+      candidateState: { preserved: null, publishedHead: null },
     },
     nextStep: "review",
     counters: { attempts: 1, retries: 0, reviewRounds: 1 },
@@ -693,14 +698,14 @@ function parkedCandidateRecord(index: number): WorkRecordV1 {
 }
 
 Deno.test(
-  "ci approval: parked records are filtered before the three-candidate slice",
+  "ci approval: incomplete unpublished candidates are filtered before the three-candidate slice",
   async () => {
-    const parked = [0, 1, 2].map(parkedCandidateRecord);
-    // The legacy candidate is LAST: without pre-slice filtering the three
-    // parked records would occupy every approval slot.
-    const rig = makeRig([...parked, candidateRecord()]);
-    let parkedPrReads = 0;
-    for (const record of parked) {
+    const incomplete = [0, 1, 2].map(incompleteCandidateRecord);
+    // The valid candidate is LAST: without pre-slice filtering the three
+    // incomplete records would occupy every approval slot.
+    const rig = makeRig([...incomplete, candidateRecord()]);
+    let incompletePrReads = 0;
+    for (const record of incomplete) {
       const pr = record.target.pr as number;
       const head = record.target.head as string;
       const headRef = record.target.branch as string;
@@ -708,7 +713,7 @@ Deno.test(
         "GET",
         `/repos/ubiquity/sentinel/pulls/${pr}`,
         () => {
-          parkedPrReads++;
+          incompletePrReads++;
           return response(
             200,
             pullBody({ number: pr, headSha: head, headRef }),
@@ -718,12 +723,12 @@ Deno.test(
     }
     const summary = await rig.run();
     assert.deepEqual(summary, { approved: 1, pending: 0, unavailable: 0 });
-    assert.equal(parkedPrReads, 0, "no API call for a parked PR");
+    assert.equal(incompletePrReads, 0, "no API call for an incomplete PR");
     assert.equal(rig.http.posts().length, 1, "one approval POST");
     assert.equal(
       new URL(rig.http.posts()[0]!.url).pathname,
       APPROVE_PATH,
-      "the legacy candidate is approved",
+      "the valid candidate is approved",
     );
     assert.deepEqual(
       rig.http.calls.map((call) =>
@@ -736,7 +741,7 @@ Deno.test(
         `GET ${PULL_PATH}`,
         `POST ${APPROVE_PATH}`,
       ],
-      "only the legacy PR is ever read",
+      "exactly the valid fourth record is read and approved",
     );
   },
 );
