@@ -54,6 +54,12 @@ const HTTP_DATE = new RegExp(
     ")$",
 );
 
+/** RFC-850 date shape, with the two-digit year captured for resolution. */
+const RFC850_DATE = new RegExp(
+  `^(?:${HTTP_DATE_WEEKDAY_FULL}), \\d{2}-(?:${HTTP_DATE_MONTH})-(\\d{2}) ` +
+    `\\d{2}:\\d{2}:\\d{2} GMT$`,
+);
+
 /** Outcome of evaluating one server hint header. */
 type HintResult =
   | { kind: "valid"; deadline: number }
@@ -164,7 +170,7 @@ function evalRetryAfter(value: string, observedAt: number): HintResult {
     return evalSecondsDelta(value, observedAt);
   }
   if (HTTP_DATE.test(value)) {
-    const deadline = Date.parse(value);
+    const deadline = Date.parse(resolveRfc850Year(value, observedAt));
     if (Number.isNaN(deadline)) return { kind: "malformed" };
     if (!Number.isSafeInteger(deadline)) {
       return { kind: "unrepresentable" };
@@ -172,6 +178,32 @@ function evalRetryAfter(value: string, observedAt: number): HintResult {
     return { kind: "valid", deadline };
   }
   return { kind: "malformed" };
+}
+
+/** Resolve an RFC-850 year using the observation clock and RFC 9110's rule. */
+function resolveRfc850Year(value: string, observedAt: number): string {
+  const match = RFC850_DATE.exec(value);
+  if (match === null) return value;
+
+  const observed = new Date(observedAt);
+  const observedYear = observed.getUTCFullYear();
+  if (!Number.isInteger(observedYear)) return value;
+
+  let year = Math.floor(observedYear / 100) * 100 + Number(match[1]);
+  const withCandidateYear = (candidateYear: number): string =>
+    value.replace(`-${match[1]} `, `-${candidateYear} `);
+  const candidateDeadline = Date.parse(withCandidateYear(year));
+  const fiftyYearsAgo = new Date(observedAt);
+  fiftyYearsAgo.setUTCFullYear(observedYear - 50);
+  const fiftyYearsAhead = new Date(observedAt);
+  fiftyYearsAhead.setUTCFullYear(observedYear + 50);
+
+  if (candidateDeadline > fiftyYearsAhead.getTime()) {
+    year -= 100;
+  } else if (candidateDeadline < fiftyYearsAgo.getTime()) {
+    year += 100;
+  }
+  return withCandidateYear(year);
 }
 
 /** Evaluate a strict decimal seconds delta; huge values are unrepresentable. */
