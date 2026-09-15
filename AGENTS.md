@@ -9,8 +9,10 @@ identity and isolated worker lanes are invariants. Preserve unrelated work.
   plus a separate deterministic Deno release controller with exclusive release
   ownership. Parallel development workers do not imply parallel runtime agents.
 - Use Deno and TypeScript. Define shared contracts before parallel implementation.
-- Keep model admission behind durable rolling-hour and rolling-seven-day limits;
+- During development, cap shared model admission at 120 starts per rolling hour
+  with no weekly cap, as directed on 2026-09-15. Preserve durable reservations;
   review requests, retries and continuations count. No quota/model fallback.
+- Sentinel runs as a cron-triggered GitHub Actions job.
 - Preserve runtime implementation model gpt-5.6-luna with max reasoning. Local
   DSH implementation follows the current global deepseek-harness.md playbook;
   it cannot change the runtime model policy.

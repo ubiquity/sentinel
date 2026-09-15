@@ -35,7 +35,8 @@ export const REPO_2 = {
 
 export interface BudgetLimits {
   perHour: number;
-  perSevenDays: number;
+  /** Numeric rolling weekly cap, or explicit null for no weekly cap. */
+  perSevenDays: number | null;
 }
 
 /** Minimal valid config via the frozen parser; explicit synthetic caps only. */

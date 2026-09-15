@@ -8,6 +8,7 @@
 import assert from "node:assert/strict";
 
 import { HOUR_WINDOW_MS, RollingStartBudget } from "../../src/budget/mod.ts";
+import { canonicalStringify } from "../../src/contracts/canonical.ts";
 import { createRepairStateStore, DenoGitRunner } from "../../src/state/mod.ts";
 import type { GitRunnerV1 } from "../../src/state/mod.ts";
 import type { RepairStateSnapshotV1 } from "../../src/contracts/state-snapshots.ts";
@@ -27,6 +28,7 @@ import {
   REPO_2,
   repositoryConfig,
   reserveRequest,
+  seededReservation,
 } from "./helpers.ts";
 
 const HERE = new URL(import.meta.url);
@@ -280,6 +282,107 @@ Deno.test("budget: invalid identity inputs are invalid at the real state boundar
     // None of the rejected requests ever created or wrote the state branch.
     const absent = await storeAt(ctx, "b").readRepair();
     assert.ok(absent.ok && absent.value.status === "absent");
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+Deno.test("budget: null weekly cap uses only the rolling hour and preserves every charge", async () => {
+  const ctx = await makeCtx("null-weekly");
+  try {
+    const clock = new FakeClock(T0);
+    const store = storeAt(ctx, "a");
+    const LIMITS = { perHour: 120, perSevenDays: null } as const;
+    const configSet = [
+      repositoryConfig(REPO, LIMITS),
+      repositoryConfig(REPO_2, LIMITS),
+    ];
+    // 119 charges inside the rolling hour; 200 more inside the week but
+    // outside the hour (more than the retired 168 weekly cap).
+    const inHour = Array.from(
+      { length: 119 },
+      (_value, index) =>
+        seededReservation(`in-hour-${String(index).padStart(3, "0")}`, {
+          createdAt: T0 - 1_000,
+        }),
+    );
+    const olderInWeek = Array.from(
+      { length: 200 },
+      (_value, index) =>
+        seededReservation(`older-${String(index).padStart(3, "0")}`, {
+          createdAt: T0 - 2 * HOUR_WINDOW_MS - index * 60_000,
+        }),
+    );
+    const seeded = [...inHour, ...olderInWeek];
+    const seed: RepairStateSnapshotV1 = {
+      version: "v1",
+      kind: "repair_state_snapshot",
+      stateHead: null,
+      sequence: 1,
+      updatedAt: T0,
+      incidents: [],
+      evidence: [],
+      work: [],
+      reservations: seeded,
+      reviews: [],
+      replays: [],
+      releaseRequests: [],
+      githubCooldowns: [],
+    };
+    const written = await store.writeRepair(seed, null);
+    assert.ok(written.ok && written.value.status === "applied");
+
+    const controller = budgetAt(clock, store, configSet);
+    const admitted = await controller.reserveModelStart(
+      reserveRequest("task:open120", { repository: REPO_2 }),
+    );
+    assert.ok(admitted.status === "admitted", JSON.stringify(admitted));
+
+    // The durable state carries every historical charge byte-for-byte plus
+    // the one appended admission.
+    const read = await storeAt(ctx, "b").readRepair();
+    assert.ok(read.ok && read.value.status === "found");
+    if (read.ok && read.value.status === "found") {
+      const persisted = read.value.snapshot.reservations;
+      assert.equal(persisted.length, seeded.length + 1);
+      const persistedById = new Map(
+        persisted.map((entry) => [entry.id, entry] as const),
+      );
+      for (const entry of seeded) {
+        const row = persistedById.get(entry.id);
+        assert.ok(row, `missing persisted reservation ${entry.id}`);
+        assert.equal(canonicalStringify(row), canonicalStringify(entry));
+      }
+      const admittedRow = persistedById.get(admitted.reservation.id);
+      assert.ok(
+        admittedRow,
+        `missing admitted reservation ${admitted.reservation.id}`,
+      );
+      assert.equal(
+        canonicalStringify(admittedRow),
+        canonicalStringify(admitted.reservation),
+      );
+      assert.equal(
+        admittedRow.repository.installationId,
+        REPO_2.installationId,
+      );
+    }
+
+    // The hour is full: the next start defers until the oldest relevant
+    // in-hour charge exits, regardless of the older weekly history.
+    const deferred = await controller.reserveModelStart(
+      reserveRequest("task:open121"),
+    );
+    assert.equal(deferred.status, "deferred", JSON.stringify(deferred));
+    if (deferred.status === "deferred") {
+      assert.equal(deferred.reason, "cap_limit");
+      assert.equal(deferred.retryAt, T0 - 1_000 + HOUR_WINDOW_MS);
+    }
+    clock.set(T0 - 1_000 + HOUR_WINDOW_MS);
+    const afterExit = await controller.reserveModelStart(
+      reserveRequest("task:open122"),
+    );
+    assert.equal(afterExit.status, "admitted", JSON.stringify(afterExit));
   } finally {
     await ctx.cleanup();
   }
