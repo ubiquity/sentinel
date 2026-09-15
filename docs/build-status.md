@@ -2,7 +2,7 @@
 
 ## Active task register — Astra owned
 
-Updated 2026-09-15 20:27 UTC. This is the only authoritative acceptance ledger.
+Updated 2026-09-15 20:34 UTC. This is the only authoritative acceptance ledger.
 The goal remains incomplete: autonomous GitHub Actions repair against Sentinel,
 then the separately authorized ai.ubq.fi target. Only the current GPT-6 Astra
 integration owner may change scope, status, acceptance or write ownership here.
@@ -12,6 +12,20 @@ or superseded drafts, is retained in this file at Git commit
 `74e67ec5a55fdd273f5ef2b56a477ddb27bd3072`. Read it with
 `git show 74e67ec5a55fdd273f5ef2b56a477ddb27bd3072:docs/build-status.md`.
 This compaction changes no acceptance decision and creates no second ledger.
+
+Continuation verification at20:34: canonical3536daf is clean; M15 remains clean
+at9cc379d; M14 has only its ten owned changes; no process has a worker-lane cwd.
+Fresh saved evidence b4503a79-4207-4b13-95f5-824ab7a8f1b4 confirms M14's final
+preserver prerequisite passed51tests/0failures, child0, executed9708ms.
+V8e settled; source inspection confirms uncertainty is set before validation
+and retained on throw. Its live process attestation was missed; persisted
+Flash/max/workspace-write/ask and production launch command are proved.
+M15 CI35019235545/35019241504 failed five positive fixtures (1122passed/5failed).
+Fresh read-only audit mapped six timing literals in three integration files;
+forty minutes restores former admission headroom without weakening guards.
+Primary reread playbook hashfc44ca6e and assigns those exact edits under immutable
+m15-assignment-review-fixtures-v1.md. No other M15 writer is active.
+M17 V3 settled; wait for corrected final PR70 head before one literal rebind.
 
 ## Canonical identity and policy
 
