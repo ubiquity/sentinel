@@ -75,7 +75,14 @@ The authentic runtime review FAILED TO PRODUCE A VALIDATED RESULT:
 - Observation artifact is unavailable; no completed authentic receipt exists.
   Preserve this charge and original operation. Do not resubmit it or merge.
 - Read-only `hosted_failure_acceptance_audit` is diagnosing saved runtime
-  evidence and whether observation-only recovery is possible.
+  evidence and whether observation-only recovery is possible. At20:13 it found
+  121 reasoning records, zero final messages, no saved completed turn and zero
+  persisted threads (ephemeral review). HTTP200 streamed until19:54:27 without
+  saved auth/transport error. The unavailable journal at19:54:36.427 matches the
+  600-second host bound minus close reserve. Deadline intervention is strongly
+  supported; exact terminal subtype was discarded and remains unproved.
+  Observation-only recovery is unavailable. A scoped review-window correction
+  is under read-only assessment; no unchanged request or charge reset.
 
 [PR67](https://github.com/ubiquity/sentinel/pull/67) remains the aggregate
 canonical history delivery. Its prior authentic review failed before a model
@@ -141,8 +148,19 @@ preservation. Worker reports no tests, children, probes or live effects; one
 final formatter. Primary diff check passed; checks and audit remain pending.
 Primary found a required correction: local loader must not classify every Git
 nonzero, unreadable mapping or mismatched mapping as positive `not_found`.
-Fresh no-history `candidate_preserver_acceptance_audit` is checking the remaining
-adapter contract. Do not accept V8 or start dependent wiring before corrections.
+Fresh no-history `candidate_preserver_acceptance_audit` requires full refresh
+restore binding, safe settlement-aware scratch retention and faithful fixtures.
+GPT evidence `8ed82c6f-69db-4289-818e-de60cc7cfffc` failed with 46 passed / 3 failed
+in 11,424 ms (race, dropped injected runtime, relative fixture-root setup).
+V8 used 144 tool calls, exceeding its 100-call assignment; preserve that deviation.
+V8b owns only the two host files and their two test files under immutable
+`m14-assignment-v8b.md`, max65 calls / expected10 minutes. Parent3929686 and its
+direct descendants are absent; transfer source ownership only to this correction.
+No V8 acceptance or dependent wiring until its known defects are corrected.
+V8b launched20:13 as exec60647/PID3960889 in the same lane; live production/cwd/
+credential-presence proof is `m14-launch-v8b.json`. Persisted session
+`b14d1ca0-1834-4aa5-9636-297b024b6a00` and stream
+`bfcbecf1-74a3-4bad-bf26-d24a8eba4953` confirm Flash/max/workspace-write/ask.
 
 Next serial work: preserve → publish and acknowledge → refresh → preserve/publish
 successor → one central current-base/current-publication review gate before
