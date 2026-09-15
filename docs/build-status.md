@@ -2,12 +2,90 @@
 
 ## Active task register — Astra owned
 
-Updated 2026-09-15 23:06 UTC. This is the only authoritative acceptance ledger.
+Updated 2026-09-15 23:29 UTC. This is the only authoritative acceptance ledger.
 The goal remains incomplete: autonomous GitHub Actions repair against Sentinel,
 then the separately authorized ai.ubq.fi target. Only the current GPT-6 Astra
 integration owner may change scope, status, acceptance or write ownership here.
 
 ### Current checkpoint
+
+- At23:32 V16c settled exec34788/PID258323 exit0/completed,17calls/4edits,
+  one permitted two-file formatter pass, no tests/probes/children. Persisted
+  9e95729a/stream51cd0e9d proves Flash/max/workspace-write/ask; live process
+  attestation proves exact cwd/production/credential presence (PID258309 is
+  the parent shell). GPT02339353-0501-4b73-89d9-da9d16d9b14e passed all eight
+  real-Git legacy loss proof cases, child0,4198ms. Lint841129da-547e-4e56-acbb-
+  758b9c01c9d8 and formatf26ed537-e7a0-4621-8b0d-c198d7302fcf also passed.
+  Primary inspected the exact three callback corrections, one removed unused
+  import, two helper formatting differences, contract and same-port wiring.
+  This accepts V16 proof for ancestry integration; normal recovery remains
+  V17, unimplemented. Fresh PR70 unchanged864d7a0 OPEN; supervisor35035719004
+  succeeded at launchera076b17f. No live write/review/installation occurred.
+
+- Continuation at23:29 verified canonical/M14 d9cdf821, exact lanes and all
+  existing dirty paths; no DSH writer or test active. Fresh no-history Astra
+  legacy_loss_proof_audit returned PASS with fixture correction, no substantive
+  source defect. All three overridden counting callbacks must retain calls.
+  Saved lint b88267f9 reports only unused portOk import in causal-capture_test.ts;
+  saved format a8fe603f passed. V16c owns those two test files only, immutable
+  assignment30calls; proof source and helpers frozen. DSH playbook2026-09-14.2
+  hashfc44ca6e read before launch. V17 draft receives independent read-only
+  fixture-scope check while correction runs. PR70 permission remains unanswered;
+  no extra review, merge or installation. Completed Pro job reused, no new call.
+
+- V16b settled exit0/completed, eight calls/one import edit and one permitted
+  two-file formatter pass. Persisted d212c953/stream0bfa4cfb and livePID251200
+  prove production/Flash/max/workspace-write/ask. GPT bdc6f96f-19d7-4dbe-a257-
+  f361e6eb50d5 executed eight proof cases: seven passed, one failed, child1,
+ 4458ms. Real positive loss, binding/source/ref/PR/review, fetched-history,
+  cooldown and state drift cases passed. Sole failure is local availability
+  fixture at3298: loader-call assertion expected1, observed0. Fresh no-history
+  Astra legacy_loss_proof_audit independently audits the frozen V16b patch
+ 50671184 and that failure before any correction. No source writer/test active;
+  primary ran the separate existing format gate after its known CI correction.
+  The two-CAS loop remains an unlaunched draft, not implemented or accepted.
+
+- At23:20 proof capture348ce98c-b6d1-4438-b207-8805b5a38b81 failed before
+  execution, child1,4356ms:21 TS2304 diagnostics are all missing SHA2/SHA3
+  imports in the new fixture. V16b owns only those two imports plus one combined
+  formatter pass on that file and the CI-identified helpers.ts differences.
+  Source, proof behavior and assertions frozen. Immutable V16b assignment,
+ 25calls; no test remains active. This is not a failing runtime proof yet.
+
+- At23:20 V16 settled exit0/completed,70calls/14edits, one permitted formatter
+  pass, no tests/probes/children. Persisted8d527468/streamec4d62f2 and live
+  PID240050 attest required launch identity/settings; no writer remains.
+  Four owned paths changed; frozen private patchcac8b3b9. Primary inspected
+  exact local-loader absence, fresh authenticated task-ref fetch, H0/B0/review
+  binding, post-proof rechecks, same-port composition and absence of state/ref
+  writes. GPT m14-legacy-loss-proof exec49064 started23:20, expected two minutes.
+  Inputs frozen. Unlaunched V17 draft uses normal pre-ranking two-CAS recovery,
+  guarded proof heads, real state ancestry and ordinary attempt4 admission.
+  Fresh test-scope mapping selected existing loop_test.ts real-store rig; no
+  new large two-process fixture. Guard mixed clean/P2 reviews and avoid a
+  no-op higher candidate starving another recoverable candidate. V17 will
+  also format the two existing helpers.ts wrapping differences found by CI.
+
+- At23:10 V16 is the sole M14 writer, exec40692/PID240050; live attestation
+  m14-launch-v16.json and persisted8d527468 prove exact cwd, production,
+  credential presence, Flash/max/workspace-write/ask. No tests run during it.
+  Fresh GitHub reads: PR70 remains OPEN864d7a0 with both CI runs successful;
+  only issues48/61 are opted in. Supervisor35033906256 succeeded at launcher
+  a076b17f. Remote development remains8c861f5, repair0469fa633913f1a99051182b2864549f4fd96abc,
+  release3d91cf331fe3f403403c5781924e7c85b94c93d2. No new live write occurred.
+  Canonical CI35034181137 failed only its format gate: tests/repair/helpers.ts
+  has two wrapping differences from the earlier fixture work. Complete raw log
+  canonical-d9cdf82-ci-35034181137.log is private. The next settled fixture/loop
+  assignment must apply one formatter pass there; do not rerun unchanged CI.
+
+- Canonical d9cdf8213928549ce86ec82866abf558863ae679 integrates dc3faba
+  by ancestry and the frozen legacy-loss design; both canonical and M14 pushed.
+  M14 fast-forwarded to this exact clean base. V16 owns only ports.ts,
+  actions-candidates.ts, composeLocalGitHub wiring in local.ts, and focused
+  actions-candidates tests for the trusted read-only loss proof. The immutable
+  m14-assignment-v16-legacy-loss-proof.md limits it to160calls and one formatter
+  pass. Normal loop/selector and live state are frozen; the two-CAS consumer
+  follows only after this proof is independently checked and integrated.
 
 - V15b settled exit0/completed at23:04, nine calls/one edit, no checks/probes/
   formatter/children. Persisted dda71563/stream16cd1bc8 and live PID228453
