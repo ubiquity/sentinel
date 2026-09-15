@@ -776,16 +776,25 @@ async function pollIntake(
     }
     for (const summary of page.value.items) {
       const existing = context.snapshot.incidents.find(
-        (incident) => incident.fingerprint === summary.fingerprint,
+        (incident) =>
+          incident.id === summary.id &&
+          incident.fingerprint === summary.fingerprint &&
+          sameRepositoryIdentity(incident.repository, summary.repository),
       );
       const work = context.snapshot.work.find(
-        (record) => record.fingerprint === summary.fingerprint,
+        (record) =>
+          record.source.kind === "incident" &&
+          record.related.incidentId === summary.id &&
+          record.fingerprint === summary.fingerprint &&
+          sameRepositoryIdentity(record.repository, summary.repository),
       ) ?? null;
       // Old reader: a record carrying V1 candidate state is parked. Its
       // stored summary and record bytes must not change, so this incoming
       // summary is skipped entirely BEFORE any newSummaries.set or
-      // applyIncidentSummary. The record lookup above still searches the
-      // entire snapshot, so the parked task is never recreated.
+      // applyIncidentSummary. The lookups above match the exact incident scope
+      // (incident id + fingerprint + repository identity), so a parked task
+      // from a different incident or repository can never suppress this
+      // summary, and this exact parked task is never recreated.
       if (work !== null && hasCandidateState(work)) continue;
       if (existing !== null && existing !== undefined) {
         // Nondecreasing refresh of the stored summary.
