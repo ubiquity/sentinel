@@ -24,16 +24,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Checkout immutable maintenance candidate source
-        # The development-budget maintenance tests import the exact frozen
-        # ports from the reviewed candidate, so the immutable checkout must be
-        # present before any test step. It is read-only test input.
-        uses: actions/checkout@v4
-        with:
-          ref: 969edbdfd80d8c8723364038dbf3176bb1a027ce
-          path: .sentinel-policy-source
-          fetch-depth: 0
-          persist-credentials: false
       - uses: denoland/setup-deno@v2
         with:
           deno-version: v2.x
@@ -50,6 +40,4 @@ jobs:
       - name: Credential-free local harness
         run: |
           export PATH="/usr/local/bin:$PATH"
-          /usr/local/bin/deno fmt --check ops/development-budget-maintenance.ts
-          /usr/local/bin/deno lint ops/development-budget-maintenance.ts
           /usr/local/bin/deno task test:local

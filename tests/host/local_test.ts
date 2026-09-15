@@ -541,6 +541,28 @@ const DUMMY_EVIDENCE_REF = "dummy-evidence-ref-marker";
 const DUMMY_CHANGED_PATH = "src/dummy-changed-path-marker.ts";
 const DUMMY_RAW_ERROR = "dummy-raw-error-marker";
 const DUMMY_INVOCATION = "dummy-invocation-marker";
+const DUMMY_PROVIDER = "dummy-provider-marker";
+const DUMMY_THREAD = "dummy-thread-marker";
+const DUMMY_TURN = "dummy-turn-marker";
+const DUMMY_MODEL = "dummy-observed-model-marker";
+const DUMMY_REASONING = "dummy-observed-reasoning-marker";
+
+/** Capture console.log so advisory emission can be asserted and restored. */
+function captureConsoleLog(): { lines: string[]; restore: () => void } {
+  const original = console.log;
+  const lines: string[] = [];
+  console.log = ((...args: unknown[]) => {
+    lines.push(
+      args.map((arg) => typeof arg === "string" ? arg : String(arg)).join(" "),
+    );
+  }) as typeof console.log;
+  return {
+    lines,
+    restore: () => {
+      console.log = original;
+    },
+  };
+}
 
 function modelRequest(): ModelRunRequestV1 {
   return {
@@ -565,6 +587,12 @@ function receipt(
     observedTerminalStatus?: "completed" | "interrupted" | "failed" | null;
     outputChars?: number;
     candidate?: boolean;
+    provider?: string;
+    threadId?: string;
+    turnId?: string;
+    observedModel?: string;
+    observedReasoning?: string;
+    durationMs?: number;
   } = {},
 ): PortResultV1<ModelRunReceiptV1> {
   return {
@@ -574,16 +602,16 @@ function receipt(
       outcome: overrides.outcome ?? "completed",
       actual: {
         evidenceKind: "request-runtime",
-        provider: "sentinel-host",
-        threadId: "thread-1",
-        turnId: "turn-1",
+        provider: overrides.provider ?? "sentinel-host",
+        threadId: overrides.threadId ?? "thread-1",
+        turnId: overrides.turnId ?? "turn-1",
         terminalOrigin: overrides.terminalOrigin ?? "runtime",
         observedTerminalStatus: overrides.observedTerminalStatus !== undefined
           ? overrides.observedTerminalStatus
           : "completed",
-        observedModel: "gpt-5.6-luna",
-        observedReasoning: "max",
-        durationMs: 1_234,
+        observedModel: overrides.observedModel ?? "gpt-5.6-luna",
+        observedReasoning: overrides.observedReasoning ?? "max",
+        durationMs: overrides.durationMs ?? 1_234,
         outputChars: overrides.outputChars ?? 100,
       },
       candidate: overrides.candidate === false ? null : {
@@ -603,6 +631,7 @@ Deno.test(
       dir: ".",
       prefix: "sentinel-model-results-",
     });
+    const captured = captureConsoleLog();
     try {
       const request = modelRequest();
       const first = await writeLocalModelResult(
@@ -770,6 +799,267 @@ Deno.test(
       assert.equal(portFailure.reason, "runtime_error");
       assert.equal(portFailureText.includes(DUMMY_RAW_ERROR), false);
     } finally {
+      captured.restore();
+      await Deno.remove(stateRoot, { recursive: true });
+    }
+  },
+);
+
+const SAFE_DIAGNOSTIC_KEYS = [
+  "base",
+  "candidatePresent",
+  "durationMs",
+  "errorKind",
+  "kind",
+  "observedAt",
+  "observedTerminalStatus",
+  "outcome",
+  "outputChars",
+  "reason",
+  "taskKey",
+  "terminalOrigin",
+  "version",
+];
+
+Deno.test(
+  "local model results: the advisory summary is strict and never leaks private fields",
+  async () => {
+    const stateRoot = await Deno.makeTempDir({
+      dir: ".",
+      prefix: "sentinel-model-diagnostics-",
+    });
+    const captured = captureConsoleLog();
+    try {
+      const request = modelRequest();
+      const taskKey = await localCheckoutKey(request.taskId);
+      const summary = (): Record<string, unknown> => {
+        const line = captured.lines[captured.lines.length - 1];
+        assert.ok(line !== undefined, "expected one advisory summary line");
+        const parsed = JSON.parse(line as string) as Record<string, unknown>;
+        assert.deepEqual(Object.keys(parsed).sort(), SAFE_DIAGNOSTIC_KEYS);
+        return parsed;
+      };
+
+      // A receipt failure saves the minimal private report and emits exactly one
+      // advisory line carrying only the safe allow-list fields.
+      const failedPath = await writeLocalModelResult(
+        stateRoot,
+        request,
+        receipt({ outcome: "failed", error: DUMMY_RAW_ERROR }),
+        T0,
+      );
+      assert.equal(captured.lines.length, 1);
+      assert.deepEqual(summary(), {
+        version: "v1",
+        kind: "sentinel_model_diagnostic",
+        taskKey,
+        base: SHA1,
+        observedAt: T0,
+        outcome: "failed",
+        reason: "runtime_error",
+        errorKind: null,
+        terminalOrigin: "runtime",
+        observedTerminalStatus: "completed",
+        durationMs: 1_234,
+        outputChars: 100,
+        candidatePresent: true,
+      });
+      const failedPrivate = await Deno.readTextFile(failedPath);
+      assert.equal(
+        (JSON.parse(failedPrivate) as Record<string, unknown>).kind,
+        "local_model_result",
+      );
+      assert.equal(failedPrivate.includes(DUMMY_RAW_ERROR), false);
+      assert.equal((await Deno.stat(failedPath)).mode! & 0o777, 0o600);
+
+      // The output bound and the exact loop marker keep their classifications.
+      await writeLocalModelResult(
+        stateRoot,
+        request,
+        receipt({ outcome: "failed", outputChars: 400_001 }),
+        T0,
+      );
+      assert.equal(summary().reason, "output_limit");
+      assert.equal(summary().outcome, "failed");
+      await writeLocalModelResult(
+        stateRoot,
+        request,
+        receipt({ outcome: "failed", error: LOOP_STOP_MARKER }),
+        T0,
+      );
+      assert.equal(summary().reason, "failed_command_loop");
+
+      // A host timeout preserves the observed null terminal status and the
+      // absence of a candidate.
+      await writeLocalModelResult(
+        stateRoot,
+        request,
+        receipt({
+          outcome: "failed",
+          terminalOrigin: "host-timeout",
+          observedTerminalStatus: null,
+          error: DUMMY_RAW_ERROR,
+          candidate: false,
+        }),
+        T0,
+      );
+      assert.deepEqual(summary(), {
+        version: "v1",
+        kind: "sentinel_model_diagnostic",
+        taskKey,
+        base: SHA1,
+        observedAt: T0,
+        outcome: "failed",
+        reason: "host_timeout",
+        errorKind: null,
+        terminalOrigin: "host-timeout",
+        observedTerminalStatus: null,
+        durationMs: 1_234,
+        outputChars: 100,
+        candidatePresent: false,
+      });
+
+      // Arbitrary private receipt content (provider, thread/turn identity,
+      // observed model/reasoning) never reaches the advisory line, while the
+      // private report keeps that identity and still omits the raw error.
+      const maliciousPath = await writeLocalModelResult(
+        stateRoot,
+        request,
+        receipt({
+          provider: DUMMY_PROVIDER,
+          threadId: DUMMY_THREAD,
+          turnId: DUMMY_TURN,
+          observedModel: DUMMY_MODEL,
+          observedReasoning: DUMMY_REASONING,
+          error: DUMMY_RAW_ERROR,
+        }),
+        T0,
+      );
+      const emittedText = JSON.stringify(summary());
+      for (
+        const marker of [
+          DUMMY_PROVIDER,
+          DUMMY_THREAD,
+          DUMMY_TURN,
+          DUMMY_MODEL,
+          DUMMY_REASONING,
+          DUMMY_RAW_ERROR,
+          DUMMY_ISSUE_BODY,
+          DUMMY_EVIDENCE_REF,
+          DUMMY_CHANGED_PATH,
+          DUMMY_INVOCATION,
+          SHA3,
+          "checkpointSha",
+        ]
+      ) {
+        assert.equal(
+          emittedText.includes(marker),
+          false,
+          `advisory summary never carries ${marker}`,
+        );
+      }
+      assert.equal(summary().candidatePresent, true);
+      const maliciousPrivate = await Deno.readTextFile(maliciousPath);
+      for (
+        const marker of [
+          DUMMY_PROVIDER,
+          DUMMY_THREAD,
+          DUMMY_TURN,
+          DUMMY_MODEL,
+          DUMMY_REASONING,
+        ]
+      ) {
+        assert.equal(
+          maliciousPrivate.includes(marker),
+          true,
+          `private report keeps ${marker}`,
+        );
+      }
+      assert.equal(
+        maliciousPrivate.includes(DUMMY_RAW_ERROR),
+        false,
+        "the private report never keeps the raw error",
+      );
+
+      // A typed port error keeps only its kind, with a null terminal and
+      // counters, and its private report is still saved.
+      const portFailure: PortResultV1<ModelRunReceiptV1> = {
+        ok: false,
+        error: { kind: "unavailable", detail: DUMMY_RAW_ERROR },
+      };
+      const portPath = await writeLocalModelResult(
+        stateRoot,
+        request,
+        portFailure,
+        T0,
+      );
+      assert.deepEqual(summary(), {
+        version: "v1",
+        kind: "sentinel_model_diagnostic",
+        taskKey,
+        base: SHA1,
+        observedAt: T0,
+        outcome: "port_error",
+        reason: "runtime_error",
+        errorKind: "unavailable",
+        terminalOrigin: null,
+        observedTerminalStatus: null,
+        durationMs: null,
+        outputChars: null,
+        candidatePresent: false,
+      });
+      assert.equal(
+        (await Deno.readTextFile(portPath)).includes(DUMMY_RAW_ERROR),
+        false,
+        "the private port-error report never keeps the raw error",
+      );
+
+      // Malformed counters or enums suppress only the advisory summary; the
+      // private 0600 report is still saved unchanged.
+      const before = captured.lines.length;
+      for (
+        const mutate of [
+          (actual: Record<string, unknown>) => {
+            actual.durationMs = -1;
+          },
+          (actual: Record<string, unknown>) => {
+            actual.outputChars = 1.5;
+          },
+          (actual: Record<string, unknown>) => {
+            actual.terminalOrigin = "made-up";
+          },
+          (actual: Record<string, unknown>) => {
+            actual.observedTerminalStatus = "unknown";
+          },
+        ]
+      ) {
+        const broken = receipt();
+        assert.equal(broken.ok, true);
+        if (!broken.ok) throw new Error("unreachable");
+        mutate(broken.value.actual as unknown as Record<string, unknown>);
+        const brokenPath = await writeLocalModelResult(
+          stateRoot,
+          request,
+          broken,
+          T0,
+        );
+        assert.equal(
+          captured.lines.length,
+          before,
+          "an invalid projection emits no summary",
+        );
+        assert.equal((await Deno.stat(brokenPath)).isFile, true);
+        assert.equal((await Deno.stat(brokenPath)).mode! & 0o777, 0o600);
+        assert.equal(
+          (JSON.parse(await Deno.readTextFile(brokenPath)) as Record<
+            string,
+            unknown
+          >).kind,
+          "local_model_result",
+        );
+      }
+    } finally {
+      captured.restore();
       await Deno.remove(stateRoot, { recursive: true });
     }
   },
