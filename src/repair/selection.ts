@@ -14,7 +14,6 @@
 import type { WorkItemId } from "../contracts/brands.ts";
 import type { RepositoryConfigV1 } from "../contracts/repository-config.ts";
 import type { RepairStateSnapshotV1 } from "../contracts/state-snapshots.ts";
-import { hasCandidateState } from "../contracts/work-record.ts";
 import type { WorkRecordV1 } from "../contracts/work-record.ts";
 
 /** One implementation writer globally; at most three unfinished target PRs. */
@@ -41,9 +40,6 @@ export function isEligible(
   now: number,
 ): boolean {
   if (record.nextStep === "done" || record.nextStep === "blocked") return false;
-  // V1 candidate state parks the record: the candidate writer is unavailable
-  // in this reader, so no action path may execute for it.
-  if (hasCandidateState(record)) return false;
   if (isWaiting(record, now)) return false;
   if (!dependenciesDone(record, snapshot)) return false;
   return true;
@@ -80,14 +76,6 @@ export function rankEligibleWork(
   const skipped: Record<string, string> = {};
 
   for (const record of snapshot.work) {
-    // Parked V1 candidate work is excluded first, with one explicit reason for
-    // every phase — including terminal/blocked records the future writer may
-    // have finished. It still counts in openPrCount and dependency resolution:
-    // parking never frees WIP or unblocks dependents.
-    if (hasCandidateState(record)) {
-      skipped[record.id] = "candidate_writer_unavailable";
-      continue;
-    }
     if (record.nextStep === "done") {
       skipped[record.id] = "terminal";
       continue;

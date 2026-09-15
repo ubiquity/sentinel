@@ -37,13 +37,14 @@
  *    the same real restorer/loop/publication/refresh consumers; its model port
  *    throws on any call. Fixture context travels on stdin JSON only.
  *
- * Desired behavior asserted here: H1 is restored into the fresh object store,
- * published to the owned branch and incorporated with B1 before review, with
- * zero new implementation calls and historical reservations unchanged. On this
- * base the child's real recovery consumer cannot obtain H1 and the assertion
- * fails at real recovery/publication, not at test setup. Every assertion
- * message retains the producer head, the actual old remote head and the saved
- * state so the failing production boundary is identifiable.
+ * Asserted behavior: the real production preserver retains H1 under its
+ * operation-bound ref during the bounded producer handoff, and the fresh child
+ * restores H1 into an empty object store, publishes it to the owned branch,
+ * integrates B1, preserves the exact H2 successor and admits the refreshed
+ * head to review — with zero new implementation calls and historical
+ * reservations unchanged. Every assertion message retains the producer head,
+ * the actual old remote head and the saved state so a failing production
+ * boundary is identifiable.
  *
  * No network, no credentials, no model call, no GitHub write, no deployment.
  */
@@ -65,7 +66,10 @@ import {
   unavailableIncidents,
   unavailableReplay,
 } from "../../src/host/local.ts";
-import { createActionsCandidateRestorer } from "../../src/host/actions-candidates.ts";
+import {
+  createActionsCandidateRestorer,
+  createCandidatePreserver,
+} from "../../src/host/actions-candidates.ts";
 import { composeGitHubHost } from "../../src/host/github.ts";
 import { runRepairEntrypoint } from "../../src/main.ts";
 import { RollingStartBudget } from "../../src/budget/mod.ts";
@@ -84,6 +88,7 @@ import {
 import {
   type CandidateHandoffObservationV1,
   type CandidateHandoffScenarioV1,
+  createExactCandidateLoader,
   createRemoteRefReader,
   makeRefReadingTransport,
 } from "./candidate-handoff-worker.ts";
@@ -519,6 +524,28 @@ Deno.test(
         trustedPrAuthor: TRUSTED_AUTHOR,
         ensureCandidateObjects: (value) => candidates.ensure(value),
       });
+      // The REAL candidate-preservation capability on THAT same port, state,
+      // executor, source mirror, cooldown gate and HTTP transport. The exact
+      // object loader verifies the requested SHA (never target.head).
+      host.port.preserveCandidate = createCandidatePreserver({
+        state,
+        gate,
+        token: "candidate-handoff-fixture-token",
+        http: producerHttp,
+        clock,
+        sourcePath: mirrorDir,
+        scratch: home,
+        trustedPath: TRUSTED_PATH,
+        gitExecutable: "git",
+        remoteUrl: `file://${remoteGitDir}`,
+        apiBaseUrl: "https://api.github.com",
+        port: host.port,
+        protectedPaths: config.protectedPaths,
+        ensureLocalCandidate: createExactCandidateLoader({
+          sourcePath: mirrorDir,
+          env,
+        }),
+      });
 
       const produced: GitSha[] = [];
       const model = new ProducerModel(async () => {
@@ -645,9 +672,9 @@ Deno.test(
       // Semantic handoff cut: continue with at most eight one-step production
       // calls until the bare remote actually retains the candidate at exactly
       // H1 under the content-addressed candidate namespace. The fixture only
-      // observes real refs through `git for-each-ref`; it never writes them. An
-      // absent ref is the expected pre-fix observation and must not become a
-      // setup failure.
+      // observes real refs through `git for-each-ref`; it never writes them. A
+      // ref that is still absent after the bounded handoff is a real
+      // preservation failure reported by the assertions below.
       // ---------------------------------------------------------------------
       const MAX_HANDOFF_STEPS = 8;
       let handoffSteps = 0;
@@ -742,8 +769,8 @@ Deno.test(
           "--no-check",
           "--allow-read",
           "--allow-write",
-          "--allow-run=git",
-          "--allow-env=HOME,PATH",
+          "--allow-run",
+          "--allow-env=HOME,PATH,NODE_V8_COVERAGE",
           WORKER_PATH,
         ],
         cwd: ROOT,

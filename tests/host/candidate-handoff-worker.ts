@@ -24,12 +24,13 @@
  * global/system Git config.
  */
 
-import type { GitSha } from "../../src/contracts/brands.ts";
+import type { GitSha, WorkItemId } from "../../src/contracts/brands.ts";
 import type { BudgetReservationV1 } from "../../src/contracts/budget-reservation.ts";
 import {
   type Clock,
   type ImplementationPort,
   portError,
+  portOk,
   type PortResultV1,
 } from "../../src/contracts/ports.ts";
 import type { RepositoryIdentityV1 } from "../../src/contracts/shared.ts";
@@ -46,7 +47,10 @@ import {
 } from "../../src/state/mod.ts";
 import { DurableGitHubCooldownGate } from "../../src/repair/github-cooldown.ts";
 import { candidateBranch, workItemIdForIssue } from "../../src/repair/keys.ts";
-import { createActionsCandidateRestorer } from "../../src/host/actions-candidates.ts";
+import {
+  createActionsCandidateRestorer,
+  createCandidatePreserver,
+} from "../../src/host/actions-candidates.ts";
 import { composeGitHubHost } from "../../src/host/github.ts";
 import {
   createLocalRepositoryConfig,
@@ -149,6 +153,39 @@ export interface CandidateHandoffObservationV1 {
 
 const STATIC_MODEL = "model implementation port must not be called";
 const STATIC_BRANCH = "candidate handoff scenario branch is not exact";
+const STATIC_CANDIDATE_INPUT = "candidate preservation request is invalid";
+const STATIC_CANDIDATE_LOCAL =
+  "candidate preservation exact objects are unavailable";
+
+/**
+ * Trusted exact-object loader for the real preservation boundary.
+ *
+ * It verifies the REQUESTED SHA exists as a commit in this process's trusted
+ * source store and never substitutes another head: the durable
+ * `record.target.head` is deliberately NOT the request identity (during base
+ * refresh H2 preparation the target still points at H1). A missing or
+ * non-matching object is honest `unavailable`, never a fabricated success.
+ */
+export function createExactCandidateLoader(input: {
+  sourcePath: string;
+  env: Record<string, string>;
+}): (taskId: WorkItemId, head: GitSha) => Promise<PortResultV1<void>> {
+  return async (_taskId, head) => {
+    if (typeof head !== "string" || !/^[0-9a-f]{40}$/.test(head)) {
+      return portError("invalid", STATIC_CANDIDATE_INPUT);
+    }
+    const read = await gitRun(input.sourcePath, [
+      "rev-parse",
+      "--verify",
+      "--quiet",
+      `${head}^{commit}`,
+    ], input.env);
+    if (!read.ok || read.stdout.trim() !== head) {
+      return portError("unavailable", STATIC_CANDIDATE_LOCAL);
+    }
+    return portOk(undefined);
+  };
+}
 
 /** Minimal local `git` invocation with an isolated, credential-free child. */
 export async function gitRun(
@@ -443,6 +480,29 @@ export async function runCandidateHandoffWorker(
     baseBranch: scenario.baseBranch,
     trustedPrAuthor: scenario.trustedPrAuthor,
     ensureCandidateObjects: (value) => candidates.ensure(value),
+  });
+  // The real candidate-preservation capability is composed on THAT same port,
+  // state, executor, source store, cooldown gate and HTTP transport: the H2
+  // successor of the base refresh is made durable through this exact consumer
+  // before any task-branch push.
+  host.port.preserveCandidate = createCandidatePreserver({
+    state,
+    gate,
+    token: "candidate-handoff-fixture-token",
+    http,
+    clock,
+    sourcePath: scenario.childSource,
+    scratch: scenario.childScratch,
+    trustedPath,
+    gitExecutable: "git",
+    remoteUrl: scenario.remoteUrl,
+    apiBaseUrl: "https://api.github.com",
+    port: host.port,
+    protectedPaths: config.protectedPaths,
+    ensureLocalCandidate: createExactCandidateLoader({
+      sourcePath: scenario.childSource,
+      env,
+    }),
   });
 
   // Hosted startup loads the moved base before any recovery: fetch ONLY the
