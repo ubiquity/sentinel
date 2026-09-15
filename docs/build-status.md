@@ -2,12 +2,81 @@
 
 ## Active task register — Astra owned
 
-Updated 2026-09-15 21:53 UTC. This is the only authoritative acceptance ledger.
+Updated 2026-09-15 22:27 UTC. This is the only authoritative acceptance ledger.
 The goal remains incomplete: autonomous GitHub Actions repair against Sentinel,
 then the separately authorized ai.ubq.fi target. Only the current GPT-6 Astra
 integration owner may change scope, status, acceptance or write ownership here.
 
 ### Current checkpoint
+
+- At22:28 fresh fixture_last_failure_audit confirmed a fixture-only correction:
+  legacy publication now has exact no-op PREPARED/PREPARED, changing next/PREPARED,
+  and no-op next/next calls; only one remote write, all before the one review.
+  V13b owns that single test assertion/callback in base-refresh_test.ts;30calls,
+  immutable m14-assignment-v13b-legacy-push-sequence.md. Other94 passing cases,
+  source and destructive fixtures stay frozen. GPT will run only the9base-refresh
+  cases because the remaining bytes and their successful evidence are unchanged.
+
+- Continuation verified at22:27: canonical1969ebeb1aef070bc78c2a751bdb0e536bfbf029
+  matches origin; only this primary-owned ledger is dirty. M14 remains49cbd624
+  with exactly six fixture files dirty; no DSH writer or test process survives.
+  V13 settled exit0/completed,83calls/13mutations, persisted ae3d475b/stream2fc4a5a8.
+  Required production/Flash/max/workspace-write/ask evidence remains saved.
+  One permitted formatter pass ran; an unauthorized minor awk line-length check
+  also ran. Preserve that qualification. GPT exec16557 settled: capture
+  88197184-d1e4-490e-871b-765c3b6e2a24 passed94/failed1, child1,139221ms.
+  The sole failure is base-refresh_test.ts:838 expecting the refresh output as
+  the first push. Fresh no-history Astra fixture_last_failure_audit diagnoses
+  the actual lifecycle before correction. All other affected tests, including
+  lost H1/H2 push/review and freshness gates, passed. Frozen patch a46a6cd6
+  remains private. No production source or destructive fixture changed.
+  V14 integration-fixture draft is unlaunched pending this checkpoint.
+  PR70's extra review/merge/install authority remains unanswered; no new action.
+  Read-only legacy-loss scope found a potential existing typed-state route,
+  subject to fresh positive absence/predecessor proof; the exact current legacy
+  base_refresh bridge and admission bound still need diagnosis before coding.
+
+- V13 launch ownership at22:13: only base-refresh/actions-ci/loop/run-bounds/
+  selection test files, exact49cbd62 plus preserved dirty fixture checkpoint.
+  Exec86256/PID72237; m14-launch-v13.json proves exact cwd/production/credential
+  presence. Persisted ae3d475b-23f7-4a20-aacc-0e2bcabaf4f3/stream2fc4a5a8 proves
+  Flash/max/workspace-write/ask. At22:18 it has useful edits in all five owned
+  files,81 calls against140 bound; no test execution before settlement.
+  Independent inspection mapped all10 failures to setup: four PR/CI observation
+  cases, distinct second PR number8, one missing closure lifecycle opt-in, three
+  run-bound exact-ref/PR setups and one parser-invalid null-head/PR11 fixture.
+  Immutable m14-assignment-v13-port-observations.md batches those corrections.
+  New passing loss/gate cases and production source remain frozen. Read-only
+  legacy_loss_disposition_scope maps the next normal-runtime recovery boundary;
+  it has no write/admission authority. No extra PR70 review is authorized yet.
+
+- At22:10 V12b settled exit0/completed, persisted ea0a88ff-5108-4837-8371-
+  79870aaf14f8/stream433e8c73; live PID13680 attestation and header prove required
+  settings. It used67 calls, exceeding60 by7 during useful corrections; no tests
+  or formatter ran. Preserve this deviation, not an unqualified compliant run.
+  GPT ff7bda06-7d1a-403d-96ac-670d406b4834 executed146270ms, child1:
+  85passed/10failed. New H1/H2 push-loss, review-loss and exact freshness gates
+  passed. Four failures are untouched base-refresh/CI fake observations; six
+  remaining fixture setups are under bounded read-only diagnosis. No writer or
+  test remains active. Source and destructive fixtures remain unchanged.
+  V13 port-observation assignment is prepared but not launched; batch the six
+  concrete remaining fixture corrections before that launch. PR70 authority
+  still pending; no review/merge/install or runtime state write occurred.
+
+- At22:00 V12 was stopped at131 calls after exceeding its immutable110-call bound.
+  Exact PID4193888/cwd/production verified before SIGTERM; parent4193874 and
+  worker absent afterwards, no children. Exec76948 exited0 but no completed
+  stream result exists: retain as interrupted partial, not a compliant handback.
+  Four owned test files are dirty; source and destructive fixtures unchanged.
+  GPT capture4a3ac4a6-cd6d-4af9-9748-690510653c49 failed before test execution
+  with one TS2540 (readonly fake capability versus intended method override).
+  Independent fixture inspection found masked PR/ref/capability negatives and
+  seeded PR-number collision. V12b owns only helpers/loop/run-bounds tests for
+  these exact corrections,60-call hard bound. Remaining fixture files follow.
+  Issue48 H0/B0 proof now exists in private issue48-h0-ancestry-v1/receipt.json:
+  empty credential-free store fetched exact0e689889 from the real task ref;
+  1d618965 is a commit and ancestor, and only text.ts/pr_test.ts differ.
+  This does not recover lost51842315 or admit a successor. No live state changed.
 
 - Continuation verified at 21:53 UTC: canonical fe4691b4671bcabd504f3c25f551f10bebf9443e
   matches its published branch; only primary-owned ledger additions are dirty.
@@ -483,7 +552,15 @@ published-head recovery case. Do not fake it with advertised SHAs; leave the tas
 blocked until implemented. The full loss record remains in state Git ancestry.
 
 Issue61 remains independently blocked with an ambiguous pre-receipt failure.
-Its cause is unproved. Do not reset charges or let it stop unrelated eligible work.
+Fresh read-only issue61_blocker_scope confirmed this is distinct from issue48:
+attempt2 reservation96e114 retains null resultId/requested PR/head in its intent;
+ordinary-34993587187-repair.log:307 reports runtime_error/unavailable without a
+trusted receipt. PR63 still contains the two-file RFC-850 fix ataf252716, with
+passing CI34990801355 and unresolved P1 review5212344049. M14 preservation cannot
+resume an unknown result; a byte/test dispute is not a cleared review finding.
+Any future pre-receipt disposition must reconcile existing evidence and preserve
+that ambiguous charge, candidate and review. Its cause is unproved. Do not reset
+charges or let it stop unrelated eligible work.
 
 Issue58 is a verified autonomous delivery: PR62 reviewed candidate `c89f4b1…`,
 review5212089661, passing CI, bot merge at 16:15:06 UTC as runtime `20aae115…`,
