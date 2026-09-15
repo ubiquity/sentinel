@@ -45,7 +45,13 @@ import type {
   ReplayRuntimeV1,
 } from "../replay/runtime.ts";
 import { createReleaseStateStore, DenoGitRunner } from "../state/mod.ts";
-import { ensurePrivateDir, githubGitAuthEnv, joinPath } from "./local.ts";
+import {
+  ensurePrivateDir,
+  githubGitAuthEnv,
+  joinPath,
+  parseLocalModelDiagnosticV1,
+} from "./local.ts";
+import type { LocalModelDiagnosticV1 } from "./local.ts";
 
 /** Exact fixed workflow ref the protected supervisor runs from. */
 export const HOSTED_RUNTIME_WORKFLOW_REF =
@@ -97,6 +103,8 @@ const GIT_TIMEOUT_MS = 10_000;
 const GIT_MAX_OUTPUT_BYTES = 64 * 1024;
 const MAX_DETAIL_CHARS = 4_096;
 const HOSTED_TERMINAL_LOOKING = /"kind"\s*:\s*"hosted_runtime_terminal"/;
+const MAX_DIAGNOSTIC_LINE_CHARS = 2_048;
+const MAX_HOSTED_DIAGNOSTICS = 64;
 
 export type HostedRuntimeJobV1 = "prepare" | "repair" | "finalize";
 
@@ -205,12 +213,31 @@ export type HostedRuntimeLauncherStatusV1 =
   | "failed"
   | "unavailable";
 
+/**
+ * One reconstructed advisory diagnostic. The wrapper kind, the advisory flag
+ * and the execution intent are stamped by this trusted process only: a child
+ * line can never supply them. The nested diagnostic was strictly rebuilt from
+ * the child's own summary by the explicit allow-list parser.
+ */
+export interface HostedModelDiagnosticV1 {
+  version: "v1";
+  kind: "hosted_model_diagnostic";
+  advisory: true;
+  execution: HostedExecutionIntentV1;
+  diagnostic: LocalModelDiagnosticV1;
+}
+
 export interface HostedRuntimeLauncherResultV1 {
   status: HostedRuntimeLauncherStatusV1;
   /** The trusted terminal, or null when no honest proof exists. */
   terminal: HostedRuntimeTerminalV1 | null;
   /** Static diagnostic; never raw child output. */
   detail: string;
+  /**
+   * Reconstructed advisory summaries from settled child stdout. Empty by
+   * default; they never attest health, terminal, settlement or any authority.
+   */
+  diagnostics: HostedModelDiagnosticV1[];
 }
 
 /** Fixed private launcher scratch inside the ignored launcher checkout. */
@@ -298,7 +325,15 @@ async function launchHostedRuntime(
   if (!isNonNegativeSafeInteger(finishedAt) || finishedAt < startedAt) {
     return unavailableResult();
   }
-  return resolveLauncherResult({ run, execution, startedAt, finishedAt });
+  const resolved = resolveLauncherResult({
+    run,
+    execution,
+    startedAt,
+    finishedAt,
+  });
+  // Advisory summaries are attached independently of the resolved status and
+  // never replace the trusted terminal or the existing unhealthy exit.
+  return attachDiagnostics(resolved, run, execution);
 }
 
 interface LauncherTerminalInputV1 {
@@ -392,7 +427,58 @@ function terminalResult(
     detail: outcome === "healthy"
       ? HOSTED_RUNTIME_HEALTHY_DETAIL
       : HOSTED_RUNTIME_FAILED_DETAIL,
+    diagnostics: [],
   };
+}
+
+/**
+ * Scan only a complete bounded untruncated settled child capture for advisory
+ * summaries. Each accepted line is strictly re-parsed through the shared
+ * allow-list, then stamped with the already-verified execution intent; a child
+ * can never supply the wrapper kind, the advisory flag or the execution.
+ * Malformed, oversized, unrecognized or forged records are ignored and never
+ * copied. Nothing is invented from the host duration or the exit code, and a
+ * diagnostic can never create terminal or health proof.
+ */
+function attachDiagnostics(
+  result: HostedRuntimeLauncherResultV1,
+  run: ReplayCommandResultV1,
+  execution: HostedExecutionIntentV1,
+): HostedRuntimeLauncherResultV1 {
+  const diagnostics = scanChildDiagnostics(run, execution);
+  if (diagnostics.length === 0) return result;
+  return { ...result, diagnostics };
+}
+
+function scanChildDiagnostics(
+  run: ReplayCommandResultV1,
+  execution: HostedExecutionIntentV1,
+): HostedModelDiagnosticV1[] {
+  if (run.truncated || !run.settled) return [];
+  if (run.outcome !== "exited" && run.outcome !== "timed_out") return [];
+  const found: HostedModelDiagnosticV1[] = [];
+  const stdout = new TextDecoder().decode(run.stdout);
+  for (const rawLine of stdout.split("\n")) {
+    if (found.length >= MAX_HOSTED_DIAGNOSTICS) break;
+    const line = rawLine.trim();
+    if (line.length === 0 || line.length > MAX_DIAGNOSTIC_LINE_CHARS) continue;
+    let value: unknown;
+    try {
+      value = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const diagnostic = parseLocalModelDiagnosticV1(value);
+    if (diagnostic === null) continue;
+    found.push({
+      version: "v1",
+      kind: "hosted_model_diagnostic",
+      advisory: true,
+      execution,
+      diagnostic,
+    });
+  }
+  return found;
 }
 
 type ChildStatusScanV1 =
@@ -703,6 +789,7 @@ function unavailableResult(): HostedRuntimeLauncherResultV1 {
     status: "unavailable",
     terminal: null,
     detail: HOSTED_RUNTIME_UNAVAILABLE_DETAIL,
+    diagnostics: [],
   };
 }
 
@@ -758,8 +845,12 @@ export async function runHostedRuntimeMain(): Promise<
 
 if (import.meta.main) {
   const result = await runHostedRuntimeMain();
-  // Only the trusted parsed terminal is ever printed; a failed or unavailable
-  // run logs nothing machine-readable and exits nonzero.
+  // Each reconstructed advisory is printed first; it is not evidence. Then
+  // only the trusted parsed terminal is ever printed. A failed or unavailable
+  // run prints no terminal record and exits nonzero.
+  for (const diagnostic of result.diagnostics) {
+    console.log(JSON.stringify(diagnostic));
+  }
   if (result.terminal !== null) console.log(JSON.stringify(result.terminal));
   if (result.status !== "healthy") {
     console.error(result.detail);
