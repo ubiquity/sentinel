@@ -84,6 +84,7 @@ import { DurableGitHubCooldownGate } from "../../src/repair/github-cooldown.ts";
 import {
   DEP_2,
   evidenceFixture,
+  exactCandidateLifecycle,
   FakeClock,
   FakeGithub,
   FakeIncidents,
@@ -211,7 +212,11 @@ Deno.test(
 Deno.test(
   "lifecycle: actual entrypoints drive discovery, work, review, merge, release promotion/acceptance and closure",
   async () => {
-    const rig = await makeRepairRig("lifecycle");
+    const rig = await makeRepairRig("lifecycle", {
+      github: {
+        candidateLifecycle: exactCandidateLifecycle({ head: SHA3 }),
+      },
+    });
     try {
       // Run 1: intake -> evidence -> intended before-failure -> model ->
       // after-pass regression -> deterministic PR -> review request ->
@@ -926,7 +931,11 @@ function secondIncidentEvidence(): ReturnType<typeof incidentEvidence> {
 Deno.test(
   "entrypoint: mandatory drain settles a delayed clean review through the concrete transport port",
   async () => {
-    const rig = await makeRepairRig("drain-concrete-transport");
+    const rig = await makeRepairRig("drain-concrete-transport", {
+      github: {
+        candidateLifecycle: exactCandidateLifecycle({ head: SHA3 }),
+      },
+    });
     try {
       const store = new ReviewRestStore();
       const preparedSessions: PreparedStructuredReviewV1[] = [];
@@ -1095,7 +1104,11 @@ Deno.test(
 Deno.test(
   "entrypoint: drain receives the original hard deadline and the loop keeps its five-minute reserve and model cutoff",
   async () => {
-    const rig = await makeRepairRig("drain-hard-deadline");
+    const rig = await makeRepairRig("drain-hard-deadline", {
+      github: {
+        candidateLifecycle: exactCandidateLifecycle({ head: SHA3 }),
+      },
+    });
     try {
       const start = rig.clock.now();
       const bounds: { latestStartAt: number; settleBy: number }[] = [];
@@ -1176,6 +1189,12 @@ Deno.test(
   "entrypoint: a second implementation task advances while the first review is pending with one writer",
   async () => {
     const rig = await makeRepairRig("dual-task-progress", {
+      github: {
+        candidateLifecycle: exactCandidateLifecycle(
+          { head: SHA3 },
+          { head: SECOND_HEAD },
+        ),
+      },
       model: { heads: [SHA3, SECOND_HEAD] },
     });
     try {

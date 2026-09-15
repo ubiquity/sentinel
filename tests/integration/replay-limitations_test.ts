@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
-import { makeRepairRig } from "./helpers.ts";
+import { exactCandidateLifecycle, makeRepairRig, SHA3 } from "./helpers.ts";
 
 Deno.test("replay limitations block publication", async () => {
   for (const mode of ["before-only", "after-only"] as const) {
     const rig = await makeRepairRig(`limitations-${mode}`, {
+      github: {
+        candidateLifecycle: exactCandidateLifecycle({ head: SHA3 }),
+      },
       replay: mode === "before-only"
         ? { before: { limitations: ["fixture_redacted"] } }
         : { after: { limitations: ["output_truncated"] } },
@@ -90,7 +93,13 @@ Deno.test("replay limitations block publication", async () => {
 });
 
 Deno.test("replay cache identities are immutable", async () => {
-  const baselineRig = await makeRepairRig("replay-cache-baseline");
+  const baselineRig = await makeRepairRig("replay-cache-baseline", {
+    // The baseline candidate must reach the actual after-replay validation
+    // before its immutable identities are re-seeded for the cache cases.
+    github: {
+      candidateLifecycle: exactCandidateLifecycle({ head: SHA3 }),
+    },
+  });
   let baseline: Awaited<ReturnType<typeof baselineRig.snapshot>>;
   try {
     await baselineRig.run();
