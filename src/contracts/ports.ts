@@ -28,6 +28,7 @@ import type {
   ReleaseStateSnapshotV1,
   RepairStateSnapshotV1,
 } from "./state-snapshots.ts";
+import type { CandidatePreservationV1 } from "./work-record.ts";
 import type {
   DeploymentIdentityV1,
   EvidenceRefV1,
@@ -391,6 +392,22 @@ export interface MergeRequestV1 {
 
 export type IssueCloseOutcomeV1 = "closed" | "already_closed";
 
+/**
+ * Trusted candidate-preservation request.
+ *
+ * `candidate` is the exact operation-bound descriptor the trusted host derived
+ * from durable state: its `base`/`head` are the exact candidate commits, its
+ * `operationKey` is the producing operation identity and its `ref` is the
+ * deterministic create-only destination derived from repository/task/operation.
+ * `publishedHead` is the exact previously verified task-branch head, or null.
+ * The repository identity is fixed by the port instance, never by the request.
+ */
+export interface CandidatePreservationRequestV1 {
+  taskId: WorkItemId;
+  candidate: CandidatePreservationV1;
+  publishedHead: GitSha | null;
+}
+
 export interface GitHubPort {
   /**
    * Exact trusted review publisher identity configured for this port. The
@@ -450,6 +467,23 @@ export interface GitHubPort {
     request: MergeRequestV1,
   ): Promise<PortResultV1<MergeOutcomeV1>>;
   closeIssue(issueNumber: number): Promise<PortResultV1<IssueCloseOutcomeV1>>;
+  /**
+   * Required trusted candidate-preservation capability.
+   *
+   * It revalidates the exact durable operation binding, stores the exact
+   * candidate objects in a create-only deterministic remote ref and proves a
+   * fresh empty object store can retrieve them, all through this SAME port
+   * instance (repository identity is fixed here, never by the request).
+   * Success means validated candidate plus exact create-only remote ref and
+   * independently fetched objects in a new empty object store. A generic
+   * transport/auth/CAS/permission/read failure is `unavailable`, never proof
+   * of permanent loss; an existing different ref SHA is `conflict`. A port
+   * without a composed preservation capability returns a static `unavailable`
+   * for every call — it never reports success and never writes.
+   */
+  preserveCandidate(
+    request: CandidatePreservationRequestV1,
+  ): Promise<PortResultV1<void>>;
   /**
    * Bounded lifecycle finalization forwarded to the SAME review-service
    * transport instance the port submits through: admission stops, owned

@@ -153,7 +153,11 @@ async function makeGitCtx(): Promise<GitCtxV1> {
   }
 }
 
-/** Recording GitHub port with an exact controllable remote base/branch ref. */
+/**
+ * Recording GitHub port with exact controllable remote ref and current-PR
+ * observations: only the two refs this task owns are known, and the one open
+ * PR follows the live remote branch mutation.
+ */
 class RefreshGithub extends FakeGithub {
   remoteBase: GitSha;
   remoteBranch: GitSha | null;
@@ -182,19 +186,66 @@ class RefreshGithub extends FakeGithub {
     if (this.refReadFails) {
       return Promise.resolve(portError("unavailable", "ref read failed"));
     }
-    if (ref.endsWith(`refs/heads/${BASE_BRANCH}`)) {
+    if (ref === `refs/heads/${BASE_BRANCH}`) {
+      return Promise.resolve(portOk({ ref, sha: this.remoteBase }));
+    }
+    if (ref === `refs/heads/${BRANCH}`) {
       return Promise.resolve(
-        portOk({ ref, sha: this.remoteBase }),
+        portOk(
+          this.remoteBranch === null ? null : {
+            ref,
+            sha: this.remoteBranch,
+          },
+        ),
       );
     }
-    return Promise.resolve(
-      portOk(
-        this.remoteBranch === null ? null : {
-          ref,
-          sha: this.remoteBranch,
-        },
-      ),
-    );
+    // Any other ref (including a candidate-preservation ref) is unknown: the
+    // task bytes are never advertised under a ref this fixture does not own.
+    return Promise.resolve(portOk(null));
+  }
+
+  /**
+   * The one exact CURRENT open PR for this task: its head follows the live
+   * remote branch mutation and its base is the observed remote base. A missing
+   * remote branch or any other number/branch is unknown, never a merged or
+   * defaulted shape.
+   */
+  private currentPullRequest(
+    number: number,
+    headRef: string,
+  ): GitHubPullRequestV1 | null {
+    const head = this.remoteBranch;
+    if (head === null || number !== 7 || headRef !== BRANCH) {
+      return null;
+    }
+    return {
+      number: 7,
+      title: "Sentinel repair",
+      body: "Refs 1",
+      state: "open",
+      head,
+      base: this.remoteBase,
+      mergeSha: null,
+      headRef: BRANCH,
+      baseRef: BASE_BRANCH,
+      author: TRUSTED_AUTHOR,
+      createdAt: T0,
+      updatedAt: T0,
+      mergedAt: null,
+      reviewDecision: "none",
+    };
+  }
+  override readPullRequest(
+    number: number,
+  ): Promise<PortResultV1<GitHubPullRequestV1 | null>> {
+    this.calls.push(`readPr:${number}`);
+    return Promise.resolve(portOk(this.currentPullRequest(number, BRANCH)));
+  }
+  override findPullRequestByHeadRef(
+    headRef: string,
+  ): Promise<PortResultV1<GitHubPullRequestV1 | null>> {
+    this.calls.push(`findPr:${headRef}`);
+    return Promise.resolve(portOk(this.currentPullRequest(7, headRef)));
   }
   override async pushHead(
     ref: string,
@@ -738,6 +789,7 @@ Deno.test(
     };
     let reviewsAtFirstPush: number | null = null;
     fake.onPush = () => {
+      assert.equal(fake.reviewRequests, 0, "no review budget on any push");
       if (reviewsAtFirstPush === null) {
         reviewsAtFirstPush = fake.reviewRequests;
       }
@@ -784,12 +836,14 @@ Deno.test(
     assert.equal(fake.prepareCalls[0].previousBase, SHA2);
     assert.equal(fake.prepareCalls[0].expectedBase, newer);
     assert.equal(fake.prepareCalls[0].preparedHead, undefined);
-    assert.equal(fake.pushCalls[0].sha, next);
-    assert.equal(
-      fake.pushCalls[0].expected,
-      PREPARED,
-      "publishes from the exact saved candidate",
-    );
+    // New publication order: a no-op publication of the already prepared
+    // candidate before the review gate, the changing base refresh, then a
+    // no-op publication of the new head before the one fresh review.
+    assert.deepEqual(fake.pushCalls, [
+      { ref: `refs/heads/${BRANCH}`, sha: PREPARED, expected: PREPARED },
+      { ref: `refs/heads/${BRANCH}`, sha: next, expected: PREPARED },
+      { ref: `refs/heads/${BRANCH}`, sha: next, expected: next },
+    ]);
     assert.equal(reviewsAtFirstPush, 0, "no review budget before integration");
     assert.equal(fake.reviewRequests, 1, "one fresh review for the new head");
     assert.equal(fake.remoteWrites, 1);

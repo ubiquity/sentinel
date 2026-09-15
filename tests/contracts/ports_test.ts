@@ -597,6 +597,11 @@ const _githubFake: GitHubPort = {
   readRef() {
     return resolved(portOk(null));
   },
+  preserveCandidate() {
+    return resolved(
+      portError("unavailable", "candidate preservation is not composed"),
+    );
+  },
   pushHead() {
     return resolved(portOk("applied"));
   },
