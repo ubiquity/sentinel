@@ -2,12 +2,38 @@
 
 ## Active task register — Astra owned
 
-Updated 2026-09-15 22:31 UTC. This is the only authoritative acceptance ledger.
+Updated 2026-09-15 22:40 UTC. This is the only authoritative acceptance ledger.
 The goal remains incomplete: autonomous GitHub Actions repair against Sentinel,
 then the separately authorized ai.ubq.fi target. Only the current GPT-6 Astra
 integration owner may change scope, status, acceptance or write ownership here.
 
 ### Current checkpoint
+
+- V14 settled at22:40 exit0/completed,102calls/35edits, stream483809ae-e2ba-
+  4d75-86fb-feaa814168ea, persistedfbff67d0. All eight owned integration fixtures
+  changed; no source or other path changed. One permitted formatter pass ran;
+  no tests/typechecks/lint/children. Primary inspected the helper's explicit
+  exact base/head/ref checks, exact super-backed PR observations, and preserved
+  deadline/cooldown/replay/closure assertions. Frozen patch4289f1fe is private.
+  GPT m14-integration-fixtures started exec26683 at22:40, expected roughly3min.
+  No writer may mutate these inputs before settlement. Existing repair and real
+  destructive proofs are retained without rerunning.
+  Legacy-loss audit confirms issue48 still needs a separate bridge from its
+  original base_refresh intent; it cannot use the new-format preservation path
+  directly. Commit a truthful loss state first, retain its Git ancestry, then
+  re-prove H0/B0 before a separate CAS restore and ordinary charged attempt4.
+  Normal headRejectedByReview rejects the authentic P2-bearing H0 receipt, so
+  restored work routes to implementation rather than delivering H0. Exact
+  transient proof contract and one contradictory legacy-ref observation are
+  being resolved before the next source assignment. Issue61 stays excluded.
+
+- V14 launched22:31 at cleanbc7e4eb54b97793291b89fc7415b8cb7a845fb4f,
+  exec72231/PID138463, sole M14 writer for eight integration fixture files.
+  m14-launch-v14.json and persistedfbff67d0-299c-4340-8c20-e9de1ddabd6b prove
+  cwd/production/credential presence and Flash/max/workspace-write/ask.
+  Canonical392aaf9 is pushed; no fixture execution while this writer is active.
+  At22:32 PR70 remains OPEN864d7a0 with both exact-head CI checks passed; no
+  review/merge/install beyond the pending21:28permission request was attempted.
 
 - At22:31 the M14 durability and repair-fixture checkpoint8493511d78dc4af46568590dc33ad6a261de715d
   is integrated by ancestry as8ec1abe80d023b31c669bef9874367a4e95dc679. This is
