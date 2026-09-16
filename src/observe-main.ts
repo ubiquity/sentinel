@@ -315,8 +315,15 @@ async function main(): Promise<void> {
       storeRoot: STORE_ROOT,
     });
     if (!result.ok) {
+      // The typed detail is a fixed adapter/observer literal (never a payload,
+      // credential or key-derived value). Without it a CI-only failure reports
+      // only a bare kind and cannot be diagnosed from the run log.
       console.error(
-        JSON.stringify({ status: "blocked", reason: result.error.kind }),
+        JSON.stringify({
+          status: "blocked",
+          reason: result.error.kind,
+          detail: result.error.detail,
+        }),
       );
       Deno.exit(2);
     }
