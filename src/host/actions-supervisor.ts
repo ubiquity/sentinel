@@ -1138,7 +1138,9 @@ export async function runHostedSupervisorHost(
       run: false,
       revision: null,
       execution: null,
-      detail: outcome.status === "pending" ? outcome.detail : outcome.status,
+      // An `idle` outcome carries its own bounded reason; collapsing it to the
+      // bare word made "the supervisor does nothing" undiagnosable.
+      detail: outcome.status === "run" ? "run" : outcome.detail,
     };
   }
   if (writeOutput === undefined) throw new Error(STATIC_OUTPUT);
@@ -1150,7 +1152,7 @@ export async function runHostedSupervisorHost(
       run: false,
       revision: null,
       execution: null,
-      detail: outcome.status === "pending" ? outcome.detail : outcome.status,
+      detail: outcome.detail,
     };
   }
   if (!isGitSha(outcome.execution.revision)) throw new Error(STATIC_RESULT);

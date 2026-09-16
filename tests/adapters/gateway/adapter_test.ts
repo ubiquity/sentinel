@@ -1263,3 +1263,111 @@ Deno.test("adapter: readArtifact stops pagination at the exact capture", async (
     await removeRoot(root);
   }
 });
+
+/**
+ * Serves one index row plus a cursor-chained `limit=1` replay export, so a
+ * walk can be driven past the contract artifact-count bound.
+ */
+function boundedWalkResponder(
+  row: Record<string, unknown>,
+  captures: { manifest: Record<string, unknown>; chunks: string[] }[],
+  onReplay: () => void,
+): (url: URL) => Response {
+  return (url) => {
+    if (url.pathname === INDEX_PATH) {
+      return jsonResponse(makeIndexPage([row]));
+    }
+    onReplay();
+    const cursor = url.searchParams.get("cursor");
+    const index = cursor === null ? 0 : Number(cursor);
+    const next = index + 1 < captures.length ? String(index + 1) : null;
+    return jsonResponse(makeReplayPage(captures[index]!, next));
+  };
+}
+
+/** Live and source-expired capture builders for the bound tests. */
+function boundCaptures(
+  now: number,
+  expired: number,
+  live: number,
+): { manifest: Record<string, unknown>; chunks: string[] }[] {
+  const expiredAt = now - 49 * 60 * 60 * 1_000;
+  const built = [];
+  for (let index = 0; index < expired + live; index++) {
+    built.push(makeCapture(syntheticBytes(120, index + 1), {
+      capture_id: `cap-${index}`,
+      captured_at_ms: index < expired ? expiredAt : now - 60_000,
+    }));
+  }
+  return built;
+}
+
+Deno.test("adapter: source-expired captures never consume the artifact-count bound", async () => {
+  // 18 expired captures followed by 2 retainable ones: the walk crosses the
+  // bound of 16 while still holding only two retainable captures, and the
+  // referenced digest is the very last capture.
+  const EXPIRED = 18;
+  const LIVE = 2;
+  const now = T0 + 3_600_000;
+  const captures = boundCaptures(now, EXPIRED, LIVE);
+  const lastBytes = syntheticBytes(300, 91);
+  captures[EXPIRED + LIVE - 1] = makeCapture(lastBytes, {
+    capture_id: `cap-${EXPIRED + LIVE - 1}`,
+    captured_at_ms: now - 60_000,
+  });
+  const digest = await sha256hex(lastBytes);
+  const row = makeIndexRow({
+    evidence_ref: { ref: "artifact://sentinel/x.pgc", digest },
+    evidence_expires_at_ms: now + 48 * 60 * 60 * 1_000,
+  });
+  let replayRequests = 0;
+  const { adapter, root } = await makeAdapter(
+    boundedWalkResponder(row, captures, () => {
+      replayRequests++;
+    }),
+    { clock: new FakeClock(now) },
+  );
+  try {
+    const result = await adapter.readIncident(INCIDENT_A);
+    assert.ok(result.ok, `unexpected failure: ${JSON.stringify(result)}`);
+    if (!result.ok) return;
+    assert.ok(result.value !== null, "the referenced live capture must bind");
+    if (result.value === null) return;
+    assert.ok(
+      result.value.artifacts.some((artifact) => artifact.digest === digest),
+      "the exact referenced digest must be retained",
+    );
+    // Expired captures are walked but are not retainable, so the whole export
+    // is consulted instead of refusing at the 17th capture.
+    assert.equal(replayRequests, EXPIRED + LIVE);
+  } finally {
+    await removeRoot(root);
+  }
+});
+
+Deno.test("adapter: more retainable captures than the bound stays refused", async () => {
+  // Fail-closed is preserved: once 17 captures could actually be retained, the
+  // contract's artifact array cannot represent them and the walk refuses.
+  const now = T0 + 3_600_000;
+  const captures = boundCaptures(now, 0, 17);
+  const absentDigest = await sha256hex(syntheticBytes(120, 99));
+  const row = makeIndexRow({
+    evidence_ref: { ref: "artifact://sentinel/x.pgc", digest: absentDigest },
+    evidence_expires_at_ms: now + 48 * 60 * 60 * 1_000,
+  });
+  const { adapter, root } = await makeAdapter(
+    boundedWalkResponder(row, captures, () => {}),
+    { clock: new FakeClock(now) },
+  );
+  try {
+    const result = await adapter.readIncident(INCIDENT_A);
+    assert.ok(!result.ok, `expected a refusal: ${JSON.stringify(result)}`);
+    if (result.ok) return;
+    assert.equal(
+      result.error.detail,
+      "replay export exceeds the contract artifact-count bound",
+    );
+  } finally {
+    await removeRoot(root);
+  }
+});
