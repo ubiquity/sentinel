@@ -958,6 +958,9 @@ const CANDIDATE_BRANCH = "sentinel/inc-2026-09-07-0001";
 const CANDIDATE_REF = `refs/heads/sentinel-candidates/${"ab".repeat(32)}`;
 const PRODUCING_RESERVATION = "cd".repeat(32);
 const OTHER_CANDIDATE_SHA = "2222222222222222222222222222222222222222";
+/** The other admitted descriptor key form: exact base-refresh identity. */
+const CANDIDATE_BASE_REFRESH_KEY =
+  `base_refresh:7:${CANDIDATE_HEAD}:${CANDIDATE_BASE}`;
 
 async function rawLegacyWork(): Promise<Record<string, unknown>> {
   return (await readFixture("valid", "work-record-v1.json")) as Record<
@@ -1082,6 +1085,26 @@ Deno.test("candidate state: exact new shape round-trips canonical bytes", async 
   assert.equal(hasCandidateState(parsed), true);
   assert.equal(canonicalStringify(parsed), canonicalStringify(raw));
 
+  // The other admitted producing-operation key form, the exact base-refresh
+  // identity, parses and round-trips byte-preserving as well.
+  const baseRefreshRaw = await candidateWorkRaw((_target, candidateState) => {
+    (candidateState.preserved as Record<string, unknown>).operationKey =
+      CANDIDATE_BASE_REFRESH_KEY;
+  });
+  const baseRefresh = parseWorkRecordV1(baseRefreshRaw);
+  assert.deepEqual(baseRefresh.target.candidateState, {
+    preserved: {
+      ...preservedDescriptor(),
+      operationKey: CANDIDATE_BASE_REFRESH_KEY,
+    },
+    publishedHead: CANDIDATE_HEAD,
+  });
+  assert.equal(hasCandidateState(baseRefresh), true);
+  assert.equal(
+    canonicalStringify(baseRefresh),
+    canonicalStringify(baseRefreshRaw),
+  );
+
   // Null-preserved parked work is valid, round-trips, and is still parked:
   // preserved === null is never treated as "no candidate state".
   const nullPreservedRaw = await candidateWorkRaw((_target, candidateState) => {
@@ -1172,6 +1195,153 @@ Deno.test("candidate state: malformed groups, keys and bindings reject", async (
       }),
       code: "bound_exceeded",
       path: "$.target.candidateState.preserved.operationKey",
+    },
+    {
+      name: "unknown nonempty operation key",
+      raw: await candidateWorkRaw((_target, group) => {
+        (group.preserved as Record<string, unknown>).operationKey =
+          `review:7:${CANDIDATE_HEAD}`;
+      }),
+      code: "invalid_pattern",
+      path: "$.target.candidateState.preserved.operationKey",
+    },
+    {
+      name: "impl reservation id too short",
+      raw: await candidateWorkRaw((_target, group) => {
+        (group.preserved as Record<string, unknown>).operationKey = `impl:${
+          "cd".repeat(31)
+        }`;
+      }),
+      code: "invalid_pattern",
+      path: "$.target.candidateState.preserved.operationKey",
+    },
+    {
+      name: "impl reservation id uppercase",
+      raw: await candidateWorkRaw((_target, group) => {
+        (group.preserved as Record<string, unknown>).operationKey = `impl:${
+          "CD".repeat(32)
+        }`;
+      }),
+      code: "invalid_pattern",
+      path: "$.target.candidateState.preserved.operationKey",
+    },
+    {
+      name: "impl key suffix",
+      raw: await candidateWorkRaw((_target, group) => {
+        (group.preserved as Record<string, unknown>).operationKey =
+          `impl:${PRODUCING_RESERVATION}:extra`;
+      }),
+      code: "invalid_pattern",
+      path: "$.target.candidateState.preserved.operationKey",
+    },
+    {
+      name: "impl key newline suffix",
+      raw: await candidateWorkRaw((_target, group) => {
+        (group.preserved as Record<string, unknown>).operationKey =
+          `impl:${PRODUCING_RESERVATION}\n`;
+      }),
+      code: "invalid_pattern",
+      path: "$.target.candidateState.preserved.operationKey",
+    },
+    {
+      name: "base refresh zero pr",
+      raw: await candidateWorkRaw((_target, group) => {
+        (group.preserved as Record<string, unknown>).operationKey =
+          `base_refresh:0:${CANDIDATE_HEAD}:${CANDIDATE_BASE}`;
+      }),
+      code: "invalid_pattern",
+      path: "$.target.candidateState.preserved.operationKey",
+    },
+    {
+      name: "base refresh negative pr",
+      raw: await candidateWorkRaw((_target, group) => {
+        (group.preserved as Record<string, unknown>).operationKey =
+          `base_refresh:-1:${CANDIDATE_HEAD}:${CANDIDATE_BASE}`;
+      }),
+      code: "invalid_pattern",
+      path: "$.target.candidateState.preserved.operationKey",
+    },
+    {
+      name: "base refresh leading-zero pr",
+      raw: await candidateWorkRaw((_target, group) => {
+        (group.preserved as Record<string, unknown>).operationKey =
+          `base_refresh:07:${CANDIDATE_HEAD}:${CANDIDATE_BASE}`;
+      }),
+      code: "invalid_pattern",
+      path: "$.target.candidateState.preserved.operationKey",
+    },
+    {
+      name: "base refresh noninteger pr",
+      raw: await candidateWorkRaw((_target, group) => {
+        (group.preserved as Record<string, unknown>).operationKey =
+          `base_refresh:1.5:${CANDIDATE_HEAD}:${CANDIDATE_BASE}`;
+      }),
+      code: "invalid_pattern",
+      path: "$.target.candidateState.preserved.operationKey",
+    },
+    {
+      name: "base refresh unsafe pr",
+      raw: await candidateWorkRaw((_target, group) => {
+        (group.preserved as Record<string, unknown>).operationKey =
+          `base_refresh:9007199254740993:${CANDIDATE_HEAD}:${CANDIDATE_BASE}`;
+      }),
+      code: "invalid_pattern",
+      path: "$.target.candidateState.preserved.operationKey",
+    },
+    {
+      name: "base refresh short old head",
+      raw: await candidateWorkRaw((_target, group) => {
+        (group.preserved as Record<string, unknown>).operationKey =
+          `base_refresh:7:${CANDIDATE_HEAD.slice(1)}:${CANDIDATE_BASE}`;
+      }),
+      code: "invalid_pattern",
+      path: "$.target.candidateState.preserved.operationKey",
+    },
+    {
+      name: "base refresh uppercase new base",
+      raw: await candidateWorkRaw((_target, group) => {
+        (group.preserved as Record<string, unknown>).operationKey =
+          `base_refresh:7:${CANDIDATE_HEAD}:${CANDIDATE_BASE.toUpperCase()}`;
+      }),
+      code: "invalid_pattern",
+      path: "$.target.candidateState.preserved.operationKey",
+    },
+    {
+      name: "base refresh missing new base",
+      raw: await candidateWorkRaw((_target, group) => {
+        (group.preserved as Record<string, unknown>).operationKey =
+          `base_refresh:7:${CANDIDATE_HEAD}`;
+      }),
+      code: "invalid_pattern",
+      path: "$.target.candidateState.preserved.operationKey",
+    },
+    {
+      name: "base refresh extra component",
+      raw: await candidateWorkRaw((_target, group) => {
+        (group.preserved as Record<string, unknown>).operationKey =
+          `base_refresh:7:${CANDIDATE_HEAD}:${CANDIDATE_BASE}:extra`;
+      }),
+      code: "invalid_pattern",
+      path: "$.target.candidateState.preserved.operationKey",
+    },
+    {
+      name: "base refresh newline suffix",
+      raw: await candidateWorkRaw((_target, group) => {
+        (group.preserved as Record<string, unknown>).operationKey =
+          `base_refresh:7:${CANDIDATE_HEAD}:${CANDIDATE_BASE}\n`;
+      }),
+      code: "invalid_pattern",
+      path: "$.target.candidateState.preserved.operationKey",
+    },
+    {
+      name: "base refresh descriptor head binding still enforced",
+      raw: await candidateWorkRaw((_target, group) => {
+        const preserved = group.preserved as Record<string, unknown>;
+        preserved.operationKey = CANDIDATE_BASE_REFRESH_KEY;
+        preserved.head = OTHER_CANDIDATE_SHA;
+      }),
+      code: "invalid_lifecycle",
+      path: "$.target.candidateState.preserved",
     },
     {
       name: "wrong ref namespace",
@@ -1282,6 +1452,14 @@ Deno.test("candidate preservation intent: mismatches and bad identities reject",
       name: "not a producing key",
       raw: await preservationIntentRaw({
         intent: intentWith({ key: `push:${CANDIDATE_HEAD}` }),
+      }),
+      code: "invalid_lifecycle",
+      path: "$.intent.key",
+    },
+    {
+      name: "base_refresh descriptor key is not an implementation intent key",
+      raw: await preservationIntentRaw({
+        intent: intentWith({ key: CANDIDATE_BASE_REFRESH_KEY }),
       }),
       code: "invalid_lifecycle",
       path: "$.intent.key",
