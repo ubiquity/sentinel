@@ -477,11 +477,16 @@ export class GatewayIncidentAdapter implements IncidentAdapter {
     let candidates = 0;
     const pending: GatewayReplayCaptureV1[] = [];
     const matchedArtifacts: StoredArtifactV1[] = [];
+    // The single source-expiry verdict, shared by the walk's retention filter
+    // and its artifact-count bound: a capture that can never be retained must
+    // not consume the bound of the array it would never join.
+    const sourceExpired = (capture: GatewayReplayCaptureV1): boolean =>
+      capture.manifest.expiresAt <= now;
     const walked = await this.walkReplayCaptures(
       row.incidentId,
       now,
       async (capture) => {
-        if (capture.manifest.expiresAt <= now) {
+        if (sourceExpired(capture)) {
           // Source-expired: excluded from the binding pool and from retention.
           return portOk(false);
         }
@@ -506,6 +511,7 @@ export class GatewayIncidentAdapter implements IncidentAdapter {
         }
         return portOk(false);
       },
+      (capture) => !sourceExpired(capture),
     );
     if (!walked.ok) return walked;
     if (!matched) {
@@ -564,6 +570,12 @@ export class GatewayIncidentAdapter implements IncidentAdapter {
    * everything already retained; a single page is still governed by the
    * response/per-artifact caps.
    *
+   * The artifact-count bound caps the retained `artifacts` array, so only a
+   * capture the caller could actually retain may consume it:
+   * `countsAgainstArtifactBound` is asked per capture and a false answer
+   * leaves the bound untouched. The page bound (`GATEWAY_MAX_SCAN_PAGES`)
+   * still bounds the walk itself, so this never makes fetching unbounded.
+   *
    * `visit` returns true to stop fetching early (for example when the exact
    * target capture was found).
    */
@@ -573,6 +585,9 @@ export class GatewayIncidentAdapter implements IncidentAdapter {
     visit: (
       capture: GatewayReplayCaptureV1,
     ) => PortResultV1<boolean> | Promise<PortResultV1<boolean>>,
+    countsAgainstArtifactBound: (
+      capture: GatewayReplayCaptureV1,
+    ) => boolean = () => true,
   ): Promise<PortResultV1<void>> {
     let cursor: string | null = null;
     const seen = new Set<string>();
@@ -633,7 +648,8 @@ export class GatewayIncidentAdapter implements IncidentAdapter {
             "replay export repeated the same capture",
           );
         }
-        if (captures + 1 > GATEWAY_MAX_ARTIFACTS_PER_EVIDENCE) {
+        const retainable = countsAgainstArtifactBound(capture);
+        if (retainable && captures + 1 > GATEWAY_MAX_ARTIFACTS_PER_EVIDENCE) {
           return portError(
             "invalid",
             "replay export exceeds the contract artifact-count bound",
@@ -649,7 +665,7 @@ export class GatewayIncidentAdapter implements IncidentAdapter {
           );
         }
         captureIds.add(capture.manifest.captureId);
-        captures += 1;
+        if (retainable) captures += 1;
         aggregateBytes += capture.manifest.ciphertextBytes;
         const visited = await visit(capture);
         if (!visited.ok) return visited;
