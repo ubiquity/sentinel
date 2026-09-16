@@ -11,6 +11,20 @@ status, acceptance and write ownership here.
 
 ### Current checkpoint
 
+Continuation state, verified facts, next work and local environment traps are in
+`docs/implementation-handoff-2026-09-16.md`. Read it with this register; it is
+not a second task register and does not change scope, status or acceptance.
+
+- At23:10 the observer repair is complete and the continuation handoff is
+  written. No outstanding source change from this session. The next work items
+  are, in order: the live issue-48 `review` work item and its open PR 51; the
+  `reviewAuthorizes` self-repo release gate that contradicts the owner's
+  2026-09-16 no-development-review instruction and currently makes autonomous
+  self-repair unreleasable; the two blocked work items (61, 21) with no recorded
+  blocker reason; the fact that the observer now runs but retains zero
+  ciphertexts with five of six incidents source-lost; and the stale duplicate
+  PRs 74/75 whose only un-integrated commit `f18ac8e` is superseded by da08c9f.
+
 - At21:50 the scheduled observer is repaired and proved live. Exact cause: one
   incident whose replay export exceeded the contract artifact-count bound made
   `readIncident` return `invalid`, and `observe-main.ts` aborted the whole pass
