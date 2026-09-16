@@ -2,12 +2,32 @@
 
 ## Active task register — Astra owned
 
-Updated 2026-09-15 23:57 UTC. This is the only authoritative acceptance ledger.
+Updated 2026-09-16 00:01 UTC. This is the only authoritative acceptance ledger.
 The goal remains incomplete: autonomous GitHub Actions repair against Sentinel,
 then the separately authorized ai.ubq.fi target. Only the current GPT-6 Astra
 integration owner may change scope, status, acceptance or write ownership here.
 
 ### Current checkpoint
+
+- At00:01 V18 settled exec66141/PID282397 exit0/completed,30calls, one permitted
+  formatter pass; no tests/probes/children. Persisted2958d324/stream66ad8369 and
+  m14-launch-v18.json prove exact cwd/production/Flash/max/workspace-write/ask.
+  Primary inspected the two-file diff: bounded exact implementation/base-refresh
+  descriptor syntax and canonical safe PR numbers; intent and consumer bindings
+  unchanged. GPTcd7b845a-25fe-4047-8aa4-d910b114eaa4 contracts passed child0,
+  3573ms. Lint4289e957 and formatec5b0187 passed. Stage2 Issue69 code prerequisite
+  is accepted for integration; issue remains open until delivery. Fresh remote
+  development8c861f5 and launchera076b17f unchanged; release77298d44 pointer
+  blob237248da proves active20aae115 generation5, executionnull, latest settled
+  ordinary35037557130 healthy. This is not proof of the new recovery behavior.
+  Repair ref2ee6011f is a read-only observation. No live write/review/install.
+
+- Canonical/M14 b289347f923ae28839a4352b541d855256e3ba09 now includes accepted
+  V17 tip94a75187 by ancestry. V18 owns only work-record.ts and records_test.ts
+  for the existing Issue69 Stage2 operation-key syntax requirement; trusted
+  consumer binding, normal loop and other fixtures are frozen. Exact45-call
+  assignment pins this base; rules hashfc44ca6e unchanged. Final push/CI will
+  include this narrow prerequisite to avoid an unnecessary intermediate CI run.
 
 - At23:57 V17b settled exec78508/PID278808 exit0/completed,16calls/3edits,
   one permitted single-file formatter pass, no checks/children. Persisted
