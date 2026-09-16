@@ -107,6 +107,29 @@ export async function runActionsCiApproval(
 
 /** Nonterminal scope-0 self-target record with a durable PR/head/branch. */
 function isSelfCandidate(record: WorkRecordV1): boolean {
+  // New-format candidate records are approved ONLY with an exact preserved
+  // descriptor bound to the target and a verified published head equal to the
+  // requested head. The check runs BEFORE the bounded slice so an ineligible
+  // new-format record never consumes one of the three approval slots; legacy
+  // records keep their normal exact API PR/head/branch verification below.
+  const candidateState = record.target.candidateState;
+  if (candidateState !== undefined) {
+    const preserved = candidateState.preserved;
+    if (preserved === null) return false;
+    if (
+      candidateState.publishedHead === null ||
+      record.target.head === null ||
+      candidateState.publishedHead !== record.target.head
+    ) {
+      return false;
+    }
+    if (
+      preserved.head !== record.target.head ||
+      preserved.base !== record.target.base
+    ) {
+      return false;
+    }
+  }
   return record.repository.owner === SELF_REPOSITORY.owner &&
     record.repository.name === SELF_REPOSITORY.name &&
     record.repository.installationId === SELF_REPOSITORY.installationId &&

@@ -15,7 +15,7 @@
  */
 
 import { isGitSha, isSha256Hex } from "../contracts/brands.ts";
-import type { GitSha } from "../contracts/brands.ts";
+import type { GitSha, WorkItemId } from "../contracts/brands.ts";
 import { portError, portOk, SystemClock } from "../contracts/ports.ts";
 import type {
   Clock,
@@ -81,6 +81,10 @@ import { DurableGitHubCooldownGate } from "../repair/github-cooldown.ts";
 import type { RepairCycleOutcomeV1 } from "../repair/loop.ts";
 import { DenoReplayRuntime } from "../replay/runtime.ts";
 import { composeGitHubHost } from "./github.ts";
+import {
+  createCandidatePreserver,
+  createLegacyBaseRefreshLossProver,
+} from "./actions-candidates.ts";
 import { runRepairEntrypoint } from "../main.ts";
 
 /** Fixed local target identity (explicit no-App owner credential scope). */
@@ -133,6 +137,10 @@ const STATIC_IMPORT =
   "local repair host failed: candidate objects could not be imported into the trusted source repository";
 const STATIC_MODEL_RESULT =
   "local repair host failed: the private model result receipt could not be persisted; no candidate was imported";
+const STATIC_LOCAL_CANDIDATE =
+  "local candidate objects are unavailable for the exact task and head";
+const STATIC_RECEIPT_DIAGNOSTIC =
+  "local model diagnostic persistence failed; the trusted completed receipt is preserved without a durability claim";
 const STATIC_MARKER =
   "local repair host failed: the session marker could not be cleared";
 
@@ -875,6 +883,7 @@ export async function runLocalRepairHost(
       token: input.githubToken,
       login,
       invocationId,
+      stateRoot: input.stateRoot,
       sourcePath,
       scratch,
       reviewCheckout,
@@ -1052,6 +1061,11 @@ export interface LocalGitHubInputV1 {
   token: string;
   login: string;
   invocationId: string;
+  /**
+   * Exact private state root this host owns: the trusted source `checkouts`
+   * mapping and the owned scratch used by candidate preservation.
+   */
+  stateRoot: string;
   sourcePath: string;
   scratch: string;
   reviewCheckout: string;
@@ -1339,6 +1353,50 @@ export function composeLocalGitHub(input: LocalGitHubInputV1): GitHubPort {
     trustedPrAuthor: input.login,
     ensureCandidateObjects,
   });
+  // Candidate preservation is composed on the SAME port + executor identities:
+  // the authenticated operation-ref read and the create-only push use this
+  // exact port, and the trusted loader imports only the exact task-mapped
+  // producer checkout under this host's private state root.
+  host.port.preserveCandidate = createCandidatePreserver({
+    state: input.state,
+    gate,
+    token: input.token,
+    http: input.http,
+    clock: input.clock,
+    sourcePath: input.sourcePath,
+    scratch: input.scratch,
+    trustedPath: input.trustedPath,
+    gitExecutable: trustedGitPath(input.trustedPath),
+    port: host.port,
+    protectedPaths: createLocalRepositoryConfig().protectedPaths,
+    ensureLocalCandidate: createLocalCandidateLoader({
+      stateRoot: input.stateRoot,
+      sourcePath: input.sourcePath,
+      scratch: input.scratch,
+      trustedPath: input.trustedPath,
+    }),
+  });
+  // The legacy candidate-loss proof is composed on the SAME port identity and
+  // the SAME exact loader inputs as preservation. The port object is passed
+  // BEFORE the scope wrapper replaces `readIssue`, so the prover resolves the
+  // scoped reader dynamically at invocation and never captures a pre-scope one.
+  host.port.proveLegacyBaseRefreshLoss = createLegacyBaseRefreshLossProver({
+    state: input.state,
+    port: host.port,
+    gate,
+    token: input.token,
+    scratch: input.scratch,
+    trustedPath: input.trustedPath,
+    gitExecutable: trustedGitPath(input.trustedPath),
+    baseBranch: LOCAL_BASE_BRANCH,
+    trustedPrAuthor: input.login,
+    ensureLocalCandidate: createLocalCandidateLoader({
+      stateRoot: input.stateRoot,
+      sourcePath: input.sourcePath,
+      scratch: input.scratch,
+      trustedPath: input.trustedPath,
+    }),
+  });
   return scopeLocalRepairIssues(host.port);
 }
 
@@ -1591,37 +1649,81 @@ export class LocalCheckoutModelPort implements ImplementationPort {
       ? request
       : { ...request, base: checkoutBase };
     const result = await port.runModel(modelRequest);
-    // Persist the private minimal diagnostic BEFORE returning the receipt or
-    // importing any candidate: a run without its saved receipt may not
-    // publish. A storage failure must not erase the existing checkout or the
-    // durable reservation, so it only returns static unavailable. The common
-    // saved-report path also emits the bounded advisory summary line for both
-    // receipt results and port errors; no raw port detail is ever logged here.
-    try {
-      await writeLocalModelResult(
-        this.input.stateRoot,
-        request,
-        result,
-        this.input.clock.now(),
-      );
-    } catch {
-      return portError("unavailable", STATIC_MODEL_RESULT);
-    }
-    if (!result.ok) return result;
-    const head = result.value.candidate?.head ?? null;
-    if (head !== null) {
-      const imported = await importCandidate({
-        sourcePath: this.input.sourcePath,
-        checkout: prepared.checkout,
-        head,
-        key,
-        scratch: this.input.scratch,
-        trustedPath: this.input.trustedPath,
-      });
-      if (!imported) return portError("unavailable", STATIC_IMPORT);
-    }
-    return result;
+    return await finalizeLocalModelResult({
+      stateRoot: this.input.stateRoot,
+      request,
+      result,
+      observedAt: this.input.clock.now(),
+      importCandidate: (head) =>
+        importCandidate({
+          sourcePath: this.input.sourcePath,
+          checkout: prepared.checkout,
+          head,
+          key,
+          scratch: this.input.scratch,
+          trustedPath: this.input.trustedPath,
+        }),
+    });
   }
+}
+
+/**
+ * Post-run trusted bookkeeping for exactly one local model invocation.
+ *
+ * The private minimal diagnostic is still persisted BEFORE any candidate
+ * import, and a non-completed port error keeps its original conservative
+ * behavior (an unsaved diagnostic or a failed import stays `unavailable`).
+ *
+ * A TRUSTED COMPLETED receipt is different: its execution/accounting meaning
+ * is preserved unchanged when either the diagnostic write or the best-effort
+ * local import fails. The diagnostic failure is reported as one static line
+ * and the original receipt (including its exact candidate head and actual
+ * runtime fields) is returned unchanged; no durability claim is made and
+ * nothing is published here. The persistent checkout is never touched.
+ */
+export async function finalizeLocalModelResult(input: {
+  stateRoot: string;
+  request: ModelRunRequestV1;
+  result: PortResultV1<ModelRunReceiptV1>;
+  observedAt: number;
+  /** Exact-head import into the trusted source mirror; best effort. */
+  importCandidate: (head: GitSha) => Promise<boolean>;
+}): Promise<PortResultV1<ModelRunReceiptV1>> {
+  const completedHead: GitSha | null = input.result.ok
+    ? input.result.value.candidate?.head ?? null
+    : null;
+  const completed = completedHead !== null && input.result.ok &&
+    input.result.value.outcome === "completed";
+  let diagnosticSaved = false;
+  try {
+    await writeLocalModelResult(
+      input.stateRoot,
+      input.request,
+      input.result,
+      input.observedAt,
+    );
+    diagnosticSaved = true;
+  } catch {
+    if (!completed) return portError("unavailable", STATIC_MODEL_RESULT);
+    // Static sanitized line only: no task content, candidate identity or raw
+    // error is ever logged, and the receipt below keeps its full meaning.
+    console.log(STATIC_RECEIPT_DIAGNOSTIC);
+  }
+  if (!input.result.ok) return input.result;
+  if (completedHead !== null && diagnosticSaved) {
+    let imported = false;
+    try {
+      imported = await input.importCandidate(completedHead);
+    } catch {
+      imported = false;
+    }
+    // A trusted completed run never turns a failed best-effort import into
+    // model-unavailable accounting; durability remains a separate obligation.
+    if (!imported && !completed) {
+      return portError("unavailable", STATIC_IMPORT);
+    }
+  }
+  return input.result;
 }
 
 /** Create the one-time checkout at the exact base; reuse is exact-match only. */
@@ -1849,6 +1951,8 @@ async function importCandidate(input: {
   trustedPath: string;
 }): Promise<boolean> {
   const ref = `refs/sentinel/candidates/${input.key}`;
+  // The EXACT requested commit is fetched, never the checkout's mutable HEAD:
+  // a later commit or a moved HEAD must not silently replace the candidate.
   const fetched = await runTrustedGitResult({
     args: [
       "-C",
@@ -1856,7 +1960,7 @@ async function importCandidate(input: {
       "fetch",
       "--no-tags",
       input.checkout,
-      `+HEAD:${ref}`,
+      `+${input.head}:${ref}`,
     ],
     cwd: input.sourcePath,
     scratch: input.scratch,
@@ -1870,6 +1974,225 @@ async function importCandidate(input: {
     trustedPath: input.trustedPath,
   });
   return observed.code === 0 && observed.stdout.trim() === input.head;
+}
+
+/** Three-way availability of one exact object in one verified repository. */
+type LocalObjectStateV1 = "present" | "absent" | "unknown";
+
+/** Three-way path state: only a NotFound error proves the path is missing. */
+type LocalPathStateV1 = "present" | "absent" | "unknown";
+
+/** Direct candidate-checkout mapping read bound (bytes). */
+const CANDIDATE_MAPPING_MAX_BYTES = 64 * 1024;
+
+/** Path state where every failure other than NotFound stays unknown. */
+async function localPathState(path: string): Promise<LocalPathStateV1> {
+  try {
+    await Deno.stat(path);
+    return "present";
+  } catch (error) {
+    return error instanceof Deno.errors.NotFound ? "absent" : "unknown";
+  }
+}
+
+/**
+ * Trusted exact-object loader for candidate preservation.
+ *
+ * It first checks the private source mirror (already-imported objects need no
+ * checkout access), then resolves EXACTLY the task's mapped producer checkout
+ * under `<stateRoot>/checkouts/<localCheckoutKey(taskId)>` through a direct
+ * bounded mapping read and the exact requested SHA. Only then is that exact
+ * commit imported into the source mirror — never a mutable HEAD and never a
+ * different task's checkout.
+ *
+ * Availability is three-way and never conflates failure with loss: an object
+ * is `present` only in a verified repository, `absent` only after the
+ * documented missing-revision exit code 1, and every unreadable, corrupt,
+ * wrong-type, wrong-task/version/kind/base or mismatched mapping state is
+ * `unavailable`. `not_found` is returned ONLY after the source mirror AND the
+ * exact mapped checkout/object both prove positive absence. Files are never
+ * deleted or rewritten.
+ */
+export function createLocalCandidateLoader(input: {
+  stateRoot: string;
+  sourcePath: string;
+  scratch: string;
+  trustedPath: string;
+}): (taskId: WorkItemId, head: GitSha) => Promise<PortResultV1<void>> {
+  const gitAt = async (
+    dir: string,
+    args: string[],
+  ): Promise<{ code: number; stdout: string } | null> => {
+    try {
+      return await runTrustedGitResult({
+        args: ["-C", dir, ...args],
+        cwd: input.stateRoot,
+        scratch: input.scratch,
+        trustedPath: input.trustedPath,
+        // Read-only object queries must never lazy-fetch, substitute replace
+        // refs or reach any protocol: the same isolation the publication
+        // validator already applies to its local object reads.
+        extraEnv: {
+          GIT_NO_LAZY_FETCH: "1",
+          GIT_NO_REPLACE_OBJECTS: "1",
+          GIT_ALLOW_PROTOCOL: "",
+        },
+      });
+    } catch {
+      return null;
+    }
+  };
+  /**
+   * Exact commit availability in one verified repository.
+   *
+   * The repository is verified first; `rev-parse --verify --quiet <sha>^{commit}`
+   * then has exactly one positive absence: exit code 1 with empty stdout.
+   * Exit 128, a throw, truncation, an unreadable repository and a present
+   * non-commit object (wrong type) are all `unknown`, never absence.
+   */
+  const objectState = async (
+    dir: string,
+    head: GitSha,
+  ): Promise<LocalObjectStateV1> => {
+    const repo = await gitAt(dir, ["rev-parse", "--absolute-git-dir"]);
+    if (repo === null || repo.code !== 0 || repo.stdout.trim().length === 0) {
+      return "unknown";
+    }
+    // Parent-directory discovery is refused: the resolved Git directory must be
+    // this exact repository itself (bare source mirror) or its own `.git`
+    // (mapped producer clone). Any read or path identity mismatch is unknown.
+    try {
+      const gitDir = await Deno.realPath(repo.stdout.trim());
+      const repoDir = await Deno.realPath(dir);
+      if (gitDir !== repoDir) {
+        const dotGit = await Deno.realPath(joinPath(dir, ".git"));
+        if (gitDir !== dotGit) return "unknown";
+      }
+    } catch {
+      return "unknown";
+    }
+    const peeled = await gitAt(dir, [
+      "rev-parse",
+      "--verify",
+      "--quiet",
+      `${head}^{commit}`,
+    ]);
+    if (peeled === null) return "unknown";
+    if (peeled.code === 0) {
+      return peeled.stdout.trim() === head ? "present" : "unknown";
+    }
+    if (peeled.code !== 1 || peeled.stdout.trim() !== "") return "unknown";
+    // The revision is missing OR names a present non-commit object: never
+    // report the wrong type as positive loss.
+    const object = await gitAt(dir, [
+      "rev-parse",
+      "--verify",
+      "--quiet",
+      `${head}^{object}`,
+    ]);
+    if (object === null || object.code !== 1) return "unknown";
+    return object.stdout.trim() === "" ? "absent" : "unknown";
+  };
+  /**
+   * Direct bounded mapping read for this exact task/key; the shared legacy
+   * checkout-mapping helper is deliberately not used here.
+   */
+  const mappingState = async (
+    mappingPath: string,
+    taskId: WorkItemId,
+    key: string,
+  ): Promise<"exact" | "missing" | "unusable"> => {
+    let text: string;
+    try {
+      const stat = await Deno.stat(mappingPath);
+      if (!stat.isFile || stat.size > CANDIDATE_MAPPING_MAX_BYTES) {
+        return "unusable";
+      }
+      text = await Deno.readTextFile(mappingPath);
+    } catch (error) {
+      return error instanceof Deno.errors.NotFound ? "missing" : "unusable";
+    }
+    let parsed: Record<string, unknown>;
+    try {
+      const value = JSON.parse(text);
+      if (typeof value !== "object" || value === null || Array.isArray(value)) {
+        return "unusable";
+      }
+      parsed = value as Record<string, unknown>;
+    } catch {
+      return "unusable";
+    }
+    if (
+      parsed.version !== "v1" || parsed.kind !== "local_checkout" ||
+      typeof parsed.taskId !== "string" || typeof parsed.key !== "string" ||
+      typeof parsed.base !== "string" || !isGitSha(parsed.base)
+    ) {
+      return "unusable";
+    }
+    return parsed.taskId === taskId && parsed.key === key
+      ? "exact"
+      : "unusable";
+  };
+  return async (taskId, head) => {
+    if (typeof taskId !== "string" || taskId.length === 0 || !isGitSha(head)) {
+      return portError("invalid", STATIC_LOCAL_CANDIDATE);
+    }
+    // 1. The trusted source mirror already owning the exact objects wins.
+    const inSource = await objectState(input.sourcePath, head);
+    if (inSource === "present") return portOk(undefined);
+    // A failed source read is never ignored and never becomes not_found.
+    if (inSource === "unknown") {
+      return portError("unavailable", STATIC_LOCAL_CANDIDATE);
+    }
+    // 2. The exact task-mapped producer checkout; anything else refuses.
+    const key = await localCheckoutKey(taskId);
+    const checkoutsDir = joinPath(input.stateRoot, "checkouts");
+    const checkout = joinPath(checkoutsDir, key);
+    const mapping = await mappingState(
+      joinPath(checkoutsDir, `${key}.json`),
+      taskId,
+      key,
+    );
+    if (mapping === "unusable") {
+      return portError("unavailable", STATIC_LOCAL_CANDIDATE);
+    }
+    const checkoutPath = await localPathState(checkout);
+    if (checkoutPath === "unknown") {
+      return portError("unavailable", STATIC_LOCAL_CANDIDATE);
+    }
+    if (mapping === "missing") {
+      // No mapped producer checkout was ever published for this task: only a
+      // provably absent checkout path can prove the candidate was never made.
+      return checkoutPath === "absent"
+        ? portError("not_found", STATIC_LOCAL_CANDIDATE)
+        : portError("unavailable", STATIC_LOCAL_CANDIDATE);
+    }
+    if (checkoutPath === "absent") {
+      return portError("not_found", STATIC_LOCAL_CANDIDATE);
+    }
+    const inCheckout = await objectState(checkout, head);
+    if (inCheckout === "unknown") {
+      return portError("unavailable", STATIC_LOCAL_CANDIDATE);
+    }
+    if (inCheckout === "absent") {
+      return portError("not_found", STATIC_LOCAL_CANDIDATE);
+    }
+    let imported = false;
+    try {
+      imported = await importCandidate({
+        sourcePath: input.sourcePath,
+        checkout,
+        head,
+        key,
+        scratch: input.scratch,
+        trustedPath: input.trustedPath,
+      });
+    } catch {
+      return portError("unavailable", STATIC_LOCAL_CANDIDATE);
+    }
+    if (!imported) return portError("unavailable", STATIC_LOCAL_CANDIDATE);
+    return portOk(undefined);
+  };
 }
 
 /** Write the isolated client home, token file and config for one task. */

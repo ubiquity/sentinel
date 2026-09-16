@@ -16,6 +16,7 @@ import type {
   GitHubPullRequestV1,
   PortResultV1,
 } from "../../src/contracts/ports.ts";
+import { portOk } from "../../src/contracts/ports.ts";
 import { parseReviewReceiptV1 } from "../../src/contracts/review-receipt.ts";
 import type { ReviewReceiptV1 } from "../../src/contracts/review-receipt.ts";
 import {
@@ -25,6 +26,7 @@ import {
 } from "../../src/repair/loop.ts";
 import { runRepairEntrypoint } from "../../src/main.ts";
 import { DurableGitHubCooldownGate } from "../../src/repair/github-cooldown.ts";
+import { candidatePreservationRef } from "../../src/repair/keys.ts";
 import type { FakeGithubOptionsV1, FakeReplayOptionsV1 } from "./helpers.ts";
 import {
   AdvancingFakeGithub,
@@ -40,6 +42,7 @@ import {
 import {
   incidentEvidence,
   incidentSummary,
+  REPO,
   SHA1,
   SHA2,
   SHA3,
@@ -120,9 +123,16 @@ function makeRig(
   const budget = new RollingStartBudget({ clock, state, configs });
   const githubOptions: FakeGithubOptionsV1 = {
     baseSha: SHA1,
-    branchRefSha: SHA3,
     ...options.github,
   };
+  if (
+    githubOptions.candidateLifecycle === undefined &&
+    githubOptions.branchRefSha === undefined
+  ) {
+    // Legacy blanket observation for tests that never opted into the exact
+    // lifecycle; opt-in fixtures seed exact refs instead.
+    githubOptions.branchRefSha = SHA3;
+  }
   const github = options.githubAdvanceMs !== undefined
     ? new AdvancingFakeGithub(clock, options.githubAdvanceMs, githubOptions)
     : options.readPrAdvanceMs !== undefined
@@ -201,10 +211,68 @@ async function seed(
   assert.ok(written.ok && written.value.status === "applied");
 }
 
+/**
+ * Explicit per-test positive candidate lifecycle for run-bound publication
+ * cases: the preservation callback simulates capability success over the fake
+ * port (no storage); real preservation storage evidence comes only from the
+ * existing destructive host fixtures. An unchanged base is never prepared.
+ */
+function positiveLifecycle(): NonNullable<
+  FakeGithubOptionsV1["candidateLifecycle"]
+> {
+  return {
+    preserveCandidate: async (request) => {
+      assert.equal(request.candidate.base, SHA1, "exact candidate base");
+      assert.equal(request.candidate.head, SHA3, "exact candidate head");
+      assert.equal(
+        request.candidate.ref,
+        await candidatePreservationRef(
+          REPO,
+          request.taskId,
+          request.candidate.operationKey,
+        ),
+        "exact preservation ref",
+      );
+      return portOk(undefined);
+    },
+    prepareBaseRefresh: () => {
+      throw new Error("a base refresh must never run for an unchanged base");
+    },
+  };
+}
+
+/** Exact open PR bound to the task branch/head/base (positive lifecycle). */
+function exactOpenPr(
+  number: number,
+  head: GitSha,
+  headRef: string,
+  base: GitSha = SHA1,
+): GitHubPullRequestV1 {
+  return {
+    number,
+    title: "Sentinel repair",
+    body: "Refs 1",
+    state: "open",
+    head,
+    base,
+    mergeSha: null,
+    headRef,
+    baseRef: "development",
+    author: null,
+    createdAt: T0,
+    updatedAt: T0,
+    mergedAt: null,
+    reviewDecision: "none",
+  };
+}
+
 Deno.test(
   "run ceiling: an implementation start just before the 90-minute cutoff is admitted and completes publication",
   async () => {
-    const rig = makeRig({ replayAdvanceMs: REPAIR_MODEL_CUTOFF_MS - 1 });
+    const rig = makeRig({
+      replayAdvanceMs: REPAIR_MODEL_CUTOFF_MS - 1,
+      github: { candidateLifecycle: positiveLifecycle() },
+    });
     const outcome = await rig.run();
     assert.equal(outcome.status, "idle", JSON.stringify(outcome));
     const state = await rig.snapshot();
@@ -454,7 +522,10 @@ Deno.test(
     // review (the full declared review bound plus the reserved margin) can no
     // longer fit that window, so the run legitimately ends in the typed
     // no-work margin with the review neither started nor charged.
-    const fits = makeRig({ replayAdvanceMs: MINUTE });
+    const fits = makeRig({
+      replayAdvanceMs: MINUTE,
+      github: { candidateLifecycle: positiveLifecycle() },
+    });
     const fitted = await fits.run(10 * MINUTE);
     assert.equal(fitted.status, "margin", JSON.stringify(fitted));
     assert.equal(fits.model.requests.length, 1, "the implementation start ran");
@@ -545,7 +616,16 @@ Deno.test(
 Deno.test(
   "run ceiling: a review admission crossing the cutoff during the reservation write is refunded and a later run requests the review once",
   async () => {
-    const rig = makeRig({ incidents: false });
+    const rig = makeRig({
+      incidents: false,
+      github: {
+        candidateLifecycle: {
+          ...positiveLifecycle(),
+          refs: { "refs/heads/sentinel/repair/issue-1": SHA3 },
+          pullRequests: [exactOpenPr(7, SHA3, "sentinel/repair/issue-1")],
+        },
+      },
+    });
     const record = workRecord("issue-1", {
       source: { kind: "issue", id: "1", revision: SHA1 },
       related: { incidentId: null, issueNumber: 1 },
@@ -624,7 +704,16 @@ Deno.test(
 Deno.test(
   "run ceiling: a review admission crossing a tighter caller deadline is refunded and a later run requests the review once",
   async () => {
-    const rig = makeRig({ incidents: false });
+    const rig = makeRig({
+      incidents: false,
+      github: {
+        candidateLifecycle: {
+          ...positiveLifecycle(),
+          refs: { "refs/heads/sentinel/repair/issue-1": SHA3 },
+          pullRequests: [exactOpenPr(7, SHA3, "sentinel/repair/issue-1")],
+        },
+      },
+    });
     const record = workRecord("issue-1", {
       source: { kind: "issue", id: "1", revision: SHA1 },
       related: { incidentId: null, issueNumber: 1 },
@@ -800,6 +889,7 @@ Deno.test(
   async () => {
     const rig = makeRig({
       githubAdvanceMs: REPAIR_RUN_CEILING_MS + MINUTE,
+      github: { candidateLifecycle: positiveLifecycle() },
     });
     const first = await rig.run();
     assert.equal(first.status, "margin", JSON.stringify(first));
@@ -834,15 +924,65 @@ Deno.test(
 );
 
 Deno.test(
+  "run bounds: a fresh candidate branch is absent before its push and carries exactly the pushed head afterwards",
+  async () => {
+    const rig = makeRig({
+      github: { candidateLifecycle: positiveLifecycle() },
+    });
+    const push = rig.github.pushHead.bind(rig.github);
+    let refBefore: GitSha | null = null;
+    let refAfter: GitSha | null = null;
+    let observed = false;
+    rig.github.pushHead = (
+      ref: string,
+      sha: GitSha,
+      expected: GitSha | null,
+    ) => {
+      observed = true;
+      refBefore = rig.github.candidateRefs.get(ref) ?? null;
+      const result = push(ref, sha, expected);
+      refAfter = rig.github.candidateRefs.get(ref) ?? null;
+      return result;
+    };
+    const outcome = await rig.run();
+    assert.equal(outcome.status, "idle", JSON.stringify(outcome));
+    const state = await rig.snapshot();
+    const branch = state.work[0]!.target.branch;
+    assert.ok(branch, "candidate branch identity exists");
+    assert.ok(observed, "the candidate push ran");
+    assert.equal(
+      refBefore,
+      null,
+      "the fresh candidate branch is absent before the push (never the model SHA3)",
+    );
+    assert.equal(refAfter, SHA3, "the push publishes the exact model head");
+    assert.equal(rig.github.pushes.length, 1, "one push");
+    assert.equal(
+      rig.github.candidateRefs.get(`refs/heads/${branch}`),
+      SHA3,
+      "the exact ref carries the pushed head",
+    );
+    assert.equal(rig.model.requests.length, 1, "one model start");
+    assert.equal(state.work[0]!.nextStep, "review");
+    assert.equal(state.work[0]!.target.pr, 7);
+  },
+);
+
+Deno.test(
   "run ceiling: a remote PR reconciliation read that crosses the total deadline defers creation and the next run creates it once",
   async () => {
     const rig = makeRig({
       incidents: false,
       findPrAdvanceMs: REPAIR_RUN_CEILING_MS + MINUTE,
+      github: {
+        candidateLifecycle: {
+          ...positiveLifecycle(),
+          refs: { "refs/heads/sentinel/repair/issue-1": SHA3 },
+          pullRequests: [],
+        },
+      },
     });
     // No PR exists yet: creation must be re-attempted after the deadline.
-    rig.github.prNumber = 0;
-    rig.github.releasedHead = SHA3;
     const record = workRecord("issue-1", {
       source: { kind: "issue", id: "1", revision: SHA1 },
       related: { incidentId: null, issueNumber: 1 },

@@ -61,9 +61,11 @@ import type {
 } from "../../src/contracts/brands.ts";
 import type {
   MergeOutcomeV1,
+  MergeRequestV1,
   PortResultV1,
+  PullRequestCreateV1,
+  PullRequestPublishV1,
 } from "../../src/contracts/ports.ts";
-import { portOk } from "../../src/contracts/ports.ts";
 import type { RepositoryConfigV1 } from "../../src/contracts/repository-config.ts";
 import { parseRepositoryConfigV1 } from "../../src/contracts/repository-config.ts";
 import type { RepositoryIdentityV1 } from "../../src/contracts/shared.ts";
@@ -84,6 +86,7 @@ import type {
   GatewayCausalVerifierV1,
 } from "../../src/replay/causal-verifier.ts";
 import { markerProofParser } from "../../src/replay/fixture.ts";
+import { LinuxReplayIsolation } from "../../src/replay/isolation.ts";
 import { DenoReplayRuntime } from "../../src/replay/runtime.ts";
 import type {
   ReplayCommandInputV1,
@@ -116,6 +119,7 @@ import {
   sha256hex,
 } from "../adapters/gateway/helpers.ts";
 import {
+  exactCandidateLifecycle,
   FakeClock,
   FakeGithub,
   makeIntegrationCtx,
@@ -764,15 +768,32 @@ function causalConsumerFixtureBase(): string {
   return `tests/fixtures/gateway-replay/${INCIDENT_A}/${CAPTURE_ID_A}`;
 }
 
-function makeConcreteVerifier(
+async function makeConcreteVerifier(
   toy: ToyRepoV1,
   tmp: string,
   runtime: ReplayRuntimeV1,
-): GatewayCausalVerifierV1 {
+): Promise<GatewayCausalVerifierV1> {
   const base = causalConsumerFixtureBase();
+  const scratchDir = `${tmp}/causal-verifier-scratch`;
+  // The verifier's trusted scratch root must already EXIST and be a real
+  // directory (the Linux isolation constructor refuses a missing root), so
+  // create the exact causal-verifier-scratch directory first with a
+  // restrictive mode.
+  await Deno.mkdir(scratchDir, { recursive: true, mode: 0o700 });
+  // Linux consumes the REAL bubblewrap namespace boundary
+  // (`LinuxReplayIsolation`, the same supplied recording runtime); macOS
+  // keeps the verifier's embedded fixed sandbox-exec Seatbelt profile and
+  // every other platform is explicitly skipped by the callers. The
+  // capability is the real instance: its attestation is the production
+  // description and the port-style validator captures and receiver-binds its
+  // `run`. Nothing here overrides osName, fabricates an attestation or
+  // rewrites runtime results.
+  const isolation = Deno.build.os === "linux"
+    ? new LinuxReplayIsolation(scratchDir, { runtime })
+    : null;
   return new GatewayLocalCausalVerifier({
     sourcePath: toy.root,
-    scratchDir: `${tmp}/causal-verifier-scratch`,
+    scratchDir,
     // The fixed `scripts/replay.ts` consumer bound to the trusted
     // trusted-consumer command identity (an interchangeable consumer path is
     // rejected by the verifier constructor).
@@ -782,6 +803,7 @@ function makeConcreteVerifier(
     denoPath: Deno.execPath(),
     maxDurationMs: 60_000,
     maxOutputBytes: 262_144,
+    ...(isolation === null ? {} : { isolation }),
     runtime,
   });
 }
@@ -914,10 +936,10 @@ function sessionVerifier(evidence: {
   return null;
 }
 
-/** Exact-head fake GitHub: each head gets its own PR number. */
+/** Exact-head fake GitHub: each head gets its own PR number. The inherited
+ * lifecycle maps own the exact PR/ref observations, so create and merge
+ * delegate to super and every read observes the same exact objects. */
 class ExactHeadFakeGithub extends FakeGithub {
-  private prByHead = new Map<GitSha, number>();
-  private nextPr = 7;
   readonly mergedHeads: GitSha[] = [];
   readonly publishedHeads: GitSha[] = [];
 
@@ -930,35 +952,25 @@ class ExactHeadFakeGithub extends FakeGithub {
     return super.pushHead(ref, sha, expectedRef);
   }
 
-  override createPullRequest(_request: unknown): Promise<
-    PortResultV1<{
-      outcome: "applied" | "ambiguous";
-      number: number | null;
-      head: GitSha | null;
-    }>
-  > {
-    const request = _request as { expectedHeadRef: GitSha };
-    const head = request.expectedHeadRef;
-    let number = this.prByHead.get(head);
-    if (number === undefined) {
-      number = this.nextPr++;
-      this.prByHead.set(head, number);
+  override async createPullRequest(
+    request: PullRequestCreateV1,
+  ): Promise<PortResultV1<PullRequestPublishV1>> {
+    const published = await super.createPullRequest(request);
+    // Keep the exact per-head PR allocation in the call recording; the
+    // inherited lifecycle fake already allocated it deterministically.
+    if (published.ok && published.value.number !== null) {
+      this.calls.push(`createPr:${published.value.number}`);
     }
-    this.calls.push(`createPr:${number}`);
-    return Promise.resolve(portOk({ outcome: "applied", number, head }));
+    return published;
   }
 
-  override mergePullRequest(_request: unknown): Promise<
-    PortResultV1<MergeOutcomeV1>
-  > {
-    const request = _request as { expectedHead: GitSha };
-    const head = request.expectedHead;
-    this.mergedHeads.push(head);
-    return Promise.resolve(portOk({
-      outcome: "merged",
-      head,
-      mergeSha: head,
-    }));
+  override async mergePullRequest(
+    request: MergeRequestV1,
+  ): Promise<PortResultV1<MergeOutcomeV1>> {
+    this.mergedHeads.push(request.expectedHead);
+    // The inherited lifecycle merge closes the exact requested PR on the exact
+    // requested head; the merge receipt is never the global last push.
+    return await super.mergePullRequest(request);
   }
 }
 
@@ -1076,7 +1088,24 @@ async function makeCausalRig(
     remoteUrl: ctx.remoteUrl,
   });
   const configs = [composedConfig(REPO)];
-  const github = new ExactHeadFakeGithub({ baseSha: toy.originalSha });
+  let candidateHead: GitSha | null = null;
+  // The positive candidate head depends on the composed fixture bytes and is
+  // resolved after this rig is built, so the exact preservation assertion
+  // reads it at call time (always set before the positive run).
+  const github = new ExactHeadFakeGithub({
+    baseSha: toy.originalSha,
+    candidateLifecycle: exactCandidateLifecycle({
+      base: toy.originalSha,
+      head: () => {
+        const head = candidateHead;
+        assert.ok(
+          head !== null,
+          "candidate head must be set before preservation",
+        );
+        return head;
+      },
+    }),
+  });
   const keyBytes = hexToBytes(
     JSON.parse(
       await Deno.readTextFile(
@@ -1128,7 +1157,6 @@ async function makeCausalRig(
   const opened = await gatewayStore.open();
   assert.ok(opened.ok, `store open failed: ${JSON.stringify(opened)}`);
 
-  let candidateHead: GitSha | null = null;
   const sessions: FakeCodexSession[] = [];
   const replayRuntime = new RecordingReplayRuntime(
     new DenoReplayRuntime(Deno.env.get("PATH") ?? "/usr/bin:/bin"),
@@ -1138,7 +1166,7 @@ async function makeCausalRig(
   const concrete = options.concrete === true ||
     options.mutateProof !== undefined;
   const inner = concrete
-    ? makeConcreteVerifier(toy, ctx.tmp, replayRuntime)
+    ? await makeConcreteVerifier(toy, ctx.tmp, replayRuntime)
     : null;
   const verifier = inner === null
     ? undefined
@@ -1283,16 +1311,77 @@ async function walkFiles(dir: string, out: string[] = []): Promise<string[]> {
 }
 
 // ---------------------------------------------------------------------------
+// Platform boundary evidence helpers.
+// ---------------------------------------------------------------------------
+
+/**
+ * The concrete trusted causal verifier has a real restricted-execution
+ * boundary only on the two platforms this host can enforce: macOS (installed
+ * fixed `/usr/bin/sandbox-exec` running the verifier's embedded Seatbelt
+ * profile) and Linux (the injected `LinuxReplayIsolation` bubblewrap
+ * namespace). Every other platform has no boundary, so the cases that require
+ * a bound proof stay explicitly skipped instead of silently passing.
+ */
+const CONCRETE_VERIFIER_UNSUPPORTED = Deno.build.os !== "darwin" &&
+  Deno.build.os !== "linux";
+
+/** Fixed bubblewrap binary the injected Linux isolation boundary spawns. */
+const LINUX_BWRAP_PATH = "/usr/bin/bwrap";
+
+/** First value of a repeated `flag value` pair in a recorded argv, or null. */
+function argvFlagValue(args: readonly string[], flag: string): string | null {
+  for (let index = 0; index < args.length - 1; index += 1) {
+    if (args[index] === flag) return args[index + 1]!;
+  }
+  return null;
+}
+
+/** `--setenv <key> <value>` value of a recorded bubblewrap argv, or null. */
+function bwrapSetenvValue(args: readonly string[], key: string): string | null {
+  for (let index = 0; index < args.length - 2; index += 1) {
+    if (args[index] === "--setenv" && args[index + 1] === key) {
+      return args[index + 2]!;
+    }
+  }
+  return null;
+}
+
+/**
+ * The snapshot checkout one recorded concrete-consumer run actually enters,
+ * derived from the REAL boundary argv only: the sandbox-exec `SNAPSHOT=`
+ * substitution parameter on macOS, the bubblewrap `--chdir` on Linux. The
+ * outer runtime cwd (always `/` for a Linux bwrap spawn) is never snapshot
+ * evidence.
+ */
+function consumerSnapshot(
+  args: readonly string[],
+  osName: string,
+): string | null {
+  if (osName === "darwin") {
+    for (let index = 0; index < args.length - 1; index += 1) {
+      if (args[index] === "-D" && args[index + 1]!.startsWith("SNAPSHOT=")) {
+        return args[index + 1]!.slice("SNAPSHOT=".length);
+      }
+    }
+    return null;
+  }
+  return argvFlagValue(args, "--chdir");
+}
+
+// ---------------------------------------------------------------------------
 // Tests.
 // ---------------------------------------------------------------------------
 
 Deno.test({
   name:
     "causal capture: one captured request crosses the real repair loop to PR/review intent with a bound proof and zero limitations",
-  // True macOS slice: the concrete verifier's embedded sandbox-exec seatbelt
-  // profile exists and is supported only on macOS (never skipped on this
-  // Mac — only explicit non-macOS CI ignores).
-  ignore: Deno.build.os !== "darwin",
+  // True restricted-execution slice on the platforms that HAVE a real
+  // boundary: macOS runs the concrete verifier's embedded fixed sandbox-exec
+  // Seatbelt profile; Linux runs the identical direct-Deno consumer through
+  // the injected LinuxReplayIsolation bubblewrap namespace (--unshare-all,
+  // read-only snapshot bind, private tmpfs /tmp). Platforms with no real
+  // boundary are explicitly skipped rather than passing without a proof.
+  ignore: CONCRETE_VERIFIER_UNSUPPORTED,
   fn: async () => {
     const toy = await makeToyRepo("positive");
     const rig = await makeCausalRig(toy, "positive", {
@@ -1342,7 +1431,7 @@ Deno.test({
       const unrelatedSha = await commitUnrelated(toy);
       assert.notEqual(unrelatedSha, candidateSha);
 
-      const outcome1 = await rig.run();
+      const outcome1 = await rig.run(60 * 60_000);
       assert.equal(outcome1.status, "idle", JSON.stringify(outcome1));
       const state = await rig.snapshot();
 
@@ -1423,79 +1512,151 @@ Deno.test({
       // The exact composed bundle ran through the concrete verifier: the
       // private original request/upstream and the sanitized bundle both
       // executed the SAME committed consumer at the original SHA under the
+      // REAL restricted-execution boundary for this platform — macOS: the
       // embedded fixed sandbox-exec seatbelt profile (DENO/SNAPSHOT/CACHE
-      // realpath-resolved substitution parameters, cwd = the snapshot) and
-      // both failed for the intended specific failure. Each run has its OWN
-      // home/cache and sees only its OWN snapshot.
+      // realpath-resolved substitution parameters, cwd = the snapshot); Linux:
+      // the injected LinuxReplayIsolation bubblewrap namespace with the exact
+      // snapshot bound read-only at its own absolute path — and both failed
+      // for the intended specific failure.
       const verifierRuns = rig.replayRuntime.runs.filter((run) =>
-        run.input.executable === CAUSAL_SANDBOX_EXEC_PATH
+        run.input.executable ===
+          (Deno.build.os === "darwin"
+            ? CAUSAL_SANDBOX_EXEC_PATH
+            : LINUX_BWRAP_PATH)
       );
       assert.ok(verifierRuns.length >= 2, "original + sanitized consumer runs");
-      const snapshotParams = verifierRuns.map((run) => {
-        const args = run.input.args;
-        for (let index = 0; index < args.length - 1; index += 1) {
-          if (
-            args[index] === "-D" && args[index + 1]!.startsWith("SNAPSHOT=")
-          ) {
-            return args[index + 1]!.slice("SNAPSHOT=".length);
-          }
-        }
-        return null;
-      });
+
+      // Snapshot evidence comes ONLY from the actual per-platform boundary
+      // argv, never from the outer runtime cwd.
+      const consumerSnapshots = verifierRuns.map((run) =>
+        consumerSnapshot(run.input.args, Deno.build.os)
+      );
       assert.ok(
-        snapshotParams.every((value) =>
+        consumerSnapshots.every((value) =>
           value !== null && value.startsWith("/")
         ),
-        "realpath-resolved SNAPSHOT parameters",
+        "exact realpath-resolved snapshot paths",
       );
       assert.equal(
-        new Set(snapshotParams).size,
+        new Set(consumerSnapshots).size,
         verifierRuns.length,
-        "each consumer run sees only its own snapshot",
+        "each consumer run sees only its own unique snapshot",
       );
-      for (const run of verifierRuns) {
-        const args = run.input.args;
-        assert.equal(args[0], "-p", "fixed embedded seatbelt profile");
+
+      if (Deno.build.os === "darwin") {
+        for (const run of verifierRuns) {
+          const args = run.input.args;
+          assert.equal(args[0], "-p", "fixed embedded seatbelt profile");
+          assert.ok(
+            args.includes("--no-config") && args.includes("--no-remote"),
+            "fixed no-config/no-remote consumer protocol",
+          );
+          assert.equal(
+            args[args.length - 1],
+            `${run.input.cwd}/scripts/replay.ts`,
+            "the fixed bound consumer at its own snapshot path",
+          );
+          assert.ok(
+            !args.includes("task"),
+            "verifier never runs deno task",
+          );
+          assert.equal(run.exitCode, 1, "consumer must fail at original SHA");
+          assert.ok(run.outputText.includes(TEST_ID_MARKER));
+          assert.ok(
+            run.outputText.includes("stream terminated unexpectedly"),
+            "consumer failure is the intended specific failure",
+          );
+        }
+        // Each run has its OWN home/cache and sees only its OWN snapshot.
+        const [firstConsumer, secondConsumer] = verifierRuns;
+        assert.notEqual(firstConsumer!.input.cwd, secondConsumer!.input.cwd);
+        assert.notEqual(
+          firstConsumer!.input.env.HOME,
+          secondConsumer!.input.env.HOME,
+          "no shared home between original and sanitized executions",
+        );
+        assert.notEqual(
+          firstConsumer!.input.env.DENO_DIR,
+          secondConsumer!.input.env.DENO_DIR,
+          "no shared cache between original and sanitized executions",
+        );
         assert.ok(
-          args.includes("--no-config") && args.includes("--no-remote"),
-          "fixed no-config/no-remote consumer protocol",
-        );
-        assert.equal(
-          args[args.length - 1],
-          `${run.input.cwd}/scripts/replay.ts`,
-          "the fixed bound consumer at its own snapshot path",
+          firstConsumer!.input.env.HOME.includes("home-original"),
+          "original run home is its own",
         );
         assert.ok(
-          !args.includes("task"),
-          "verifier never runs deno task",
+          secondConsumer!.input.env.HOME.includes("home-sanitized"),
+          "sanitized run home is its own",
         );
-        assert.equal(run.exitCode, 1, "consumer must fail at original SHA");
-        assert.ok(run.outputText.includes(TEST_ID_MARKER));
+      } else {
+        // Linux: each snapshot is the ACTUAL `--chdir` of the recorded bwrap
+        // argv, never the outer runtime cwd (which is `/` for every bwrap
+        // spawn).
         assert.ok(
-          run.outputText.includes("stream terminated unexpectedly"),
-          "consumer failure is the intended specific failure",
+          verifierRuns.every((run) => run.input.cwd === "/"),
+          "Linux isolation spawns bwrap from / and enters via --chdir",
         );
+        for (let index = 0; index < verifierRuns.length; index += 1) {
+          const run = verifierRuns[index]!;
+          const args = run.input.args;
+          const snapshot = consumerSnapshots[index]!;
+          for (
+            const flag of [
+              "--unshare-all",
+              "--clearenv",
+              "--new-session",
+              "--die-with-parent",
+            ]
+          ) {
+            assert.ok(args.includes(flag), `fixed ${flag} boundary flag`);
+          }
+          assert.equal(
+            argvFlagValue(args, "--tmpfs"),
+            "/tmp",
+            "private tmpfs /tmp per namespace",
+          );
+          // The fixed sandbox HOME/DENO_DIR strings are identical in both
+          // recorded runs, but each run owns an unshared namespace with its
+          // own tmpfs /tmp, so no home or cache is shared between the
+          // original and sanitized executions.
+          assert.equal(bwrapSetenvValue(args, "HOME"), "/tmp/home");
+          assert.equal(bwrapSetenvValue(args, "DENO_DIR"), "/tmp/deno");
+          // The exact snapshot is bound READ-ONLY at its own absolute path
+          // and never read-write.
+          assert.ok(
+            args.some((arg, argIndex) =>
+              arg === "--ro-bind" && args[argIndex + 1] === snapshot &&
+              args[argIndex + 2] === snapshot
+            ),
+            "the exact snapshot is --ro-bind at its own absolute path",
+          );
+          assert.equal(
+            args.some((arg, argIndex) =>
+              arg === "--bind" &&
+              (args[argIndex + 1] === snapshot ||
+                args[argIndex + 2] === snapshot)
+            ),
+            false,
+            "no read-write --bind of the private snapshot checkout",
+          );
+          assert.ok(
+            args.includes("--no-config") && args.includes("--no-remote"),
+            "fixed no-config/no-remote consumer protocol",
+          );
+          assert.ok(!args.includes("task"), "verifier never runs deno task");
+          assert.equal(
+            args[args.length - 1],
+            `${snapshot}/scripts/replay.ts`,
+            "the fixed bound consumer at its own snapshot path",
+          );
+          assert.equal(run.exitCode, 1, "consumer must fail at original SHA");
+          assert.ok(run.outputText.includes(TEST_ID_MARKER));
+          assert.ok(
+            run.outputText.includes("stream terminated unexpectedly"),
+            "consumer failure is the intended specific failure",
+          );
+        }
       }
-      const [firstConsumer, secondConsumer] = verifierRuns;
-      assert.notEqual(firstConsumer!.input.cwd, secondConsumer!.input.cwd);
-      assert.notEqual(
-        firstConsumer!.input.env.HOME,
-        secondConsumer!.input.env.HOME,
-        "no shared home between original and sanitized executions",
-      );
-      assert.notEqual(
-        firstConsumer!.input.env.DENO_DIR,
-        secondConsumer!.input.env.DENO_DIR,
-        "no shared cache between original and sanitized executions",
-      );
-      assert.ok(
-        firstConsumer!.input.env.HOME.includes("home-original"),
-        "original run home is its own",
-      );
-      assert.ok(
-        secondConsumer!.input.env.HOME.includes("home-sanitized"),
-        "sanitized run home is its own",
-      );
 
       // The identical permanent fixture ran through the candidate's ordinary
       // deno task test and passed: the committed bytes equal the composed
@@ -1597,7 +1758,7 @@ Deno.test(
 Deno.test({
   name:
     "causal capture: mismatched proof identities (bundle digest, original SHA) stay blocked as missing evidence",
-  ignore: Deno.build.os !== "darwin",
+  ignore: CONCRETE_VERIFIER_UNSUPPORTED,
   fn: async () => {
     const variants: Array<{
       name: string;
@@ -1655,7 +1816,7 @@ Deno.test({
 Deno.test({
   name:
     "causal capture: a redaction-damaged (text-dependent) capture cannot be causally proved and stays blocked",
-  ignore: Deno.build.os !== "darwin",
+  ignore: CONCRETE_VERIFIER_UNSUPPORTED,
   fn: async () => {
     const toy = await makeToyRepo("textdamage");
     const rig = await makeCausalRig(toy, "textdamage", {
@@ -1699,7 +1860,7 @@ Deno.test({
 Deno.test({
   name:
     "causal capture: an unrelated candidate failure never publishes and never fabricates a clean replay",
-  ignore: Deno.build.os !== "darwin",
+  ignore: CONCRETE_VERIFIER_UNSUPPORTED,
   fn: async () => {
     const toy = await makeToyRepo("unrelated");
     const rig = await makeCausalRig(toy, "unrelated", {

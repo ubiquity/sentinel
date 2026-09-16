@@ -23,6 +23,8 @@
 import { type GitSha, isGitSha, isSha256Hex } from "../contracts/brands.ts";
 import { canonicalStringifySha256 } from "../contracts/canonical.ts";
 import { portError, portOk, type PortResultV1 } from "../contracts/ports.ts";
+import { MaxItems, MaxText } from "../contracts/validation.ts";
+import { containsSecretShapedText } from "../replay/fixture.ts";
 import { DenoReplayRuntime, type ReplayRuntimeV1 } from "../replay/runtime.ts";
 
 /** Whole snapshot operation bound: no read may outlive this. */
@@ -37,6 +39,22 @@ export const MAX_FILE_BYTES = 512 * 1024;
 export const MAX_PATH_CHARS = 1024;
 /** Snapshot value version. */
 export const SNAPSHOT_VERSION = "v1" as const;
+/** One publication validation: newly exposed commit bound (overflow rejects). */
+export const MAX_NEW_COMMITS = 128;
+/** One publication validation: newly exposed object bound (overflow rejects). */
+export const MAX_NEW_OBJECTS = 4096;
+/** One newly exposed commit's parent-edge bound (an octopus merge stays finite). */
+export const MAX_COMMIT_PARENTS = 64;
+/** One publication validation: protected-path entries, the repository config bound. */
+export const MAX_PROTECTED_PATHS = MaxItems.protectedPaths;
+/** Combined bounded protected-path characters accepted from the config. */
+const MAX_PROTECTED_PATHSPEC_CHARS = 128 * 1024;
+/** One newly exposed commit metadata read bound. */
+const MAX_METADATA_BYTES = MAX_FILE_BYTES;
+/** One recursive root-tree listing bound for a newly exposed root commit. */
+const MAX_TREE_READ_BYTES = (MAX_NEW_OBJECTS + 1) * (MAX_PATH_CHARS + 64);
+/** One exact `ls-tree -z` entry read bound for one literal protected path. */
+const MAX_TREE_ENTRY_BYTES = MAX_PATH_CHARS + 64;
 
 const ZERO_SHA = "0".repeat(40);
 const ZERO_MODE = "000000";
@@ -90,6 +108,65 @@ const SNAPSHOT_SHAPE_DETAIL =
 /** Static sanitized digest-binding failure shared with the review producer. */
 export const SNAPSHOT_DIGEST_DETAIL =
   "review snapshot unavailable: the snapshot digest does not bind its contents";
+
+const PUBLICATION_INPUT_DETAIL =
+  "publication validation unavailable: expected exact base, head and optional published head commit SHAs with bounded protected paths";
+const PUBLICATION_PROTECTED_INPUT_DETAIL =
+  "publication validation unavailable: protected paths are malformed or over bound";
+const PUBLICATION_DEADLINE_DETAIL =
+  "publication validation unavailable: the bounded publication validation deadline elapsed";
+const PUBLICATION_READ_DETAIL =
+  "publication validation unavailable: a trusted Git object read did not settle with exit 0";
+const PUBLICATION_UNSETTLED_DETAIL =
+  "publication validation unavailable: a trusted Git object read did not prove process settlement";
+const PUBLICATION_OVERBOUND_DETAIL =
+  "publication validation unavailable: a trusted Git object read exceeded its finite output bound";
+const PUBLICATION_COMMIT_DETAIL =
+  "publication validation unavailable: base, head or published head is not the exact commit object requested";
+const PUBLICATION_STALE_BASE_DETAIL =
+  "publication validation unavailable: base is not an ancestor of head (stale base)";
+const PUBLICATION_PUBLISHED_HEAD_DETAIL =
+  "publication validation unavailable: the prior published head is not an ancestor of head";
+const PUBLICATION_EMPTY_DETAIL =
+  "publication validation unavailable: the publication exposes no new commit to validate";
+const PUBLICATION_COMMIT_BOUND_DETAIL =
+  "publication validation unavailable: the newly exposed commit bound was exceeded";
+const PUBLICATION_OBJECT_BOUND_DETAIL =
+  "publication validation unavailable: the newly exposed object bound was exceeded";
+const PUBLICATION_LIST_DETAIL =
+  "publication validation unavailable: a bounded Git object list is malformed";
+const PUBLICATION_BOUND_DETAIL =
+  "publication validation unavailable: the aggregate inspected metadata and blob bytes exceeded their finite bound";
+const PUBLICATION_METADATA_DETAIL =
+  "publication validation unavailable: newly exposed commit metadata is not bounded text";
+const PUBLICATION_METADATA_BOUND_DETAIL =
+  "publication validation unavailable: newly exposed commit metadata exceeded its finite content bound";
+const PUBLICATION_METADATA_SECRET_DETAIL =
+  "publication validation unavailable: newly exposed commit metadata contains secret-shaped text";
+const PUBLICATION_ISSUE_DETAIL =
+  "publication validation unavailable: newly exposed commit metadata contains an issue-closing reference";
+const PUBLICATION_PROTECTED_DETAIL =
+  "publication validation unavailable: a protected entry does not match the trusted base tree";
+const PUBLICATION_STRUCTURE_DETAIL =
+  "publication validation unavailable: a parent edge has an unsafe, unsupported or over-bound structural change";
+const PUBLICATION_PATH_DETAIL =
+  "publication validation unavailable: a parent edge changed path is unsafe or over bound";
+const PUBLICATION_MODE_DETAIL =
+  "publication validation unavailable: a parent edge changed path has an unsupported Git mode";
+const PUBLICATION_SYMLINK_DETAIL =
+  "publication validation unavailable: newly exposed symlinks are unsupported";
+const PUBLICATION_SUBMODULE_DETAIL =
+  "publication validation unavailable: newly exposed submodules are unsupported";
+const PUBLICATION_STATUS_DETAIL =
+  "publication validation unavailable: a parent edge changed path has an unsupported status";
+const PUBLICATION_BINARY_DETAIL =
+  "publication validation unavailable: a newly exposed blob is binary";
+const PUBLICATION_UTF8_DETAIL =
+  "publication validation unavailable: a newly exposed blob is not valid UTF-8 text";
+const PUBLICATION_FILE_BOUND_DETAIL =
+  "publication validation unavailable: a newly exposed blob exceeded its finite content bound";
+const PUBLICATION_SECRET_DETAIL =
+  "publication validation unavailable: a newly exposed blob contains secret-shaped text";
 
 /**
  * Fixed global argv: no optional locks, no pager, literal pathspecs, no
@@ -382,6 +459,267 @@ function numstatRecordCount(text: string): number {
   return count;
 }
 
+/** Exact bytes a `rev-list` SHA list read may retain for `bound` entries. */
+function shaListBytes(bound: number): number {
+  return (bound + 1) * 41;
+}
+
+/**
+ * Validate and normalize caller-supplied protected paths. A protected entry is
+ * the repository config's exact relative path or a trailing-slash subtree
+ * entry; both normalize to one literal pathspec, because a directory entry's
+ * exact object SHA is its subtree SHA. Bounded in count (`MaxItems`) and
+ * length (`MaxText.path`), no pathspec magic, no control characters, no
+ * absolute or dot-segment forms. Returns unique normalized paths, or null when
+ * the value is malformed or over bound (which the caller rejects).
+ */
+function normalizeProtectedPaths(value: unknown): string[] | null {
+  if (!Array.isArray(value)) return null;
+  if (value.length > MAX_PROTECTED_PATHS) return null;
+  const paths = new Set<string>();
+  let pathspecChars = 0;
+  for (const entry of value) {
+    if (typeof entry !== "string") return null;
+    const path = entry.endsWith("/") ? entry.slice(0, -1) : entry;
+    if (path.length === 0 || path.length > MaxText.path) return null;
+    if (!isSafeReviewPath(path)) return null;
+    if (paths.has(path)) continue;
+    paths.add(path);
+    pathspecChars += path.length + 1;
+    if (pathspecChars > MAX_PROTECTED_PATHSPEC_CHARS) return null;
+  }
+  return [...paths];
+}
+
+/**
+ * Parse one bounded `rev-list` list: exactly one 40-hex object name per line
+ * and no other content. Null when any line is malformed. The caller applies
+ * the finite entry bound to the parsed list; the bounded read retains at most
+ * one entry beyond that bound, which is what makes overflow provable.
+ */
+function parseShaList(text: string): string[] | null {
+  const shas: string[] = [];
+  const lines = text.split("\n");
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index];
+    if (line === "") {
+      if (index === lines.length - 1) continue;
+      return null;
+    }
+    if (!/^[0-9a-f]{40}$/.test(line)) return null;
+    shas.push(line);
+  }
+  return shas;
+}
+
+/**
+ * Parse the parent edges of one raw commit object. The tree header must be
+ * present and every `parent` header must be an exact 40-hex commit name; the
+ * header section ends at the first empty line, so message content can never
+ * fabricate a parent edge. Null when the metadata is malformed.
+ */
+function parseCommitParents(text: string): string[] | null {
+  const parents: string[] = [];
+  let sawTree = false;
+  for (const line of text.split("\n")) {
+    if (line === "") break;
+    if (line.startsWith("tree ")) {
+      if (sawTree || !/^[0-9a-f]{40}$/.test(line.slice(5))) return null;
+      sawTree = true;
+      continue;
+    }
+    if (line.startsWith("parent ")) {
+      if (!/^[0-9a-f]{40}$/.test(line.slice(7))) return null;
+      parents.push(line.slice(7));
+      if (parents.length > MAX_COMMIT_PARENTS) return null;
+    }
+  }
+  return sawTree ? parents : null;
+}
+
+/**
+ * Ordinary GitHub issue-closing references in raw commit metadata: one of
+ * fix/fixes/fixed, close/closes/closed, resolve/resolves/resolved, then
+ * ordinary whitespace or a colon, then `#N`, `owner/repo#N` or a GitHub issue
+ * URL. This is a deterministic negative check on trusted-local bytes; the
+ * candidate commit is never mutated and the simple PR-body keyword sanitizer
+ * stays a separate API.
+ */
+const ISSUE_CLOSING_RE =
+  /\b(?:fix(?:e[sd])?|close[sd]?|resolve[sd]?)\b[\s:]+(?:#\d+|https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/issues\/\d+|[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+#\d+)/i;
+
+function hasIssueClosingReference(text: string): boolean {
+  return ISSUE_CLOSING_RE.test(text);
+}
+
+/**
+ * Complete structural view of one newly exposed root commit's tree. Entries
+ * must have safe paths and regular-file modes; every other mode or type is
+ * rejected, never omitted. Returns the tree's candidate blob names; the caller
+ * keeps only the objects that are actually newly exposed.
+ */
+function parseRootTreeBlobs(
+  text: string,
+): { ok: true; blobs: string[] } | { ok: false; detail: string } {
+  const blobs: string[] = [];
+  const seenPaths = new Set<string>();
+  for (const record of text.split("\u0000")) {
+    if (record === "") continue;
+    const tab = record.indexOf("\t");
+    if (tab <= 0) return { ok: false, detail: PUBLICATION_STRUCTURE_DETAIL };
+    const meta = record.slice(0, tab).split(" ");
+    if (meta.length !== 3) {
+      return { ok: false, detail: PUBLICATION_STRUCTURE_DETAIL };
+    }
+    const [mode, type, sha] = meta;
+    const path = record.slice(tab + 1);
+    if (!/^[0-9a-f]{40}$/.test(sha)) {
+      return { ok: false, detail: PUBLICATION_STRUCTURE_DETAIL };
+    }
+    if (!isSafeReviewPath(path) || seenPaths.has(path)) {
+      return { ok: false, detail: PUBLICATION_PATH_DETAIL };
+    }
+    seenPaths.add(path);
+    if (mode === "120000") {
+      return { ok: false, detail: PUBLICATION_SYMLINK_DETAIL };
+    }
+    if (mode === "160000") {
+      return { ok: false, detail: PUBLICATION_SUBMODULE_DETAIL };
+    }
+    if (!isRegularMode(mode) || type !== "blob") {
+      return { ok: false, detail: PUBLICATION_MODE_DETAIL };
+    }
+    blobs.push(sha);
+  }
+  return { ok: true, blobs };
+}
+
+/**
+ * One exact protected tree entry read for one literal path: either the path is
+ * absent (exit-0 empty `ls-tree -z` output) or its complete mode/type/object
+ * identity at exactly that full path.
+ */
+type ProtectedTreeEntryV1 =
+  | { readonly absent: true }
+  | {
+    readonly absent: false;
+    readonly mode: string;
+    readonly type: string;
+    readonly sha: string;
+  };
+
+/**
+ * Parse one exact `ls-tree -z --full-tree <commit> -- <path>` read. Empty
+ * output means exactly that the literal path is absent. Otherwise the output
+ * must be exactly one NUL-terminated record whose mode, type and object SHA
+ * are valid and whose full path is the exact literal path requested; anything
+ * malformed, multiple or foreign is rejected (null) and the caller fails
+ * closed. Truncated output never reaches this parser: the bounded read rejects
+ * it first.
+ */
+function parseProtectedTreeEntry(
+  text: string,
+  path: string,
+): ProtectedTreeEntryV1 | null {
+  if (text !== "" && !text.endsWith("\u0000")) return null;
+  const records = text.split("\u0000");
+  if (records.length > 0 && records[records.length - 1] === "") records.pop();
+  if (records.length === 0) return { absent: true };
+  if (records.length !== 1) return null;
+  const record = records[0];
+  const tab = record.indexOf("\t");
+  if (tab <= 0) return null;
+  const meta = record.slice(0, tab).split(" ");
+  if (meta.length !== 3) return null;
+  const [mode, type, sha] = meta;
+  if (!/^[0-9a-f]{40}$/.test(sha)) return null;
+  if (record.slice(tab + 1) !== path) return null;
+  const expectedType = mode === "040000"
+    ? "tree"
+    : mode === "160000"
+    ? "commit"
+    : mode === "100644" || mode === "100755" || mode === "120000"
+    ? "blob"
+    : null;
+  if (expectedType === null || type !== expectedType) return null;
+  return { absent: false, mode, type, sha };
+}
+
+/** Exact protected identity: existence, mode, type and object SHA. */
+function sameProtectedEntry(
+  a: ProtectedTreeEntryV1,
+  b: ProtectedTreeEntryV1,
+): boolean {
+  if (a.absent || b.absent) return a.absent === b.absent;
+  return a.mode === b.mode && a.type === b.type && a.sha === b.sha;
+}
+
+/**
+ * Ancestor identity: existence, mode and type only. An ancestor tree SHA is
+ * never compared, because it legitimately changes for allowed siblings.
+ */
+function sameProtectedAncestor(
+  a: ProtectedTreeEntryV1,
+  b: ProtectedTreeEntryV1,
+): boolean {
+  if (a.absent || b.absent) return a.absent === b.absent;
+  return a.mode === b.mode && a.type === b.type;
+}
+
+/** A present ancestor entry must be a directory tree; absence is allowed. */
+function isDirectoryTreeEntry(entry: ProtectedTreeEntryV1): boolean {
+  return entry.absent || (entry.mode === "040000" && entry.type === "tree");
+}
+
+/** One safe protected path's proper ancestors, outermost first. */
+function protectedAncestorPaths(path: string): string[] {
+  const segments = path.split("/");
+  const ancestors: string[] = [];
+  let prefix = "";
+  for (let index = 0; index + 1 < segments.length; index++) {
+    prefix = index === 0 ? segments[index] : `${prefix}/${segments[index]}`;
+    ancestors.push(prefix);
+  }
+  return ancestors;
+}
+
+/** Map one shared snapshot structural detail onto its static publication reason. */
+function publicationStructureDetail(detail: string): string {
+  switch (detail) {
+    case SNAPSHOT_PATH_DETAIL:
+      return PUBLICATION_PATH_DETAIL;
+    case SNAPSHOT_MODE_DETAIL:
+      return PUBLICATION_MODE_DETAIL;
+    case SNAPSHOT_SYMLINK_DETAIL:
+      return PUBLICATION_SYMLINK_DETAIL;
+    case SNAPSHOT_SUBMODULE_DETAIL:
+      return PUBLICATION_SUBMODULE_DETAIL;
+    case SNAPSHOT_STATUS_DETAIL:
+      return PUBLICATION_STATUS_DETAIL;
+    default:
+      return PUBLICATION_STRUCTURE_DETAIL;
+  }
+}
+
+/**
+ * Map one shared bounded-read failure onto its static publication reason.
+ * Details that are already publication reasons pass through unchanged.
+ */
+function publicationReadDetail(detail: string): string {
+  switch (detail) {
+    case SNAPSHOT_DEADLINE_DETAIL:
+      return PUBLICATION_DEADLINE_DETAIL;
+    case SNAPSHOT_OVERBOUND_DETAIL:
+      return PUBLICATION_OVERBOUND_DETAIL;
+    case SNAPSHOT_UNSETTLED_DETAIL:
+      return PUBLICATION_UNSETTLED_DETAIL;
+    case SNAPSHOT_READ_DETAIL:
+      return PUBLICATION_READ_DETAIL;
+    default:
+      return detail;
+  }
+}
+
 export interface GitReviewSnapshotOptionsV1 {
   /** Trusted PATH exposed to the Git child only (no host credential). */
   trustedPath: string;
@@ -508,60 +846,9 @@ export class GitReviewSnapshot {
     if (changes.length === 0) {
       return portError("unavailable", SNAPSHOT_EMPTY_DETAIL);
     }
-    if (changes.length > MAX_CHANGED_PATHS) {
-      return portError("unavailable", SNAPSHOT_PATHS_DETAIL);
-    }
-    const seenPaths = new Set<string>();
-    for (const change of changes) {
-      if (!isSafeReviewPath(change.path)) {
-        return portError("unavailable", SNAPSHOT_PATH_DETAIL);
-      }
-      if (seenPaths.has(change.path)) {
-        return portError("unavailable", SNAPSHOT_RAW_DETAIL);
-      }
-      seenPaths.add(change.path);
-      if (change.oldMode === "120000" || change.newMode === "120000") {
-        return portError("unavailable", SNAPSHOT_SYMLINK_DETAIL);
-      }
-      if (change.oldMode === "160000" || change.newMode === "160000") {
-        return portError("unavailable", SNAPSHOT_SUBMODULE_DETAIL);
-      }
-      if (
-        (change.oldMode !== ZERO_MODE && !isRegularMode(change.oldMode)) ||
-        (change.newMode !== ZERO_MODE && !isRegularMode(change.newMode))
-      ) {
-        return portError("unavailable", SNAPSHOT_MODE_DETAIL);
-      }
-      if (
-        !/^[0-9a-f]{40}$/.test(change.oldBlob) ||
-        !/^[0-9a-f]{40}$/.test(change.newBlob)
-      ) {
-        return portError("unavailable", SNAPSHOT_RAW_DETAIL);
-      }
-      if (change.status === "A") {
-        if (
-          change.oldMode !== ZERO_MODE || change.oldBlob !== ZERO_SHA ||
-          !isRegularMode(change.newMode) || change.newBlob === ZERO_SHA
-        ) {
-          return portError("unavailable", SNAPSHOT_RAW_DETAIL);
-        }
-      } else if (change.status === "D") {
-        if (
-          change.newMode !== ZERO_MODE || change.newBlob !== ZERO_SHA ||
-          !isRegularMode(change.oldMode) || change.oldBlob === ZERO_SHA
-        ) {
-          return portError("unavailable", SNAPSHOT_RAW_DETAIL);
-        }
-      } else if (change.status === "M") {
-        if (
-          !isRegularMode(change.oldMode) || !isRegularMode(change.newMode) ||
-          change.oldBlob === ZERO_SHA || change.newBlob === ZERO_SHA
-        ) {
-          return portError("unavailable", SNAPSHOT_MODE_DETAIL);
-        }
-      } else {
-        return portError("unavailable", SNAPSHOT_STATUS_DETAIL);
-      }
+    const structuralDetail = this.validateChanges(changes);
+    if (structuralDetail !== null) {
+      return portError("unavailable", structuralDetail);
     }
 
     const numstat = await this.read(
@@ -690,6 +977,406 @@ export class GitReviewSnapshot {
       return portError("unavailable", SNAPSHOT_PROMPT_BOUND_DETAIL);
     }
     return portOk(snapshot);
+  }
+
+  /**
+   * Complete structural validation of one bounded raw changed-path view under
+   * the shared safe path, regular-mode and status rules: symlinks, gitlinks,
+   * unsupported modes, unsafe paths and malformed records are rejected, never
+   * omitted. Returns a static detail for the first violation, or null when
+   * every record is structurally supported. Empty views are valid here (a
+   * merge may change nothing against one parent); callers decide whether an
+   * empty view is meaningful.
+   */
+  private validateChanges(changes: RawChangeV1[]): string | null {
+    if (changes.length > MAX_CHANGED_PATHS) return SNAPSHOT_PATHS_DETAIL;
+    const seenPaths = new Set<string>();
+    for (const change of changes) {
+      if (!isSafeReviewPath(change.path)) {
+        return SNAPSHOT_PATH_DETAIL;
+      }
+      if (seenPaths.has(change.path)) {
+        return SNAPSHOT_RAW_DETAIL;
+      }
+      seenPaths.add(change.path);
+      if (change.oldMode === "120000" || change.newMode === "120000") {
+        return SNAPSHOT_SYMLINK_DETAIL;
+      }
+      if (change.oldMode === "160000" || change.newMode === "160000") {
+        return SNAPSHOT_SUBMODULE_DETAIL;
+      }
+      if (
+        (change.oldMode !== ZERO_MODE && !isRegularMode(change.oldMode)) ||
+        (change.newMode !== ZERO_MODE && !isRegularMode(change.newMode))
+      ) {
+        return SNAPSHOT_MODE_DETAIL;
+      }
+      if (
+        !/^[0-9a-f]{40}$/.test(change.oldBlob) ||
+        !/^[0-9a-f]{40}$/.test(change.newBlob)
+      ) {
+        return SNAPSHOT_RAW_DETAIL;
+      }
+      if (change.status === "A") {
+        if (
+          change.oldMode !== ZERO_MODE || change.oldBlob !== ZERO_SHA ||
+          !isRegularMode(change.newMode) || change.newBlob === ZERO_SHA
+        ) {
+          return SNAPSHOT_RAW_DETAIL;
+        }
+      } else if (change.status === "D") {
+        if (
+          change.newMode !== ZERO_MODE || change.newBlob !== ZERO_SHA ||
+          !isRegularMode(change.oldMode) || change.oldBlob === ZERO_SHA
+        ) {
+          return SNAPSHOT_RAW_DETAIL;
+        }
+      } else if (change.status === "M") {
+        if (
+          !isRegularMode(change.oldMode) || !isRegularMode(change.newMode) ||
+          change.oldBlob === ZERO_SHA || change.newBlob === ZERO_SHA
+        ) {
+          return SNAPSHOT_MODE_DETAIL;
+        }
+      } else {
+        return SNAPSHOT_STATUS_DETAIL;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Bounded negative publication check for one exact candidate head.
+   *
+   * The caller supplies the authenticated exact `base`, the candidate `head`
+   * and the prior published head (or null). This method has no credentials and
+   * no remote transport: it reads only the trusted local Git object repository
+   * through the same fixed argv, cleared child environment, whole-operation
+   * deadline, runtime and finite output bounds `capture` uses.
+   *
+   * The checked publication set is exactly `Reach(head)` minus `Reach(base)`
+   * minus `Reach(publishedHead)` — every newly exposed commit and object, not
+   * merely the final `base...head` tree diff. Each newly exposed commit's raw
+   * metadata must be bounded text without secret-shaped material and without
+   * GitHub issue-closing references; every parent edge must have a complete,
+   * bounded, structurally supported changed-path/type/mode view; and every
+   * newly exposed blob (including intermediate content that later commits
+   * delete or revert) must be bounded text, valid UTF-8, NUL-free and free of
+   * secret-shaped material.
+   *
+   * Protected paths are the repository config's exact relative path or
+   * trailing-slash subtree entries. For each newly exposed commit, each
+   * protected path and each of its ancestors is read as one exact literal
+   * `ls-tree -z --full-tree` entry from the trusted local object repository
+   * (empty exit-0 output proves absence; malformed, multiple or over-bound
+   * output fails closed). A protected entry's existence, mode, type and object
+   * SHA — the subtree SHA for a directory — must equal the trusted `base`
+   * entry exactly, so an explicit empty tree entry is never hidden by an empty
+   * leaf diff. Ancestors compare existence, mode and type only and must be
+   * directories when present: ancestor tree SHAs are deliberately not compared
+   * because they legitimately change for allowed siblings, while a blocked or
+   * replaced ancestor makes the protected entry unprovable.
+   *
+   * Success is only this negative publication check. It is never a complete
+   * sanitization claim and never a durability receipt: textual, structurally
+   * supported, non-secret-shaped, non-issue-closing content can still be a bad
+   * candidate. A nonnull `publishedHead` is trusted as already validated, so
+   * its history is excluded rather than re-inspected; in the H2 refresh case
+   * (an old candidate merged with an authenticated new base) the merge commit
+   * is validated against the new base while protected base changes on the
+   * `publishedHead` parent edge stay legitimate.
+   */
+  async validatePublication(input: {
+    base: GitSha;
+    head: GitSha;
+    publishedHead: GitSha | null;
+    protectedPaths: readonly string[];
+  }): Promise<PortResultV1<void>> {
+    const base = input?.base;
+    const head = input?.head;
+    const publishedHead = input?.publishedHead ?? null;
+    if (
+      !isGitSha(base) || !isGitSha(head) ||
+      (publishedHead !== null && !isGitSha(publishedHead))
+    ) {
+      return portError("unavailable", PUBLICATION_INPUT_DETAIL);
+    }
+    const protectedPaths = normalizeProtectedPaths(input?.protectedPaths);
+    if (protectedPaths === null) {
+      return portError("unavailable", PUBLICATION_PROTECTED_INPUT_DETAIL);
+    }
+    const deadline = this.now() + this.totalDeadlineMs;
+    let inspectedBytes = 0;
+    const fail = (detail: string): PortResultV1<void> =>
+      portError("unavailable", publicationReadDetail(detail));
+    const readTracked = async (
+      args: readonly string[],
+      allowExitCodes: readonly number[],
+      maxOutputBytes: number,
+    ): Promise<GitReadV1> => {
+      const result = await this.read(
+        args,
+        allowExitCodes,
+        maxOutputBytes,
+        deadline,
+      );
+      if (!result.ok) return result;
+      inspectedBytes += result.bytes.byteLength;
+      return inspectedBytes > MAX_PROMPT_BYTES
+        ? { ok: false, detail: PUBLICATION_BOUND_DETAIL }
+        : result;
+    };
+
+    const trustedShas: GitSha[] = publishedHead === null
+      ? [base, head]
+      : [base, head, publishedHead];
+    for (const sha of trustedShas) {
+      const resolved = await readTracked(
+        ["rev-parse", "--verify", "--quiet", `${sha}^{commit}`],
+        [0],
+        SCALAR_READ_BYTES,
+      );
+      if (!resolved.ok) return fail(resolved.detail);
+      if (this.text(resolved.bytes)?.trim() !== sha) {
+        return fail(PUBLICATION_COMMIT_DETAIL);
+      }
+    }
+
+    const ancestor = await readTracked(
+      ["merge-base", "--is-ancestor", base, head],
+      [0, 1],
+      SCALAR_READ_BYTES,
+    );
+    if (!ancestor.ok) return fail(ancestor.detail);
+    if (ancestor.exitCode !== 0) return fail(PUBLICATION_STALE_BASE_DETAIL);
+    if (publishedHead !== null) {
+      const publishedAncestor = await readTracked(
+        ["merge-base", "--is-ancestor", publishedHead, head],
+        [0, 1],
+        SCALAR_READ_BYTES,
+      );
+      if (!publishedAncestor.ok) return fail(publishedAncestor.detail);
+      if (publishedAncestor.exitCode !== 0) {
+        return fail(PUBLICATION_PUBLISHED_HEAD_DETAIL);
+      }
+    }
+
+    const excluded = publishedHead === null
+      ? [`^${base}`]
+      : [`^${base}`, `^${publishedHead}`];
+    const commitList = await readTracked(
+      ["rev-list", head, ...excluded],
+      [0],
+      shaListBytes(MAX_NEW_COMMITS),
+    );
+    if (!commitList.ok) return fail(commitList.detail);
+    const commitListText = this.text(commitList.bytes);
+    if (commitListText === null) return fail(PUBLICATION_LIST_DETAIL);
+    const newCommits = parseShaList(commitListText);
+    if (newCommits === null) return fail(PUBLICATION_LIST_DETAIL);
+    if (newCommits.length > MAX_NEW_COMMITS) {
+      return fail(PUBLICATION_COMMIT_BOUND_DETAIL);
+    }
+    if (newCommits.length === 0) return fail(PUBLICATION_EMPTY_DETAIL);
+
+    const objectList = await readTracked(
+      ["rev-list", "--objects", "--no-object-names", head, ...excluded],
+      [0],
+      shaListBytes(MAX_NEW_OBJECTS),
+    );
+    if (!objectList.ok) return fail(objectList.detail);
+    const objectListText = this.text(objectList.bytes);
+    if (objectListText === null) return fail(PUBLICATION_LIST_DETAIL);
+    const newObjects = parseShaList(objectListText);
+    if (newObjects === null) return fail(PUBLICATION_LIST_DETAIL);
+    if (newObjects.length > MAX_NEW_OBJECTS) {
+      return fail(PUBLICATION_OBJECT_BOUND_DETAIL);
+    }
+    const newlyExposed = new Set(newObjects);
+    for (const commit of newCommits) {
+      if (!newlyExposed.has(commit)) return fail(PUBLICATION_LIST_DETAIL);
+    }
+
+    // Candidate blobs are collected only from complete parent-edge views and
+    // from the recursive tree of a newly exposed root commit; the set filter
+    // below then keeps exactly the objects that are newly exposed, so trusted
+    // base history is never re-inspected and no intermediate blob is hidden.
+    const candidateBlobs = new Set<string>();
+
+    // Exact protected-entry identity: for every newly exposed commit, each
+    // configured protected path and each of its ancestors is read as one
+    // literal `ls-tree` entry instead of inferring identity from a diff.
+    // Trusted base entries are immutable for this invocation and are read at
+    // most once. Absence is proven only by exit-0 empty output; malformed,
+    // multiple or over-bound output fails closed.
+    const trustedProtectedEntries = new Map<string, ProtectedTreeEntryV1>();
+    const readProtectedEntry = async (
+      commit: string,
+      path: string,
+    ): Promise<PortResultV1<ProtectedTreeEntryV1>> => {
+      const read = await readTracked(
+        ["ls-tree", "-z", "--full-tree", commit, "--", path],
+        [0],
+        MAX_TREE_ENTRY_BYTES,
+      );
+      if (!read.ok) {
+        return portError(
+          "unavailable",
+          read.detail === SNAPSHOT_OVERBOUND_DETAIL
+            ? PUBLICATION_PROTECTED_DETAIL
+            : read.detail,
+        );
+      }
+      const text = this.text(read.bytes);
+      if (text === null) {
+        return portError("unavailable", PUBLICATION_PROTECTED_DETAIL);
+      }
+      const entry = parseProtectedTreeEntry(text, path);
+      if (entry === null) {
+        return portError("unavailable", PUBLICATION_PROTECTED_DETAIL);
+      }
+      return portOk(entry);
+    };
+    const readTrustedProtectedEntry = async (
+      path: string,
+    ): Promise<PortResultV1<ProtectedTreeEntryV1>> => {
+      const cached = trustedProtectedEntries.get(path);
+      if (cached !== undefined) return portOk(cached);
+      const read = await readProtectedEntry(base, path);
+      if (!read.ok) return read;
+      trustedProtectedEntries.set(path, read.value);
+      return read;
+    };
+
+    for (const commit of newCommits) {
+      const metadata = await readTracked(
+        ["cat-file", "commit", commit],
+        [0],
+        MAX_METADATA_BYTES,
+      );
+      if (!metadata.ok) {
+        return fail(
+          metadata.detail === SNAPSHOT_OVERBOUND_DETAIL
+            ? PUBLICATION_METADATA_BOUND_DETAIL
+            : metadata.detail,
+        );
+      }
+      const metadataText = this.text(metadata.bytes);
+      if (metadataText === null) return fail(PUBLICATION_METADATA_DETAIL);
+      if (containsSecretShapedText(metadata.bytes)) {
+        return fail(PUBLICATION_METADATA_SECRET_DETAIL);
+      }
+      if (hasIssueClosingReference(metadataText)) {
+        return fail(PUBLICATION_ISSUE_DETAIL);
+      }
+      const parents = parseCommitParents(metadataText);
+      if (parents === null) return fail(PUBLICATION_METADATA_DETAIL);
+
+      if (protectedPaths.length > 0) {
+        for (const protectedPath of protectedPaths) {
+          for (const ancestor of protectedAncestorPaths(protectedPath)) {
+            const candidateAncestor = await readProtectedEntry(
+              commit,
+              ancestor,
+            );
+            if (!candidateAncestor.ok) {
+              return fail(candidateAncestor.error.detail);
+            }
+            const trustedAncestor = await readTrustedProtectedEntry(ancestor);
+            if (!trustedAncestor.ok) return fail(trustedAncestor.error.detail);
+            if (
+              !sameProtectedAncestor(
+                candidateAncestor.value,
+                trustedAncestor.value,
+              ) ||
+              !isDirectoryTreeEntry(candidateAncestor.value) ||
+              !isDirectoryTreeEntry(trustedAncestor.value)
+            ) {
+              return fail(PUBLICATION_PROTECTED_DETAIL);
+            }
+          }
+          const candidateEntry = await readProtectedEntry(
+            commit,
+            protectedPath,
+          );
+          if (!candidateEntry.ok) return fail(candidateEntry.error.detail);
+          const trustedEntry = await readTrustedProtectedEntry(protectedPath);
+          if (!trustedEntry.ok) return fail(trustedEntry.error.detail);
+          if (!sameProtectedEntry(candidateEntry.value, trustedEntry.value)) {
+            return fail(PUBLICATION_PROTECTED_DETAIL);
+          }
+        }
+      }
+
+      if (parents.length === 0) {
+        const rootTree = await readTracked(
+          ["ls-tree", "-r", "-z", "--full-tree", commit],
+          [0],
+          MAX_TREE_READ_BYTES,
+        );
+        if (!rootTree.ok) return fail(rootTree.detail);
+        const rootTreeText = this.text(rootTree.bytes);
+        if (rootTreeText === null) return fail(PUBLICATION_STRUCTURE_DETAIL);
+        const listed = parseRootTreeBlobs(rootTreeText);
+        if (!listed.ok) return fail(listed.detail);
+        for (const blob of listed.blobs) candidateBlobs.add(blob);
+        continue;
+      }
+      for (const parent of parents) {
+        const edge = await readTracked(
+          [
+            "diff",
+            "--raw",
+            "-z",
+            "--no-renames",
+            "--no-abbrev",
+            "--no-ext-diff",
+            NO_SUBMODULE_IGNORE,
+            parent,
+            commit,
+          ],
+          [0],
+          RAW_READ_BYTES,
+        );
+        if (!edge.ok) return fail(edge.detail);
+        const edgeText = this.text(edge.bytes);
+        if (edgeText === null) return fail(PUBLICATION_STRUCTURE_DETAIL);
+        const changes = parseRawChanges(edgeText);
+        if (changes === null) return fail(PUBLICATION_STRUCTURE_DETAIL);
+        const structuralDetail = this.validateChanges(changes);
+        if (structuralDetail !== null) {
+          return fail(publicationStructureDetail(structuralDetail));
+        }
+        for (const change of changes) {
+          if (change.status !== "D") candidateBlobs.add(change.newBlob);
+        }
+      }
+    }
+
+    for (const blob of candidateBlobs) {
+      if (!newlyExposed.has(blob)) continue;
+      const content = await readTracked(
+        ["cat-file", "blob", blob],
+        [0],
+        MAX_FILE_BYTES,
+      );
+      if (!content.ok) {
+        return fail(
+          content.detail === SNAPSHOT_OVERBOUND_DETAIL
+            ? PUBLICATION_FILE_BOUND_DETAIL
+            : content.detail,
+        );
+      }
+      if (content.bytes.includes(0)) return fail(PUBLICATION_BINARY_DETAIL);
+      if (this.text(content.bytes) === null) {
+        return fail(PUBLICATION_UTF8_DETAIL);
+      }
+      if (containsSecretShapedText(content.bytes)) {
+        return fail(PUBLICATION_SECRET_DETAIL);
+      }
+    }
+
+    return portOk(undefined);
   }
 
   /** Fixed-argv, cleared-environment, bounded Git object read. */
