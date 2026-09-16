@@ -2,12 +2,25 @@
 
 ## Active task register — Astra owned
 
-Updated 2026-09-16 05:49 UTC. This is the only authoritative acceptance ledger.
+Updated 2026-09-16 05:56 UTC. This is the only authoritative acceptance ledger.
 The goal remains incomplete: autonomous GitHub Actions repair against Sentinel,
 then the separately authorized ai.ubq.fi target. Only the current GPT-6 Astra
 integration owner may change scope, status, acceptance or write ownership here.
 
 ### Current checkpoint
+
+- Owner update05:51-05:53: no further development PRs or Codex reviews; make
+  changes and immediately test. Owner explicitly preserves autonomous repair
+  PRs/reviews and said Proceed. The exhausted development review allowance and
+  staged reviewer-bootstrap reviews are superseded; no further approval is
+  needed for direct verified development delivery. No review receipt is faked.
+  Canonicalad928949 integrates adapterfb4ef47 by ancestry, with publication
+  validation and candidate recovery preserved. GPTb631e6b0 passes122tests/
+  23steps, child0,79661ms; lint9b690822 passes. Two merge conflicts were resolved
+  by settled DSHc4ae558b, required Flash/max/workspace-write/ask, no child/checks.
+  Installed supervisor a076b17 already reads candidateState. Next direct
+  installation uses reader864d7a0 as safe rollback before the aggregate runtime;
+  current generation5 runtime20aae115 and all historical state/charges remain.
 
 - At 05:49 final M15 adapter patch0b6003b4 passed GPT correctionse90aba1d:
   51tests/23steps, child0,11250ms; lint2fc5ef9b passed. Fresh source follow-up

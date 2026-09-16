@@ -26,6 +26,11 @@ identity and isolated worker lanes are invariants. Preserve unrelated work.
 
 ## Development and review
 
+- Owner update, 2026-09-16: no development pull requests or Codex reviews.
+  Make the scoped change, test it immediately, then deliver it directly.
+  This supersedes development acceptance-review and PR requirements below.
+  Autonomous target repairs retain their existing PR, review and merge gates.
+
 - Never add branch protection rules or branch rulesets to this project.
   Do not recreate deleted protection rules.
 

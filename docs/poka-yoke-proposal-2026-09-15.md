@@ -326,6 +326,14 @@ rollout. Keep named profiles; legacy read-only alone is not equivalent.
 
 ### Minimum delivery sequence
 
+Owner update2026-09-16 05:51-05:53 supersedes the development PR and review
+steps below: no more development PRs or Codex reviews. The owner explicitly
+keeps autonomous repair PRs/reviews. Directly deliver the tested source, install
+the state reader as a safe rollback, then install the aggregate recovery runtime
+and verify real Actions behavior. Preserve exact source/state identity and
+record owner installation honestly, without a fabricated autonomous receipt.
+The following numbered sequence records the earlier proposal only.
+
 1. Implement only the adapter patch and measure a reader-plus-adapter bootstrap
    against the CURRENT trusted review snapshot limits. Keep the oversized ledger
    unchanged in this small deployment candidate. If it fits, use one bootstrap;

@@ -153,6 +153,15 @@ This is a new goal, not the embedded prototype's goal. Do not repurpose its bran
 
 ## 3. Review policy: concentrate Codex at acceptance
 
+Owner update, 2026-09-16 05:51 UTC: stop all development pull requests and
+Codex reviews. Make changes, immediately test, and deliver directly. This
+supersedes development acceptance rounds, fresh-Astra audit gates and PR
+delivery requirements in this plan and repository instructions. The owner
+explicitly clarified that autonomous repairs retain their PRs and reviews.
+Preserve those runtime gates, exact source identity, state, admission charges
+and rollback. Direct owner-authorized development installation must be recorded
+as such and must not fabricate a model review or autonomous release receipt.
+
 During module development use focused deterministic tests and primary-agent diff inspection. Do not spend Codex reviews on module commits, internal ancestry merges, scaffolding, or every small adjustment. The first Codex review covers the complete integrated, locally accepted candidate. Batch relevant fixes; a materially changed candidate needs a fresh acceptance review, not a recycled clean verdict. At most three review rounds per acceptance cycle; unresolved substantive P0/P1 after that means blocked, never automatic merge. Review failure/no verdict is unavailable, not passed.
 
 Development reviews and the product's runtime review policy are distinct. Runtime target PRs still require a verified completed current-head Codex review with no unresolved P0/P1 plus passing deterministic CI and branch protections. They wait asynchronously and consume configured model-start allowance. P2/P3 become future work unless target policy requires more. The earlier embedded prototype's all-severity non-gating policy is not adopted.
