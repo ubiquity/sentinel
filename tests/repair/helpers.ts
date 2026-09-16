@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 
 import type { FixtureDigest, GitSha } from "../../src/contracts/brands.ts";
 import type {
+  CandidatePreservationRequestV1,
   Clock,
   GitHubIssueV1,
   GitHubPort,
@@ -22,6 +23,8 @@ import type {
   ModelRunReceiptV1,
   ModelRunRequestV1,
   PortResultV1,
+  PullRequestCreateV1,
+  PullRequestPublishV1,
   RepairStateWriter,
   ReplayPort,
   ReplayRunRequestV1,
@@ -38,6 +41,7 @@ import type { RepairStateSnapshotV1 } from "../../src/contracts/state-snapshots.
 import { parseRepairStateSnapshotV1 } from "../../src/contracts/state-snapshots.ts";
 import { REPO, SHA1, SHA2, T0 } from "../state/helpers.ts";
 import { repositoryConfig } from "../budget/helpers.ts";
+import type { MergeRequestV1 } from "../../src/contracts/merge-request.ts";
 import type { IncidentSummaryV1 } from "../../src/contracts/incident.ts";
 import type { IncidentEvidenceV1 } from "../../src/contracts/incident.ts";
 import type { WorkRecordV1 } from "../../src/contracts/work-record.ts";
@@ -168,6 +172,22 @@ export class MemoryState implements StateReadView, RepairStateWriter {
   }
 }
 
+/**
+ * Opt-in candidate lifecycle for the shared GitHub fake. `{}` enables accurate
+ * exact-ref/PR observations while both lifecycle capabilities stay unavailable
+ * (never a default success).
+ */
+export interface FakeGithubCandidateLifecycleV1 {
+  /** Explicit preservation capability; absent keeps the static unavailable. */
+  preserveCandidate?: GitHubPort["preserveCandidate"];
+  /** Explicit base-refresh capability; absent keeps the method absent. */
+  prepareBaseRefresh?: NonNullable<GitHubPort["prepareBaseRefresh"]>;
+  /** Explicit exact full-ref observations; a null value is a known-absent ref. */
+  refs?: Readonly<Record<string, GitSha | null>>;
+  /** Explicit PR observations by number; never defaulted to merged. */
+  pullRequests?: readonly GitHubPullRequestV1[];
+}
+
 export interface FakeGithubOptionsV1 {
   baseSha?: GitSha;
   issues?: Partial<GitHubIssueV1>[];
@@ -175,6 +195,11 @@ export interface FakeGithubOptionsV1 {
   pullRequest?: Partial<GitHubPullRequestV1> | null;
   /** Exact SHA served for the candidate branch ref when no push preceded it. */
   branchRefSha?: GitSha | null;
+  /**
+   * Opt-in exact candidate lifecycle. Without it every existing blanket fake
+   * behavior below is unchanged.
+   */
+  candidateLifecycle?: FakeGithubCandidateLifecycleV1;
   review?: Partial<ReviewObservationV1> | null;
   reviewUnavailable?: boolean;
   reviewRequestedAt?: number;
@@ -205,15 +230,42 @@ export class FakeGithub implements GitHubPort {
     completedAt: 0,
   });
   readonly pushes: { ref: string; sha: GitSha; expected: GitSha | null }[] = [];
+  /** Every preservation request in call order (recorded clone, never shared). */
+  readonly preservationRequests: CandidatePreservationRequestV1[] = [];
+  /** Exact simulated remote branch heads, seeded plus applied pushes. */
+  readonly candidateRefs = new Map<string, GitSha | null>();
+  /** Exact simulated PRs by number, seeded or created in opt-in mode. */
+  readonly candidatePullRequests = new Map<number, GitHubPullRequestV1>();
+  /** Present only when an explicit prepare callback was supplied. */
+  prepareBaseRefresh?: NonNullable<GitHubPort["prepareBaseRefresh"]>;
   reviewObservations: ReviewObservationV1 | null = null;
   reviewStatus: "pending" | "completed" | "unavailable" = "pending";
   completedReviewAt: number | null = null;
   prNumber = 7;
   releasedHead: GitSha | null = null;
   private readonly options: FakeGithubOptionsV1;
+  private readonly lifecycle: FakeGithubCandidateLifecycleV1 | undefined;
+  private nextPrNumber = 7;
 
   constructor(options: FakeGithubOptionsV1 = {}) {
     this.options = options;
+    this.lifecycle = options.candidateLifecycle;
+    if (this.lifecycle !== undefined) {
+      for (const [ref, sha] of Object.entries(this.lifecycle.refs ?? {})) {
+        this.candidateRefs.set(ref, sha);
+      }
+      for (const pr of this.lifecycle.pullRequests ?? []) {
+        this.candidatePullRequests.set(pr.number, { ...pr });
+      }
+      if (this.lifecycle.prepareBaseRefresh !== undefined) {
+        this.prepareBaseRefresh = this.lifecycle.prepareBaseRefresh;
+      }
+    }
+  }
+
+  /** Opt-in exact observations; absent keeps the legacy blanket fake. */
+  private get lifecycleEnabled(): boolean {
+    return this.lifecycle !== undefined;
   }
 
   readIssue(issueNumber: number): Promise<PortResultV1<GitHubIssueV1 | null>> {
@@ -256,6 +308,16 @@ export class FakeGithub implements GitHubPort {
     headRef: string,
   ): Promise<PortResultV1<GitHubPullRequestV1 | null>> {
     this.calls.push(`findPr:${headRef}`);
+    if (this.lifecycleEnabled) {
+      if (this.options.pullRequest === null) {
+        return Promise.resolve(portOk(null));
+      }
+      const tracked = [...this.candidatePullRequests.values()].find((pr) =>
+        pr.headRef === headRef
+      );
+      if (tracked === undefined) return Promise.resolve(portOk(null));
+      return Promise.resolve(portOk(this.withPullRequestOverlay(tracked)));
+    }
     if (this.prNumber === 0) return Promise.resolve(portOk(null));
     return Promise.resolve(portOk(this.pullRequest()));
   }
@@ -264,8 +326,23 @@ export class FakeGithub implements GitHubPort {
     number: number,
   ): Promise<PortResultV1<GitHubPullRequestV1 | null>> {
     this.calls.push(`readPr:${number}`);
+    if (this.lifecycleEnabled) {
+      if (this.options.pullRequest === null) {
+        return Promise.resolve(portOk(null));
+      }
+      const tracked = this.candidatePullRequests.get(number);
+      if (tracked === undefined) return Promise.resolve(portOk(null));
+      return Promise.resolve(portOk(this.withPullRequestOverlay(tracked)));
+    }
     if (this.prNumber === 0) return Promise.resolve(portOk(null));
     return Promise.resolve(portOk(this.pullRequest()));
+  }
+
+  /** Partial explicit PR override layered over the exact tracked PR. */
+  private withPullRequestOverlay(
+    tracked: GitHubPullRequestV1,
+  ): GitHubPullRequestV1 {
+    return { ...tracked, ...(this.options.pullRequest ?? {}) };
   }
 
   readChecks(_head: GitSha) {
@@ -292,6 +369,24 @@ export class FakeGithub implements GitHubPort {
         ref,
         sha: this.options.baseSha ?? SHA1,
       }));
+    }
+    if (this.lifecycleEnabled) {
+      // An explicit per-test observation override is authoritative, including
+      // an explicit null (known-absent ref).
+      if (this.options.branchRefSha !== undefined) {
+        return Promise.resolve(portOk(
+          this.options.branchRefSha === null ? null : {
+            ref,
+            sha: this.options.branchRefSha,
+          },
+        ));
+      }
+      const tracked = this.candidateRefs.get(ref);
+      return Promise.resolve(portOk(
+        tracked === undefined || tracked === null
+          ? null
+          : { ref, sha: tracked },
+      ));
     }
     if (
       this.options.branchRefSha !== null &&
@@ -321,6 +416,13 @@ export class FakeGithub implements GitHubPort {
         portError("unavailable", "push transport failure"),
       );
     }
+    if (this.lifecycleEnabled) {
+      // Apply the exact mutation before returning, so even a lost response
+      // leaves the branch (and every PR head on it) updated. A push never
+      // marks a PR merged.
+      this.candidateRefs.set(ref, sha);
+      this.updatePullRequestHeads(ref, sha);
+    }
     this.pushes.push({ ref, sha, expected: expectedRef });
     this.releasedHead = sha;
     // A lost push response is a one-shot condition: the ref is recorded and
@@ -330,31 +432,103 @@ export class FakeGithub implements GitHubPort {
     return Promise.resolve(portOk(outcome));
   }
 
-  createPullRequest(_request: unknown): Promise<
-    PortResultV1<{
-      outcome: "applied" | "ambiguous";
-      number: number | null;
-      head: GitSha | null;
-    }>
-  > {
+  private updatePullRequestHeads(ref: string, sha: GitSha): void {
+    const headRef = ref.replace(/^refs\/heads\//, "");
+    for (const [number, pr] of [...this.candidatePullRequests]) {
+      if (pr.headRef !== headRef || pr.state !== "open") continue;
+      this.candidatePullRequests.set(number, {
+        ...pr,
+        head: sha,
+        mergeSha: null,
+        updatedAt: T0,
+      });
+    }
+  }
+
+  /**
+   * Test-side simulation of a push whose response was lost: the exact remote
+   * mutation (branch plus associated PR heads) is applied without returning a
+   * transport result. Callers return their own failure afterwards.
+   */
+  applyPushWithoutResponse(ref: string, sha: GitSha): void {
+    this.candidateRefs.set(ref, sha);
+    this.updatePullRequestHeads(ref, sha);
+  }
+
+  createPullRequest(
+    request: PullRequestCreateV1,
+  ): Promise<PortResultV1<PullRequestPublishV1>> {
     this.calls.push("createPr");
     if (this.options.createFailNext) {
       this.options.createFailNext = false;
       return Promise.resolve(portError("unavailable", "create failure"));
     }
-    if (this.options.createOutcome === "ambiguous") {
+    if (!this.lifecycleEnabled) {
+      if (this.options.createOutcome === "ambiguous") {
+        return Promise.resolve(portOk({
+          outcome: "ambiguous",
+          number: null,
+          head: null,
+        }));
+      }
+      this.prNumber = 7;
+      return Promise.resolve(portOk({
+        outcome: "applied",
+        number: 7,
+        head: this.releasedHead,
+      }));
+    }
+    // One deterministic head ref owns exactly one open PR: a repeated create
+    // for the same branch reuses the tracked PR instead of allocating another.
+    const existing = [...this.candidatePullRequests.values()].find((pr) =>
+      pr.headRef === request.headRef
+    );
+    if (existing !== undefined) {
+      this.prNumber = existing.number;
+      this.options.createOutcome = undefined;
+      return Promise.resolve(portOk({
+        outcome: "applied",
+        number: existing.number,
+        head: existing.head,
+      }));
+    }
+    const head = request.expectedHeadRef ??
+      this.candidateRefs.get(`refs/heads/${request.headRef}`) ?? SHA1;
+    // Next free deterministic PR number at or above 7: an already tracked
+    // (for example seeded) PR is never overwritten by a fresh allocation.
+    let number = Math.max(this.nextPrNumber, 7);
+    while (this.candidatePullRequests.has(number)) number++;
+    this.nextPrNumber = number + 1;
+    const created: GitHubPullRequestV1 = {
+      number,
+      title: request.title,
+      body: request.body,
+      state: "open",
+      head,
+      base: request.expectedBase,
+      mergeSha: null,
+      headRef: request.headRef,
+      baseRef: request.baseRef,
+      author: null,
+      createdAt: T0,
+      updatedAt: T0,
+      mergedAt: null,
+      reviewDecision: "none",
+    };
+    // A failed creation before the response leaves no PR; a lost response
+    // retains the exact created PR for deterministic reconciliation.
+    this.candidatePullRequests.set(number, created);
+    this.prNumber = number;
+    const outcome = this.options.createOutcome ?? "applied";
+    this.options.createOutcome = undefined;
+    if (outcome === "ambiguous") {
       return Promise.resolve(portOk({
         outcome: "ambiguous",
         number: null,
         head: null,
       }));
     }
-    this.prNumber = 7;
-    return Promise.resolve(portOk({
-      outcome: "applied",
-      number: 7,
-      head: this.releasedHead,
-    }));
+    return Promise.resolve(portOk({ outcome: "applied", number, head }));
   }
 
   requestReview(_request: unknown): Promise<
@@ -416,13 +590,40 @@ export class FakeGithub implements GitHubPort {
     return Promise.resolve(portOk(this.reviewObservation()));
   }
 
-  mergePullRequest(_request: unknown): Promise<PortResultV1<MergeOutcomeV1>> {
+  mergePullRequest(
+    request: MergeRequestV1,
+  ): Promise<PortResultV1<MergeOutcomeV1>> {
     this.calls.push("merge");
     if (this.options.mergeFailNext) {
       this.options.mergeFailNext = false;
       return Promise.resolve(
         portError("unavailable", "merge transport failure"),
       );
+    }
+    if (this.lifecycleEnabled) {
+      const outcome: MergeOutcomeV1 = this.options.mergeOutcome ?? {
+        outcome: "merged",
+        head: request.expectedHead,
+        mergeSha: request.expectedHead,
+      };
+      if (outcome.outcome === "merged") {
+        // Only the exact requested PR advances, on the exact requested head;
+        // the global last-pushed head is never merge authority.
+        const tracked = this.candidatePullRequests.get(
+          request.pullRequestNumber,
+        );
+        if (tracked !== undefined) {
+          this.candidatePullRequests.set(request.pullRequestNumber, {
+            ...tracked,
+            state: "merged",
+            head: outcome.head,
+            mergeSha: outcome.mergeSha,
+            mergedAt: T0,
+            updatedAt: T0,
+          });
+        }
+      }
+      return Promise.resolve(portOk(outcome));
     }
     return Promise.resolve(portOk(
       this.options.mergeOutcome ?? {
@@ -444,6 +645,29 @@ export class FakeGithub implements GitHubPort {
       );
     }
     return Promise.resolve(portOk(this.options.closeOutcome ?? "closed"));
+  }
+
+  /**
+   * Every call is recorded as an exact clone first; the explicit callback is
+   * then invoked when composed. With no callback the port returns the existing
+   * static unavailable result and never reports success or performs a write.
+   */
+  preserveCandidate(
+    request: CandidatePreservationRequestV1,
+  ): Promise<PortResultV1<void>> {
+    const recorded: CandidatePreservationRequestV1 = {
+      taskId: request.taskId,
+      candidate: { ...request.candidate },
+      publishedHead: request.publishedHead,
+    };
+    this.preservationRequests.push(recorded);
+    const callback = this.lifecycle?.preserveCandidate;
+    if (callback === undefined) {
+      return Promise.resolve(
+        portError("unavailable", "candidate preservation is not composed"),
+      );
+    }
+    return callback(recorded);
   }
 
   /** Deliver a completed review for the current release head. */

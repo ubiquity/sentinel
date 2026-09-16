@@ -26,6 +26,7 @@ import { DurableGitHubCooldownGate } from "../../src/repair/github-cooldown.ts";
 import { runRepairEntrypoint } from "../../src/main.ts";
 import {
   evidenceFixture,
+  exactCandidateLifecycle,
   FakeClock,
   makeIntegrationCtx,
   repairConfigs,
@@ -240,7 +241,15 @@ Deno.test(
       const github = new AdvancingFakeGithub(
         clock,
         REPAIR_RUN_CEILING_MS + MINUTE,
-        { baseSha: SHA1 },
+        {
+          baseSha: SHA1,
+          // Fresh publication: the candidate branch is absent at the start and
+          // the fake exposes the exact pushed SHA afterwards.
+          candidateLifecycle: exactCandidateLifecycle({
+            base: SHA1,
+            head: SHA3,
+          }),
+        },
       );
       const incidents = new FakeIncidents({
         summaries: [summaryFixture()],

@@ -315,6 +315,7 @@ class RecordingSession implements CodexSessionV1 {
         model: REVIEW_MODEL,
         modelProvider: PROVIDER,
         reasoningEffort: REVIEW_REASONING,
+        activePermissionProfile: { id: "sentinel-review" },
       });
     }
     if (method === "turn/start") {
@@ -406,11 +407,14 @@ async function snapshotFixture(
     base: BASE,
     head: HEAD,
     mergeBase: BASE,
-    diff: "diff --git a/account.ts b/account.ts\n",
     files: [{
       path: "account.ts",
       kind: "modified",
-      content: ACCOUNT_CONTENT,
+      oldBlob: "1".repeat(40),
+      newBlob: "2".repeat(40),
+      oldMode: "100644",
+      newMode: "100644",
+      candidateLines: 4,
     }],
     digest: "",
     ...overrides,
@@ -441,6 +445,7 @@ function makeReviewer(
     provider: PROVIDER,
     openSession: () => session,
     sessionCwd: "/tmp/sentinel-review-transport",
+    permissionProfile: "sentinel-review",
     now: () => clock.now(),
   });
 }

@@ -83,6 +83,40 @@ export function mergeIntentKey(
   return `merge:${pullRequestNumber}:${head}`;
 }
 
+/**
+ * Operation key for one deterministic candidate-base refresh: exact PR, exact
+ * old candidate head and exact observed new base. The persisted intent key is
+ * the same value (see the repair loop's base-refresh preparation).
+ */
+export function baseRefreshIntentKey(
+  pullRequestNumber: number,
+  expectedHead: GitSha,
+  observedBase: GitSha,
+): string {
+  return `base_refresh:${pullRequestNumber}:${expectedHead}:${observedBase}`;
+}
+
+/** Fixed namespace of every operation-bound candidate-preservation ref. */
+export const CANDIDATE_PRESERVATION_REF_PREFIX =
+  "refs/heads/sentinel-candidates/";
+
+/**
+ * Trusted deterministic candidate-preservation ref for one producing
+ * operation: `refs/heads/sentinel-candidates/<64 lowercase hex>`, the SHA-256
+ * of the canonical identity object `{repository, taskId, operationKey}`. The
+ * candidate head/base are deliberately EXCLUDED: one producing operation owns
+ * exactly one create-only destination, so a changed head under the same
+ * operation is a conflict, never a different ref.
+ */
+export async function candidatePreservationRef(
+  repository: RepositoryIdentityV1,
+  taskId: WorkItemId,
+  operationKey: string,
+): Promise<string> {
+  const digest = await deriveDigest({ repository, taskId, operationKey });
+  return `${CANDIDATE_PRESERVATION_REF_PREFIX}${digest}`;
+}
+
 /** Operation key for one issue closure (closure-only retry identity). */
 export function closureIntentKey(issueNumber: number): string {
   return `issue_closure:${issueNumber}`;

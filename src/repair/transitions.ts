@@ -17,6 +17,7 @@ import type { EvidenceRefV1 } from "../contracts/shared.ts";
 import { parseWorkRecordV1 } from "../contracts/work-record.ts";
 import type {
   BlockerKindV1,
+  CandidateStateV1,
   IncompleteOperationV1,
   WorkBlockerV1,
   WorkRecordV1,
@@ -309,7 +310,14 @@ export function startAttempt(record: WorkRecordV1, now: number): WorkRecordV1 {
   });
 }
 
-/** Record a locally validated candidate head/checkpoint. */
+/**
+ * Record a locally validated candidate head/checkpoint.
+ *
+ * V1 candidate state (when the record already carries it) follows the exact
+ * head: a changed head resets the preservation descriptor because the old
+ * descriptor describes the old candidate, while the verified published head is
+ * retained — a completed model run never advances publication by itself.
+ */
 export function noteCandidate(
   record: WorkRecordV1,
   candidate: {
@@ -318,13 +326,34 @@ export function noteCandidate(
   },
   now: number,
 ): WorkRecordV1 {
+  const candidateState = record.target.candidateState;
+  const nextState = candidateState === undefined ? undefined : {
+    preserved: record.target.head === candidate.head
+      ? candidateState.preserved
+      : null,
+    publishedHead: candidateState.publishedHead,
+  };
   return expectWork({
     ...record,
     target: {
       ...record.target,
       head: candidate.head,
       checkpoint: candidate.checkpoint,
+      ...(nextState === undefined ? {} : { candidateState: nextState }),
     },
+    updatedAt: now,
+  });
+}
+
+/** Attach or replace the V1 candidate state group (descriptor + published head). */
+export function setCandidateState(
+  record: WorkRecordV1,
+  candidateState: CandidateStateV1,
+  now: number,
+): WorkRecordV1 {
+  return expectWork({
+    ...record,
+    target: { ...record.target, candidateState },
     updatedAt: now,
   });
 }

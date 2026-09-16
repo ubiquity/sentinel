@@ -31,6 +31,8 @@ import {
 const BASE: GitSha = asGitSha("a".repeat(40));
 const HEAD: GitSha = asGitSha("b".repeat(40));
 const PROVIDER = "openai";
+const REVIEW_PROFILE = "sentinel-review";
+const SESSION_CWD = "/tmp/sentinel-review-checkout";
 
 const CLEAN_RESULT = {
   verdict: "clean",
@@ -76,6 +78,7 @@ class ScriptedCodexSession implements CodexSessionV1 {
     model: "gpt-5.6-luna",
     modelProvider: PROVIDER,
     reasoningEffort: "max",
+    activePermissionProfile: { id: REVIEW_PROFILE },
   };
   turnId = "turn-1";
   turnResponse: unknown = null;
@@ -179,12 +182,14 @@ async function snapshotFixture(
     base: BASE,
     head: HEAD,
     mergeBase: BASE,
-    diff:
-      'diff --git a/account.ts b/account.ts\n+  if (amount < 0) throw new Error("negative");\n',
     files: [{
       path: "account.ts",
       kind: "modified",
-      content: ACCOUNT_CONTENT,
+      oldBlob: "1".repeat(40),
+      newBlob: "2".repeat(40),
+      oldMode: "100644",
+      newMode: "100644",
+      candidateLines: 4,
     }],
     digest: "",
     ...overrides,
@@ -216,9 +221,31 @@ function makeReviewer(
   return new CodexStructuredReviewer({
     provider: PROVIDER,
     openSession: () => session,
-    sessionCwd: "/tmp/sentinel-review-checkout",
+    sessionCwd: SESSION_CWD,
+    permissionProfile: REVIEW_PROFILE,
     ...overrides,
   });
+}
+
+/**
+ * One installed 0.154 `commandExecution` item shape for the trusted session
+ * cwd: bounded id/command, `commandActions` best-effort classification and
+ * agent provenance (source omitted).
+ */
+function commandItem(
+  itemId: string,
+  status: "inProgress" | "completed" | "failed" | "declined",
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    type: "commandExecution",
+    id: itemId,
+    command: "rg --no-heading -n deposit account.ts",
+    commandActions: [{ type: "read" }],
+    cwd: SESSION_CWD,
+    status,
+    ...overrides,
+  };
 }
 
 function agentMessage(
@@ -308,8 +335,8 @@ Deno.test(
     assert.deepEqual(session.sent, ["initialize", "thread/start"]);
     assert.deepEqual(
       (session.params[0] as Record<string, unknown>).capabilities,
-      { experimentalApi: false },
-      "an omitted permission profile keeps the legacy capabilities",
+      { experimentalApi: true },
+      "the required named profile enables the experimental capabilities",
     );
     assert.equal(session.opened, 1);
     assert.equal(session.turnStarts(), 0);
@@ -326,12 +353,17 @@ Deno.test(
     const threadParams = session.params[1] as Record<string, unknown>;
     assert.equal(threadParams.model, "gpt-5.6-luna");
     assert.equal(threadParams.modelProvider, PROVIDER);
-    assert.equal(threadParams.sandbox, "read-only");
+    assert.equal(threadParams.permissions, REVIEW_PROFILE);
+    assert.equal(
+      "sandbox" in threadParams,
+      false,
+      "the required named profile replaces the legacy sandbox",
+    );
     assert.equal(threadParams.approvalPolicy, "never");
     assert.deepEqual(threadParams.config, {
       model_reasoning_effort: "max",
       review_model: "gpt-5.6-luna",
-      "features.shell_tool": false,
+      "features.shell_tool": true,
       "features.unified_exec": false,
       "features.multi_agent": false,
       "features.apps": false,
@@ -386,20 +418,28 @@ Deno.test(
     const turnParams = session.params[2] as {
       input: { text: string }[];
       outputSchema: unknown;
-      sandboxPolicy: unknown;
+      permissions: unknown;
       approvalPolicy: unknown;
       model: unknown;
       effort: unknown;
     };
     assert.equal(turnParams.model, "gpt-5.6-luna");
     assert.equal(turnParams.effort, "max");
-    assert.deepEqual(turnParams.sandboxPolicy, { type: "readOnly" });
+    assert.equal(turnParams.permissions, REVIEW_PROFILE);
     assert.deepEqual(turnParams.outputSchema, REVIEW_RESULT_OUTPUT_SCHEMA);
     const prompt = turnParams.input[0].text;
     contains(prompt, `Base ${BASE}; head ${HEAD};`);
     contains(prompt, snapshot.digest);
-    contains(prompt, "===== FILE account.ts (modified) =====");
-    contains(prompt, ACCOUNT_CONTENT.trim());
+    contains(prompt, 'path "account.ts"; kind modified');
+    contains(prompt, `oldBlob ${"1".repeat(40)}; newBlob ${"2".repeat(40)}`);
+    contains(prompt, "candidateLines 4");
+    contains(prompt, "--no-ext-diff");
+    contains(prompt, "--no-textconv");
+    assert.equal(
+      prompt.includes(ACCOUNT_CONTENT.trim()),
+      false,
+      "no candidate content is embedded in the manifest prompt",
+    );
 
     const closed = await review.close();
     assert.equal(closed.settled, true);
@@ -492,6 +532,20 @@ Deno.test(
       false,
       "the named profile replaces the legacy sandbox",
     );
+    const profileConfig = threadParams.config as Record<string, unknown>;
+    assert.equal(
+      profileConfig["features.shell_tool"],
+      true,
+      "the named restricted profile enables the ordinary shell read tool",
+    );
+    assert.equal(
+      profileConfig["features.unified_exec"],
+      false,
+      "unified exec stays disabled: only one-shot ExecCommandHandler authority",
+    );
+    assert.equal(profileConfig["features.multi_agent"], false);
+    assert.equal(profileConfig["features.apps"], false);
+    assert.equal(profileConfig.web_search, "disabled");
 
     const outcome = await prepared.value.start();
     if (!outcome.ok) assert.fail(outcome.error.detail);
@@ -518,15 +572,13 @@ Deno.test(
     for (const [label, ack] of cases) {
       await t.step(label, async () => {
         const session = new ScriptedCodexSession();
-        if (ack !== undefined) {
-          session.threadAck = {
-            thread: { id: "thread-1" },
-            model: "gpt-5.6-luna",
-            modelProvider: PROVIDER,
-            reasoningEffort: "max",
-            activePermissionProfile: ack,
-          };
-        }
+        session.threadAck = {
+          thread: { id: "thread-1" },
+          model: "gpt-5.6-luna",
+          modelProvider: PROVIDER,
+          reasoningEffort: "max",
+          ...(ack === undefined ? {} : { activePermissionProfile: ack }),
+        };
         const reviewer = makeReviewer(session, {
           permissionProfile: "sentinel-review",
         });
@@ -540,6 +592,26 @@ Deno.test(
         assert.equal(session.closed, 1, "the owned session settles");
       });
     }
+  },
+);
+
+Deno.test(
+  "reviewer: missing permission profile refuses before opening any session",
+  async () => {
+    const session = new ScriptedCodexSession();
+    const reviewer = makeReviewer(session, {
+      permissionProfile: undefined as unknown as string,
+    });
+    const prepared = await reviewer.prepare(
+      prepareRequest(await snapshotFixture()),
+    );
+    assert.equal(prepared.ok, false);
+    if (prepared.ok) return;
+    assert.equal(prepared.error.kind, "unavailable");
+    contains(prepared.error.detail, "permission profile");
+    assert.equal(session.opened, 0, "no app-server session is ever opened");
+    assert.deepEqual(session.sent, [], "no handshake or turn request is sent");
+    assert.equal(session.turnStarts(), 0);
   },
 );
 
@@ -861,7 +933,7 @@ Deno.test(
       scripted.emit("item/started", {
         threadId: "thread-1",
         turnId: scripted.turnId,
-        item: { type: "commandExecution", id: "cmd-1", command: "ls" },
+        item: { type: "fileChange", id: "edit-1" },
       });
       scripted.emit(
         "item/completed",
@@ -872,6 +944,19 @@ Deno.test(
     const forbidden = await startReview(tool, await snapshotFixture());
     assert.equal(forbidden.status, "unavailable");
     contains(forbidden.detail ?? "", "forbidden");
+
+    const mcp = new ScriptedCodexSession();
+    mcp.plan = (scripted) => {
+      scripted.emit("item/completed", {
+        threadId: "thread-1",
+        turnId: scripted.turnId,
+        item: { type: "mcpToolCall", id: "mcp-1" },
+      });
+      scripted.emit("turn/completed", turnCompleted(scripted.turnId));
+    };
+    const forbiddenMcp = await startReview(mcp, await snapshotFixture());
+    assert.equal(forbiddenMcp.status, "unavailable");
+    contains(forbiddenMcp.detail ?? "", "forbidden");
 
     const server = new ScriptedCodexSession();
     server.plan = (scripted) => {
@@ -890,6 +975,381 @@ Deno.test(
     assert.equal(failedRun.status, "unavailable");
     assert.equal(failedRun.actual?.observedTerminalStatus, "failed");
     assert.equal(failedRun.execution, null);
+  },
+);
+
+Deno.test(
+  "reviewer: correlated shell command start, output deltas and completion permit a clean review",
+  async () => {
+    const session = new ScriptedCodexSession();
+    session.plan = (scripted) => {
+      scripted.emit("item/started", {
+        threadId: "thread-1",
+        turnId: scripted.turnId,
+        item: commandItem("cmd-1", "inProgress", { source: "agent" }),
+      });
+      scripted.emit("item/commandExecution/outputDelta", {
+        threadId: "thread-1",
+        turnId: scripted.turnId,
+        itemId: "cmd-1",
+        delta: ACCOUNT_CONTENT,
+      });
+      scripted.emit("item/completed", {
+        threadId: "thread-1",
+        turnId: scripted.turnId,
+        item: commandItem("cmd-1", "completed"),
+      });
+      scripted.emit(
+        "item/completed",
+        agentMessage(
+          scripted.turnId,
+          "item-final",
+          JSON.stringify(CLEAN_RESULT),
+        ),
+      );
+      scripted.emit("turn/completed", turnCompleted(scripted.turnId));
+    };
+    const outcome = await startReview(session, await snapshotFixture());
+    assert.equal(outcome.status, "clean");
+    assert.equal(outcome.resultId, "item-final");
+    assert.equal(outcome.execution?.turnId, "turn-1");
+    assert.equal(outcome.actual?.observedTerminalStatus, "completed");
+    assert.equal(session.turnStarts(), 1);
+    assert.equal(
+      JSON.stringify(outcome).includes(ACCOUNT_CONTENT),
+      false,
+      "shell output is evidence only and never becomes the review result",
+    );
+  },
+);
+
+Deno.test(
+  "reviewer: unfinished commands, malformed or wrong command identities and interruptions never yield clean",
+  async () => {
+    // A started command without a completed settlement.
+    const unfinished = new ScriptedCodexSession();
+    unfinished.plan = (scripted) => {
+      scripted.emit("item/started", {
+        threadId: "thread-1",
+        turnId: scripted.turnId,
+        item: commandItem("cmd-1", "inProgress"),
+      });
+      scripted.emit(
+        "item/completed",
+        agentMessage(
+          scripted.turnId,
+          "item-final",
+          JSON.stringify(CLEAN_RESULT),
+        ),
+      );
+      scripted.emit("turn/completed", turnCompleted(scripted.turnId));
+    };
+    const pending = await startReview(unfinished, await snapshotFixture());
+    assert.equal(pending.status, "unavailable");
+    assert.equal(pending.execution, null);
+    contains(pending.detail ?? "", "settle");
+
+    // A delta that shares no started command item identity.
+    const unknownDelta = new ScriptedCodexSession();
+    unknownDelta.plan = (scripted) => {
+      scripted.emit("item/commandExecution/outputDelta", {
+        threadId: "thread-1",
+        turnId: scripted.turnId,
+        itemId: "cmd-unknown",
+        delta: "x\n",
+      });
+      scripted.emit("turn/completed", turnCompleted(scripted.turnId));
+    };
+    const uncorrelated = await startReview(
+      unknownDelta,
+      await snapshotFixture(),
+    );
+    assert.equal(uncorrelated.status, "unavailable");
+    contains(uncorrelated.detail ?? "", "correlate");
+
+    // A delta carrying a different turn identity.
+    const wrongTurn = new ScriptedCodexSession();
+    wrongTurn.plan = (scripted) => {
+      scripted.emit("item/started", {
+        threadId: "thread-1",
+        turnId: scripted.turnId,
+        item: commandItem("cmd-1", "inProgress"),
+      });
+      scripted.emit("item/commandExecution/outputDelta", {
+        threadId: "thread-1",
+        turnId: "turn-other",
+        itemId: "cmd-1",
+        delta: "x\n",
+      });
+      scripted.emit("turn/completed", turnCompleted(scripted.turnId));
+    };
+    const mismatched = await startReview(wrongTurn, await snapshotFixture());
+    assert.equal(mismatched.status, "unavailable");
+    contains(mismatched.detail ?? "", "correlate");
+
+    // A malformed delta shape (non-string delta).
+    const malformedDelta = new ScriptedCodexSession();
+    malformedDelta.plan = (scripted) => {
+      scripted.emit("item/commandExecution/outputDelta", {
+        threadId: "thread-1",
+        turnId: scripted.turnId,
+        itemId: "cmd-1",
+        delta: 5,
+      });
+      scripted.emit("turn/completed", turnCompleted(scripted.turnId));
+    };
+    const malformed = await startReview(
+      malformedDelta,
+      await snapshotFixture(),
+    );
+    assert.equal(malformed.status, "unavailable");
+    contains(malformed.detail ?? "", "correlate");
+
+    // An unmatched command completion with no recorded start.
+    const unmatched = new ScriptedCodexSession();
+    unmatched.plan = (scripted) => {
+      scripted.emit("item/completed", {
+        threadId: "thread-1",
+        turnId: scripted.turnId,
+        item: commandItem("cmd-1", "completed"),
+      });
+      scripted.emit("turn/completed", turnCompleted(scripted.turnId));
+    };
+    const orphan = await startReview(unmatched, await snapshotFixture());
+    assert.equal(orphan.status, "unavailable");
+    contains(orphan.detail ?? "", "command execution item");
+
+    // A command start that reports a cwd other than the trusted session cwd.
+    const wrongCwd = new ScriptedCodexSession();
+    wrongCwd.plan = (scripted) => {
+      scripted.emit("item/started", {
+        threadId: "thread-1",
+        turnId: scripted.turnId,
+        item: commandItem("cmd-1", "inProgress", {
+          cwd: "/tmp/other-checkout",
+        }),
+      });
+      scripted.emit("turn/completed", turnCompleted(scripted.turnId));
+    };
+    const cwdRefused = await startReview(wrongCwd, await snapshotFixture());
+    assert.equal(cwdRefused.status, "unavailable");
+    contains(cwdRefused.detail ?? "", "command execution item");
+
+    // Plugin/script provenance can never claim the agent read operation.
+    const pluginSource = new ScriptedCodexSession();
+    pluginSource.plan = (scripted) => {
+      scripted.emit("item/started", {
+        threadId: "thread-1",
+        turnId: scripted.turnId,
+        item: commandItem("cmd-1", "inProgress", {
+          source: "plugin",
+          pluginId: "plugin-1",
+        }),
+      });
+      scripted.emit("turn/completed", turnCompleted(scripted.turnId));
+    };
+    const sourceRefused = await startReview(
+      pluginSource,
+      await snapshotFixture(),
+    );
+    assert.equal(sourceRefused.status, "unavailable");
+    contains(sourceRefused.detail ?? "", "command execution item");
+
+    // A start status that is already terminal is not a valid start.
+    const terminalStart = new ScriptedCodexSession();
+    terminalStart.plan = (scripted) => {
+      scripted.emit("item/started", {
+        threadId: "thread-1",
+        turnId: scripted.turnId,
+        item: commandItem("cmd-1", "completed"),
+      });
+      scripted.emit("turn/completed", turnCompleted(scripted.turnId));
+    };
+    const statusRefused = await startReview(
+      terminalStart,
+      await snapshotFixture(),
+    );
+    assert.equal(statusRefused.status, "unavailable");
+    contains(statusRefused.detail ?? "", "command execution item");
+
+    // A completion whose command no longer matches the recorded start.
+    const wrongCommand = new ScriptedCodexSession();
+    wrongCommand.plan = (scripted) => {
+      scripted.emit("item/started", {
+        threadId: "thread-1",
+        turnId: scripted.turnId,
+        item: commandItem("cmd-1", "inProgress"),
+      });
+      scripted.emit("item/completed", {
+        threadId: "thread-1",
+        turnId: scripted.turnId,
+        item: commandItem("cmd-1", "completed", {
+          command: "rg --no-heading -n withdrawal account.ts",
+        }),
+      });
+      scripted.emit("turn/completed", turnCompleted(scripted.turnId));
+    };
+    const commandRefused = await startReview(
+      wrongCommand,
+      await snapshotFixture(),
+    );
+    assert.equal(commandRefused.status, "unavailable");
+    contains(commandRefused.detail ?? "", "command execution item");
+
+    // A declined command is unavailable, never a settled read.
+    const declined = new ScriptedCodexSession();
+    declined.plan = (scripted) => {
+      scripted.emit("item/started", {
+        threadId: "thread-1",
+        turnId: scripted.turnId,
+        item: commandItem("cmd-1", "inProgress"),
+      });
+      scripted.emit("item/completed", {
+        threadId: "thread-1",
+        turnId: scripted.turnId,
+        item: commandItem("cmd-1", "declined"),
+      });
+      scripted.emit("turn/completed", turnCompleted(scripted.turnId));
+    };
+    const declinedRun = await startReview(declined, await snapshotFixture());
+    assert.equal(declinedRun.status, "unavailable");
+    contains(declinedRun.detail ?? "", "command execution item");
+
+    // An ordinary failed read (for example no match) is a settled completion.
+    const failedRead = new ScriptedCodexSession();
+    failedRead.plan = (scripted) => {
+      scripted.emit("item/started", {
+        threadId: "thread-1",
+        turnId: scripted.turnId,
+        item: commandItem("cmd-1", "inProgress"),
+      });
+      scripted.emit("item/completed", {
+        threadId: "thread-1",
+        turnId: scripted.turnId,
+        item: commandItem("cmd-1", "failed"),
+      });
+      scripted.emit(
+        "item/completed",
+        agentMessage(
+          scripted.turnId,
+          "item-final",
+          JSON.stringify(CLEAN_RESULT),
+        ),
+      );
+      scripted.emit("turn/completed", turnCompleted(scripted.turnId));
+    };
+    const failedReadRun = await startReview(
+      failedRead,
+      await snapshotFixture(),
+    );
+    assert.equal(failedReadRun.status, "clean");
+
+    // A started command reported twice is contradictory.
+    const duplicateStart = new ScriptedCodexSession();
+    duplicateStart.plan = (scripted) => {
+      const started = {
+        threadId: "thread-1",
+        turnId: scripted.turnId,
+        item: commandItem("cmd-1", "inProgress"),
+      };
+      scripted.emit("item/started", started);
+      scripted.emit("item/started", started);
+      scripted.emit("turn/completed", turnCompleted(scripted.turnId));
+    };
+    const duplicatedStart = await startReview(
+      duplicateStart,
+      await snapshotFixture(),
+    );
+    assert.equal(duplicatedStart.status, "unavailable");
+    contains(duplicatedStart.detail ?? "", "contradictory");
+
+    // A completed command reported twice is contradictory.
+    const duplicate = new ScriptedCodexSession();
+    duplicate.plan = (scripted) => {
+      scripted.emit("item/started", {
+        threadId: "thread-1",
+        turnId: scripted.turnId,
+        item: commandItem("cmd-1", "inProgress"),
+      });
+      const completed = {
+        threadId: "thread-1",
+        turnId: scripted.turnId,
+        item: commandItem("cmd-1", "completed"),
+      };
+      scripted.emit("item/completed", completed);
+      scripted.emit("item/completed", completed);
+      scripted.emit("turn/completed", turnCompleted(scripted.turnId));
+    };
+    const contradictory = await startReview(duplicate, await snapshotFixture());
+    assert.equal(contradictory.status, "unavailable");
+    contains(contradictory.detail ?? "", "contradictory");
+
+    // Terminal interaction and connection-scoped command telemetry are refused.
+    const interaction = new ScriptedCodexSession();
+    interaction.plan = (scripted) => {
+      scripted.emit("item/commandExecution/terminalInteraction", {
+        threadId: "thread-1",
+        turnId: scripted.turnId,
+        itemId: "cmd-1",
+        stdin: "y\n",
+      });
+      scripted.emit("turn/completed", turnCompleted(scripted.turnId));
+    };
+    const interactionRun = await startReview(
+      interaction,
+      await snapshotFixture(),
+    );
+    assert.equal(interactionRun.status, "unavailable");
+    contains(interactionRun.detail ?? "", "terminal interaction");
+
+    const connectionScoped = new ScriptedCodexSession();
+    connectionScoped.plan = (scripted) => {
+      scripted.emit("command/exec/outputDelta", {
+        processId: "p-1",
+        delta: "x",
+      });
+      scripted.emit("turn/completed", turnCompleted(scripted.turnId));
+    };
+    const connectionRun = await startReview(
+      connectionScoped,
+      await snapshotFixture(),
+    );
+    assert.equal(connectionRun.status, "unavailable");
+    contains(connectionRun.detail ?? "", "connection-scoped");
+
+    // A compacted context is fatal evidence.
+    const compacted = new ScriptedCodexSession();
+    compacted.plan = (scripted) => {
+      scripted.emit("thread/compacted", { threadId: "thread-1" });
+      scripted.emit(
+        "item/completed",
+        agentMessage(
+          scripted.turnId,
+          "item-final",
+          JSON.stringify(CLEAN_RESULT),
+        ),
+      );
+      scripted.emit("turn/completed", turnCompleted(scripted.turnId));
+    };
+    const compactedRun = await startReview(compacted, await snapshotFixture());
+    assert.equal(compactedRun.status, "unavailable");
+    contains(compactedRun.detail ?? "", "compacted");
+
+    // An interrupted turn is never a clean review.
+    const interrupted = new ScriptedCodexSession();
+    interrupted.plan = (scripted) => {
+      scripted.emit(
+        "turn/completed",
+        turnCompleted(scripted.turnId, "interrupted"),
+      );
+    };
+    const interruptedRun = await startReview(
+      interrupted,
+      await snapshotFixture(),
+    );
+    assert.equal(interruptedRun.status, "unavailable");
+    assert.equal(interruptedRun.actual?.observedTerminalStatus, "interrupted");
+    assert.equal(interruptedRun.execution, null);
   },
 );
 
@@ -1138,7 +1598,7 @@ Deno.test(
     const snapshot = await snapshotFixture();
     const tampered: ReviewSnapshotV1 = {
       ...snapshot,
-      diff: `${snapshot.diff}\n+injected\n`,
+      files: [{ ...snapshot.files[0], candidateLines: 99 }],
     };
     const digest = await reviewer.prepare(prepareRequest(tampered));
     assert.equal(digest.ok, false);
@@ -1154,8 +1614,24 @@ Deno.test(
 
     const withDeletion = await snapshotFixture({
       files: [
-        { path: "account.ts", kind: "modified", content: ACCOUNT_CONTENT },
-        { path: "gone.ts", kind: "deleted", content: null },
+        {
+          path: "account.ts",
+          kind: "modified",
+          oldBlob: "1".repeat(40),
+          newBlob: "2".repeat(40),
+          oldMode: "100644",
+          newMode: "100644",
+          candidateLines: 4,
+        },
+        {
+          path: "gone.ts",
+          kind: "deleted",
+          oldBlob: "3".repeat(40),
+          newBlob: "0".repeat(40),
+          oldMode: "100644",
+          newMode: "000000",
+          candidateLines: null,
+        },
       ],
     });
     const cases: { name: string; finding: Record<string, unknown> }[] = [

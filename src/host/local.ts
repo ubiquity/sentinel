@@ -15,7 +15,7 @@
  */
 
 import { isGitSha, isSha256Hex } from "../contracts/brands.ts";
-import type { GitSha } from "../contracts/brands.ts";
+import type { GitSha, WorkItemId } from "../contracts/brands.ts";
 import { portError, portOk, SystemClock } from "../contracts/ports.ts";
 import type {
   Clock,
@@ -81,6 +81,10 @@ import { DurableGitHubCooldownGate } from "../repair/github-cooldown.ts";
 import type { RepairCycleOutcomeV1 } from "../repair/loop.ts";
 import { DenoReplayRuntime } from "../replay/runtime.ts";
 import { composeGitHubHost } from "./github.ts";
+import {
+  createCandidatePreserver,
+  createLegacyBaseRefreshLossProver,
+} from "./actions-candidates.ts";
 import { runRepairEntrypoint } from "../main.ts";
 
 /** Fixed local target identity (explicit no-App owner credential scope). */
@@ -133,6 +137,10 @@ const STATIC_IMPORT =
   "local repair host failed: candidate objects could not be imported into the trusted source repository";
 const STATIC_MODEL_RESULT =
   "local repair host failed: the private model result receipt could not be persisted; no candidate was imported";
+const STATIC_LOCAL_CANDIDATE =
+  "local candidate objects are unavailable for the exact task and head";
+const STATIC_RECEIPT_DIAGNOSTIC =
+  "local model diagnostic persistence failed; the trusted completed receipt is preserved without a durability claim";
 const STATIC_MARKER =
   "local repair host failed: the session marker could not be cleared";
 
@@ -875,6 +883,7 @@ export async function runLocalRepairHost(
       token: input.githubToken,
       login,
       invocationId,
+      stateRoot: input.stateRoot,
       sourcePath,
       scratch,
       reviewCheckout,
@@ -1052,6 +1061,11 @@ export interface LocalGitHubInputV1 {
   token: string;
   login: string;
   invocationId: string;
+  /**
+   * Exact private state root this host owns: the trusted source `checkouts`
+   * mapping and the owned scratch used by candidate preservation.
+   */
+  stateRoot: string;
   sourcePath: string;
   scratch: string;
   reviewCheckout: string;
@@ -1251,17 +1265,30 @@ export function composeLocalGitHub(input: LocalGitHubInputV1): GitHubPort {
   });
   const snapshot = new GitReviewSnapshot({
     trustedPath: input.trustedPath,
-    repositoryDir: input.sourcePath,
+    repositoryDir: input.reviewCheckout,
     gitExecutable: trustedGitPath(input.trustedPath),
   });
   const ensureCandidateObjects = input.ensureCandidateObjects;
-  // Lazy restore: the actual snapshot producer runs only after the exact
-  // durable candidate objects are available; a failed restore propagates as
-  // this operation's unavailability, never a host-wide exception.
-  const snapshotSource = ensureCandidateObjects === undefined ? snapshot : {
+  // Every capture first restores the exact durable candidate objects when the
+  // host has that capability, then prepares the independent exact review
+  // checkout under trusted ownership and captures the immutable manifest from
+  // that exact checkout. A failed restore or preparation propagates as this
+  // operation's sanitized unavailability, never a host-wide exception.
+  const snapshotSource = {
     capture: async (value: { base: GitSha; head: GitSha }) => {
-      const ensured = await ensureCandidateObjects(value);
-      if (!ensured.ok) return ensured;
+      if (ensureCandidateObjects !== undefined) {
+        const ensured = await ensureCandidateObjects(value);
+        if (!ensured.ok) return ensured;
+      }
+      const prepared = await prepareReviewCheckout({
+        sourcePath: input.sourcePath,
+        reviewCheckout: input.reviewCheckout,
+        base: value.base,
+        head: value.head,
+        trustedPath: input.trustedPath,
+        scratch: input.scratch,
+      });
+      if (!prepared.ok) return prepared;
       return await snapshot.capture(value);
     },
   };
@@ -1338,6 +1365,50 @@ export function composeLocalGitHub(input: LocalGitHubInputV1): GitHubPort {
     baseBranch: LOCAL_BASE_BRANCH,
     trustedPrAuthor: input.login,
     ensureCandidateObjects,
+  });
+  // Candidate preservation is composed on the SAME port + executor identities:
+  // the authenticated operation-ref read and the create-only push use this
+  // exact port, and the trusted loader imports only the exact task-mapped
+  // producer checkout under this host's private state root.
+  host.port.preserveCandidate = createCandidatePreserver({
+    state: input.state,
+    gate,
+    token: input.token,
+    http: input.http,
+    clock: input.clock,
+    sourcePath: input.sourcePath,
+    scratch: input.scratch,
+    trustedPath: input.trustedPath,
+    gitExecutable: trustedGitPath(input.trustedPath),
+    port: host.port,
+    protectedPaths: createLocalRepositoryConfig().protectedPaths,
+    ensureLocalCandidate: createLocalCandidateLoader({
+      stateRoot: input.stateRoot,
+      sourcePath: input.sourcePath,
+      scratch: input.scratch,
+      trustedPath: input.trustedPath,
+    }),
+  });
+  // The legacy candidate-loss proof is composed on the SAME port identity and
+  // the SAME exact loader inputs as preservation. The port object is passed
+  // BEFORE the scope wrapper replaces `readIssue`, so the prover resolves the
+  // scoped reader dynamically at invocation and never captures a pre-scope one.
+  host.port.proveLegacyBaseRefreshLoss = createLegacyBaseRefreshLossProver({
+    state: input.state,
+    port: host.port,
+    gate,
+    token: input.token,
+    scratch: input.scratch,
+    trustedPath: input.trustedPath,
+    gitExecutable: trustedGitPath(input.trustedPath),
+    baseBranch: LOCAL_BASE_BRANCH,
+    trustedPrAuthor: input.login,
+    ensureLocalCandidate: createLocalCandidateLoader({
+      stateRoot: input.stateRoot,
+      sourcePath: input.sourcePath,
+      scratch: input.scratch,
+      trustedPath: input.trustedPath,
+    }),
   });
   return scopeLocalRepairIssues(host.port);
 }
@@ -1591,37 +1662,81 @@ export class LocalCheckoutModelPort implements ImplementationPort {
       ? request
       : { ...request, base: checkoutBase };
     const result = await port.runModel(modelRequest);
-    // Persist the private minimal diagnostic BEFORE returning the receipt or
-    // importing any candidate: a run without its saved receipt may not
-    // publish. A storage failure must not erase the existing checkout or the
-    // durable reservation, so it only returns static unavailable. The common
-    // saved-report path also emits the bounded advisory summary line for both
-    // receipt results and port errors; no raw port detail is ever logged here.
-    try {
-      await writeLocalModelResult(
-        this.input.stateRoot,
-        request,
-        result,
-        this.input.clock.now(),
-      );
-    } catch {
-      return portError("unavailable", STATIC_MODEL_RESULT);
-    }
-    if (!result.ok) return result;
-    const head = result.value.candidate?.head ?? null;
-    if (head !== null) {
-      const imported = await importCandidate({
-        sourcePath: this.input.sourcePath,
-        checkout: prepared.checkout,
-        head,
-        key,
-        scratch: this.input.scratch,
-        trustedPath: this.input.trustedPath,
-      });
-      if (!imported) return portError("unavailable", STATIC_IMPORT);
-    }
-    return result;
+    return await finalizeLocalModelResult({
+      stateRoot: this.input.stateRoot,
+      request,
+      result,
+      observedAt: this.input.clock.now(),
+      importCandidate: (head) =>
+        importCandidate({
+          sourcePath: this.input.sourcePath,
+          checkout: prepared.checkout,
+          head,
+          key,
+          scratch: this.input.scratch,
+          trustedPath: this.input.trustedPath,
+        }),
+    });
   }
+}
+
+/**
+ * Post-run trusted bookkeeping for exactly one local model invocation.
+ *
+ * The private minimal diagnostic is still persisted BEFORE any candidate
+ * import, and a non-completed port error keeps its original conservative
+ * behavior (an unsaved diagnostic or a failed import stays `unavailable`).
+ *
+ * A TRUSTED COMPLETED receipt is different: its execution/accounting meaning
+ * is preserved unchanged when either the diagnostic write or the best-effort
+ * local import fails. The diagnostic failure is reported as one static line
+ * and the original receipt (including its exact candidate head and actual
+ * runtime fields) is returned unchanged; no durability claim is made and
+ * nothing is published here. The persistent checkout is never touched.
+ */
+export async function finalizeLocalModelResult(input: {
+  stateRoot: string;
+  request: ModelRunRequestV1;
+  result: PortResultV1<ModelRunReceiptV1>;
+  observedAt: number;
+  /** Exact-head import into the trusted source mirror; best effort. */
+  importCandidate: (head: GitSha) => Promise<boolean>;
+}): Promise<PortResultV1<ModelRunReceiptV1>> {
+  const completedHead: GitSha | null = input.result.ok
+    ? input.result.value.candidate?.head ?? null
+    : null;
+  const completed = completedHead !== null && input.result.ok &&
+    input.result.value.outcome === "completed";
+  let diagnosticSaved = false;
+  try {
+    await writeLocalModelResult(
+      input.stateRoot,
+      input.request,
+      input.result,
+      input.observedAt,
+    );
+    diagnosticSaved = true;
+  } catch {
+    if (!completed) return portError("unavailable", STATIC_MODEL_RESULT);
+    // Static sanitized line only: no task content, candidate identity or raw
+    // error is ever logged, and the receipt below keeps its full meaning.
+    console.log(STATIC_RECEIPT_DIAGNOSTIC);
+  }
+  if (!input.result.ok) return input.result;
+  if (completedHead !== null && diagnosticSaved) {
+    let imported = false;
+    try {
+      imported = await input.importCandidate(completedHead);
+    } catch {
+      imported = false;
+    }
+    // A trusted completed run never turns a failed best-effort import into
+    // model-unavailable accounting; durability remains a separate obligation.
+    if (!imported && !completed) {
+      return portError("unavailable", STATIC_IMPORT);
+    }
+  }
+  return input.result;
 }
 
 /** Create the one-time checkout at the exact base; reuse is exact-match only. */
@@ -1849,6 +1964,8 @@ async function importCandidate(input: {
   trustedPath: string;
 }): Promise<boolean> {
   const ref = `refs/sentinel/candidates/${input.key}`;
+  // The EXACT requested commit is fetched, never the checkout's mutable HEAD:
+  // a later commit or a moved HEAD must not silently replace the candidate.
   const fetched = await runTrustedGitResult({
     args: [
       "-C",
@@ -1856,7 +1973,7 @@ async function importCandidate(input: {
       "fetch",
       "--no-tags",
       input.checkout,
-      `+HEAD:${ref}`,
+      `+${input.head}:${ref}`,
     ],
     cwd: input.sourcePath,
     scratch: input.scratch,
@@ -1870,6 +1987,225 @@ async function importCandidate(input: {
     trustedPath: input.trustedPath,
   });
   return observed.code === 0 && observed.stdout.trim() === input.head;
+}
+
+/** Three-way availability of one exact object in one verified repository. */
+type LocalObjectStateV1 = "present" | "absent" | "unknown";
+
+/** Three-way path state: only a NotFound error proves the path is missing. */
+type LocalPathStateV1 = "present" | "absent" | "unknown";
+
+/** Direct candidate-checkout mapping read bound (bytes). */
+const CANDIDATE_MAPPING_MAX_BYTES = 64 * 1024;
+
+/** Path state where every failure other than NotFound stays unknown. */
+async function localPathState(path: string): Promise<LocalPathStateV1> {
+  try {
+    await Deno.stat(path);
+    return "present";
+  } catch (error) {
+    return error instanceof Deno.errors.NotFound ? "absent" : "unknown";
+  }
+}
+
+/**
+ * Trusted exact-object loader for candidate preservation.
+ *
+ * It first checks the private source mirror (already-imported objects need no
+ * checkout access), then resolves EXACTLY the task's mapped producer checkout
+ * under `<stateRoot>/checkouts/<localCheckoutKey(taskId)>` through a direct
+ * bounded mapping read and the exact requested SHA. Only then is that exact
+ * commit imported into the source mirror — never a mutable HEAD and never a
+ * different task's checkout.
+ *
+ * Availability is three-way and never conflates failure with loss: an object
+ * is `present` only in a verified repository, `absent` only after the
+ * documented missing-revision exit code 1, and every unreadable, corrupt,
+ * wrong-type, wrong-task/version/kind/base or mismatched mapping state is
+ * `unavailable`. `not_found` is returned ONLY after the source mirror AND the
+ * exact mapped checkout/object both prove positive absence. Files are never
+ * deleted or rewritten.
+ */
+export function createLocalCandidateLoader(input: {
+  stateRoot: string;
+  sourcePath: string;
+  scratch: string;
+  trustedPath: string;
+}): (taskId: WorkItemId, head: GitSha) => Promise<PortResultV1<void>> {
+  const gitAt = async (
+    dir: string,
+    args: string[],
+  ): Promise<{ code: number; stdout: string } | null> => {
+    try {
+      return await runTrustedGitResult({
+        args: ["-C", dir, ...args],
+        cwd: input.stateRoot,
+        scratch: input.scratch,
+        trustedPath: input.trustedPath,
+        // Read-only object queries must never lazy-fetch, substitute replace
+        // refs or reach any protocol: the same isolation the publication
+        // validator already applies to its local object reads.
+        extraEnv: {
+          GIT_NO_LAZY_FETCH: "1",
+          GIT_NO_REPLACE_OBJECTS: "1",
+          GIT_ALLOW_PROTOCOL: "",
+        },
+      });
+    } catch {
+      return null;
+    }
+  };
+  /**
+   * Exact commit availability in one verified repository.
+   *
+   * The repository is verified first; `rev-parse --verify --quiet <sha>^{commit}`
+   * then has exactly one positive absence: exit code 1 with empty stdout.
+   * Exit 128, a throw, truncation, an unreadable repository and a present
+   * non-commit object (wrong type) are all `unknown`, never absence.
+   */
+  const objectState = async (
+    dir: string,
+    head: GitSha,
+  ): Promise<LocalObjectStateV1> => {
+    const repo = await gitAt(dir, ["rev-parse", "--absolute-git-dir"]);
+    if (repo === null || repo.code !== 0 || repo.stdout.trim().length === 0) {
+      return "unknown";
+    }
+    // Parent-directory discovery is refused: the resolved Git directory must be
+    // this exact repository itself (bare source mirror) or its own `.git`
+    // (mapped producer clone). Any read or path identity mismatch is unknown.
+    try {
+      const gitDir = await Deno.realPath(repo.stdout.trim());
+      const repoDir = await Deno.realPath(dir);
+      if (gitDir !== repoDir) {
+        const dotGit = await Deno.realPath(joinPath(dir, ".git"));
+        if (gitDir !== dotGit) return "unknown";
+      }
+    } catch {
+      return "unknown";
+    }
+    const peeled = await gitAt(dir, [
+      "rev-parse",
+      "--verify",
+      "--quiet",
+      `${head}^{commit}`,
+    ]);
+    if (peeled === null) return "unknown";
+    if (peeled.code === 0) {
+      return peeled.stdout.trim() === head ? "present" : "unknown";
+    }
+    if (peeled.code !== 1 || peeled.stdout.trim() !== "") return "unknown";
+    // The revision is missing OR names a present non-commit object: never
+    // report the wrong type as positive loss.
+    const object = await gitAt(dir, [
+      "rev-parse",
+      "--verify",
+      "--quiet",
+      `${head}^{object}`,
+    ]);
+    if (object === null || object.code !== 1) return "unknown";
+    return object.stdout.trim() === "" ? "absent" : "unknown";
+  };
+  /**
+   * Direct bounded mapping read for this exact task/key; the shared legacy
+   * checkout-mapping helper is deliberately not used here.
+   */
+  const mappingState = async (
+    mappingPath: string,
+    taskId: WorkItemId,
+    key: string,
+  ): Promise<"exact" | "missing" | "unusable"> => {
+    let text: string;
+    try {
+      const stat = await Deno.stat(mappingPath);
+      if (!stat.isFile || stat.size > CANDIDATE_MAPPING_MAX_BYTES) {
+        return "unusable";
+      }
+      text = await Deno.readTextFile(mappingPath);
+    } catch (error) {
+      return error instanceof Deno.errors.NotFound ? "missing" : "unusable";
+    }
+    let parsed: Record<string, unknown>;
+    try {
+      const value = JSON.parse(text);
+      if (typeof value !== "object" || value === null || Array.isArray(value)) {
+        return "unusable";
+      }
+      parsed = value as Record<string, unknown>;
+    } catch {
+      return "unusable";
+    }
+    if (
+      parsed.version !== "v1" || parsed.kind !== "local_checkout" ||
+      typeof parsed.taskId !== "string" || typeof parsed.key !== "string" ||
+      typeof parsed.base !== "string" || !isGitSha(parsed.base)
+    ) {
+      return "unusable";
+    }
+    return parsed.taskId === taskId && parsed.key === key
+      ? "exact"
+      : "unusable";
+  };
+  return async (taskId, head) => {
+    if (typeof taskId !== "string" || taskId.length === 0 || !isGitSha(head)) {
+      return portError("invalid", STATIC_LOCAL_CANDIDATE);
+    }
+    // 1. The trusted source mirror already owning the exact objects wins.
+    const inSource = await objectState(input.sourcePath, head);
+    if (inSource === "present") return portOk(undefined);
+    // A failed source read is never ignored and never becomes not_found.
+    if (inSource === "unknown") {
+      return portError("unavailable", STATIC_LOCAL_CANDIDATE);
+    }
+    // 2. The exact task-mapped producer checkout; anything else refuses.
+    const key = await localCheckoutKey(taskId);
+    const checkoutsDir = joinPath(input.stateRoot, "checkouts");
+    const checkout = joinPath(checkoutsDir, key);
+    const mapping = await mappingState(
+      joinPath(checkoutsDir, `${key}.json`),
+      taskId,
+      key,
+    );
+    if (mapping === "unusable") {
+      return portError("unavailable", STATIC_LOCAL_CANDIDATE);
+    }
+    const checkoutPath = await localPathState(checkout);
+    if (checkoutPath === "unknown") {
+      return portError("unavailable", STATIC_LOCAL_CANDIDATE);
+    }
+    if (mapping === "missing") {
+      // No mapped producer checkout was ever published for this task: only a
+      // provably absent checkout path can prove the candidate was never made.
+      return checkoutPath === "absent"
+        ? portError("not_found", STATIC_LOCAL_CANDIDATE)
+        : portError("unavailable", STATIC_LOCAL_CANDIDATE);
+    }
+    if (checkoutPath === "absent") {
+      return portError("not_found", STATIC_LOCAL_CANDIDATE);
+    }
+    const inCheckout = await objectState(checkout, head);
+    if (inCheckout === "unknown") {
+      return portError("unavailable", STATIC_LOCAL_CANDIDATE);
+    }
+    if (inCheckout === "absent") {
+      return portError("not_found", STATIC_LOCAL_CANDIDATE);
+    }
+    let imported = false;
+    try {
+      imported = await importCandidate({
+        sourcePath: input.sourcePath,
+        checkout,
+        head,
+        key,
+        scratch: input.scratch,
+        trustedPath: input.trustedPath,
+      });
+    } catch {
+      return portError("unavailable", STATIC_LOCAL_CANDIDATE);
+    }
+    if (!imported) return portError("unavailable", STATIC_LOCAL_CANDIDATE);
+    return portOk(undefined);
+  };
 }
 
 /** Write the isolated client home, token file and config for one task. */
@@ -2063,6 +2399,413 @@ async function durableGitPathState(
     return "present";
   }
   return "empty";
+}
+
+// ---------------------------------------------------------------------------
+// Independent exact review checkout (trusted host ownership)
+// ---------------------------------------------------------------------------
+
+/** Static sanitized failure for one exact review checkout preparation. */
+export const STATIC_REVIEW_CHECKOUT =
+  "review checkout unavailable: the exact independent review checkout could not be prepared";
+
+export interface PrepareReviewCheckoutInputV1 {
+  /** Trusted persistent source object repository (never a model checkout). */
+  sourcePath: string;
+  /** Independent review checkout directory exposed to the model session. */
+  reviewCheckout: string;
+  /** Exact committed base that must exist in the review checkout. */
+  base: GitSha;
+  /** Exact candidate head the review checkout must be detached at. */
+  head: GitSha;
+  /** Trusted PATH for the Git child only. */
+  trustedPath: string;
+  /** Private scratch HOME for trusted Git invocations. */
+  scratch: string;
+}
+
+/**
+ * Narrow safe local configuration of a standard independent clone: the ONLY
+ * accepted keys and values (exact match, no duplicates). Every other local
+ * key, a repeated key or an unexpected value refuses the checkout, so local
+ * authority such as hooks, fsmonitor, worktree redirection or checkout filters
+ * can never be executed while the checkout is validated or reused.
+ */
+const REVIEW_CHECKOUT_SAFE_CONFIG = new Map<string, ReadonlySet<string>>([
+  ["core.repositoryformatversion", new Set(["0"])],
+  ["core.filemode", new Set(["true", "false"])],
+  ["core.bare", new Set(["false"])],
+  ["core.logallrefupdates", new Set(["true"])],
+  ["core.ignorecase", new Set(["true", "false"])],
+  ["core.precomposeunicode", new Set(["true", "false"])],
+]);
+const REVIEW_CHECKOUT_REQUIRED_CONFIG: readonly string[] = [
+  "core.repositoryformatversion",
+  "core.filemode",
+  "core.bare",
+  "core.logallrefupdates",
+];
+
+/**
+ * True only when a `git config --local --no-includes --list` listing contains
+ * allowed independent-clone keys with allowed values, no duplicate and every
+ * required key. This is a strict equivalence check over Git's own config
+ * listing, never a general config parser and never a denylist.
+ */
+function hasSafeReviewCheckoutConfig(text: string): boolean {
+  const seen = new Set<string>();
+  for (const line of text.split("\n")) {
+    if (line === "") continue;
+    const separator = line.indexOf("=");
+    if (separator <= 0) return false;
+    const key = line.slice(0, separator);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    const allowed = REVIEW_CHECKOUT_SAFE_CONFIG.get(key);
+    if (allowed === undefined || !allowed.has(line.slice(separator + 1))) {
+      return false;
+    }
+  }
+  for (const key of REVIEW_CHECKOUT_REQUIRED_CONFIG) {
+    if (!seen.has(key)) return false;
+  }
+  return true;
+}
+
+/** Exact lstat classification of one critical metadata path (never followed). */
+async function metadataEntryKind(
+  path: string,
+): Promise<"absent" | "file" | "directory" | "other"> {
+  let info: Deno.FileInfo;
+  try {
+    info = await Deno.lstat(path);
+  } catch (error) {
+    if (error instanceof Deno.errors.NotFound) return "absent";
+    throw error;
+  }
+  if (info.isSymlink) return "other";
+  if (info.isFile) return "file";
+  if (info.isDirectory) return "directory";
+  return "other";
+}
+
+/** Bounded whole-`.git` traversal limits: entries examined and depth below `.git`. */
+const REVIEW_CHECKOUT_METADATA_MAX_ENTRIES = 100_000;
+const REVIEW_CHECKOUT_METADATA_MAX_DEPTH = 64;
+
+/**
+ * Bounded link-free walk of the ENTIRE real `.git` directory. Every entry is
+ * classified with `Deno.lstat` and never followed: a symlink, a non-file or
+ * non-directory entry, and a regular file with more than one link (shared
+ * writable metadata) all refuse the checkout. The walk fails closed beyond its
+ * entry or depth bound and on any directory-read or lstat error, and it never
+ * modifies anything, so every offending entry and its target are preserved.
+ */
+async function reviewCheckoutMetadataTreeSafe(
+  gitDir: string,
+): Promise<boolean> {
+  let entries = 0;
+  const visit = async (directory: string, depth: number): Promise<boolean> => {
+    if (depth > REVIEW_CHECKOUT_METADATA_MAX_DEPTH) return false;
+    try {
+      for await (const entry of Deno.readDir(directory)) {
+        entries++;
+        if (entries > REVIEW_CHECKOUT_METADATA_MAX_ENTRIES) return false;
+        const path = joinPath(directory, entry.name);
+        const info = await Deno.lstat(path);
+        if (info.isSymlink) return false;
+        if (info.isFile) {
+          if (info.nlink !== 1) return false;
+          continue;
+        }
+        if (!info.isDirectory) return false;
+        if (!(await visit(path, depth + 1))) return false;
+      }
+    } catch {
+      return false;
+    }
+    return true;
+  };
+  return await visit(gitDir, 1);
+}
+
+/**
+ * Verify the exposed checkout's local Git metadata BEFORE any command that can
+ * execute config hooks or filters: `.git` must be a real directory (never a
+ * file pointer or symlink), commondir/alternates/grafts redirection must be
+ * absent, and config, HEAD, index (when present), objects, refs and info must
+ * be real local entries. A bounded link-free walk then classifies EVERY entry
+ * of the real `.git` directory, including FETCH_HEAD, logs descendants and
+ * objects/pack descendants: symlinks, special entries, hardlinked regular
+ * files and any walk beyond its entry/depth bounds are refused. Every refusal
+ * preserves the offending entry and its target exactly.
+ */
+async function reviewCheckoutMetadataSafe(
+  reviewCheckout: string,
+): Promise<boolean> {
+  const gitDir = joinPath(reviewCheckout, ".git");
+  if (await metadataEntryKind(gitDir) !== "directory") return false;
+  const forbidden = [
+    "commondir",
+    joinPath("objects", "info", "alternates"),
+    joinPath("objects", "info", "http-alternates"),
+    joinPath("info", "grafts"),
+  ];
+  for (const relative of forbidden) {
+    if (await metadataEntryKind(joinPath(gitDir, relative)) !== "absent") {
+      return false;
+    }
+  }
+  for (const relative of ["config", "HEAD"]) {
+    if (await metadataEntryKind(joinPath(gitDir, relative)) !== "file") {
+      return false;
+    }
+  }
+  for (const relative of ["objects", "refs", "info"]) {
+    if (await metadataEntryKind(joinPath(gitDir, relative)) !== "directory") {
+      return false;
+    }
+  }
+  const objectsInfo = await metadataEntryKind(
+    joinPath(gitDir, "objects", "info"),
+  );
+  if (objectsInfo !== "absent" && objectsInfo !== "directory") return false;
+  const index = await metadataEntryKind(joinPath(gitDir, "index"));
+  if (index !== "absent" && index !== "file") return false;
+  return await reviewCheckoutMetadataTreeSafe(gitDir);
+}
+
+/**
+ * Classify the durable review checkout path: an absent path and an existing
+ * EMPTY directory may be initialized, an existing nonempty directory is only
+ * ever reused under verification (never deleted), and a symlink or plain file
+ * is refused before any Git runs. Nothing is deleted or reset here.
+ */
+async function reviewCheckoutState(
+  path: string,
+): Promise<"fresh" | "reuse" | "blocked"> {
+  let info: Deno.FileInfo;
+  try {
+    info = await Deno.lstat(path);
+  } catch (error) {
+    if (error instanceof Deno.errors.NotFound) return "fresh";
+    throw error;
+  }
+  if (info.isSymlink || !info.isDirectory) return "blocked";
+  for await (const _entry of Deno.readDir(path)) return "reuse";
+  return "fresh";
+}
+
+/**
+ * Trusted preparation of the ONE independent review checkout.
+ *
+ * The checkout is a real `--no-hardlinks` clone of the trusted source object
+ * repository with its own `.git` directory and independent objects: no `.git`
+ * file pointer, symlinked metadata, alternates, shared writable metadata,
+ * hooks or credential-bearing config, and no remote after preparation. Only
+ * the exact base/head objects are fetched from the trusted local source (no
+ * network, no credentials), then the checkout is detached at the exact head.
+ * A reused nonempty directory is verified (real local `.git` metadata with no
+ * commondir/alternates/graft redirection, symlinked or hardlinked metadata or
+ * special `.git` entries, an exact safe-local-config allowlist through Git's
+ * own `--local --no-includes` listing, no loose or packed `refs/replace/`
+ * entry, and an actual `--absolute-git-dir`/`--show-toplevel` identity bound
+ * to the exact real checkout paths) BEFORE any Git command that could execute a
+ * config hook or filter, and clean tracked AND untracked state is proved before
+ * it is changed; unexpected data is preserved and reported, never reset,
+ * cleaned or erased. Every failure returns the same sanitized unavailable
+ * result and never escapes as a thrown host error.
+ */
+export async function prepareReviewCheckout(
+  input: PrepareReviewCheckoutInputV1,
+): Promise<PortResultV1<void>> {
+  if (!isGitSha(input.base) || !isGitSha(input.head)) {
+    return portError("unavailable", STATIC_REVIEW_CHECKOUT);
+  }
+  const parent = dirnamePath(input.reviewCheckout);
+  const git = (args: string[]) =>
+    runTrustedGitResult({
+      args,
+      cwd: parent,
+      scratch: input.scratch,
+      trustedPath: input.trustedPath,
+    });
+  const trustedMetadata = async (): Promise<boolean> => {
+    if (!(await reviewCheckoutMetadataSafe(input.reviewCheckout))) return false;
+    // Git's own local listing without includes is read only AFTER the metadata
+    // paths proved real, so no config hook or filter can run first.
+    const config = await git([
+      "-C",
+      input.reviewCheckout,
+      "config",
+      "--local",
+      "--no-includes",
+      "--list",
+    ]);
+    if (config.code !== 0) return false;
+    if (!hasSafeReviewCheckoutConfig(config.stdout)) return false;
+    // Loose AND packed `refs/replace/` entries are refused here, BEFORE any
+    // fetch, checkout or status: replacement refs would otherwise make model
+    // Git read content other than the exact objects bound by the manifest.
+    const replacements = await git([
+      "-C",
+      input.reviewCheckout,
+      "for-each-ref",
+      "--format=%(refname)",
+      "refs/replace/",
+    ]);
+    return replacements.code === 0 &&
+      replacements.stdout.trim().length === 0;
+  };
+  /**
+   * Bind the actual repository identity Git would use to the exact real
+   * checkout and `.git` paths before any fetch, checkout or status runs, so a
+   * worktree/commondir redirection that survived metadata acceptance can never
+   * operate on another directory.
+   */
+  const bindIdentity = async (): Promise<boolean> => {
+    let realCheckout: string;
+    let realGitDir: string;
+    try {
+      realCheckout = await Deno.realPath(input.reviewCheckout);
+      realGitDir = await Deno.realPath(joinPath(input.reviewCheckout, ".git"));
+    } catch {
+      return false;
+    }
+    if (realGitDir !== joinPath(realCheckout, ".git")) return false;
+    const absoluteGitDir = await git([
+      "-C",
+      input.reviewCheckout,
+      "rev-parse",
+      "--absolute-git-dir",
+    ]);
+    if (
+      absoluteGitDir.code !== 0 ||
+      absoluteGitDir.stdout.trim() !== realGitDir
+    ) {
+      return false;
+    }
+    const topLevel = await git([
+      "-C",
+      input.reviewCheckout,
+      "rev-parse",
+      "--show-toplevel",
+    ]);
+    return topLevel.code === 0 && topLevel.stdout.trim() === realCheckout;
+  };
+  const cleanCheckout = async (): Promise<boolean> => {
+    const status = await git([
+      "-C",
+      input.reviewCheckout,
+      "status",
+      "--porcelain",
+      "--untracked-files=all",
+    ]);
+    return status.code === 0 && status.stdout.trim().length === 0;
+  };
+  const trustedCheckout = async (): Promise<boolean> =>
+    await trustedMetadata() && await bindIdentity() && await cleanCheckout();
+  try {
+    await ensurePrivateDir(parent);
+    const state = await reviewCheckoutState(input.reviewCheckout);
+    if (state === "blocked") {
+      return portError("unavailable", STATIC_REVIEW_CHECKOUT);
+    }
+    if (state === "fresh") {
+      await ensurePrivateDir(input.reviewCheckout);
+      const cloned = await git([
+        "clone",
+        "--no-hardlinks",
+        "--no-checkout",
+        input.sourcePath,
+        input.reviewCheckout,
+      ]);
+      if (cloned.code !== 0) {
+        return portError("unavailable", STATIC_REVIEW_CHECKOUT);
+      }
+      // Remove the clone's transport authority BEFORE the checkout is exposed
+      // to any model tool: no origin, no push/fetch target remains.
+      const removed = await git([
+        "-C",
+        input.reviewCheckout,
+        "remote",
+        "remove",
+        "origin",
+      ]);
+      if (removed.code !== 0) {
+        return portError("unavailable", STATIC_REVIEW_CHECKOUT);
+      }
+      // A fresh `--no-checkout` clone has an empty index, so metadata, safe
+      // config and the bound repository identity are verified here;
+      // tracked/untracked cleanliness is proved after the exact detached
+      // checkout below.
+      if (!(await trustedMetadata())) {
+        return portError("unavailable", STATIC_REVIEW_CHECKOUT);
+      }
+      if (!(await bindIdentity())) {
+        return portError("unavailable", STATIC_REVIEW_CHECKOUT);
+      }
+    } else if (!(await trustedCheckout())) {
+      return portError("unavailable", STATIC_REVIEW_CHECKOUT);
+    }
+    // Fetch only the exact base/head objects from the trusted local source; a
+    // request denied for an object the local clone already carries is not
+    // fatal, but the exact objects must then already be present below.
+    for (const sha of [input.head, input.base]) {
+      await git([
+        "-C",
+        input.reviewCheckout,
+        "fetch",
+        "--no-tags",
+        input.sourcePath,
+        sha,
+      ]);
+    }
+    for (const sha of [input.head, input.base]) {
+      const present = await git([
+        "-C",
+        input.reviewCheckout,
+        "cat-file",
+        "-e",
+        `${sha}^{commit}`,
+      ]);
+      if (present.code !== 0) {
+        return portError("unavailable", STATIC_REVIEW_CHECKOUT);
+      }
+    }
+    const detached = await git([
+      "-C",
+      input.reviewCheckout,
+      "-c",
+      "advice.detachedHead=false",
+      "checkout",
+      "--detach",
+      input.head,
+    ]);
+    if (detached.code !== 0) {
+      return portError("unavailable", STATIC_REVIEW_CHECKOUT);
+    }
+    const head = await git(["-C", input.reviewCheckout, "rev-parse", "HEAD"]);
+    if (head.code !== 0 || head.stdout.trim() !== input.head) {
+      return portError("unavailable", STATIC_REVIEW_CHECKOUT);
+    }
+    const symbolic = await git([
+      "-C",
+      input.reviewCheckout,
+      "rev-parse",
+      "--abbrev-ref",
+      "HEAD",
+    ]);
+    if (symbolic.code !== 0 || symbolic.stdout.trim() !== "HEAD") {
+      return portError("unavailable", STATIC_REVIEW_CHECKOUT);
+    }
+    if (!(await trustedCheckout())) {
+      return portError("unavailable", STATIC_REVIEW_CHECKOUT);
+    }
+    return portOk(undefined);
+  } catch {
+    return portError("unavailable", STATIC_REVIEW_CHECKOUT);
+  }
 }
 
 /** Refresh the exact remote development ref through trusted authenticated git. */

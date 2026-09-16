@@ -63,6 +63,13 @@ jobs:
     if: always() && github.ref == 'refs/heads/sentinel-supervisor'
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # The one-shot owner installation reads the fixed runtime revision's
+    # ancestry and its completed `test-local` check with the repository token
+    # before any state commit is created.
+    permissions:
+      contents: read
+      actions: read
+      checks: read
     environment:
       name: sentinel-supervisor
     outputs:
@@ -87,6 +94,23 @@ jobs:
           owner: ubiquity
           repositories: sentinel
           permission-contents: write
+      # One-shot fixed owner-authorized development installation. It reads and
+      # validates the complete release state with the App token, verifies the
+      # next fixed runtime revision with the repository token, and creates its
+      # own explicitly owner-authorized state commit before the ordinary
+      # prepare run. It starts no model and prints no credential.
+      - name: Install owner-authorized development runtime
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SENTINEL_SUPERVISOR_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: >-
+          deno run --no-lock
+          --allow-read
+          --allow-write
+          --allow-run=git
+          --allow-net=api.github.com
+          --allow-env=HOME,PATH,GITHUB_TOKEN,SENTINEL_SUPERVISOR_TOKEN,GITHUB_REPOSITORY,GITHUB_REF,GITHUB_SHA,GITHUB_WORKFLOW_SHA,GITHUB_JOB
+          src/host/owner-development-install.ts
       - name: Prepare hosted supervisor run
         id: prepare
         env:

@@ -1,5 +1,11 @@
 import assert from "node:assert/strict";
-import { makeRepairRig, SHA1 } from "./helpers.ts";
+import {
+  exactCandidateLifecycle,
+  makeRepairRig,
+  SHA1,
+  SHA2,
+  SHA3,
+} from "./helpers.ts";
 import { DurableGitHubCooldownGate } from "../../src/repair/github-cooldown.ts";
 import { runRepairEntrypoint } from "../../src/main.ts";
 import { RollingStartBudget } from "../../src/budget/mod.ts";
@@ -131,7 +137,11 @@ Deno.test("cooldown entrypoint: restart and fault modes keep zero further HTTP/a
 
 Deno.test("cooldown ambiguity: lost response keeps durable intent, cooldown and exact reconciliation with one mutation", async () => {
   for (const mode of ["pr", "merge"]) {
-    const rig = await makeRepairRig(`cooldown-lost-${mode}`);
+    const rig = await makeRepairRig(`cooldown-lost-${mode}`, {
+      github: {
+        candidateLifecycle: exactCandidateLifecycle({ head: SHA3 }),
+      },
+    });
     try {
       const gate = new DurableGitHubCooldownGate({
         state: rig.store,
@@ -271,6 +281,9 @@ Deno.test("cooldown admission: awaited gate cannot consume an ineligible model r
     const github = new FakeGithub({
       issues: [{ number: 1, title: "synthetic issue" }],
       openIssues: [{ number: 1, title: "synthetic issue" }],
+      // The review-cutoff mode publishes and must reach the wrapped review
+      // admission gate; the implementation-fit mode never publishes.
+      candidateLifecycle: exactCandidateLifecycle({ head: SHA2 }),
     });
     const configs = repairConfigs({
       sessionBound: { maxDurationMs: 240000, maxOutputChars: 200000 },

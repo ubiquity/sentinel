@@ -22,6 +22,7 @@ import type {
   ImplementationPort,
   IncidentAdapter,
   IsolatedReplayResultV1,
+  LegacyBaseRefreshLossProofV1,
   MergeOutcomeV1,
   ModelRunReceiptV1,
   PortResultV1,
@@ -60,14 +61,15 @@ import type {
   RepositoryIdentityV1,
 } from "../contracts/shared.ts";
 import type {
+  CandidatePreservationV1,
   IncompleteOperationV1,
   WorkRecordV1,
 } from "../contracts/work-record.ts";
-import { hasCandidateState } from "../contracts/work-record.ts";
 import type { BudgetControllerV1 } from "../budget/mod.ts";
 import { MAX_REVIEW_TOTAL_MS } from "../github/codex-reviewer.ts";
 import {
   candidateBranch,
+  candidatePreservationRef,
   closureIntentKey,
   implementationIntentKey,
   mergeIntentKey,
@@ -80,7 +82,11 @@ import {
   reviewOperationKey,
   reviewReceiptId,
 } from "./keys.ts";
-import { MAX_UNFINISHED_PRS, rankEligibleWork } from "./selection.ts";
+import {
+  isWaiting,
+  MAX_UNFINISHED_PRS,
+  rankEligibleWork,
+} from "./selection.ts";
 import {
   advanceToCorrection,
   advanceToDelivery,
@@ -94,6 +100,7 @@ import {
   markBlocked,
   markDone,
   noteCandidate,
+  setCandidateState,
   setIntent,
   setWait,
   startAttempt,
@@ -138,12 +145,6 @@ const MAX_IMPLEMENTATION_ATTEMPTS = 4;
 const MAX_OUTPUT_LIMIT_BYTES = 4096;
 const MODEL_ID = "gpt-5.6-luna" as const;
 const REASONING = "max" as const;
-/**
- * Static parking detail for a V1 candidate-state record. The old reader has no
- * preservation writer, so the step is deferred without any task mutation,
- * model admission, push, review, merge or closure.
- */
-const CANDIDATE_WRITER_UNAVAILABLE = "candidate writer unavailable";
 
 function isCausalReplayResult(
   result: ReplayResultV1,
@@ -344,6 +345,9 @@ export async function runRepairCycle(
   // bounds are deferred so that lower-ranked deterministic work still runs;
   // the run ends in the existing typed "margin" outcome when nothing remains.
   const deferred = new Set<string>();
+  // One run-local attempt per task and legacy-loss phase: a phase is never
+  // proved twice in the same run, even after a state reload.
+  const legacyLossAttempted = new Set<string>();
   // Intake is polled exactly once per run. A deferred (cooldown or bound)
   // iteration must never re-poll the sources: subsequent loop iterations reuse
   // the run-local deferral tracking instead of repeating intake reads.
@@ -422,6 +426,26 @@ export async function runRepairCycle(
 
     if (steps >= stepLimit) {
       return { status: "step_limit", steps };
+    }
+
+    // Bounded pre-ranking legacy-loss bridge (optional capability): a proven
+    // lost legacy candidate is committed as truthful missing_evidence BEFORE
+    // the generic ranking sees it; a successful CAS counts as the ordinary
+    // step and the outer loop reloads the authoritative state. Generic
+    // selection and blocked behavior stay unchanged.
+    const bridged = await bridgeLegacyLoss(
+      deps,
+      context,
+      legacyLossAttempted,
+      deferred,
+    );
+    if (bridged.kind === "state_error") {
+      return { status: "state_error", detail: bridged.detail };
+    }
+    if (bridged.kind === "progress") {
+      didWork = true;
+      steps++;
+      continue;
     }
 
     const rank = rankEligibleWork(
@@ -539,6 +563,7 @@ async function persistTransition(
   deps: RepairCycleDepsV1,
   context: LoopContextV1,
   mutate: (draft: RepairStateSnapshotV1) => void,
+  proofHead?: GitSha,
 ): Promise<StepResultV1> {
   // Safe snapshot synchronization: the durable cooldown gate writes
   // githubCooldowns through the SAME repair state store, so the authoritative
@@ -554,6 +579,16 @@ async function persistTransition(
     return {
       kind: "state_error",
       detail: "repair state moved with conflicting contents",
+    };
+  }
+  // A caller that carries a proof bound to one exact authoritative state head
+  // requires the reread to still BE that head. Even an admitted cooldown-only
+  // movement makes the proof stale, so the mutation is refused before the
+  // draft is built: no state is written and the caller defers the record.
+  if (proofHead !== undefined && synchronized.head !== proofHead) {
+    return {
+      kind: "deferred",
+      detail: "state head moved after the trusted proof was established",
     };
   }
   const base = synchronized.snapshot;
@@ -691,6 +726,305 @@ function persistWork(
 }
 
 // ---------------------------------------------------------------------------
+// Legacy loss bridge: two guarded CAS commits turn ONE proven lost legacy
+// base-refresh candidate into an ordinary charged retry. The bounded pass is
+// strictly pre-ranking; the generic selector, blocked handling and every other
+// transition stay unchanged.
+// ---------------------------------------------------------------------------
+
+/** Truthful static detail for a proven lost legacy candidate. */
+const LEGACY_LOSS_DETAIL =
+  "legacy base-refresh candidate is missing; predecessor head pending";
+
+type LegacyLossPhaseV1 = "discover" | "restore";
+
+type LegacyLossBridgeResultV1 =
+  | { kind: "progress" }
+  | { kind: "none" }
+  | { kind: "state_error"; detail: string };
+
+/** Exact self scope-0 identity: `ubiquity/sentinel` under the no-App scope. */
+function isSelfScopeZero(repository: RepositoryIdentityV1): boolean {
+  return repository.installationId === 0 &&
+    repository.owner === "ubiquity" &&
+    repository.name === "sentinel";
+}
+
+function legacyDependenciesDone(
+  snapshot: RepairStateSnapshotV1,
+  record: WorkRecordV1,
+): boolean {
+  for (const dependency of record.dependencies) {
+    const dep = snapshot.work.find((work) => work.id === dependency);
+    if (dep === undefined || dep.nextStep !== "done") return false;
+  }
+  return true;
+}
+
+/**
+ * Structural eligibility for the legacy-loss bridge. It matches ONLY a self
+ * scope-0 issue with an absent candidateState and the original unprepared
+ * base_refresh intent whose branch/PR/head/key/observedBase bind exactly to
+ * the loaded record: implementation intents, new-format candidate records and
+ * every other lifecycle are never touched. Discovery covers ordinary `work`;
+ * restoration covers only the truthful missing_evidence blocker this bridge
+ * writes, while an implementation attempt remains.
+ */
+function legacyLossPhase(
+  deps: RepairCycleDepsV1,
+  snapshot: RepairStateSnapshotV1,
+  record: WorkRecordV1,
+  now: number,
+): LegacyLossPhaseV1 | null {
+  if (!isSelfScopeZero(record.repository)) return null;
+  if (record.source.kind !== "issue" || record.related.incidentId !== null) {
+    return null;
+  }
+  const issueNumber = record.related.issueNumber;
+  if (issueNumber === null || record.source.id !== String(issueNumber)) {
+    return null;
+  }
+  if (record.target.candidateState !== undefined) return null;
+  const intent = record.intent;
+  if (
+    intent === null || intent.kind !== "base_refresh" ||
+    intent.requestId !== null || intent.resultId !== null
+  ) {
+    return null;
+  }
+  const branch = record.target.branch;
+  const head = record.target.head;
+  const pr = record.target.pr;
+  const observedBase = intent.observedBase;
+  if (
+    branch === null || head === null || pr === null || observedBase === null
+  ) {
+    return null;
+  }
+  if (
+    branch !== candidateBranch(record.id) ||
+    intent.branch !== branch || intent.expectedHead !== head ||
+    intent.pr !== pr ||
+    intent.key !== baseRefreshIntentKey(pr, head, observedBase)
+  ) {
+    return null;
+  }
+  if (isWaiting(record, now) || !legacyDependenciesDone(snapshot, record)) {
+    return null;
+  }
+  if (configFor(deps, record.repository) === null) return null;
+  if (record.nextStep === "work") return "discover";
+  if (
+    record.nextStep === "blocked" &&
+    record.blocker?.kind === "missing_evidence" &&
+    record.counters.attempts < MAX_IMPLEMENTATION_ATTEMPTS
+  ) {
+    return "restore";
+  }
+  return null;
+}
+
+/**
+ * The proof's historical review must be the authentic completed H0/B0
+ * correction review: exact scope, PR, predecessor head and lost base, the
+ * configured trusted reviewer as both expected and observed identity, and at
+ * least one unresolved finding severity.
+ */
+function legacyLossReviewMatches(
+  snapshot: RepairStateSnapshotV1,
+  record: WorkRecordV1,
+  proof: LegacyBaseRefreshLossProofV1,
+  reviewer: string,
+): boolean {
+  const review = snapshot.reviews.find((entry) => entry.id === proof.reviewId);
+  if (review === undefined) return false;
+  return review.outcome === "completed" && review.resultId !== null &&
+    review.completedAt !== null && review.unresolvedSeverities.length > 0 &&
+    review.expectedReviewer === reviewer &&
+    review.observedReviewer === reviewer &&
+    review.pullRequest.number === proof.pr &&
+    review.pullRequest.head === proof.predecessorHead &&
+    review.pullRequest.base === proof.lostBase &&
+    sameRepositoryIdentity(review.repository, record.repository);
+}
+
+/**
+ * Independent re-validation of one runtime proof against the exact loaded
+ * record and this run's authoritative state head. The proof's `stateHead` must
+ * equal the head of the state read that produced the record — the snapshot's
+ * own `stateHead` field is never current-head evidence.
+ */
+function legacyLossProofMatches(
+  deps: RepairCycleDepsV1,
+  context: LoopContextV1,
+  record: WorkRecordV1,
+  proof: LegacyBaseRefreshLossProofV1,
+): boolean {
+  if (proof.shape !== "legacy_base_refresh") return false;
+  if (proof.taskId !== record.id) return false;
+  if (!sameRepositoryIdentity(proof.repository, record.repository)) {
+    return false;
+  }
+  if (proof.stateHead !== context.head) return false;
+  if (proof.lostBase !== record.target.base) return false;
+  if (proof.lostHead !== record.target.head) return false;
+  if (proof.branch !== record.target.branch) return false;
+  if (proof.pr !== record.target.pr) return false;
+  if (record.intent === null || proof.intentKey !== record.intent.key) {
+    return false;
+  }
+  if (proof.predecessorHead === proof.lostHead) return false;
+  return legacyLossReviewMatches(
+    context.snapshot,
+    record,
+    proof,
+    deps.github.reviewerIdentity,
+  );
+}
+
+/** Ordinary restored tuple: H0 at B0, same branch/PR, no intent or blocker. */
+function legacyLossRestoredRecord(
+  record: WorkRecordV1,
+  proof: LegacyBaseRefreshLossProofV1,
+  now: number,
+): WorkRecordV1 {
+  return {
+    ...record,
+    target: {
+      ...record.target,
+      base: proof.lostBase,
+      branch: proof.branch,
+      checkpoint: null,
+      head: proof.predecessorHead,
+      pr: proof.pr,
+    },
+    nextStep: "work",
+    wait: null,
+    blocker: null,
+    intent: null,
+    updatedAt: now,
+  };
+}
+
+/**
+ * Restoration is admitted only when the EXISTING head-rejection helper agrees
+ * for the proposed H0 record: it reads the FIRST completed receipt for the
+ * PR/head, so an earlier clean H0 receipt keeps the tuple blocked instead of
+ * delivering a head the ordinary gate would treat as publish-ready.
+ */
+function restoreLegacyLoss(
+  deps: RepairCycleDepsV1,
+  context: LoopContextV1,
+  record: WorkRecordV1,
+  proof: LegacyBaseRefreshLossProofV1,
+): Promise<StepResultV1> {
+  const now = deps.clock.now();
+  const proposed = legacyLossRestoredRecord(record, proof, now);
+  if (!headRejectedByReview(context.snapshot, proposed)) {
+    return Promise.resolve({
+      kind: "deferred",
+      detail: "legacy predecessor head is not rejected by review",
+    });
+  }
+  return persistTransition(
+    deps,
+    context,
+    replaceWorkMutation(proposed),
+    proof.stateHead,
+  );
+}
+
+/**
+ * Bounded pre-ranking pass over structurally eligible legacy records in stable
+ * id order. Each phase is attempted at most once per run, marked BEFORE its
+ * proof call. A shared state trust error stops the run; an ordinary cooldown
+ * deferral, a thrown/unavailable proof or any proof mismatch defers the active
+ * record and continues, so the first null/unavailable candidate can never
+ * starve a later recoverable one. Null means no loss state change. The pass
+ * stops at the first successful CAS (the caller reloads, counts the ordinary
+ * step and returns to normal ranking) or at exhaustion/deadline.
+ */
+async function bridgeLegacyLoss(
+  deps: RepairCycleDepsV1,
+  context: LoopContextV1,
+  attempted: Set<string>,
+  deferred: Set<string>,
+): Promise<LegacyLossBridgeResultV1> {
+  const prove = deps.github.proveLegacyBaseRefreshLoss;
+  if (prove === undefined) return { kind: "none" };
+  const now = deps.clock.now();
+  const ids = context.snapshot.work
+    .filter((record) =>
+      legacyLossPhase(deps, context.snapshot, record, now) !== null
+    )
+    .map((record) => record.id)
+    .sort();
+  for (const id of ids) {
+    // No probe begins at/after the total run deadline: the proof is awaited
+    // wall-clock work and every CAS must stay inside the same bound.
+    if (deps.clock.now() >= context.bounds.runDeadline) return { kind: "none" };
+    const record = context.snapshot.work.find((work) => work.id === id);
+    if (record === undefined) continue;
+    const phase = legacyLossPhase(deps, context.snapshot, record, now);
+    if (phase === null) continue;
+    const key = `${id}:${phase}`;
+    if (attempted.has(key)) continue;
+    attempted.add(key);
+    const cooling = await checkGithubCooldown(
+      deps,
+      record.repository,
+      context.bounds,
+    );
+    if (cooling.kind === "state_error") {
+      return { kind: "state_error", detail: cooling.detail };
+    }
+    if (cooling.kind === "deferred") {
+      deferred.add(id);
+      continue;
+    }
+    let proof: PortResultV1<LegacyBaseRefreshLossProofV1 | null>;
+    try {
+      proof = await prove.call(deps.github, record.id);
+    } catch {
+      deferred.add(id);
+      continue;
+    }
+    if (!proof.ok) {
+      deferred.add(id);
+      continue;
+    }
+    // Explicit "this record is not a legacy-loss case": no state change, and
+    // the scan continues to any later candidate.
+    if (proof.value === null) continue;
+    if (!legacyLossProofMatches(deps, context, record, proof.value)) {
+      deferred.add(id);
+      continue;
+    }
+    const persisted = phase === "discover"
+      ? await persistTransition(
+        deps,
+        context,
+        replaceWorkMutation(
+          markBlocked(
+            record,
+            "missing_evidence",
+            LEGACY_LOSS_DETAIL,
+            deps.clock.now(),
+          ),
+        ),
+        proof.value.stateHead,
+      )
+      : await restoreLegacyLoss(deps, context, record, proof.value);
+    if (persisted.kind === "progress") return { kind: "progress" };
+    if (persisted.kind === "state_error") {
+      return { kind: "state_error", detail: persisted.detail };
+    }
+    deferred.add(id);
+  }
+  return { kind: "none" };
+}
+
+// ---------------------------------------------------------------------------
 // Intake: deterministic incident and issue polling; a failed read is never empty.
 // ---------------------------------------------------------------------------
 
@@ -788,14 +1122,6 @@ async function pollIntake(
           record.fingerprint === summary.fingerprint &&
           sameRepositoryIdentity(record.repository, summary.repository),
       ) ?? null;
-      // Old reader: a record carrying V1 candidate state is parked. Its
-      // stored summary and record bytes must not change, so this incoming
-      // summary is skipped entirely BEFORE any newSummaries.set or
-      // applyIncidentSummary. The lookups above match the exact incident scope
-      // (incident id + fingerprint + repository identity), so a parked task
-      // from a different incident or repository can never suppress this
-      // summary, and this exact parked task is never recreated.
-      if (work !== null && hasCandidateState(work)) continue;
       if (existing !== null && existing !== undefined) {
         // Nondecreasing refresh of the stored summary.
         if (
@@ -1059,15 +1385,6 @@ function executeStep(
   context: LoopContextV1,
   record: WorkRecordV1,
 ): Promise<StepResultV1> {
-  // Backstop before dispatch: even if selection ever admitted a parked record,
-  // no work/review/delivery path may execute for it. This returns a static
-  // deferral — never a persisted blocker or wait.
-  if (hasCandidateState(record)) {
-    return Promise.resolve({
-      kind: "deferred",
-      detail: CANDIDATE_WRITER_UNAVAILABLE,
-    });
-  }
   switch (record.nextStep) {
     case "work":
       return executeWorkStep(deps, context, record);
@@ -1113,16 +1430,36 @@ async function executeWorkStep(
     );
   }
 
-  // A saved base-refresh intent is reconciled wherever it is observed (the
-  // work step as well as delivery): the old candidate is preserved until the
-  // exact deterministic prepared commit was actually published.
-  if (record.intent !== null && record.intent.kind === "base_refresh") {
-    return executeBaseRefreshIntent(deps, context, record);
+  // A pending candidate-preservation intent is reconciled BEFORE any other
+  // work: the exact produced candidate is made durable through the real
+  // preservation capability, and no implementation/review start may repair it.
+  if (
+    record.intent !== null && record.intent.kind === "candidate_preservation"
+  ) {
+    return executeCandidatePreservation(deps, context, record);
   }
 
   // A saved implementation intent is never resubmitted; fail closed.
   if (record.intent !== null && record.intent.kind === "implementation") {
     return handleImplementationUncertainty(deps, context, record);
+  }
+
+  // A new-format record without a preserved descriptor (and without the
+  // pending preservation intent handled above) must stop safely: it is never
+  // regenerated, never published and never reviewed from an unverified head.
+  const candidateState = record.target.candidateState;
+  if (candidateState !== undefined && candidateState.preserved === null) {
+    return {
+      kind: "deferred",
+      detail: "candidate preservation descriptor unavailable",
+    };
+  }
+
+  // A saved base-refresh intent is reconciled wherever it is observed (the
+  // work step as well as delivery): the old candidate is preserved until the
+  // exact deterministic prepared commit was actually published.
+  if (record.intent !== null && record.intent.kind === "base_refresh") {
+    return executeBaseRefreshIntent(deps, context, record);
   }
 
   // Deterministic branch identity before any model work.
@@ -1178,21 +1515,10 @@ async function executeWorkStep(
     return executeImplementationStep(deps, context, record, config);
   }
 
-  // An issue candidate with an existing PR is checked against the CURRENT
-  // configured base BEFORE any fresh review budget is spent: a newer base
-  // creates the next deterministic base-refresh intent first. The hook never
-  // touches a pending publish/implementation/review intent, never runs for a
-  // head rejected by review (that correction path is handled above), and is
-  // inert when the host offers no prepareBaseRefresh capability.
-  if (
-    record.source.kind === "issue" &&
-    record.target.pr !== null &&
-    record.intent === null &&
-    deps.github.prepareBaseRefresh !== undefined
-  ) {
-    const refresh = await ensureBaseRefreshIntent(deps, context, record);
-    if (refresh !== null) return refresh;
-  }
+  // An unpublished candidate head must be PUBLISHED before any refresh that
+  // requires it to already be the PR head: the pre-publication refresh gate is
+  // deliberately absent here. The refresh dependency is enforced by the ONE
+  // central freshness gate in requestReviewFor after successful publication.
 
   // A head exists: it is publishable only after a validated replay result, or
   // immediately for a non-incident task (no fabricated fixture here).
@@ -2371,14 +2697,41 @@ async function handleModelReceipt(
   if (afterSettlement === null) {
     return { kind: "state_error", detail: "repair state unavailable" };
   }
-  // A completed run closes the implementation operation: the intent is
+  // The verified prior published head: retained from existing V1 candidate
+  // state, or proved by an ACTUAL owned-branch observation of the exact prior
+  // target head for a legacy record. Model output never establishes it.
+  const priorPublishedHead = await verifiedPublishedHead(deps, context, record);
+  const operationKey = implementationIntentKey(reservationId);
+  const preservationRef = await candidatePreservationRef(
+    record.repository,
+    record.id,
+    operationKey,
+  );
+  const preservationIntent: IncompleteOperationV1 = {
+    kind: "candidate_preservation",
+    key: operationKey,
+    startedAt: now,
+    branch: preservationRef,
+    expectedHead: head,
+    observedBase: record.target.base,
+    pr: null,
+    requestId: reservationId,
+    resultId: null,
+  };
+  // A completed run closes the implementation operation and opens the durable
+  // candidate lifecycle: head/checkpoint plus candidateState with no
+  // descriptor yet and the verified published head unchanged. The intent is
   // cleared only after the candidate is durably noted (never on uncertain
   // outcomes, where it remains as the manual-disposition record).
-  const withCandidate = noteCandidate(clearIntent(record, now), {
+  const noted = noteCandidate(clearIntent(record, now), {
     head,
     checkpoint: candidate!.checkpointSha === null
       ? null
       : { branch: candidateBranch(record.id), sha: candidate!.checkpointSha },
+  }, now);
+  const withCandidate = setCandidateState(noted, {
+    preserved: null,
+    publishedHead: priorPublishedHead,
   }, now);
   if (protectedHit) {
     const blocked = markBlocked(
@@ -2397,7 +2750,122 @@ async function handleModelReceipt(
   return persistTransition(
     deps,
     afterSettlement,
-    replaceWorkMutation(withCandidate),
+    replaceWorkMutation(setIntent(withCandidate, preservationIntent, now)),
+  );
+}
+
+/**
+ * The exact previously published candidate head for one record, or null.
+ *
+ * Existing V1 candidate state carries the verified value. A legacy record has
+ * no such value: the exact prior target head counts as published ONLY after
+ * the actual owned-branch ref was observed at that exact SHA. An unavailable
+ * read never becomes publication proof.
+ */
+async function verifiedPublishedHead(
+  deps: RepairCycleDepsV1,
+  context: LoopContextV1,
+  record: WorkRecordV1,
+): Promise<GitSha | null> {
+  const existing = record.target.candidateState;
+  if (existing !== undefined) return existing.publishedHead;
+  const priorHead = record.target.head;
+  if (priorHead === null) return null;
+  const cooling = await checkGithubCooldown(
+    deps,
+    record.repository,
+    context.bounds,
+  );
+  if (cooling.kind !== "ok") return null;
+  const read = await deps.github.readRef(
+    `refs/heads/${candidateBranch(record.id)}`,
+  );
+  if (!read.ok || read.value === null || read.value.sha !== priorHead) {
+    return null;
+  }
+  return priorHead;
+}
+
+/**
+ * Reconcile ONE pending candidate-preservation intent through the real
+ * trusted capability on this port. Success attaches the exact descriptor and
+ * clears the intent in one state write; any error or lost acknowledgement
+ * retains the same intent, head and accounting with a bounded wait. This path
+ * never starts a model or a review to repair preservation.
+ */
+async function executeCandidatePreservation(
+  deps: RepairCycleDepsV1,
+  context: LoopContextV1,
+  record: WorkRecordV1,
+): Promise<StepResultV1> {
+  const intent = record.intent;
+  const candidateState = record.target.candidateState;
+  const head = record.target.head;
+  if (
+    intent === null || intent.kind !== "candidate_preservation" ||
+    candidateState === undefined || candidateState.preserved !== null ||
+    head === null || intent.requestId === null ||
+    intent.branch === null || !isGitSha(head) ||
+    intent.expectedHead !== head ||
+    intent.observedBase !== record.target.base ||
+    intent.key !== implementationIntentKey(intent.requestId) ||
+    intent.pr !== null || intent.resultId !== null
+  ) {
+    return {
+      kind: "state_error",
+      detail: "candidate preservation intent identity mismatch",
+    };
+  }
+  const cooling = await checkGithubCooldown(
+    deps,
+    record.repository,
+    context.bounds,
+  );
+  if (cooling.kind === "state_error") {
+    return { kind: "state_error", detail: cooling.detail };
+  }
+  if (cooling.kind === "deferred") {
+    return { kind: "deferred", detail: cooling.detail };
+  }
+  const operationKey: string = intent.key;
+  const preservationRef: string = intent.branch;
+  const candidate: CandidatePreservationV1 = {
+    operationKey,
+    base: record.target.base,
+    head,
+    ref: preservationRef,
+  };
+  const publishedHead: GitSha | null = candidateState.publishedHead;
+  const preserved = await deps.github.preserveCandidate({
+    taskId: record.id,
+    candidate,
+    publishedHead,
+  });
+  const at = deps.clock.now();
+  if (!preserved.ok) {
+    // A generic transport/CAS/permission failure is not permanent loss: keep
+    // the same intent/head/accounting and reconcile the same operation later.
+    return persistWork(
+      deps,
+      context,
+      setWait(
+        record,
+        { reason: "unavailable", since: at, until: at + CHECK_POLL_MS },
+        at,
+      ),
+    );
+  }
+  return persistWork(
+    deps,
+    context,
+    setCandidateState(
+      clearIntent(record, at),
+      {
+        preserved: candidate,
+        publishedHead,
+      },
+      at,
+    ),
   );
 }
 
@@ -2501,6 +2969,17 @@ async function executePublishStep(
     return reconcilePublishIntent(deps, context, record, config);
   }
 
+  // A new-format record publishes only a durably preserved candidate: with no
+  // descriptor and no pending preservation intent it stops safely instead of
+  // regenerating or publishing an unverified head.
+  const candidateState = record.target.candidateState;
+  if (candidateState !== undefined && candidateState.preserved === null) {
+    return {
+      kind: "deferred",
+      detail: "candidate preservation descriptor unavailable",
+    };
+  }
+
   // The unfinished-PR cap applies only to FRESH publications. A correction of
   // an existing PR does not open another unfinished PR — it updates the branch
   // this task already owns — so it must never be blocked by the cap (matching
@@ -2521,10 +3000,61 @@ async function executePublishStep(
     );
   }
 
-  // Push the exact candidate. For an existing PR the branch is updated only
-  // against its current remote head (expected-ref compare, never a blind force).
+  // Push the exact candidate. The expected old ref is the verified published
+  // head: an already-published exact candidate is adopted, the exact saved old
+  // head is one expected-ref update, and any unrelated head is a conflict that
+  // is never overwritten. A missing ref is a creation only with a null saved
+  // head. Legacy records keep their existing "existing PR" observation.
   let expectedRemoteHead: GitSha | null = null;
-  if (record.target.pr !== null) {
+  if (candidateState !== undefined) {
+    const ref = await deps.github.readRef(`refs/heads/${branch}`);
+    if (!ref.ok) {
+      return persistWork(
+        deps,
+        context,
+        setWait(
+          record,
+          { reason: "unavailable", since: now, until: now + CHECK_POLL_MS },
+          now,
+        ),
+      );
+    }
+    if (ref.value !== null && ref.value.sha === head) {
+      // The exact candidate is already published: adopt the completed push and
+      // persist the publication proof before any PR/review continuation.
+      const adopted = withPublishedHead(record, head, deps.clock.now());
+      const persisted = await persistWork(deps, context, adopted);
+      if (persisted.kind !== "progress") return persisted;
+      return continuePublication(deps, context, adopted, config);
+    }
+    if (
+      ref.value !== null && ref.value.sha !== candidateState.publishedHead
+    ) {
+      return persistWork(
+        deps,
+        context,
+        markBlocked(
+          record,
+          "other",
+          "candidate branch ref identity mismatch",
+          deps.clock.now(),
+        ),
+      );
+    }
+    if (ref.value === null && candidateState.publishedHead !== null) {
+      return persistWork(
+        deps,
+        context,
+        markBlocked(
+          record,
+          "other",
+          "published candidate ref is missing",
+          deps.clock.now(),
+        ),
+      );
+    }
+    expectedRemoteHead = ref.value === null ? null : ref.value.sha;
+  } else if (record.target.pr !== null) {
     const ref = await deps.github.readRef(`refs/heads/${branch}`);
     if (!ref.ok || ref.value === null) {
       return persistWork(
@@ -2532,7 +3062,7 @@ async function executePublishStep(
         context,
         setWait(
           record,
-          { reason: "unavailable", since: now, until: null },
+          { reason: "unavailable", since: now, until: now + CHECK_POLL_MS },
           now,
         ),
       );
@@ -2578,7 +3108,7 @@ async function executePublishStep(
       context,
       setWait(
         withIntent,
-        { reason: "unavailable", since: now, until: null },
+        { reason: "unavailable", since: now, until: now + CHECK_POLL_MS },
         now,
       ),
     );
@@ -2596,12 +3126,54 @@ async function executePublishStep(
       detail: "publication crossed the total run deadline after push",
     };
   }
-  const pushedRecord = { ...record, updatedAt: now };
-  if (record.target.pr !== null) {
-    // Existing PR: new head needs a fresh review request, same branch.
-    return requestReviewFor(deps, context, pushedRecord, record.target.pr);
+  // New-format records acknowledge the exact publication proof (publishedHead
+  // plus a cleared push intent) BEFORE the PR/review continuation. A legacy
+  // record keeps its single pending intent, which the next operation replaces.
+  if (candidateState === undefined) {
+    return continuePublication(
+      deps,
+      context,
+      { ...record, updatedAt: now },
+      config,
+    );
   }
-  return createPullRequestFor(deps, context, pushedRecord, config);
+  const proved = withPublishedHead(withIntent, head, deps.clock.now());
+  const provedWrite = await persistWork(deps, context, proved);
+  if (provedWrite.kind !== "progress") return provedWrite;
+  return continuePublication(deps, context, proved, config);
+}
+
+/**
+ * Clear a completed push intent and persist the exact publication proof
+ * (publishedHead = the pushed head) for a V1 candidate-state record. Legacy
+ * records only clear the completed intent: their target has no candidate
+ * state group to advance.
+ */
+function withPublishedHead(
+  record: WorkRecordV1,
+  head: GitSha,
+  now: number,
+): WorkRecordV1 {
+  const cleared = clearIntent(record, now);
+  const candidateState = cleared.target.candidateState;
+  if (candidateState === undefined) return cleared;
+  return setCandidateState(cleared, {
+    preserved: candidateState.preserved,
+    publishedHead: head,
+  }, now);
+}
+
+/** Continue an exactly proved publication: request review or create the PR. */
+function continuePublication(
+  deps: RepairCycleDepsV1,
+  context: LoopContextV1,
+  record: WorkRecordV1,
+  config: RepositoryConfigV1,
+): Promise<StepResultV1> {
+  if (record.target.pr !== null) {
+    return requestReviewFor(deps, context, record, record.target.pr);
+  }
+  return createPullRequestFor(deps, context, record, config);
 }
 
 async function createPullRequestFor(
@@ -2675,7 +3247,7 @@ async function createPullRequestFor(
       context,
       setWait(
         withIntent,
-        { reason: "unavailable", since: now, until: null },
+        { reason: "unavailable", since: now, until: now + CHECK_POLL_MS },
         now,
       ),
     );
@@ -2703,6 +3275,96 @@ async function createPullRequestFor(
   const acknowledged = await persistWork(deps, context, withPr);
   if (acknowledged.kind !== "progress") return acknowledged;
   return requestReviewFor(deps, context, withPr, created.value.number);
+}
+
+/**
+ * ONE pre-budget freshness gate for review admission.
+ *
+ * Returns null ONLY when: the repository/base are configured, the record holds
+ * no incompatible intent, the requested PR is the record's exact open PR with
+ * the exact branch/head/base refs, the ACTUAL candidate branch head is the
+ * target head, a new-format record carries a preserved descriptor whose head
+ * equals the published head and the target head, and the configured base ref
+ * was observed successfully at the target base. Otherwise it returns an
+ * explicit step result: a moved base persists the durable refresh intent (with
+ * zero reservation), while a null/failed config, identity, preservation or
+ * refresh capability prevents admission outright. It runs BEFORE the review
+ * budget reservation; the caller rechecks the run bounds immediately after.
+ */
+async function ensureReviewFreshness(
+  deps: RepairCycleDepsV1,
+  context: LoopContextV1,
+  record: WorkRecordV1,
+  prNumber: number,
+): Promise<StepResultV1 | null> {
+  const config = configFor(deps, record.repository);
+  const head = record.target.head;
+  const branch = record.target.branch;
+  if (
+    config === null || head === null || branch === null ||
+    record.intent !== null || prNumber !== record.target.pr
+  ) {
+    return {
+      kind: "deferred",
+      detail: "review requires an exact published candidate",
+    };
+  }
+  const candidateState = record.target.candidateState;
+  if (candidateState !== undefined) {
+    const preserved = candidateState.preserved;
+    if (
+      preserved === null || candidateState.publishedHead !== head ||
+      preserved.head !== head || preserved.base !== record.target.base
+    ) {
+      return {
+        kind: "deferred",
+        detail: "review requires a preserved published candidate",
+      };
+    }
+  }
+  // The base cannot be reconciled without the trusted capability: review
+  // admission is refused, never granted against an unproven base.
+  if (deps.github.prepareBaseRefresh === undefined) {
+    return {
+      kind: "deferred",
+      detail: "review requires a trusted base-refresh capability",
+    };
+  }
+  // Actual PR observation: exact open PR, branch and head.
+  const pr = await deps.github.readPullRequest(prNumber);
+  if (!pr.ok) {
+    return { kind: "deferred", detail: "review PR observation unavailable" };
+  }
+  if (
+    pr.value === null || pr.value.state !== "open" ||
+    pr.value.head !== head || pr.value.headRef !== branch ||
+    pr.value.baseRef !== config.baseBranch
+  ) {
+    return { kind: "deferred", detail: "review PR identity mismatch" };
+  }
+  // Actual candidate branch observation.
+  const ref = await deps.github.readRef(`refs/heads/${branch}`);
+  if (!ref.ok) {
+    return { kind: "deferred", detail: "review candidate ref unavailable" };
+  }
+  if (ref.value === null || ref.value.sha !== head) {
+    return {
+      kind: "deferred",
+      detail: "review candidate ref identity mismatch",
+    };
+  }
+  // Configured current base observation. A moved base persists the durable
+  // refresh intent BEFORE any reservation and returns with no review request;
+  // the null result of the shared helper is trusted only because every config
+  // and identity precondition above was already satisfied here.
+  const base = await deps.github.readRef(`refs/heads/${config.baseBranch}`);
+  if (!base.ok || base.value === null) {
+    return { kind: "deferred", detail: "review base ref unavailable" };
+  }
+  if (base.value.sha !== record.target.base) {
+    return await ensureBaseRefreshIntent(deps, context, record);
+  }
+  return null;
 }
 
 async function requestReviewFor(
@@ -2744,6 +3406,17 @@ async function requestReviewFor(
   if (cooling.kind === "deferred") {
     return { kind: "deferred", detail: cooling.detail };
   }
+  // THE one pre-budget freshness gate for every successful push, PR creation
+  // and recovered push: the exact candidate must be the ACTUAL published
+  // branch/PR head with a matching preservation descriptor, and the configured
+  // base must still be the target base before any review reservation exists.
+  const freshness = await ensureReviewFreshness(
+    deps,
+    context,
+    record,
+    prNumber,
+  );
+  if (freshness !== null) return freshness;
   // The cooling check was awaited wall-clock work and only guards the total
   // deadline: recheck the 90-minute model cutoff (and the deadline) at the
   // current clock immediately before the admission, so a start that crossed
@@ -3092,6 +3765,7 @@ async function reconcilePublishIntent(
     return { kind: "deferred", detail: cooling.detail };
   }
   if (intent.kind === "push") {
+    const candidateState = record.target.candidateState;
     const ref = await deps.github.readRef(`refs/heads/${intent.branch}`);
     if (!ref.ok) {
       return persistWork(
@@ -3099,18 +3773,43 @@ async function reconcilePublishIntent(
         context,
         setWait(
           record,
-          { reason: "unavailable", since: now, until: null },
+          { reason: "unavailable", since: now, until: now + CHECK_POLL_MS },
           now,
         ),
       );
     }
     if (ref.value === null) {
+      // A new-format record that recorded a published head cannot have lost
+      // its ref: the contradiction is never overwritten with a creation.
+      if (
+        candidateState !== undefined && candidateState.publishedHead !== null
+      ) {
+        return persistWork(
+          deps,
+          context,
+          markBlocked(
+            record,
+            "other",
+            "published candidate ref is missing",
+            now,
+          ),
+        );
+      }
       // The push provably never applied: a new push with expectedRef null is
       // deterministic and non-duplicating.
       const cleared = clearIntent(record, now);
       return persistWork(deps, context, cleared); // next step re-pushes
     }
     if (ref.value.sha !== intent.expectedHead) {
+      // The exact saved OLD head means the push never applied: clear the
+      // intent and re-push against that verified lease (never a blind create
+      // and never an overwrite of an unrelated head).
+      if (
+        candidateState !== undefined &&
+        ref.value.sha === candidateState.publishedHead
+      ) {
+        return persistWork(deps, context, clearIntent(record, now));
+      }
       return persistWork(
         deps,
         context,
@@ -3132,20 +3831,17 @@ async function reconcilePublishIntent(
         detail: "publication continuation crossed the total run deadline",
       };
     }
-    const cleared = {
-      ...clearIntent(record, now),
-      target: { ...record.target },
-    };
-    const persisted = await persistWork(deps, context, cleared);
+    const proved = withPublishedHead(record, ref.value.sha, now);
+    const persisted = await persistWork(deps, context, proved);
     if (persisted.kind !== "progress") return persisted;
     // The push may have succeeded immediately before the process stopped. The
     // exact ref observation above is the publication proof; continue the same
     // publication sequence now so a bounded run does not leave a pushed branch
     // without its PR (or its next review request).
-    if (cleared.target.pr !== null) {
-      return requestReviewFor(deps, context, cleared, cleared.target.pr);
+    if (proved.target.pr !== null) {
+      return requestReviewFor(deps, context, proved, proved.target.pr);
     }
-    return createPullRequestFor(deps, context, cleared, config);
+    return createPullRequestFor(deps, context, proved, config);
   }
   if (intent.kind === "pull_request") {
     if (intent.branch === null) {
@@ -3161,7 +3857,7 @@ async function reconcilePublishIntent(
         context,
         setWait(
           record,
-          { reason: "unavailable", since: now, until: null },
+          { reason: "unavailable", since: now, until: now + CHECK_POLL_MS },
           now,
         ),
       );
@@ -3729,6 +4425,52 @@ async function executeBaseRefreshIntent(
     const persisted = await persistWork(deps, context, durable);
     if (persisted.kind !== "progress") return persisted;
   }
+  // A new-format refresh preserves the EXACT prepared commit under the
+  // existing base_refresh binding BEFORE the task push: the successor is
+  // durable first, and a failed or lost acknowledgement retains the same
+  // intent, resultId, target descriptor and accounting for a bounded retry of
+  // the SAME operation (never a new model or review).
+  const candidateState = durable.target.candidateState;
+  const preservationRef = candidateState === undefined
+    ? null
+    : await candidatePreservationRef(
+      durable.repository,
+      durable.id,
+      intent.key,
+    );
+  if (candidateState !== undefined) {
+    if (
+      candidateState.preserved === null || preservationRef === null ||
+      candidateState.publishedHead !== durable.target.head
+    ) {
+      return {
+        kind: "state_error",
+        detail: "base refresh published head mismatch",
+      };
+    }
+    const preserved = await deps.github.preserveCandidate({
+      taskId: durable.id,
+      candidate: {
+        operationKey: intent.key,
+        base: expectedBase,
+        head: preparedHead,
+        ref: preservationRef,
+      },
+      publishedHead: candidateState.publishedHead,
+    });
+    if (!preserved.ok) {
+      const at = deps.clock.now();
+      return persistWork(
+        deps,
+        context,
+        setWait(
+          durable,
+          { reason: "unavailable", since: at, until: at + CHECK_POLL_MS },
+          at,
+        ),
+      );
+    }
+  }
   // Recheck the total run deadline and the shared cooldown immediately before
   // the external write (the gate wait may have crossed the deadline).
   if (deps.clock.now() >= context.bounds.runDeadline) {
@@ -3818,12 +4560,31 @@ async function executeBaseRefreshIntent(
     );
   }
   // Success: the refreshed candidate becomes the exact target and the existing
-  // publication path requests a fresh review for the new head. Branch, PR,
-  // checkpoint, counters, source, evidence and prior reviews are preserved.
+  // publication path requests a fresh review for the new head. For a
+  // new-format record the target base/head, the successor descriptor and the
+  // published head advance ATOMICALLY here — only after the exact publication
+  // proof — and the old H1 target/descriptor is retained until this point.
+  // Branch, PR, checkpoint, counters, source, evidence and prior reviews are
+  // preserved.
   const doneAt = deps.clock.now();
   const refreshed: WorkRecordV1 = {
     ...durable,
-    target: { ...durable.target, base: expectedBase, head: preparedHead },
+    target: candidateState === undefined || preservationRef === null
+      ? { ...durable.target, base: expectedBase, head: preparedHead }
+      : {
+        ...durable.target,
+        base: expectedBase,
+        head: preparedHead,
+        candidateState: {
+          preserved: {
+            operationKey: intent.key,
+            base: expectedBase,
+            head: preparedHead,
+            ref: preservationRef,
+          },
+          publishedHead: preparedHead,
+        },
+      },
     nextStep: "work",
     wait: null,
     blocker: null,

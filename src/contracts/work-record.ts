@@ -274,6 +274,13 @@ const PRESERVATION_REF_PATTERN =
   /^refs\/heads\/sentinel-candidates\/[0-9a-f]{64}$/;
 /** A producing reservation id is the trusted derived 64-hex SHA-256 id. */
 const CANDIDATE_PRESERVATION_KEY_PATTERN = /^impl:[0-9a-f]{64}$/;
+/**
+ * Candidate descriptors may also carry the exact base-refresh operation key
+ * (the identity `baseRefreshIntentKey` derives). The implementation-reservation
+ * form above remains the only key admitted for a candidate_preservation intent.
+ */
+const CANDIDATE_DESCRIPTOR_BASE_REFRESH_KEY_PATTERN =
+  /^base_refresh:([1-9][0-9]*):[0-9a-f]{40}:[0-9a-f]{40}$/;
 const CHECKPOINT_KEYS = ["branch", "sha"] as const;
 const WAIT_KEYS = ["reason", "since", "until"] as const;
 const BLOCKER_KEYS = ["kind", "message", "since"] as const;
@@ -636,6 +643,33 @@ function parseCandidateState(
   return { preserved, publishedHead };
 }
 
+/**
+ * Candidate descriptors may carry either trusted producing-operation key form:
+ * the implementation reservation or the exact base-refresh identity. This
+ * checks descriptor syntax only; the producing consumer still verifies the full
+ * operation/task/repository/reservation/head/base/ref binding before effects,
+ * and a candidate_preservation INTENT key stays implementation-only.
+ */
+function expectCandidateDescriptorOperationKey(
+  value: unknown,
+  path: string,
+): string {
+  const key = expectNonEmptyString(value, path, MaxText.token);
+  if (CANDIDATE_PRESERVATION_KEY_PATTERN.test(key)) return key;
+  const baseRefresh = CANDIDATE_DESCRIPTOR_BASE_REFRESH_KEY_PATTERN.exec(key);
+  if (baseRefresh !== null) {
+    // Canonical positive integer PR: the pattern already forbids zero,
+    // negatives, signs and leading zeros; the value must also be a safe integer.
+    const pr = Number(baseRefresh[1]);
+    if (Number.isSafeInteger(pr) && String(pr) === baseRefresh[1]) return key;
+  }
+  fail(
+    path,
+    "invalid_pattern",
+    "expected impl:<64-hex reservation id> or base_refresh:<PR>:<40-hex old head>:<40-hex new base>",
+  );
+}
+
 function parseCandidatePreservation(
   input: unknown,
   path: string,
@@ -643,10 +677,9 @@ function parseCandidatePreservation(
 ): CandidatePreservationV1 {
   const obj = expectRecord(input, path);
   expectExactKeys(obj, CANDIDATE_PRESERVATION_KEYS, path);
-  const operationKey = expectNonEmptyString(
+  const operationKey = expectCandidateDescriptorOperationKey(
     obj.operationKey,
     `${path}.operationKey`,
-    MaxText.token,
   );
   const base = expectGitSha(obj.base, `${path}.base`);
   const head = expectGitSha(obj.head, `${path}.head`);
