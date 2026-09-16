@@ -2,12 +2,194 @@
 
 ## Active task register — Astra owned
 
-Updated 2026-09-16 00:01 UTC. This is the only authoritative acceptance ledger.
+Updated 2026-09-16 05:49 UTC. This is the only authoritative acceptance ledger.
 The goal remains incomplete: autonomous GitHub Actions repair against Sentinel,
 then the separately authorized ai.ubq.fi target. Only the current GPT-6 Astra
 integration owner may change scope, status, acceptance or write ownership here.
 
 ### Current checkpoint
+
+- At 05:49 final M15 adapter patch0b6003b4 passed GPT correctionse90aba1d:
+  51tests/23steps, child0,11250ms; lint2fc5ef9b passed. Fresh source follow-up
+  closes both replacement-ref and linked/shared-metadata findings. V3 PID602632
+  was stopped under task authority after repeated post-format inspection;
+  its diff was preserved and process/children settled. V3b PID607704 exited0
+  completed after one nullable-nlink edit, no checks or descendants. Persisted
+  92275e78 proves Flash/max/workspace-write/ask; its short lifetime prevented a
+  separate live environment attestation, so the launch command's explicit
+  production environment is recorded without claiming an independent check.
+  GPT independently verified the resulting candidate. Adapter is ready for
+  ancestry integration; PR70 remains published at864d7a0. M14 clean1a0d2a9
+  is the sole next integration writer after canonical docs are committed;
+  preserve canonical publication validation and candidate-loss recovery when
+  resolving the five identified overlaps. Final checks run on canonical.
+
+- At 05:42 the resumed owner verified canonical1a0d2a9, M15 reader864d7a0,
+  the expected eight-file V2 patch49fe1f72 and the two preserved canonical docs.
+  V2 exited0/completed with91calls despite45 assigned and an unapproved
+  fmt-check; no writer remains in M15. GPT focused capturef8a3e0e0 reports
+  106passed/15steps and two fixture failures; lint2e77666e passed. Fresh Astra
+  audit passes profile/command/snapshot source, requires rejection of replace
+  refs and linked/shared Git metadata descendants. V3 owns only local.ts and
+  reviewer/local fixtures; all other source frozen. Immutable assignment fixes
+  those two source gaps and two fixture defects without widening permissions.
+  DSH rules2026-09-14.2 hashfc44ca6e reread; unrelated live DSH processes own
+  other repositories and are preserved. Completed Pro answer reused. No new
+  formal review, live installation or review allowance is inferred.
+
+- At 05:25 M15 V1 GPT capturefbfa0e48 passed107tests/13steps, child0,71821ms.
+  Fresh Astra audit confirms the writer had already fixed fresh-clone status
+  ordering before final freeze; the earlier interim concern is superseded.
+  Required bounded corrections: named profile before opening session, exact
+  command start/completion/cwd/provenance binding, one-shot shell setting, and
+  safe Git config/critical metadata before reuse. Snapshot source audit passes.
+  V2 assignment is limited to those5files,45calls, no tests or schema scans.
+  Preliminary full-path old-renderer measurement: combined reader+adapter
+  1166198promptbytes exceeds1048576; adapter-only551001fits. Therefore staged
+  reader→adapter→aggregate needs the proposed three named authenticated calls,
+  still not authorized. PR70 stays published at864d7a0 while local adapter is
+  prepared; do not overwrite its reviewable reader head with oversized package.
+  M17 trusted-source separation settled exit0/completed,23calls/11edits and
+  one formatter, no children. GPT3e6d4c4a type-check passed child0,4791ms;
+  script hash79e0a527f829c046bd30ea563396abc5bea7214de71a29bd9a1f4cb828a893da.
+  This ignored operator stays non-live until final candidate/ownership inputs
+  and explicit review allowance are settled.
+
+- At 05:21 M15 V1 settled exit0/completed, writer533426 exited, no children;
+  exact8-file patch f1d2451bac41a5bad885e6e411af5fbbb91852a175e2202d6e8c828ea8d7e7bb
+  is frozen for GPT focused checks and fresh read-only Astra audit.35 edit/write
+  calls prove implementation; one formatter pass and no worker tests occurred.
+  The worker used102 calls despite its70-call ceiling; record this deviation
+  and tighten the next bounded assignment. Source inspection found fresh clone
+  status-before-checkout rejection and the narrower one-shot shell flag change;
+  these are pending correction, not accepted behavior. M17 independent operator
+  writer exec76482/PID542378/persisted5dcf08a8 has verified production cwd and
+  Flash/max/workspace-write/ask. Neither source patch nor operator ran live.
+
+- At 05:19 read-only aggregate_delivery_scope audit identified the existing
+  M17 operator's candidate-code imports. A disjoint M17 assignment now owns
+  only ignored .sentinel-reader-install-operator/review.ts on unchanged80b58f6:
+  bind all executable dependencies to installed20aae115, keep candidate Git
+  objects separate and verify both exact clean identities. A private independent
+  trusted-review-source-v6 clone is prepared at20aae115 with no remote; existing
+  operator inputs/history are preserved. No M17 process owns the lane. GPT
+  registered minimal-review-operator-check for type-check only after settlement.
+  This script is not launched live; review allowance remains unanswered.
+
+- At 05:12 M15 adapter V1 is launched as exec91152/PID533426 from the exact
+  clean864d7a0 lane. Persistede1da219e request proves deepseek-official /
+  deepseek-flash / max, workspace-write / ask; live cwd, production environment
+  and credential-presence check passed. Actual read/tool responses exist.
+  Immutable assignment SHA256d5690c64902649ee1f965dfbc724e306a06d2e5697dcc5043db2dc15874e0a66;
+  private minimal-review-adapter-v1-launch.json records the binding. One writer,
+  no children,70-call ceiling, first-edit checkpoint4min and expected handback
+  10-15min; print-mode feedback is next settled assignment. Candidate remains
+  unaccepted until settlement, primary checks and independent audit.
+
+- At 05:09 the resumed Astra owner reverified canonical1a0d2a9 and clean
+  M15 reader lane864d7a0cbb595616b4e90293338f496788b8321a, exact recorded
+  branches, existing reader PR70 and the two primary-owned dirty docs. No DSH
+  process owns M15. The completed Pro request is reused; no new submission.
+  One bounded M15 adapter assignment will own review-snapshot.ts,
+  codex-reviewer.ts, local.ts and their required fixtures only. It replaces
+  prompt contents with a complete exact-Git manifest, populates the restricted
+  review checkout and permits correlated shell-read events. Capture scans use
+  a separate1MiB/blob bound; existing publication-safety limits/validator are
+  preserved at canonical integration. DSH playbook2026-09-14.2 hashfc44ca6e
+  reread; current settings Flash/max/workspace-write and launch-shell key
+  presence verified. GPT registered minimal-review-adapter before delegation;
+  DSH runs no checks. Extra formal-review allowance remains unanswered and no
+  review, merge, installation or live state write is authorized by this patch.
+
+- At 04:16 Pro job c7284228-d564-4eb1-b228-bed27239e699 is completed; saved
+  pro-answer-v2.md recommends the existing structured turn/start reviewer with
+  an isolated Git checkout, not a new review subsystem. Its minimal rollout
+  revision is appended to the existing poka-yoke proposal. Independent official
+  docs, installed0.154 schemas and tagged native source corroborate the choice.
+  GPT-owned permission probe be1b5c63-37e7-4e27-adee-29211e8c66a4 passed child0,
+  613ms: exact Git reads succeed; dummy-token/symlink reads, checkout writes and
+  loopback networking fail; session settled, zero model starts. Complete copy
+  minimal-review-permissions-v2-evidence.json is private. This resolves the
+  local named-profile preflight only; the adapter patch/bootstrap-fit and live
+  delivery are not implemented or proved. Proposed two/three authenticated
+  review allowance replaces duplicated local rounds only if owner approves;
+  no extra review authority is inferred. Source remains1a0d2a9; ledger and the
+  existing proposal are the only dirty files. Both are preserved for the next
+  source-bearing checkpoint. No source/CI/runtime policy or live state changed.
+
+- At 04:05 the owner explicitly requested GPT Pro to identify minimal fixes
+  under the new library-first, simplest-design, current-docs and meaningful-test
+  rules. This is planning, not another acceptance review or rollout approval.
+  One request is submitted as c7284228-d564-4eb1-b228-bed27239e699; immutable
+  private prompt minimal-fixes-request-v2.md is 27,834 bytes, SHA256
+  1453ed26ce5b20441cb0d0c1f7417981c0ee87426d36f8f00a4a5dfe532d1be4.
+  Reuse that job; do not resubmit. Prior Pro advice was implemented already.
+  Exact source/PR heads and passing CI remain unchanged. Source audit separates
+  our tools-forbidden reviewer from upstream Codex capabilities; local and
+  Actions use 0.154.0. Read-only gateway audit finds existing incident endpoints
+  and VPS deployment, so old Deno target-release assumptions need reconciliation.
+  Release blockers remain; no new model repair/review, live write or test run.
+
+- At 00:26 the third consecutive goal turn reverified the same release
+  blockers: PR70 remains open at 864d7a0 with passing CI and no new review
+  authorization; PR67 remains open at 1a0d2a9 with both CI runs successful.
+  Remote development 8c861f5 and supervisor a076b17f are unchanged. The
+  preceding turn completed the read-only delivery-route audit; it supplied
+  a concrete design decision but did not remove either release blocker.
+  No live worker or CI wait can clear the exhausted review allowance, and
+  no supported aggregate review route exists under the current contract.
+  Independent implementation in the accepted recovery slice is complete.
+  The blocked-audit threshold is now met: mark the full goal blocked pending
+  the existing extra-review decision and the aggregate review-design decision.
+  This does not stop the installed Actions scheduler or mark either target's
+  autonomous acceptance complete. Preserve canonical source, evidence and this
+  sole uncommitted ledger update; no additional review/model/test/live write.
+
+- At 00:24 the integration owner reverified canonical and remote 1a0d2a9,
+  both successful PR67 CI runs, unchanged open PR70 at 864d7a0, development
+  8c861f5 and supervisor a076b17f. Accepted proof/loop/parser tips are canonical
+  ancestors. Source remains frozen; only this ledger checkpoint is dirty.
+  Fresh read-only Astra audit aggregate_delivery_scope found no supported
+  installation route around the aggregate snapshot limit: the supervisor and
+  M17 operator require an authentic exact-head receipt, so a local review log
+  cannot replace it. Its proposed route is a bounded review-producer change
+  that reads the complete immutable candidate on demand and retains existing
+  receipt, installation and accounting checks. This is a design proposal, not
+  implemented or authorized extra review work. PR70's existing unanswered
+  extra-round request remains pending; no repeated question, new Pro request,
+  test rerun, review, merge, installation or live state write occurred.
+  Preserve this checkpoint uncommitted until the next permitted delivery step
+  so the tested source candidate stays exact; it is not project completion.
+
+- At00:17 both exact1a0d2a9 CI runs PASSED:35038212419 in14m41s and
+  35038215854 in13m19s. Complete credential-free harness reports1183passed,
+  84steps,0failed,5platformskips. Both full logs are saved privately as
+  poka-yoke/canonical-1a0d2a9-ci-<run>.log; no local full-suite duplicate ran.
+  PR67 body now records this exact candidate and evidence. Development source
+  acceptance is established; formal review, reviewed installation and normal
+  hosted canary delivery remain unproved. Source/workers are settled; only this
+  primary-owned canonical ledger checkpoint is dirty. No gate was bypassed.
+  Installed20aae115 source explicitly has perHour120/perSevenDaysnull and is
+  still active generation5. The next dependent action needs the unanswered
+  PR70 additional-review decision; the aggregate size gate also needs an
+  explicit reviewed delivery solution. No further independent implementation
+  in this bounded poka-yoke slice remains. This is blocked-goal observation1,
+  not a third consecutive ended goal turn and not completed overall acceptance.
+
+- Final behavior candidate1a0d2a90a54fed3887f5f2067d6e62dc5c690c8e is pushed
+  on canonical PR67, now titled preserve/recover across Actions runs. Accepted
+  proof56f2cbf, loop94a75187 and parser61641a4 are all canonical ancestors;
+  worker remote61641a4 is retained and M14 local fast-forwarded to1a0d2a9.
+  No implementation writer or local test remains active. Full credential-free
+  CI35038212419/35038215854 runs on this exact candidate (expected13-15min from
+  the preceding full runs); source stays frozen. Final focused proof8/loop9/
+  contracts73 and existing runner-loss/crash/causal captures have complete copies
+  in private poka-yoke/m14-final-*-evidence.json. This checkpoint is the sole
+  primary-owned uncommitted ledger delta to avoid another evidence-only CI run.
+  No new formal review, live state write, model start or installation occurred.
+  The reader approval and aggregate review-size gates remain concrete blockers;
+  this continuation has not yet ended with those blockers, so no three-turn
+  goal-blocked threshold is inferred from intermediate checkpoints/compactions.
 
 - At00:01 V18 settled exec66141/PID282397 exit0/completed,30calls, one permitted
   formatter pass; no tests/probes/children. Persisted2958d324/stream66ad8369 and

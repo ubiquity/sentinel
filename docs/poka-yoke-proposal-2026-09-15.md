@@ -1,6 +1,7 @@
 # Sentinel: make completed work recoverable
 
-Status: reviewed proposal in implementation, not an installed fix. This supports
+Status: recovery code integrated and CI accepted; the minimal reviewer adapter
+is implemented and ready for integration. The recovery fix is not installed. This supports
 the existing MASTER-PLAN.md and canonical goal; it does not replace them or the
 authoritative docs/build-status.md ledger. The ledger owns current writer lanes.
 
@@ -272,3 +273,123 @@ Primary documentation independently read on2026-09-15:
 - [Workflow triggering](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow): token/event behavior differs;
   GITHUB_TOKEN-created PR opened/synchronize/reopened events currently create
   approval-required runs. Do not assume all token-created events are suppressed.
+
+## Minimal delivery revision — 2026-09-16
+
+This section answers the owner's new request to identify the minimum fixes. It
+does not authorize a new acceptance round or change the runtime. The canonical
+plan, worktree and branch remain those recorded in MASTER-PLAN.md. The current
+candidate is 1a0d2a90a54fed3887f5f2067d6e62dc5c690c8e on PR67; reader PR70 is
+864d7a0cbb595616b4e90293338f496788b8321a. Both have successful current-head CI.
+Current runtime20aae115 remains generation5. The ledger owns current acceptance.
+
+### Decision proposed
+
+Keep the accepted preservation/recovery implementation. Fix the review adapter
+that prevents its delivery. Retain Codex0.154.0, turn/start, outputSchema, review
+journal, authenticated GitHub publication and existing release authorization.
+Give that same reviewer an isolated, exact Git checkout instead of embedding
+the full diff and every changed file in one prompt. Use existing Git helpers
+and Codex reading tools. No SDK migration, native-review conversion, custom
+retrieval protocol, chunk-review service or additional implementation writers.
+
+Three source areas need changes:
+
+| Area | Minimum behavior |
+| --- | --- |
+| src/github/review-snapshot.ts | Bind a complete changed-path manifest to exact base/head, merge base and Git object identities. Stop duplicating all diff/file bytes into the prompt. Keep all old/new contents available; use bounded or streamed reads for needed content and location validation. Handle the oversized old ledger as well as the aggregate diff. Preserve publication-safety checks and finite resource bounds. |
+| src/host/local.ts review setup | Populate the existing reviewCheckout using prepareSourceRepository and trusted Git execution; verify exact base/head and clean detached HEAD. Keep independent objects, trusted configuration, no alternates/shared writable Git metadata, and the existing sentinel-review permission profile. Do not reuse the implementation client's write permissions. |
+| src/github/codex-reviewer.ts | Allow supported repository-reading tools and their correlated events. Keep schema-constrained final output, exact invocation/model/effort/terminal evidence and all charging. Validate findings against the immutable candidate. Tool output, malformed results, interrupted/context-exhausted work and wrong identities cannot establish a clean verdict. |
+
+Make only required type/fixture adaptations at these existing interfaces. Leave
+reviewAuthorizes, review normalization, exact merge identity and release
+authority intact. Reuse the recorded reader lane for a bounded bootstrap edit
+after rechecking its ownership; integrate accepted work into the same canonical
+lane by ancestry. No new goal lane is needed.
+
+### Verified compatibility, not an upgrade assumption
+
+Local CLI and Actions both use0.154.0. Generated installed-version schemas show
+turn/start supports outputSchema. Tagged native review source supplies no final
+schema and falls back to plain text on failed structured parsing; switching to
+native review/start would add result-normalization work.
+
+One non-model Linux probe reused the actual ensureReviewClient configuration
+and CodexSubprocessSession. Exact Git content reads passed. Reads of a dummy
+credential outside the checkout, a symlink escape, checkout writes and network
+access failed. The session settled, with zero model starts and zero loopback
+connections. Evidence be1b5c63-37e7-4e27-adee-29211e8c66a4 in the existing
+459acb17ad9ea6b3117a31ea7e3934ee42910852ebdd735c5b0a8110d8083e59 namespace;
+complete private copy minimal-review-permissions-v2-evidence.json. This proves
+the tested local Linux command boundary, not a completed model review or hosted
+rollout. Keep named profiles; legacy read-only alone is not equivalent.
+
+### Minimum delivery sequence
+
+1. Implement only the adapter patch and measure a reader-plus-adapter bootstrap
+   against the CURRENT trusted review snapshot limits. Keep the oversized ledger
+   unchanged in this small deployment candidate. If it fits, use one bootstrap;
+   if it does not, keep PR70 as the first stage and use a separate adapter-only
+   deployment stage. Do not let an unaccepted reviewer authorize itself.
+2. Request one bounded policy decision using that concrete result: replace
+   additional paired local/authenticated rounds with two named authenticated
+   calls (combined bootstrap, aggregate), or three if the bootstrap must be
+   staged (reader, adapter, aggregate). Preserve every previous round and charge.
+   This is a proposed allowance, not approval or an allowance reset. A finding
+   or changed head cannot silently renew it. The older request is unanswered.
+3. Obtain authentic current-head acceptance for the actual bootstrap, including
+   PR70's corrected incident/repository match. Install both supervisor and
+   runtime readers before emitting new-format state. Record the installed reader
+   as the exact rollback revision. Verify the adapter through that trusted route.
+4. Integrate the actual new development base into canonical ancestry, finalize
+   the checkpoint once, freeze the candidate, run required CI for changed bytes,
+   and obtain one authentic aggregate review. Merge/install through the existing
+   operator and verify actual runtime revision. Do not reuse receipts for a
+   different head or push evidence-only changes during the frozen review.
+5. Let ordinary Actions execution recover Issue48 and deliver its runtime fix.
+   Preserve Issue61's distinct ambiguous start. Observe real publication, review,
+   CI, merge, hosted release and closure, with eligible progress past the blocked
+   task. Preserve120/hour, no weekly cap, WIP3 and one runtime writer. Existing
+   Issue58 evidence remains valid; overall acceptance still needs its own proof.
+
+Use one focused adapter regression fixture for the actual oversized old blob
+and diff, complete manifest, Git finding-location checks, supported tool events
+and invalid completion cases. Reuse the accepted reader/recovery evidence.
+Required hosted CI and real delivery remain necessary; do not duplicate the
+full local suite merely to report another test total. The permission preflight
+above is already executed and must not be repeated just to recover output.
+
+### Gateway follows the working Sentinel path
+
+The current ai.ubq.fi checkout is8bf9daad and its instructions identify VPS
+deployment; Deno Deploy hosting is retired. Authenticated incident discovery,
+the durable metadata index and encrypted replay export already exist. Keep
+them. The48-hour raw-capture expiry still requires actual retained evidence.
+
+Reconcile target owner/base, existing positive App and observer/replay access,
+and exclusive VPS deployment/rollback authority. Use existing deploy:vps and
+exact health/inference identity; do not recreate an endpoint or use a historical
+Deno receipt. Verify the target's required inference origin explicitly: its
+AGENTS still names Mac-to-VPS, while the VPS-origin exception was scoped to the
+separate serial-routing goal. Update obsolete target assumptions in MASTER-PLAN
+when the applicable handover decisions are settled. Preserve the full captured-
+regression, two-delivery, continued-selection and observation objective.
+
+### Research evidence
+
+One newly authorized Pro request completed as
+c7284228-d564-4eb1-b228-bed27239e699. Complete answer: private pro-answer-v2.md;
+verified source/version findings: minimal-fixes-verification-v2.md, both under
+the existing private poka-yoke evidence root. The earlier Pro job is separate
+and its recovery recommendations are already integrated.
+
+Primary sources independently opened on2026-09-16:
+
+- https://learn.chatgpt.com/docs/app-server — turn/start, native review and
+  installed-schema generation.
+- https://learn.chatgpt.com/docs/permissions — named filesystem/network profiles
+  and their incompatibility with legacy sandbox overrides.
+- https://learn.chatgpt.com/docs/codex-sdk — SDK/app-server roles; no migration
+  requirement for this existing integration.
+- https://raw.githubusercontent.com/openai/codex/rust-v0.154.0/codex-rs/core/src/tasks/review.rs
+  — actual native model selection and result parsing at the installed version.
