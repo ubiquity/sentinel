@@ -2,12 +2,53 @@
 
 ## Active task register — Astra owned
 
-Updated 2026-09-16 05:56 UTC. This is the only authoritative acceptance ledger.
+Updated 2026-09-16 06:25 UTC. This is the only authoritative acceptance ledger.
 The goal remains incomplete: autonomous GitHub Actions repair against Sentinel,
 then the separately authorized ai.ubq.fi target. Only the current GPT-6 Astra
 integration owner may change scope, status, acceptance or write ownership here.
 
 ### Current checkpoint
+
+- At06:25 M17 owner installer is committed asb5f69101 after DSH corrections
+  settled with exit0/completed and no descendants. Focused capture04f2fc8e
+  passes7tests (2482ms); lint7266f60e and formatd0a154b7 pass. The intermediate
+  74b3f087 failure was an incorrect second-stage test expectation, corrected
+  to AGGREGATE without changing production behavior. Exactly three files:
+  fixed owner installer, focused tests, prepare workflow invocation. Worker
+  request remained Flash/max/workspace-write/ask and production cwd verified.
+  Primary now integrates by ancestry and directly publishes the launcher;
+  live installation and autonomous delivery remain to be proved.
+
+- At06:20 resumed owner reverified canonical92f3a87 and M17 base2672341,
+  preserving the existing ledger and three M17 worker files. Exact canonical
+  CI35061716162 passed1190tests/99steps; reader development CI35062030618
+  passed. Runtime remains20aae115/gen5 at release headc46cb94, executionnull.
+  M17 initial worker650911 settled with no descendants. Captured focused
+  resulte290ecf6 failed TypeScript narrowing at owner-development-install:559
+  before tests executed. Bounded correction resumes persisted session-a29e23d2
+  under exec45253/PID665734, same three-file scope with workflow frozen;
+  production cwd and Flash/max confirmed. DSH rules2026-09-16.2 hash529618ba
+  read and adopted. Bare UUID resume failed before execution; prefixed persisted
+  session ID succeeded. No development reviews or PRs are requested. Next:
+  collect corrected focused checks, directly install staged fixed revisions,
+  then require real Actions settlement and autonomous issue delivery.
+
+- At06:05 canonical92f3a87 is published; direct reader864d7a0 is on development.
+  Development PRs67/70 are closed under the owner's new instruction. Existing
+  ruleset23197426 now retains test-local only; its obsolete PR requirement was
+  removed. Release-state App-only ruleset23197448 remains unchanged. Final
+  candidate CI35061716162 is running; exact reader CI had already passed.
+  No local release-state writer has authority, and autonomous release records
+  require genuine reviews. M17 is now clean base2672341 (canonical92f3 plus
+  installed supervisor merge ancestry), with one DSH writerPID650911/exec73654,
+  persisteda29e23d2, verified production cwd/Flash/max/workspace-write/ask.
+  It owns only a fixed owner-install script, focused fixture and prepare-step
+  wiring. The operator uses the existing supervisor App and Git's non-force
+  expected-parent update, records an owner-install intent in the remote commit,
+  preserves all history/charges and never fabricates an autonomous receipt.
+  Reader864 generation6 must have real healthy proof before aggregate92f3
+  generation7; exact failure rolls back to its recorded prior. No schema or
+  autonomous admission/review rule changes. GPT checks follow settlement.
 
 - Owner update05:51-05:53: no further development PRs or Codex reviews; make
   changes and immediately test. Owner explicitly preserves autonomous repair
