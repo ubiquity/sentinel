@@ -79,6 +79,7 @@ export type ObserveConfigurationErrorCodeV1 =
   | "observe_config_invalid"
   | "observe_auth_missing"
   | "observe_auth_invalid"
+  | "observe_auth_expired"
   | "observe_replay_key_missing"
   | "observe_replay_key_invalid"
   | "observe_store_unavailable";
@@ -315,8 +316,16 @@ async function main(): Promise<void> {
       storeRoot: STORE_ROOT,
     });
     if (!result.ok) {
+      // Map auth_failed to auth_expired when credentials are rejected; the
+      // gateway adapter already returns auth_failed for 401/403, which is
+      // the definitive signal that the current token is no longer accepted.
+      // Missing/expired and invalid credentials converge to the same blocked
+      // end state so the workflow can decide how to proceed.
+      const reason = result.error.kind === "auth_failed"
+        ? "auth_expired"
+        : result.error.kind;
       console.error(
-        JSON.stringify({ status: "blocked", reason: result.error.kind }),
+        JSON.stringify({ status: "blocked", reason }),
       );
       Deno.exit(2);
     }
