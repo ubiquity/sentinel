@@ -775,8 +775,15 @@ async function trustedSnapshot(
     base,
     head,
     mergeBase: base,
-    diff: "diff --git a/src/app.ts b/src/app.ts\n",
-    files: [],
+    files: [{
+      path: "src/app.ts",
+      kind: "modified",
+      oldBlob: "1".repeat(40),
+      newBlob: "2".repeat(40),
+      oldMode: "100644",
+      newMode: "100644",
+      candidateLines: 3,
+    }],
     digest: "",
   };
   return { ...draft, digest: await reviewSnapshotDigest(draft) };
