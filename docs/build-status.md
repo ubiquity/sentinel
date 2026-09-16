@@ -1,13 +1,57 @@
 # Build status
 
-## Active task register — Astra owned
+## Active task register — primary agent owned
 
-Updated 2026-09-16 06:25 UTC. This is the only authoritative acceptance ledger.
+Updated 2026-09-16 21:50 UTC. This is the only authoritative acceptance ledger.
 The goal remains incomplete: autonomous GitHub Actions repair against Sentinel,
-then the separately authorized ai.ubq.fi target. Only the current GPT-6 Astra
-integration owner may change scope, status, acceptance or write ownership here.
+then the separately authorized ai.ubq.fi target. The owner retired the previous
+GPT-6 Astra integration owner on 2026-09-16 for not completing this job and
+transferred ownership to the primary local agent, which may now change scope,
+status, acceptance and write ownership here.
 
 ### Current checkpoint
+
+- At21:50 the scheduled observer is repaired and proved live. Exact cause: one
+  incident whose replay export exceeded the contract artifact-count bound made
+  `readIncident` return `invalid`, and `observe-main.ts` aborted the whole pass
+  on the first such incident. Every one of the 200 preceding observe runs had
+  failed, and the run log carried only `{"status":"blocked","reason":"invalid"}`
+  because the entrypoint discarded the typed detail. Fixes, all CI-green on
+  `test-local` and verified against the live VPS gateway at revision
+  `07ee77b9aa241f516b44ced5340e814e08a8825a`: da08c9f reports the blocked
+  detail; b56294b counts a per-incident `invalid` in `blockedIncidents` and
+  continues while auth/rate-limit/transport/index faults still abort; fdb0d92
+  makes only a retainable capture consume the artifact-count bound, since the
+  expiry filter ran inside `visit` after the bound check and source-expired
+  captures were consuming it. Live result, stable across three scheduled runs:
+  `pages1 incidents6 evidenceRecords1 blockedIncidents0 retainedCiphertexts0`.
+  The remaining five incidents return `null` evidence (source-lost before
+  ingestion), which is the honest fail-closed outcome, not a pass failure.
+  Primary-run local full-suite is not evidence here: only `test-local` on the
+  exact pushed commits was accepted. No model call, credential write or target
+  write was made. Next: none outstanding for this repair.
+
+- At21:15 the running hosted supervisor now reports its idle reason.
+  `actions-supervisor.ts` collapsed an `idle` outcome to the bare word `idle`,
+  discarding `STATIC_IDLE_WAITING`/`STATIC_IDLE_NONE`, so "the supervisor does
+  nothing" was equally undiagnosable. Fixed on development in b56294b and
+  promoted to the `sentinel-supervisor` lane by fast-forward
+  `f46bdd1..2a31d27` (ancestry-preserving merge of development, CI-green on
+  `test-local` for the exact merge commit, no force, no ruleset change). Live
+  prepare output is now `{"job":"prepare","status":"idle","run":false,
+  "detail":"no eligible hosted supervisor work"}` — establishing that the
+  supervisor is healthy and simply has no queued release/repair work, rather
+  than blocked. The `sentinel-release` workflow remains `disabled_manually` by
+  the owner; its failures predate 2026-09-11 15:19 and are not current.
+
+- At21:05 `sentinel-observe` had never once succeeded: 200 of 200 runs failed,
+  the earliest listed 2026-09-09T12:33:58Z. Only `development` (ruleset
+  23197426, required `test-local`) and `sentinel-state/release` (ruleset
+  23197448) carry rulesets; `sentinel-supervisor` carries none. A direct push to
+  `development` needs the required check to be green on that exact commit, so
+  each delivery went through a temporary `codex/*` branch whose check was
+  allowed to pass before the same commit was pushed to `development`; the
+  temporary branches and the promotion branch were deleted afterwards.
 
 - At06:25 M17 owner installer is committed asb5f69101 after DSH corrections
   settled with exit0/completed and no descendants. Focused capture04f2fc8e
@@ -1100,7 +1144,10 @@ This is one delivery; reader/storage infrastructure is not an additional canary.
 Open issues last verified: 3, 6, 7, 8, 9, 10, 13, 14, 15, 16, 40, 48, 61, 69.
 Issue40's full authenticated-request coverage includes unresolved token/checkout/
 Git-transport authority seams; do not infer closure from REST-only coverage.
-Gateway ai.ubq.fi runs on VPS revision `8bf9daad…`; Deno is retired. The scoped
+Gateway ai.ubq.fi runs on the VPS at verified revision
+`07ee77b9aa241f516b44ced5340e814e08a8825a` (live `/health`, 2026-09-16 17:25
+deploy); the earlier `8bf9daad…` record is superseded, and Deno is retired. The
+local ai.ubq.fi checkout is only a development copy. The scoped
 observer/replay credentials and release-authority choices are unanswered.
 Existing gateway owner remains authoritative. Do not repeat questions, infer
 approval or let those separate choices stop Sentinel self-repair.
