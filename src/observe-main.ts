@@ -63,6 +63,14 @@ export interface ObserveResultV1 {
   pages: number;
   incidents: number;
   evidenceRecords: number;
+  /**
+   * Incidents whose evidence could not be represented at all. These are
+   * recorded, counted and named — never silently dropped and never fabricated
+   * into a clean read.
+   */
+  blockedIncidents: number;
+  /** First bounded per-incident detail, for run-log diagnosis. */
+  blockedDetail: string | null;
   retainedCiphertexts: number;
   retainedCiphertextBytes: number;
 }
@@ -188,6 +196,11 @@ export function parseObserveReplayKey(value: string): Uint8Array<ArrayBuffer> {
  * encrypted capture bytes and their non-plaintext manifest metadata under
  * `storeRoot`; no remote claim, issue, PR, branch, model or release write is
  * reachable from this capability set.
+ *
+ * Per-incident refusal is not a pass failure. An incident the adapter cannot
+ * represent is counted in `blockedIncidents` (with one bounded detail) and the
+ * pass continues; only a global fault aborts it. A blocked incident is never
+ * reported as read and no evidence is ever fabricated for it.
  */
 export async function runReadOnlyObservation(
   input: ObserveConfigV1,
@@ -239,6 +252,8 @@ export async function runReadOnlyObservation(
   let pages = 0;
   let incidents = 0;
   let evidenceRecords = 0;
+  let blockedIncidents = 0;
+  let blockedDetail: string | null = null;
   for (;;) {
     pages++;
     if (pages > MAX_PAGES) {
@@ -270,7 +285,19 @@ export async function runReadOnlyObservation(
     }
     for (const item of page.value.items) {
       const evidence = await adapter.readIncident(item.id);
-      if (!evidence.ok) return evidence;
+      if (!evidence.ok) {
+        // `invalid` is a per-incident verdict: the adapter refused to
+        // represent THIS incident (for example its replay export exceeds the
+        // contract artifact-count bound), which says nothing about the others.
+        // Aborting the whole pass here discarded every remaining incident and
+        // kept the scheduled observer red indefinitely. Global faults —
+        // authentication, rate limiting, transport or index unavailability —
+        // stay fail-closed and still abort the pass.
+        if (evidence.error.kind !== "invalid") return evidence;
+        blockedIncidents++;
+        blockedDetail ??= evidence.error.detail;
+        continue;
+      }
       if (evidence.value !== null) evidenceRecords++;
     }
     cursor = page.value.nextCursor;
@@ -291,6 +318,8 @@ export async function runReadOnlyObservation(
       pages,
       incidents,
       evidenceRecords,
+      blockedIncidents,
+      blockedDetail,
       retainedCiphertexts: stats.value.count,
       retainedCiphertextBytes: stats.value.totalBytes,
     },
