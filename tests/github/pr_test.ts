@@ -39,7 +39,11 @@ Deno.test("createPullRequest: publishes with source body preserved except close 
     "close:#104, Closes: #105, CLOSES: #106, " +
     "closed: ubiquity/sentinel#107; " +
     "resolve #108, RESOLVES: #109, resolved ubiquity/sentinel#110.\n" +
-    "References #111 and ubiquity/sentinel#112 remain.";
+    "References #111 and ubiquity/sentinel#112 remain.\n" +
+    "References fixed-tools/widget#123; keep this text.\n" +
+    "fixesowner/repo#123, closed-source/project#123, and " +
+    "resolved-tools/project#123 remain unchanged.\n" +
+    "Fixes fixed-tools/widget#123 is sanitized without losing its owner.";
   const { port, transport } = makePort({
     script: [
       httpRespond("GET", "/git/ref/heads/sentinel/fix-1", 200, refWire(SHA1)),
@@ -77,7 +81,11 @@ Deno.test("createPullRequest: publishes with source body preserved except close 
       "#101, #102, ubiquity/sentinel#103; " +
       "#104, #105, #106, ubiquity/sentinel#107; " +
       "#108, #109, ubiquity/sentinel#110.\n" +
-      "References #111 and ubiquity/sentinel#112 remain.",
+      "References #111 and ubiquity/sentinel#112 remain.\n" +
+      "References fixed-tools/widget#123; keep this text.\n" +
+      "fixesowner/repo#123, closed-source/project#123, and " +
+      "resolved-tools/project#123 remain unchanged.\n" +
+      "fixed-tools/widget#123 is sanitized without losing its owner.",
   );
 });
 
