@@ -34,6 +34,7 @@ import {
   OWNER_DEVELOPMENT_INSTALL_ADVANCE_REVISION,
   OWNER_DEVELOPMENT_INSTALL_AGGREGATE_GENERATION,
   OWNER_DEVELOPMENT_INSTALL_AGGREGATE_REVISION,
+  OWNER_DEVELOPMENT_INSTALL_CADENCE_REVISION,
   OWNER_DEVELOPMENT_INSTALL_EXIT_CONTRACT_REVISION,
   OWNER_DEVELOPMENT_INSTALL_FINDINGS_REVISION,
   OWNER_DEVELOPMENT_INSTALL_HISTORY_REVISION,
@@ -79,6 +80,7 @@ const SETTLEMENT = OWNER_DEVELOPMENT_INSTALL_SETTLEMENT_REVISION;
 const RELEASED = OWNER_DEVELOPMENT_INSTALL_RELEASED_REVISION;
 const TRIGGER = OWNER_DEVELOPMENT_INSTALL_TRIGGER_REVISION;
 const ADVANCE = OWNER_DEVELOPMENT_INSTALL_ADVANCE_REVISION;
+const CADENCE = OWNER_DEVELOPMENT_INSTALL_CADENCE_REVISION;
 
 function hostedProof(input: {
   runId: number;
@@ -845,14 +847,30 @@ Deno.test(
     if (advancePlan.status !== "install") throw new Error("expected install");
     assert.equal(advancePlan.move.nextRevision, ADVANCE);
     assert.equal(advancePlan.move.nextGeneration, 20);
-    // The base-advance generation is the fixed end of the chain.
+    // The base-advance healthy proof authorizes the cadence install.
+    const advanceHealthy = healthyProof(ADVANCE, 20, 91);
+    const cadencePlan = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: ADVANCE,
+          generation: 20,
+          healthyProof: advanceHealthy,
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(cadencePlan.status, "install");
+    if (cadencePlan.status !== "install") throw new Error("expected install");
+    assert.equal(cadencePlan.move.nextRevision, CADENCE);
+    assert.equal(cadencePlan.move.nextGeneration, 21);
+    // The cadence generation is the fixed end of the chain.
     assert.equal(
       planOwnerDevelopmentInstall(
         releaseSnapshot({
           runtime: runtimeRecord({
-            revision: ADVANCE,
-            generation: 20,
-            healthyProof: healthyProof(ADVANCE, 20, 91),
+            revision: CADENCE,
+            generation: 21,
+            healthyProof: healthyProof(CADENCE, 21, 92),
           }),
         }),
         NOW,

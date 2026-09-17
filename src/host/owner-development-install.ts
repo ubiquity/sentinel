@@ -182,6 +182,13 @@ export const OWNER_DEVELOPMENT_INSTALL_TRIGGER_GENERATION = 19;
 export const OWNER_DEVELOPMENT_INSTALL_ADVANCE_REVISION =
   "33ff7fb27c5cb272d953f9ddaae3be1271212afd" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_ADVANCE_GENERATION = 20;
+/**
+ * Exact revision carrying the cadence-based retry policy. Its install triggers
+ * the immediate execution that retries the wedged tasks.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_CADENCE_REVISION =
+  "9f1bde9e342547c23dc1dc69f7650704d0f43e7f" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_CADENCE_GENERATION = 21;
 
 const API_BASE = "https://api.github.com";
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -835,10 +842,49 @@ export function planOwnerDevelopmentInstall(
       );
     }
     if (healthy !== null) {
-      return noChange("the owner development installation is complete");
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_CADENCE_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_CADENCE_GENERATION,
+        healthy,
+        "install the cadence revision after the base-advance healthy proof",
+      );
     }
     return waiting(
       "the base-advance generation 20 healthy proof is not recorded",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_CADENCE_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_CADENCE_GENERATION
+  ) {
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_ADVANCE_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_ADVANCE_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded base-advance healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_ADVANCE_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed cadence candidate to the base-advance revision",
+      );
+    }
+    if (healthy !== null) {
+      return noChange("the owner development installation is complete");
+    }
+    return waiting(
+      "the cadence generation 21 healthy proof is not recorded",
     );
   }
 
