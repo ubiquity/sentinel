@@ -158,6 +158,22 @@ export const OWNER_DEVELOPMENT_INSTALL_LEDGER_GENERATION = 16;
 export const OWNER_DEVELOPMENT_INSTALL_SETTLEMENT_REVISION =
   "fc25d716981870ce6b7038c2eda94ed2430cca58" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_SETTLEMENT_GENERATION = 17;
+/**
+ * Exact revision the hosted promotion accepted for the delivered self-repair
+ * (generation 18). It is the pointer the trigger install below starts from.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_RELEASED_REVISION =
+  "1ed66cd191271cc206aaf436d0f93d245aaee936" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_RELEASED_GENERATION = 18;
+/**
+ * Exact revision carrying default-include intake, the autonomous delivery pass
+ * and the automatic issue closure. Its install also triggers an immediate
+ * execution, which is how the owner asks the fleet to start working now instead
+ * of waiting for the hourly ordinary cadence.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_TRIGGER_REVISION =
+  "9c4f658e93ff28c60eb55f80669e589d51373b89" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_TRIGGER_GENERATION = 19;
 
 const API_BASE = "https://api.github.com";
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -714,10 +730,68 @@ export function planOwnerDevelopmentInstall(
       );
     }
     if (healthy !== null) {
-      return noChange("the owner development installation is complete");
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_TRIGGER_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_TRIGGER_GENERATION,
+        healthy,
+        "install the trigger revision after the settlement healthy proof",
+      );
     }
     return waiting(
       "the settlement generation 17 healthy proof is not recorded",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_RELEASED_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_RELEASED_GENERATION
+  ) {
+    if (healthy !== null) {
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_TRIGGER_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_TRIGGER_GENERATION,
+        healthy,
+        "install the trigger revision after the released generation healthy proof",
+      );
+    }
+    return waiting(
+      "the released generation 18 healthy proof is not recorded",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_TRIGGER_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_TRIGGER_GENERATION
+  ) {
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_RELEASED_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_RELEASED_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded released healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_RELEASED_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed trigger candidate to the released revision",
+      );
+    }
+    if (healthy !== null) {
+      return noChange("the owner development installation is complete");
+    }
+    return waiting(
+      "the trigger generation 19 healthy proof is not recorded",
     );
   }
 

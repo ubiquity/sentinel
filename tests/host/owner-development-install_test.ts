@@ -43,10 +43,12 @@ import {
   OWNER_DEVELOPMENT_INSTALL_READER_REVISION,
   OWNER_DEVELOPMENT_INSTALL_RECEIPT_REVISION,
   OWNER_DEVELOPMENT_INSTALL_RECOVERY_REVISION,
+  OWNER_DEVELOPMENT_INSTALL_RELEASED_REVISION,
   OWNER_DEVELOPMENT_INSTALL_REVIEW_STEP_REVISION,
   OWNER_DEVELOPMENT_INSTALL_REVIEWER_REVISION,
   OWNER_DEVELOPMENT_INSTALL_ROUND8_REVISION,
   OWNER_DEVELOPMENT_INSTALL_SETTLEMENT_REVISION,
+  OWNER_DEVELOPMENT_INSTALL_TRIGGER_REVISION,
   ownerDevelopmentInstallCommitMessage,
   ownerDevelopmentInstallFiles,
   planOwnerDevelopmentInstall,
@@ -73,6 +75,8 @@ const HISTORY = OWNER_DEVELOPMENT_INSTALL_HISTORY_REVISION;
 const RECEIPT = OWNER_DEVELOPMENT_INSTALL_RECEIPT_REVISION;
 const LEDGER = OWNER_DEVELOPMENT_INSTALL_LEDGER_REVISION;
 const SETTLEMENT = OWNER_DEVELOPMENT_INSTALL_SETTLEMENT_REVISION;
+const RELEASED = OWNER_DEVELOPMENT_INSTALL_RELEASED_REVISION;
+const TRIGGER = OWNER_DEVELOPMENT_INSTALL_TRIGGER_REVISION;
 
 function hostedProof(input: {
   runId: number;
@@ -793,13 +797,44 @@ Deno.test(
     }
     assert.equal(settlementPlan.move.nextRevision, SETTLEMENT);
     assert.equal(settlementPlan.move.nextGeneration, 17);
+    const settlementHealthy = healthyProof(SETTLEMENT, 17, 88);
+    const triggerPlan = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: SETTLEMENT,
+          generation: 17,
+          healthyProof: settlementHealthy,
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(triggerPlan.status, "install");
+    if (triggerPlan.status !== "install") throw new Error("expected install");
+    assert.equal(triggerPlan.move.nextRevision, TRIGGER);
+    assert.equal(triggerPlan.move.nextGeneration, 19);
+    // The released generation the promotion accepted installs the same trigger.
+    const releasedPlan = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: RELEASED,
+          generation: 18,
+          healthyProof: healthyProof(RELEASED, 18, 89),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(releasedPlan.status, "install");
+    if (releasedPlan.status !== "install") throw new Error("expected install");
+    assert.equal(releasedPlan.move.nextRevision, TRIGGER);
+    assert.equal(releasedPlan.move.nextGeneration, 19);
+    // The trigger generation is the fixed end of the chain.
     assert.equal(
       planOwnerDevelopmentInstall(
         releaseSnapshot({
           runtime: runtimeRecord({
-            revision: SETTLEMENT,
-            generation: 17,
-            healthyProof: healthyProof(SETTLEMENT, 17, 88),
+            revision: TRIGGER,
+            generation: 19,
+            healthyProof: healthyProof(TRIGGER, 19, 90),
           }),
         }),
         NOW,
