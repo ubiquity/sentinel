@@ -18,7 +18,6 @@ import type {
   StateReadView,
   StateWriteResultV1,
 } from "../../src/contracts/ports.ts";
-import { portError, portOk } from "../../src/contracts/ports.ts";
 import {
   parseReleaseStateSnapshotV1,
   parseRepairStateSnapshotV1,
