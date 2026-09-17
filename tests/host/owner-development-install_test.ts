@@ -38,6 +38,7 @@ import {
   OWNER_DEVELOPMENT_INSTALL_READER_GENERATION,
   OWNER_DEVELOPMENT_INSTALL_READER_REVISION,
   OWNER_DEVELOPMENT_INSTALL_RECOVERY_REVISION,
+  OWNER_DEVELOPMENT_INSTALL_REVIEW_STEP_REVISION,
   ownerDevelopmentInstallCommitMessage,
   ownerDevelopmentInstallFiles,
   planOwnerDevelopmentInstall,
@@ -55,6 +56,7 @@ const ORIGINAL = OWNER_DEVELOPMENT_INSTALL_ORIGINAL_REVISION;
 const READER = OWNER_DEVELOPMENT_INSTALL_READER_REVISION;
 const AGGREGATE = OWNER_DEVELOPMENT_INSTALL_AGGREGATE_REVISION;
 const RECOVERY = OWNER_DEVELOPMENT_INSTALL_RECOVERY_REVISION;
+const REVIEW_STEP = OWNER_DEVELOPMENT_INSTALL_REVIEW_STEP_REVISION;
 
 function hostedProof(input: {
   runId: number;
@@ -626,21 +628,67 @@ Deno.test(
       "install",
       "the aggregate healthy proof authorizes the review recovery install",
     );
-    // The review recovery generation is the fixed end of the chain: its own
-    // healthy proof is the completion, and no later movement exists.
+    // The review recovery healthy proof authorizes the review-step install.
     const recoveryHealthy = healthyProof(RECOVERY, 8, 75);
+    const reviewStepPlan = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: RECOVERY,
+          generation: 8,
+          healthyProof: recoveryHealthy,
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(reviewStepPlan.status, "install");
+    if (reviewStepPlan.status !== "install") {
+      throw new Error("expected install");
+    }
+    assert.equal(reviewStepPlan.move.nextRevision, REVIEW_STEP);
+    assert.equal(reviewStepPlan.move.nextGeneration, 9);
+    // The review-step generation is the fixed end of the chain: its own healthy
+    // proof is the completion, and no later movement exists.
+    const reviewStepHealthy = healthyProof(REVIEW_STEP, 9, 78);
     assert.equal(
       planOwnerDevelopmentInstall(
         releaseSnapshot({
           runtime: runtimeRecord({
-            revision: RECOVERY,
-            generation: 8,
-            healthyProof: recoveryHealthy,
+            revision: REVIEW_STEP,
+            generation: 9,
+            healthyProof: reviewStepHealthy,
           }),
         }),
         NOW,
       ).status,
       "no_change",
+    );
+    // A failed review-step candidate rolls back once to the exact review
+    // recovery revision, authorized by its recorded healthy proof.
+    const reviewStepFailed = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: REVIEW_STEP,
+          generation: 9,
+          healthyProof: recoveryHealthy,
+          executionProof: failedProof(REVIEW_STEP, 9, 79),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(reviewStepFailed.status, "rollback");
+    if (reviewStepFailed.status !== "rollback") {
+      throw new Error("expected rollback");
+    }
+    assert.equal(reviewStepFailed.move.nextRevision, RECOVERY);
+    assert.equal(reviewStepFailed.move.nextGeneration, 10);
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({ revision: REVIEW_STEP, generation: 9 }),
+        }),
+        NOW,
+      ).status,
+      "waiting",
     );
     // A failed review recovery candidate rolls back once, to the exact
     // aggregate revision, authorized by its recorded healthy proof.

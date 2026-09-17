@@ -3,7 +3,8 @@
  *
  * This fixed trusted operation performs at most one pointer movement in the
  * hosted release state: original generation 5 -> reader generation 6 ->
- * aggregate generation 7 -> review recovery generation 8, plus a one-time
+ * aggregate generation 7 -> review recovery generation 8 -> review-step
+ * reconciliation generation 9, plus a one-time
  * rollback of an exact failed candidate to its recorded previously healthy
  * revision. It is NOT a runtime redesign and NOT a recurring global gate: every other state is a zero-write
  * waiting/no-change outcome so the unchanged protected supervisor continues
@@ -87,6 +88,13 @@ export const OWNER_DEVELOPMENT_INSTALL_AGGREGATE_GENERATION = 7;
 export const OWNER_DEVELOPMENT_INSTALL_RECOVERY_REVISION =
   "fd5902a8998a7dd906fa15666c448fdb4b845aec" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_RECOVERY_GENERATION = 8;
+/**
+ * Exact revision carrying the review-step base-refresh reconciliation,
+ * installed only after the review recovery generation 8 healthy proof.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_REVIEW_STEP_REVISION =
+  "87193550640078f190ab94d7f8ca0f00bbef9124" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_REVIEW_STEP_GENERATION = 9;
 
 const API_BASE = "https://api.github.com";
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -294,10 +302,49 @@ export function planOwnerDevelopmentInstall(
       );
     }
     if (healthy !== null) {
-      return noChange("the owner development installation is complete");
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_REVIEW_STEP_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_REVIEW_STEP_GENERATION,
+        healthy,
+        "install the review-step reconciliation after the review recovery healthy proof",
+      );
     }
     return waiting(
       "the review recovery generation 8 healthy proof is not recorded",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_REVIEW_STEP_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_REVIEW_STEP_GENERATION
+  ) {
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_RECOVERY_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_RECOVERY_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded review recovery healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_RECOVERY_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed review-step candidate to its recorded prior",
+      );
+    }
+    if (healthy !== null) {
+      return noChange("the owner development installation is complete");
+    }
+    return waiting(
+      "the review-step generation 9 healthy proof is not recorded",
     );
   }
 
