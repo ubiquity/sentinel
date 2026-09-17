@@ -653,6 +653,30 @@ Deno.test(
 );
 
 Deno.test(
+  "hosted autonomy: a blocked task with an open pull request is retried in one write",
+  async () => {
+    const { rig, github } = await makeRig("autonomy-retry", {
+      repair: repairSnapshot([blockedRecord()], [authorizingReceipt()]),
+      pull: pullFacts({ state: "open", merged: false, mergeCommitSha: null }),
+    });
+    const result = await run(rig, github);
+    assert.equal(result.status, "applied");
+    assert.equal(result.reason, "retried");
+    assert.notEqual(result.appliedHead, null);
+    assert.equal(rig.writes, 1);
+    const read = await rig.state.readRepair();
+    if (!read.ok || read.value.status !== "found") {
+      throw new Error("unreadable");
+    }
+    const record = read.value.snapshot.work[0];
+    assert.equal(record.nextStep, "work");
+    assert.equal(record.blocker, null);
+    assert.equal(record.counters.retries, 1);
+    await Deno.remove(rig.tmp, { recursive: true });
+  },
+);
+
+Deno.test(
   "hosted autonomy: a blocked task whose pull request is already merged is not retried",
   async () => {
     const { rig, github } = await makeRig("autonomy-merged-blocked", {

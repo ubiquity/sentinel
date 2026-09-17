@@ -532,6 +532,15 @@ export async function runHostedAutonomy(
     for (const plan of plans) {
       actions.push(`retry:${plan.id}:grant=${plan.grant}:${plan.detail}`);
     }
+    return {
+      kind: "hosted_autonomy",
+      status: "applied",
+      reason: "retried",
+      beforeHead: initial.value.head,
+      appliedHead: write.value.head,
+      actions,
+      revisions,
+    };
   }
 
   // ---- delivery pass ------------------------------------------------------
