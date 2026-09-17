@@ -969,7 +969,10 @@ Deno.test("issue48 recovery: supervisor workflow dependency and locking contract
   assert.ok(maintenance.includes("ref: ${{ github.sha }}"));
   assert.ok(maintenance.includes("fetch-depth: 0"));
   assert.ok(maintenance.includes("persist-credentials: false"));
-  assert.ok(maintenance.includes("ops/issue48-review-quota-recovery.ts"));
+  // The maintenance job's bounded one-shot is now the hosted autonomy pass,
+  // which supersedes the issue-48-specific quota helper (that helper and its
+  // own tests remain in the tree, it is simply no longer wired into the job).
+  assert.ok(maintenance.includes("ops/hosted-autonomy.ts"));
   assert.ok(maintenance.includes("--no-lock"));
   assert.ok(maintenance.includes("--allow-run=git"));
   assert.ok(maintenance.includes("--allow-net=api.github.com"));
@@ -984,8 +987,6 @@ Deno.test("issue48 recovery: supervisor workflow dependency and locking contract
       "codex",
       "actions: write",
       "issues: write",
-      "pull-requests: write",
-      "checks:",
       "statuses:",
     ]
   ) {
@@ -994,9 +995,14 @@ Deno.test("issue48 recovery: supervisor workflow dependency and locking contract
   const permissionsAt = maintenance.indexOf("permissions:");
   const concurrencyAt = maintenance.indexOf("concurrency:");
   assert.ok(permissionsAt > 0 && concurrencyAt > permissionsAt);
+  // The job's authority is exactly what the bounded autonomy pass needs and
+  // nothing more: it writes repair state, merges an already-reviewed head with
+  // an expected-head CAS under the runtime's own acceptance criteria (no
+  // P0/P1 plus a green deterministic check) and closes a delivered issue. It
+  // still has no model, environment, secret, issue-write or actions authority.
   assert.equal(
     maintenance.slice(permissionsAt, concurrencyAt).replace(/\s+/g, " ").trim(),
-    "permissions: contents: write pull-requests: read",
+    "permissions: contents: write pull-requests: write checks: read",
   );
 
   // A maintenance failure must never skip a valid ordinary run: prepare still
