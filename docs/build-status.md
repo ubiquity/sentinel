@@ -78,12 +78,29 @@ runtime blocked `issue-ubiquity-sentinel-48` with kind `other` and the exact
 reason "model run did not complete with a trusted candidate", consuming the one
 granted attempt (counters 4/0/6, head `430b9760…`, base `3dfb3402…`). That is a
 failed attempt, not substantive progress, so the same owner-directed bound is
-re-applied once: the one-shot recovery now also clears that third, explicitly
-closed blocker (its exact reason prefix, never a general `other` block) and is
-re-pinned to this live identity (`92e1da6…`, lane `a1007c0…`). Every charge,
-receipt, reservation and counter is still preserved, the granted amount remains a
-closed 0-or-1 value, and the next ordinary execution retries the correction
-before any re-review. Nothing was merged and no receipt was fabricated.
+re-applied: the one-shot recovery now also clears that closed blocker, and the
+retry it arms is the subject of the two findings below.
+
+- A settled failed implementation cannot be retried under the runtime's current
+  reservation identity: the shared budget derives the identity from
+  (task, base, attempt, purpose), so the same base and counter reproduce the
+  settled attempt and the loop blocks with `model admission refused: duplicate`.
+  That is a genuine liveness gap in the accounting (a failed attempt's counter
+  unit is given back, but its identity is not), recorded here as the next
+  runtime defect to fix after this delivery.
+- Rebinding a preserved candidate to a newer base is NOT available to a state
+  writer: the frozen record contract requires a preserved candidate's base and
+  head to equal the target's ("never silently rebound"), so that attempt failed
+  as `snapshot_invalid` and was reverted immediately rather than kept.
+- The retry therefore uses the bounded counter grant only: the counter is
+  lowered by exactly one (3 → 2), so the next admission is
+  task/base/attempt 3 — an UNUSED identity at this unchanged base — and the
+  preserved candidate descriptor stays exactly as the runtime wrote it. Applied
+  at 08:25:57Z (`17eb286…`, lane `91b708e7…` then the counter-grant promotion);
+  the record is armed at `work` with counters 2/0/6, head `430b9760…`, base
+  `3dfb3402…` and no intent or blocker, waiting on the ordinary execution at
+  ~09:06Z. Every charge, receipt and reservation is preserved, nothing was
+  merged and no receipt was fabricated.
 
 **Live: the deadlock is broken and the runtime is recovering issue 48 on its own.**
 The fix below was activated by the owner's 2026-09-17 decision and is proven in
