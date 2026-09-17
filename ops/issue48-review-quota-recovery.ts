@@ -91,6 +91,15 @@ export const ISSUE48_QUOTA_BLOCKER_PREFIX =
 export const ISSUE48_QUOTA_BUDGET_BLOCKER_PREFIX =
   "implementation attempt budget exhausted";
 
+/**
+ * Exact prefix of the third blocker this one-shot may clear: an implementation
+ * session that ended without a trusted candidate (kind `other`), which is a
+ * failed attempt rather than substantive progress and therefore also needs the
+ * one bounded retry the owner directed.
+ */
+export const ISSUE48_QUOTA_CANDIDATE_BLOCKER_PREFIX =
+  "model run did not complete with a trusted candidate";
+
 /** Fixed production binding of the reviewed one-shot recovery. */
 export interface Issue48QuotaRecoveryBindingV1 {
   /** Exact target work item id. */
@@ -121,16 +130,17 @@ export interface Issue48QuotaRecoveryBindingV1 {
 }
 
 /**
- * Reviewed production pins, read from the live state on 2026-09-17 05:10Z (the
- * head and base of review round 5, whose completed P2 finding requires one
- * bounded correction the exhausted implementation budget would refuse).
+ * Reviewed production pins, read from the live state on 2026-09-17 07:30Z:
+ * review round 6's P2 finding requires one bounded correction, the granted
+ * attempt ended without a trusted candidate, and the runtime blocked the task
+ * with kind `other` and the candidate-failure reason.
  * The repair ref head is deliberately NOT pinned: it moves on every runtime
  * cycle, so the expected-head CAS plus the exact work-item preconditions and
  * the full readback are what authorize the single write.
  */
 export const ISSUE48_QUOTA_PRODUCTION_BINDING: Issue48QuotaRecoveryBindingV1 = {
   targetId: "issue-ubiquity-sentinel-48" as WorkItemId,
-  counters: { attempts: 4, retries: 0, reviewRounds: 5 },
+  counters: { attempts: 4, retries: 0, reviewRounds: 6 },
   grantedImplementationAttempts: 1,
   evidenceRef:
     "artifact:review-receipt/review-receipt:2e4e595978d5ca887abcad4a31b0ac94ea7d548227792f85b0d210078d3c1446",
@@ -138,8 +148,8 @@ export const ISSUE48_QUOTA_PRODUCTION_BINDING: Issue48QuotaRecoveryBindingV1 = {
     "review-receipt:2e4e595978d5ca887abcad4a31b0ac94ea7d548227792f85b0d210078d3c1446",
   ],
   pullRequestNumber: 51,
-  pullRequestHead: "ae6ff044280a04803958fcd1f6f9304bb894249e" as GitSha,
-  pullRequestBase: "f1b5a86b80ca4759ab37307484b223907bd1b1d6" as GitSha,
+  pullRequestHead: "430b9760e98d88d8e50b02c50a084300122335ba" as GitSha,
+  pullRequestBase: "3dfb3402c8a5155d6d9f023c72aaa52cf2b801e2" as GitSha,
   repository: ISSUE48_QUOTA_REPOSITORY,
   runtimeId: "ubiquity/sentinel:0:production",
   runtimeRevision: "80384fc3668c246297621aa1c588c0e49ea516c6" as GitSha,
@@ -275,9 +285,13 @@ export function targetPreconditionHolds(
   if (record.nextStep === "review") return true;
   if (record.nextStep !== "blocked") return false;
   const blocker = record.blocker;
-  if (blocker === null || blocker.kind !== "review_quota") return false;
-  return blocker.message.startsWith(ISSUE48_QUOTA_BLOCKER_PREFIX) ||
-    blocker.message.startsWith(ISSUE48_QUOTA_BUDGET_BLOCKER_PREFIX);
+  if (blocker === null) return false;
+  if (blocker.kind === "review_quota") {
+    return blocker.message.startsWith(ISSUE48_QUOTA_BLOCKER_PREFIX) ||
+      blocker.message.startsWith(ISSUE48_QUOTA_BUDGET_BLOCKER_PREFIX);
+  }
+  return blocker.kind === "other" &&
+    blocker.message.startsWith(ISSUE48_QUOTA_CANDIDATE_BLOCKER_PREFIX);
 }
 
 /**

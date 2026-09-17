@@ -34,6 +34,7 @@ import {
 import {
   buildNextQuotaSnapshot,
   ISSUE48_QUOTA_BLOCKER_PREFIX,
+  ISSUE48_QUOTA_CANDIDATE_BLOCKER_PREFIX,
   runIssue48QuotaRecovery,
   targetPreconditionHolds,
   validateIssue48QuotaHostedIdentity,
@@ -484,6 +485,29 @@ Deno.test(
       expected: string;
     }[] = [
       {
+        name: "candidate-failure-blocker-is-cleared",
+        record: {
+          blocker: {
+            kind: "other",
+            message:
+              `${ISSUE48_QUOTA_CANDIDATE_BLOCKER_PREFIX}: implementation`,
+            since: T0 + 1000,
+          },
+        },
+        expected: "applied",
+      },
+      {
+        name: "unrelated-other-blocker",
+        record: {
+          blocker: {
+            kind: "other",
+            message: "candidate preservation descriptor unavailable",
+            since: T0 + 1000,
+          },
+        },
+        expected: "target_precondition_mismatch",
+      },
+      {
         name: "granted-budget-outside-the-closed-set",
         binding: { grantedImplementationAttempts: 2 as unknown as 0 | 1 },
         expected: "target_precondition_mismatch",
@@ -580,6 +604,15 @@ Deno.test(
       });
       try {
         const result = await runRig(rig, { binding: item.binding });
+        if (item.expected === "applied") {
+          assert.equal(
+            result.status,
+            "applied",
+            `${item.name}: ${result.reason}`,
+          );
+          assert.equal(rig.writes, 1, item.name);
+          continue;
+        }
         assert.equal(result.status, "failed", `${item.name}: ${result.reason}`);
         assert.equal(result.reason, item.expected, item.name);
         assert.equal(rig.writes, 0, item.name);
