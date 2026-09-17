@@ -144,19 +144,19 @@ export interface Issue48QuotaRecoveryBindingV1 {
 }
 
 /**
- * Reviewed production pins, read from the live state on 2026-09-17 11:00Z:
- * review round 8's P2 finding requires one more bounded correction, the record
- * is still at its unobserved `review` step so that finding is recorded before
- * the correction, and the grant is the exact number of counter units (4 -> 2)
- * that makes the next admission (task/base/attempt 3) an UNUSED reservation
- * identity at this base.
+ * Reviewed production pins, read from the live state on 2026-09-17 13:30Z:
+ * review round 10's P2 finding requires one more bounded correction, the record
+ * is still at its unobserved `review` step so that finding is recorded first,
+ * and the grant is the exact number of counter units (4 -> 2) that makes the
+ * next admission (task/base/attempt 3) an UNUSED reservation identity at this
+ * base.
  * The repair ref head is deliberately NOT pinned: it moves on every runtime
  * cycle, so the expected-head CAS plus the exact work-item preconditions and
  * the full readback are what authorize the single write.
  */
 export const ISSUE48_QUOTA_PRODUCTION_BINDING: Issue48QuotaRecoveryBindingV1 = {
   targetId: "issue-ubiquity-sentinel-48" as WorkItemId,
-  counters: { attempts: 4, retries: 0, reviewRounds: 8 },
+  counters: { attempts: 4, retries: 0, reviewRounds: 10 },
   grantedImplementationAttempts: 2,
   evidenceRef:
     "artifact:review-receipt/review-receipt:2e4e595978d5ca887abcad4a31b0ac94ea7d548227792f85b0d210078d3c1446",
@@ -164,12 +164,12 @@ export const ISSUE48_QUOTA_PRODUCTION_BINDING: Issue48QuotaRecoveryBindingV1 = {
     "review-receipt:2e4e595978d5ca887abcad4a31b0ac94ea7d548227792f85b0d210078d3c1446",
   ],
   pullRequestNumber: 51,
-  pullRequestHead: "65aaa810cd55cde4a49e4613c3edeb013128eed4" as GitSha,
-  pullRequestBase: "b9a12ebd93d62869bddc490b3ade7ab77751ad10" as GitSha,
+  pullRequestHead: "cd73f2c62ace27c28d959cd61bb9dd1e33d688c1" as GitSha,
+  pullRequestBase: "0b2f389610f7cb254f335e227eb29c12e7c11960" as GitSha,
   repository: ISSUE48_QUOTA_REPOSITORY,
   runtimeId: "ubiquity/sentinel:0:production",
-  runtimeRevision: "3f500514f464c7c1ae66cc02bfe6fc4963387d04" as GitSha,
-  runtimeGeneration: 11,
+  runtimeRevision: "664a52ddeb4f23eafa58a32e8394754f3303f0c4" as GitSha,
+  runtimeGeneration: 13,
 };
 
 export interface Issue48QuotaRecoveryDepsV1 {
