@@ -11,6 +11,48 @@ status, acceptance and write ownership here.
 
 ### Current checkpoint
 
+**Live: the deadlock is broken and the runtime is recovering issue 48 on its own.**
+The fix below was activated by the owner's 2026-09-17 decision and is proven in
+production, not just in tests:
+
+- Generation 8 (`fd5902a8…`, owner-install record `22871615c6af4d29c7c6230aa22311330d34b32`,
+  applied 01:32:23Z by the protected prepare job) moved the hosted pointer and
+  the health-gap path started an ordinary execution at it; that execution
+  (run `35170923472`, revision `fd5902a8…`, outcome healthy) immediately
+  observed PR 51's terminal no-verdict review, detected the moved base, and
+  persisted a base-refresh intent instead of spending a review on a stale
+  candidate.
+- That exposed a second, separate hole: the review freshness gate creates the
+  refresh intent while the record is at `review`, and only the work and delivery
+  steps reconciled such an intent, so the record deferred on its own gate
+  forever. Fixed (`87193550…`, "reconcile a pending base refresh at the review
+  step", regression test fails before and passes after), activated as generation
+  9 (`9fefc45c…` dev head, owner-install applied 02:06:53Z).
+- Generation 9 then completed the refresh for real: PR 51's head advanced to
+  `f4678663746a2026e76190d70a3c15786c69705c` on base `9fefc45c…`, the loop
+  persisted a review-request intent and requested **review round 3 under its own
+  attempt identity** `review:51:f4678663…:attempt-3` (reservation purpose
+  `review_request`, `wait.review_pending`, `reviewRounds` 3). The previously
+  eternal pending poll is over.
+- The round-3 attempt then produced no verdict again (review `5230258721`, ready
+  journal, `execution null`) — and for the first time the durable disposition
+  carries the producer's own bounded static reason instead of the generic
+  sentence: "structured review unavailable: a command execution item was
+  malformed or contradictory" (`src/github/codex-reviewer.ts`, the read-only
+  command-item evidence check). That is the reason-preservation change working
+  in production; the failure is a producer/app-server evidence refusal during the
+  turn, not a candidate defect, and it consumed the third review round.
+- Consequence, recorded before any further write: with three rounds consumed the
+  new guard will block `issue-ubiquity-sentinel-48` with kind `review_quota` and
+  the observed reason on the next ordinary execution (fail-closed, never a
+  merge). Two of those three rounds were infrastructure failures (a cancelled
+  execution on 09-16, this app-server evidence refusal), not substantive
+  findings. Continuing to a further bounded attempt for this exact issue is the
+  owner's standing direction of 2026-09-17 ("let the bot finish issue 48") and is
+  recorded here as an explicit bound: one bounded recovery of the blocked item,
+  every charge, counter, receipt, candidate and historical record preserved, no
+  allowance reset and no merge without a completed current-head verdict.
+
 **The self-repair review-gate contradiction is resolved: it is not a gate
 contradiction at all, and no gate was weakened.** The owner's 2026-09-16 update
 removes DEVELOPMENT pull requests and Codex reviews ("Make the scoped change,
