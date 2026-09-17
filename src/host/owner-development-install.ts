@@ -138,7 +138,7 @@ export const OWNER_DEVELOPMENT_INSTALL_HISTORY_GENERATION = 14;
  * reservation; its install also triggers an immediate health-gap execution.
  */
 export const OWNER_DEVELOPMENT_INSTALL_RECEIPT_REVISION =
-  "4d8f84d0eb8c68d922378f85e3b20220a2709954" as GitSha;
+  "3b78061f0cab84a85af1f4a84dadbb80ce5a2a14" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_RECEIPT_GENERATION = 15;
 
 const API_BASE = "https://api.github.com";
