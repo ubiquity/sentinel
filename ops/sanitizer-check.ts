@@ -128,6 +128,20 @@ const CASES: { body: string; expect: "strip" | "keep"; source: string }[] = [
     expect: "keep",
     source: "review round 12 angle-delimited URL",
   },
+  {
+    // The reviewer is explicit: `www.` inside a valid qualified reference must
+    // not split the token, so the keyword is still removed and the reference
+    // preserved.
+    body: "Fixes ubiquity/www.repo#123",
+    expect: "strip",
+    source: "review round 13 qualified reference containing www.",
+  },
+  {
+    // A reference-style definition destination is a URL and must be preserved.
+    body: "[r]: /foo:fixes:#123",
+    expect: "keep",
+    source: "review round 13 reference-style destination",
+  },
 ];
 
 let failures = 0;

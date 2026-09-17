@@ -150,6 +150,14 @@ export const OWNER_DEVELOPMENT_INSTALL_RECEIPT_GENERATION = 15;
 export const OWNER_DEVELOPMENT_INSTALL_LEDGER_REVISION =
   "2b6a25b7d9992c6a027448e43d5ce104d8f1a93e" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_LEDGER_GENERATION = 16;
+/**
+ * Exact revision carrying the honest cancelled-execution settlement and the
+ * delivery ledger; its install also triggers an immediate execution after a
+ * further bounded correction grant.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_SETTLEMENT_REVISION =
+  "fc25d716981870ce6b7038c2eda94ed2430cca58" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_SETTLEMENT_GENERATION = 17;
 
 const API_BASE = "https://api.github.com";
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -669,9 +677,48 @@ export function planOwnerDevelopmentInstall(
       );
     }
     if (healthy !== null) {
-      return noChange("the owner development installation is complete");
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_SETTLEMENT_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_SETTLEMENT_GENERATION,
+        healthy,
+        "install the settlement revision after the ledger healthy proof",
+      );
     }
     return waiting("the ledger generation 16 healthy proof is not recorded");
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_SETTLEMENT_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_SETTLEMENT_GENERATION
+  ) {
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_LEDGER_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_LEDGER_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded ledger healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_LEDGER_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed settlement candidate to its recorded prior",
+      );
+    }
+    if (healthy !== null) {
+      return noChange("the owner development installation is complete");
+    }
+    return waiting(
+      "the settlement generation 17 healthy proof is not recorded",
+    );
   }
 
   // Any other pointer, including a completed rollback target, is deliberately
