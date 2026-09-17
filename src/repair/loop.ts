@@ -4303,12 +4303,7 @@ async function applyObservedReview(
       // may report several findings at one severity; passing duplicates makes
       // the strict receipt parser reject an otherwise valid result.
       unresolvedSeverities: deriveUnresolvedSeverities(value.findings),
-      submittedAt: reviewSubmittedAt(
-        context.snapshot,
-        record,
-        value.completedAt,
-        now,
-      ),
+      submittedAt: reviewSubmittedAt(record, value.completedAt, now),
       completedAt: value.completedAt,
       observedAt: value.receivedAt,
     });
@@ -5672,35 +5667,26 @@ function reviewWaitSince(record: WorkRecordV1, fallback: number): number {
 }
 
 /**
- * Exact submission instant of the review attempt being observed.
+ * Submission instant recorded on one settled review receipt.
  *
- * The durable review-request reservation of THIS round is the authoritative
- * record of when the review was submitted; a record whose wait was cleared (a
- * bounded recovery, a re-arm after a settled observation) has no wait left to
- * quote, and deriving the instant from "now" makes the strict receipt parser
- * refuse a completion that predates it — the observation is then silently
- * re-armed forever. The reservation is therefore preferred, and only its
- * absence falls back to the bounded wait/updatedAt derivation capped at the
- * observed completion so the receipt can never invert.
+ * The loop normally knows the transport's OWN reported submission instant from
+ * the pending wait, and that exact value is preserved. A bounded recovery can
+ * clear the wait, however, and the record's remaining instants then POST-DATE a
+ * completion that already happened; the strict receipt parser refuses such an
+ * inversion (live deadlock: the round-10 review was re-armed forever and never
+ * recorded). The derived instant is therefore capped at the observed completion,
+ * so the receipt can never invert while the transport's own value stands
+ * whenever it is still available.
  */
 function reviewSubmittedAt(
-  snapshot: RepairStateSnapshotV1,
   record: WorkRecordV1,
   observedCompletedAt: number | null,
   fallback: number,
 ): number {
-  const round = record.counters.reviewRounds;
-  const reservation = snapshot.reservations.find((item) =>
-    item.taskId === record.id &&
-    item.purpose === "review_request" &&
-    item.attempt === round
-  );
-  const base = reservation === undefined
-    ? reviewWaitSince(record, fallback)
-    : reservation.createdAt;
+  const derived = reviewWaitSince(record, fallback);
   return observedCompletedAt === null
-    ? base
-    : Math.min(base, observedCompletedAt);
+    ? derived
+    : Math.min(derived, observedCompletedAt);
 }
 
 function mergeEvidence(
