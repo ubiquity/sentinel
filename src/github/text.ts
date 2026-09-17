@@ -8,7 +8,8 @@
  * while the rest of the text stays byte-identical.
  */
 
-const URL_TOKEN_RE = /(?:(?:https?|ftp):\/\/|www\.)[^\s<>"'`]+/giu;
+const URL_START_RE = /(?:(?:https?|ftp):\/\/|www\.)/giu;
+const URL_DELIMITER_RE = /[\s<>"'`]/u;
 
 const AUTO_CLOSE_KEYWORD_RE =
   /(?<![\w./?&=/-])(?:fix|fixes|fixed|close|closes|closed|resolve|resolves|resolved)(?![\w-])(?:\s+:\s*|\s+|:\s*)(?=(?:[\w-]+\/[\w.-]+)?#\d+\b)/giu;
@@ -17,14 +18,32 @@ function sanitizeNonUrlText(text: string): string {
   return text.replace(AUTO_CLOSE_KEYWORD_RE, "");
 }
 
+/** Find a URL's end without consuming a Markdown closing parenthesis. */
+function findUrlEnd(text: string, start: number): number {
+  let parentheses = 0;
+  for (let cursor = start; cursor < text.length; cursor++) {
+    const character = text[cursor];
+    if (URL_DELIMITER_RE.test(character)) return cursor;
+    if (character === "(") {
+      parentheses++;
+    } else if (character === ")") {
+      if (parentheses === 0) return cursor;
+      parentheses--;
+    }
+  }
+  return text.length;
+}
+
 export function sanitizeAutoCloseKeywords(body: string): string {
   let sanitized = "";
   let cursor = 0;
-  for (const match of body.matchAll(URL_TOKEN_RE)) {
+  for (const match of body.matchAll(URL_START_RE)) {
     const start = match.index ?? 0;
+    if (start < cursor) continue;
+    const end = findUrlEnd(body, start);
     sanitized += sanitizeNonUrlText(body.slice(cursor, start));
-    sanitized += match[0];
-    cursor = start + match[0].length;
+    sanitized += body.slice(start, end);
+    cursor = end;
   }
   return sanitized + sanitizeNonUrlText(body.slice(cursor));
 }
