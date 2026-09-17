@@ -486,7 +486,9 @@ Deno.test(
       assert.ok(after.ok && after.value.status === "found");
       if (!after.ok || after.value.status !== "found") return;
       const recovered = after.value.snapshot.work[0]!;
-      assert.equal(recovered.nextStep, "work");
+      // An unobserved review step is preserved so the runtime records the
+      // latest finding before it corrects; the wait and blocker are cleared.
+      assert.equal(recovered.nextStep, "review");
       assert.equal(recovered.wait, null, "the wait is cleared with the block");
       assert.deepEqual(after.value.snapshot.work[0]!.counters, {
         attempts: rig.binding.counters.attempts - 1,
@@ -557,7 +559,7 @@ Deno.test(
       },
       {
         name: "granted-budget-outside-the-closed-set",
-        binding: { grantedImplementationAttempts: 2 as unknown as 0 | 1 },
+        binding: { grantedImplementationAttempts: 4 as unknown as 0 | 1 },
         expected: "target_precondition_mismatch",
       },
       {

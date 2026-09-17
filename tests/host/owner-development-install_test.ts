@@ -33,6 +33,7 @@ import {
   buildOwnerDevelopmentInstallSnapshot,
   OWNER_DEVELOPMENT_INSTALL_AGGREGATE_GENERATION,
   OWNER_DEVELOPMENT_INSTALL_AGGREGATE_REVISION,
+  OWNER_DEVELOPMENT_INSTALL_EXIT_CONTRACT_REVISION,
   OWNER_DEVELOPMENT_INSTALL_ORIGINAL_GENERATION,
   OWNER_DEVELOPMENT_INSTALL_ORIGINAL_REVISION,
   OWNER_DEVELOPMENT_INSTALL_READER_GENERATION,
@@ -59,6 +60,7 @@ const AGGREGATE = OWNER_DEVELOPMENT_INSTALL_AGGREGATE_REVISION;
 const RECOVERY = OWNER_DEVELOPMENT_INSTALL_RECOVERY_REVISION;
 const REVIEW_STEP = OWNER_DEVELOPMENT_INSTALL_REVIEW_STEP_REVISION;
 const REVIEWER = OWNER_DEVELOPMENT_INSTALL_REVIEWER_REVISION;
+const EXIT_CONTRACT = OWNER_DEVELOPMENT_INSTALL_EXIT_CONTRACT_REVISION;
 
 function hostedProof(input: {
   runId: number;
@@ -664,22 +666,53 @@ Deno.test(
     if (reviewerPlan.status !== "install") throw new Error("expected install");
     assert.equal(reviewerPlan.move.nextRevision, REVIEWER);
     assert.equal(reviewerPlan.move.nextGeneration, 10);
-    // The reviewer generation is the fixed end of the chain: its own healthy
-    // proof is the completion, and no later movement exists.
+    // The reviewer healthy proof authorizes the exit-contract install.
     const reviewerHealthy = healthyProof(REVIEWER, 10, 79);
+    const exitPlan = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: REVIEWER,
+          generation: 10,
+          healthyProof: reviewerHealthy,
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(exitPlan.status, "install");
+    if (exitPlan.status !== "install") throw new Error("expected install");
+    assert.equal(exitPlan.move.nextRevision, EXIT_CONTRACT);
+    assert.equal(exitPlan.move.nextGeneration, 11);
+    // The exit-contract generation is the fixed end of the chain: its own
+    // healthy proof is the completion, and no later movement exists.
+    const exitHealthy = healthyProof(EXIT_CONTRACT, 11, 81);
     assert.equal(
       planOwnerDevelopmentInstall(
         releaseSnapshot({
           runtime: runtimeRecord({
-            revision: REVIEWER,
-            generation: 10,
-            healthyProof: reviewerHealthy,
+            revision: EXIT_CONTRACT,
+            generation: 11,
+            healthyProof: exitHealthy,
           }),
         }),
         NOW,
       ).status,
       "no_change",
     );
+    const exitFailed = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: EXIT_CONTRACT,
+          generation: 11,
+          healthyProof: reviewerHealthy,
+          executionProof: failedProof(EXIT_CONTRACT, 11, 82),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(exitFailed.status, "rollback");
+    if (exitFailed.status !== "rollback") throw new Error("expected rollback");
+    assert.equal(exitFailed.move.nextRevision, REVIEWER);
+    assert.equal(exitFailed.move.nextGeneration, 12);
     // A failed reviewer candidate rolls back once to the exact review-step
     // revision, authorized by its recorded healthy proof.
     const reviewerFailed = planOwnerDevelopmentInstall(

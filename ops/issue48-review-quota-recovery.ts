@@ -120,13 +120,14 @@ export interface Issue48QuotaRecoveryBindingV1 {
   /** Exact consumed counters; any drift refuses the transition. */
   counters: { attempts: number; retries: number; reviewRounds: number };
   /**
-   * Implementation attempts this one-shot may grant back: exactly the reviewer
-   * -mandated correction the exhausted budget would otherwise refuse. It is a
-   * closed 0-or-1 value, never a budget reset: the counters are decremented by
-   * this exact amount once, every charge and reservation is preserved and the
-   * task's other budget stays untouched.
+   * Implementation attempts this one-shot may grant back. The shared budget
+   * derives a reservation identity from (task, base, attempt, purpose), so the
+   * value is exactly the number of counter units that makes the next admission
+   * an UNUSED identity at the record's current base — never a general budget
+   * reset. It is a closed 0..3 value, applied once, with every charge and
+   * reservation preserved and the rest of the budget untouched.
    */
-  grantedImplementationAttempts: 0 | 1;
+  grantedImplementationAttempts: 0 | 1 | 2 | 3;
   /** Exact accepted review receipt ref that must be retained. */
   evidenceRef: string;
   /** Exact review receipt ids that must survive; a missing one refuses. */
@@ -143,28 +144,28 @@ export interface Issue48QuotaRecoveryBindingV1 {
 }
 
 /**
- * Reviewed production pins, read from the live state on 2026-09-17 08:20Z:
- * review round 6's P2 finding requires one bounded correction, the granted
- * attempt ended without a trusted candidate, and the retry was refused because
- * the settled attempt already owns this (task, base, attempt, purpose)
- * reservation identity. The base advance is what makes the next attempt a new
- * identity; no counter is given back.
+ * Reviewed production pins, read from the live state on 2026-09-17 11:00Z:
+ * review round 8's P2 finding requires one more bounded correction, the record
+ * is still at its unobserved `review` step so that finding is recorded before
+ * the correction, and the grant is the exact number of counter units (4 -> 2)
+ * that makes the next admission (task/base/attempt 3) an UNUSED reservation
+ * identity at this base.
  * The repair ref head is deliberately NOT pinned: it moves on every runtime
  * cycle, so the expected-head CAS plus the exact work-item preconditions and
  * the full readback are what authorize the single write.
  */
 export const ISSUE48_QUOTA_PRODUCTION_BINDING: Issue48QuotaRecoveryBindingV1 = {
   targetId: "issue-ubiquity-sentinel-48" as WorkItemId,
-  counters: { attempts: 3, retries: 0, reviewRounds: 6 },
-  grantedImplementationAttempts: 1,
+  counters: { attempts: 4, retries: 0, reviewRounds: 8 },
+  grantedImplementationAttempts: 2,
   evidenceRef:
     "artifact:review-receipt/review-receipt:2e4e595978d5ca887abcad4a31b0ac94ea7d548227792f85b0d210078d3c1446",
   reviewIds: [
     "review-receipt:2e4e595978d5ca887abcad4a31b0ac94ea7d548227792f85b0d210078d3c1446",
   ],
   pullRequestNumber: 51,
-  pullRequestHead: "430b9760e98d88d8e50b02c50a084300122335ba" as GitSha,
-  pullRequestBase: "3dfb3402c8a5155d6d9f023c72aaa52cf2b801e2" as GitSha,
+  pullRequestHead: "65aaa810cd55cde4a49e4613c3edeb013128eed4" as GitSha,
+  pullRequestBase: "b9a12ebd93d62869bddc490b3ade7ab77751ad10" as GitSha,
   repository: ISSUE48_QUOTA_REPOSITORY,
   runtimeId: "ubiquity/sentinel:0:production",
   runtimeRevision: "80384fc3668c246297621aa1c588c0e49ea516c6" as GitSha,
@@ -332,10 +333,11 @@ export function targetPreconditionHolds(
 }
 
 /**
- * Clone the complete snapshot and change ONLY the target work fields — next
- * step, wait, blocker, intent and, when the binding grants exactly one
- * implementation attempt, that single counter decrement — plus the snapshot
- * metadata. Evidence, reviews, reservations, targets, blocker history and every
+ * Clone the complete snapshot and change ONLY the target work fields — an
+ * unobserved `review` step is PRESERVED so the runtime records the latest
+ * finding before it corrects, a blocked step returns to `work`, and the wait,
+ * blocker, intent and the granted counter decrement are applied — plus the
+ * snapshot metadata. Evidence, reviews, reservations, targets, blocker history and every
  * other record survive by reference.
  */
 export function buildNextQuotaSnapshot(
@@ -343,13 +345,15 @@ export function buildNextQuotaSnapshot(
   targetId: WorkItemId,
   observedHead: GitSha,
   now: number,
-  grantedImplementationAttempts: 0 | 1 = 0,
+  grantedImplementationAttempts: 0 | 1 | 2 | 3 = 0,
 ): RepairStateSnapshotV1 {
   const work = prior.work.map((record) =>
     record.id === targetId
       ? {
         ...record,
-        nextStep: "work" as const,
+        nextStep: record.nextStep === "review"
+          ? ("review" as const)
+          : ("work" as const),
         wait: null,
         blocker: null,
         intent: null,
