@@ -1414,25 +1414,29 @@ export function composeLocalGitHub(input: LocalGitHubInputV1): GitHubPort {
 }
 
 /**
- * Exact local coding-task opt-in. GitHub's repository bot removes the old
- * admission labels within seconds, so labels have no role: eligibility is this
- * exact standalone first line of the issue body, terminated by LF, CRLF, or
- * the end of the body.
+ * Explicit local coding-task opt-OUT. Every open issue is repaired by default;
+ * an issue is excluded only when its body's first line is exactly this
+ * standalone marker, or when it carries the matching label (honoured wherever
+ * the repository bot has not removed it yet).
  */
-const LOCAL_REPAIR_MARKER = "<!-- sentinel:repair -->";
+const LOCAL_SKIP_MARKER = "<!-- sentinel:skip -->";
+const LOCAL_SKIP_LABEL = "sentinel:skip";
 
 /**
- * Restrict the privately-owned concrete local port to actual coding tasks.
+ * Scope the privately-owned concrete local port to the issues this deployment
+ * may repair.
  *
  * Only `listOpenIssues` and `readIssue` are replaced, and both originals are
  * bound to this exact port before replacement, so every other method keeps
- * the class instance and its `this` binding. An issue is in scope only when
- * its body opts in with the exact standalone first line
- * `<!-- sentinel:repair -->`; labels play no part because the repository bot
- * removes them. Errors pass through unchanged; an ineligible or absent read
- * passes through as `null`, preserving the existing pre-admission wait gate.
- * The loop re-reads the source issue before every admission, so a queued
- * issue that loses eligibility cannot consume budget.
+ * the class instance and its `this` binding. EVERY open issue is in scope:
+ * nothing is silently filtered out, and an issue is excluded only by an
+ * explicit opt-out — the exact standalone first line `<!-- sentinel:skip -->`
+ * or the `sentinel:skip` label. The historical `<!-- sentinel:repair -->`
+ * opt-in marker is still accepted and is simply no longer required. Errors
+ * pass through unchanged; an excluded or absent read passes through as `null`,
+ * preserving the existing pre-admission wait gate. The loop re-reads the
+ * source issue before every admission, so a queued issue that gains the
+ * opt-out cannot consume budget.
  */
 export function scopeLocalRepairIssues(port: GitHubPort): GitHubPort {
   const listOpenIssues = port.listOpenIssues.bind(port);
@@ -1452,15 +1456,19 @@ export function scopeLocalRepairIssues(port: GitHubPort): GitHubPort {
 }
 
 /**
- * Exact first-line opt-in admission. The marker must be the whole first line
- * with no leading whitespace, quoting or fencing, followed by LF, CRLF or the
- * end of the body. A marker later in prose, a longer suffix and a partial
- * match are refused; labels never admit or refuse.
+ * Default admission with an explicit opt-out. The skip marker must be the whole
+ * first line with no leading whitespace, quoting or fencing, followed by LF,
+ * CRLF or the end of the body; the skip label is honoured according to
+ * GitHub's own case-insensitive label identity. Anything else is in scope, and
+ * the historical `<!-- sentinel:repair -->` marker changes nothing.
  */
 function isLocalRepairIssue(issue: GitHubIssueV1): boolean {
-  if (!issue.body.startsWith(LOCAL_REPAIR_MARKER)) return false;
-  const rest = issue.body.slice(LOCAL_REPAIR_MARKER.length);
-  return rest === "" || rest.startsWith("\n") || rest.startsWith("\r\n");
+  if (issue.labels.some((label) => label.toLowerCase() === LOCAL_SKIP_LABEL)) {
+    return false;
+  }
+  if (!issue.body.startsWith(LOCAL_SKIP_MARKER)) return true;
+  const rest = issue.body.slice(LOCAL_SKIP_MARKER.length);
+  return !(rest === "" || rest.startsWith("\n") || rest.startsWith("\r\n"));
 }
 
 /** Scoped Basic auth for trusted git only; never in a URL or config file. */
