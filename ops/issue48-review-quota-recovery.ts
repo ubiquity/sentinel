@@ -83,12 +83,28 @@ export const ISSUE48_QUOTA_WORKFLOW_REF =
 export const ISSUE48_QUOTA_BLOCKER_PREFIX =
   "review rounds exhausted without an accepted verdict";
 
+/**
+ * Exact prefix of the second blocker this one-shot may clear: the runtime's
+ * exhausted implementation-attempt budget, which is what refuses the one
+ * bounded correction a completed reviewer finding requires.
+ */
+export const ISSUE48_QUOTA_BUDGET_BLOCKER_PREFIX =
+  "implementation attempt budget exhausted";
+
 /** Fixed production binding of the reviewed one-shot recovery. */
 export interface Issue48QuotaRecoveryBindingV1 {
   /** Exact target work item id. */
   targetId: WorkItemId;
   /** Exact consumed counters; any drift refuses the transition. */
   counters: { attempts: number; retries: number; reviewRounds: number };
+  /**
+   * Implementation attempts this one-shot may grant back: exactly the reviewer
+   * -mandated correction the exhausted budget would otherwise refuse. It is a
+   * closed 0-or-1 value, never a budget reset: the counters are decremented by
+   * this exact amount once, every charge and reservation is preserved and the
+   * task's other budget stays untouched.
+   */
+  grantedImplementationAttempts: 0 | 1;
   /** Exact accepted review receipt ref that must be retained. */
   evidenceRef: string;
   /** Exact review receipt ids that must survive; a missing one refuses. */
@@ -105,23 +121,25 @@ export interface Issue48QuotaRecoveryBindingV1 {
 }
 
 /**
- * Reviewed production pins, read from the live state on 2026-09-17 04:30Z (the
- * post-refresh head and base of review round 4).
+ * Reviewed production pins, read from the live state on 2026-09-17 05:10Z (the
+ * head and base of review round 5, whose completed P2 finding requires one
+ * bounded correction the exhausted implementation budget would refuse).
  * The repair ref head is deliberately NOT pinned: it moves on every runtime
  * cycle, so the expected-head CAS plus the exact work-item preconditions and
  * the full readback are what authorize the single write.
  */
 export const ISSUE48_QUOTA_PRODUCTION_BINDING: Issue48QuotaRecoveryBindingV1 = {
   targetId: "issue-ubiquity-sentinel-48" as WorkItemId,
-  counters: { attempts: 4, retries: 0, reviewRounds: 4 },
+  counters: { attempts: 4, retries: 0, reviewRounds: 5 },
+  grantedImplementationAttempts: 1,
   evidenceRef:
     "artifact:review-receipt/review-receipt:2e4e595978d5ca887abcad4a31b0ac94ea7d548227792f85b0d210078d3c1446",
   reviewIds: [
     "review-receipt:2e4e595978d5ca887abcad4a31b0ac94ea7d548227792f85b0d210078d3c1446",
   ],
   pullRequestNumber: 51,
-  pullRequestHead: "956879153ddfdddb2bb1e826f1ab552284afd546" as GitSha,
-  pullRequestBase: "bd558bae583d3a7fcc352a1fa312c36b95e48a4b" as GitSha,
+  pullRequestHead: "ae6ff044280a04803958fcd1f6f9304bb894249e" as GitSha,
+  pullRequestBase: "f1b5a86b80ca4759ab37307484b223907bd1b1d6" as GitSha,
   repository: ISSUE48_QUOTA_REPOSITORY,
   runtimeId: "ubiquity/sentinel:0:production",
   runtimeRevision: "87193550640078f190ab94d7f8ca0f00bbef9124" as GitSha,
@@ -248,23 +266,33 @@ export function targetPreconditionHolds(
   if (!record.evidence.some((ref) => ref.ref === binding.evidenceRef)) {
     return false;
   }
+  if (
+    binding.grantedImplementationAttempts !== 0 &&
+    binding.grantedImplementationAttempts !== 1
+  ) {
+    return false;
+  }
   if (record.nextStep === "review") return true;
   if (record.nextStep !== "blocked") return false;
   const blocker = record.blocker;
-  return blocker !== null && blocker.kind === "review_quota" &&
-    blocker.message.startsWith(ISSUE48_QUOTA_BLOCKER_PREFIX);
+  if (blocker === null || blocker.kind !== "review_quota") return false;
+  return blocker.message.startsWith(ISSUE48_QUOTA_BLOCKER_PREFIX) ||
+    blocker.message.startsWith(ISSUE48_QUOTA_BUDGET_BLOCKER_PREFIX);
 }
 
 /**
- * Clone the complete snapshot and change ONLY the four target work fields plus
- * the snapshot metadata. Counters, evidence, reviews, reservations, targets,
- * blockers history and every other record survive by reference.
+ * Clone the complete snapshot and change ONLY the target work fields — next
+ * step, wait, blocker, intent and, when the binding grants exactly one
+ * implementation attempt, that single counter decrement — plus the snapshot
+ * metadata. Evidence, reviews, reservations, targets, blocker history and every
+ * other record survive by reference.
  */
 export function buildNextQuotaSnapshot(
   prior: RepairStateSnapshotV1,
   targetId: WorkItemId,
   observedHead: GitSha,
   now: number,
+  grantedImplementationAttempts: 0 | 1 = 0,
 ): RepairStateSnapshotV1 {
   const work = prior.work.map((record) =>
     record.id === targetId
@@ -274,6 +302,10 @@ export function buildNextQuotaSnapshot(
         wait: null,
         blocker: null,
         intent: null,
+        counters: grantedImplementationAttempts === 0 ? record.counters : {
+          ...record.counters,
+          attempts: record.counters.attempts - grantedImplementationAttempts,
+        },
         updatedAt: now,
       }
       : record
@@ -419,6 +451,7 @@ export async function runIssue48QuotaRecovery(
       binding.targetId,
       observedHead,
       now,
+      binding.grantedImplementationAttempts,
     );
     parseRepairStateSnapshotV1(next);
   } catch {
