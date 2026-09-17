@@ -241,6 +241,25 @@ export class FakeGithub implements GitHubPort {
   reviewObservations: ReviewObservationV1 | null = null;
   reviewStatus: "pending" | "completed" | "unavailable" = "pending";
   completedReviewAt: number | null = null;
+  /**
+   * Opt-in exact per-operation observations. A key present here answers for
+   * that exact review operation; every other key keeps the blanket behavior.
+   */
+  readonly reviewObservationsByKey = new Map<string, ReviewObservationV1>();
+  /**
+   * Opt-in operation keys with NO bound durable record at all. The transport's
+   * unbound receipt is reproduced exactly: `unavailable` with no journal base,
+   * no terminal instant and no reviewer.
+   */
+  readonly unboundReviewKeys = new Set<string>();
+  /** Every review operation key observed, in call order. */
+  readonly observedReviewKeys: string[] = [];
+  /** Every review request identity submitted, in call order. */
+  readonly reviewRequests: {
+    operationKey: string;
+    prNumber: number;
+    expectedHead: string;
+  }[] = [];
   prNumber = 7;
   releasedHead: GitSha | null = null;
   private readonly options: FakeGithubOptionsV1;
@@ -531,7 +550,7 @@ export class FakeGithub implements GitHubPort {
     return Promise.resolve(portOk({ outcome: "applied", number, head }));
   }
 
-  requestReview(_request: unknown): Promise<
+  requestReview(request: unknown): Promise<
     PortResultV1<{
       outcome: "applied" | "ambiguous";
       requestId: string | null;
@@ -539,6 +558,20 @@ export class FakeGithub implements GitHubPort {
     }>
   > {
     this.calls.push("requestReview");
+    const identity = request as {
+      operationKey?: unknown;
+      prNumber?: unknown;
+      expectedHead?: unknown;
+    };
+    this.reviewRequests.push({
+      operationKey: typeof identity.operationKey === "string"
+        ? identity.operationKey
+        : "",
+      prNumber: typeof identity.prNumber === "number" ? identity.prNumber : 0,
+      expectedHead: typeof identity.expectedHead === "string"
+        ? identity.expectedHead
+        : "",
+    });
     if (this.options.reviewRequestFailNext) {
       this.options.reviewRequestFailNext = false;
       return Promise.resolve(
@@ -566,8 +599,29 @@ export class FakeGithub implements GitHubPort {
     return Promise.resolve(this.drainResult);
   }
 
-  observeReview(_request: unknown): Promise<PortResultV1<ReviewObservationV1>> {
+  observeReview(request: unknown): Promise<PortResultV1<ReviewObservationV1>> {
     this.calls.push("observeReview");
+    const operationKey =
+      typeof (request as { operationKey?: unknown }).operationKey === "string"
+        ? (request as { operationKey: string }).operationKey
+        : "";
+    this.observedReviewKeys.push(operationKey);
+    if (this.unboundReviewKeys.has(operationKey)) {
+      return Promise.resolve(portOk({
+        status: "unavailable",
+        requestId: "review-req-unbound",
+        reviewer: null,
+        resultId: null,
+        completedAt: null,
+        observedHead: this.releasedHead,
+        observedBase: null,
+        findings: [],
+        summary: "head binding mismatch",
+        receivedAt: T0,
+      }));
+    }
+    const exact = this.reviewObservationsByKey.get(operationKey);
+    if (exact !== undefined) return Promise.resolve(portOk(exact));
     if (this.options.reviewUnavailable) {
       return Promise.resolve(
         portError("unavailable", "review transport failure"),

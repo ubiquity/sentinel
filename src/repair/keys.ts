@@ -67,12 +67,23 @@ export function pullRequestIntentKey(head: GitSha): string {
   return `pull_request:${head}`;
 }
 
-/** Operation key for one review request: one pending request per PR/head. */
+/**
+ * Operation key for one review request of one exact head.
+ *
+ * The first attempt keeps the original PR/head identity, so every review
+ * requested before attempt identities existed stays exactly addressable. A
+ * later attempt for the SAME head (a bounded re-attempt after an attempt
+ * concluded without an accepted verdict) is a distinct durable operation, so
+ * it carries its round explicitly; the transport binds by this exact key and
+ * one attempt can never be mistaken for another.
+ */
 export function reviewOperationKey(
   pullRequestNumber: number,
   head: GitSha,
+  attempt = 1,
 ): string {
-  return `review:${pullRequestNumber}:${head}`;
+  const base = `review:${pullRequestNumber}:${head}`;
+  return attempt <= 1 ? base : `${base}:attempt-${attempt}`;
 }
 
 /** Operation key for one exact-identity merge. */

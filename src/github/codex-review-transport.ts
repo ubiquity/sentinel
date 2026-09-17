@@ -133,6 +133,27 @@ const DETAIL_READ = "review transport: review read failed";
 /** Static sanitized summary of a standing unavailable disposition. */
 const UNAVAILABLE_SUMMARY =
   "structured review unavailable: the review did not produce a validated result";
+/** Static reason persisted when a validated result cannot fit the journal. */
+const DETAIL_RESULT_BOUND =
+  "structured review unavailable: the validated result exceeded the durable journal bound";
+/**
+ * Hard bound of one persisted no-verdict reason. Every accepted reason is a
+ * short single-line printable-ASCII static review detail; anything else (raw
+ * error text, provider output, a stack, a multi-line message) is refused and
+ * replaced by the generic sentence, so the durable journal can never carry
+ * unfiltered content.
+ */
+export const MAX_UNAVAILABLE_REASON_CHARS = 256;
+
+/** Persisted summary of one no-verdict disposition; never raw content. */
+export function staticUnavailableSummary(reason: unknown): string {
+  if (typeof reason !== "string") return UNAVAILABLE_SUMMARY;
+  if (reason.length === 0 || reason.length > MAX_UNAVAILABLE_REASON_CHARS) {
+    return UNAVAILABLE_SUMMARY;
+  }
+  if (!/^[\x20-\x7e]+$/.test(reason)) return UNAVAILABLE_SUMMARY;
+  return reason;
+}
 
 /** Exactly-one binding of one publisher record during reconciliation. */
 type BoundRecordV1 =
@@ -692,11 +713,23 @@ export class GitHubCodexReviewTransport implements ReviewServiceTransportV1 {
           op.fault = DETAIL_FAILURE;
           return;
         }
-        await this.publishDisposition(op, null);
+        // A settled start failure keeps its own bounded static reason in the
+        // durable disposition; a thrown start has none to keep.
+        await this.publishDisposition(
+          op,
+          null,
+          startFailed || started === null || started.ok
+            ? null
+            : started.error.detail,
+        );
         return;
       }
       const final = finalizeReviewCompletion(started, close);
-      await this.publishDisposition(op, final.ok ? final.value : null);
+      await this.publishDisposition(
+        op,
+        final.ok ? final.value : null,
+        final.ok ? null : final.error.detail,
+      );
     })();
     return run.catch(() => {
       op.fault ??= DETAIL_FAILURE;
@@ -713,6 +746,8 @@ export class GitHubCodexReviewTransport implements ReviewServiceTransportV1 {
   private async publishDisposition(
     op: OwnedReviewV1,
     outcome: StructuredReviewOutcomeV1 | null,
+    /** Static sanitized reason of the refusing precondition, when known. */
+    reason: string | null = null,
   ): Promise<void> {
     const reviewId = op.reviewId;
     if (reviewId === null) {
@@ -728,6 +763,12 @@ export class GitHubCodexReviewTransport implements ReviewServiceTransportV1 {
     const completedAt = this.clock.now();
     const result = outcome === null ? null : outcome.result;
     const execution = outcome === null ? null : outcome.execution;
+    // The refusing precondition of an unavailable outcome is its own bounded
+    // static detail; a settled failure that carries none keeps the generic
+    // sentence. Never a raw error, a provider message or child output.
+    const unavailableSummary = staticUnavailableSummary(
+      reason ?? (outcome === null ? null : outcome.detail),
+    );
     let journal: ReviewJournalReadyV1;
     if (
       outcome !== null && outcome.status !== "unavailable" && result !== null &&
@@ -745,7 +786,7 @@ export class GitHubCodexReviewTransport implements ReviewServiceTransportV1 {
     } else {
       const unavailableResult: ReviewResultV1 = {
         verdict: "unavailable",
-        summary: UNAVAILABLE_SUMMARY,
+        summary: unavailableSummary,
         findings: [],
       };
       journal = {
@@ -766,7 +807,7 @@ export class GitHubCodexReviewTransport implements ReviewServiceTransportV1 {
     if (body === null) {
       const unavailableResult: ReviewResultV1 = {
         verdict: "unavailable",
-        summary: UNAVAILABLE_SUMMARY,
+        summary: staticUnavailableSummary(DETAIL_RESULT_BOUND),
         findings: [],
       };
       journal = {

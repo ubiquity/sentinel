@@ -19,6 +19,7 @@ import {
   GitHubCodexReviewTransport,
   type GitReviewSnapshotCaptureV1,
   REVIEW_TRANSPORT_TOTAL_MS,
+  staticUnavailableSummary,
 } from "../../src/github/codex-review-transport.ts";
 import {
   isJournalBoundExceeded,
@@ -1235,6 +1236,87 @@ Deno.test(
       assert.equal(read.value.status, "unavailable");
       assert.equal(read.value.terminalTurnSucceeded, false);
     }
+  },
+);
+
+Deno.test(
+  "transport: a settled start refusal keeps its own bounded static reason",
+  async () => {
+    // `failStart` rejects the single turn submission AFTER preparation, so the
+    // real producer returns a TYPED start refusal (not a throw) and proves
+    // process settlement. That refusal is the only evidence that distinguishes
+    // "this attempt is over with no verdict" from "nothing concluded yet", so
+    // the durable disposition must carry its exact static detail.
+    const session = new RecordingSession();
+    session.failStart = true;
+    const h = makeHarness({ session });
+    const submitted = await h.transport.submitReview(submission());
+    assert.equal(submitted.ok, true);
+    await settle(h.transport);
+    const review = onlyReview(h.store);
+    const unavailable = await parseReviewJournalBody(review.body ?? "");
+    assert.ok(unavailable.phase === "ready");
+    assert.equal(unavailable.result.verdict, "unavailable");
+    assert.equal(
+      unavailable.result.summary,
+      "structured review unavailable: the single turn submission was not acknowledged",
+    );
+    // The durable disposition is terminal: a fresh host reads the same
+    // bounded static reason and a completed instant, never a pending wait.
+    const read = await h.freshTransport().readReview({
+      operationKey: OP_KEY,
+      requestId: null,
+      prNumber: PR,
+    });
+    assert.equal(read.ok, true);
+    if (read.ok) {
+      assert.equal(read.value.status, "unavailable");
+      assert.equal(
+        read.value.summary,
+        "structured review unavailable: the single turn submission was not acknowledged",
+      );
+      assert.notEqual(read.value.completedAt, null);
+      assert.equal(read.value.expectedBase, BASE);
+    }
+  },
+);
+
+Deno.test(
+  "transport: an unavailable disposition never carries unfiltered text",
+  () => {
+    // Every accepted disposition reason is a short single-line printable-ASCII
+    // static detail; anything else (raw error text, provider output, a stack,
+    // an empty string, a multi-line message) is replaced by the generic
+    // sentence, so the durable journal can never carry unfiltered content.
+    for (
+      const reason of [
+        "",
+        "line one\nline two",
+        "bell \u0007 here",
+        "x".repeat(257),
+        "review transport: \u00e9\u00e8",
+        "review transport: the start was rejected",
+      ]
+    ) {
+      const bounded = staticUnavailableSummary(reason);
+      const accepted = reason.length > 0 && reason.length <= 256 &&
+        /^[\x20-\x7e]+$/.test(reason);
+      assert.equal(
+        bounded,
+        accepted
+          ? reason
+          : "structured review unavailable: the review did not produce a validated result",
+        reason,
+      );
+    }
+    assert.equal(
+      staticUnavailableSummary(null),
+      "structured review unavailable: the review did not produce a validated result",
+    );
+    assert.equal(
+      staticUnavailableSummary(42),
+      "structured review unavailable: the review did not produce a validated result",
+    );
   },
 );
 
