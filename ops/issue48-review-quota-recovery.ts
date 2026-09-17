@@ -45,7 +45,6 @@
  * identity.
  */
 
-import { isGitSha } from "../src/contracts/brands.ts";
 import type { GitSha, WorkItemId } from "../src/contracts/brands.ts";
 import { canonicalStringify } from "../src/contracts/canonical.ts";
 import type { HostedRuntimeRecordV1 } from "../src/contracts/hosted-supervisor.ts";
@@ -67,7 +66,6 @@ import type {
 } from "../src/contracts/state-snapshots.ts";
 import type { WorkRecordV1 } from "../src/contracts/work-record.ts";
 import { githubGitAuthEnv } from "../src/host/local.ts";
-import { portError, portOk } from "../src/contracts/ports.ts";
 import { createRepairStateStore, DenoGitRunner } from "../src/state/mod.ts";
 
 /** The only repository identity this helper accepts. */
@@ -129,15 +127,6 @@ export interface Issue48QuotaRecoveryBindingV1 {
    * task's other budget stays untouched.
    */
   grantedImplementationAttempts: 0 | 1;
-  /**
-   * When true, the recovery also applies the candidate-base advance the
-   * runtime's own refresh performs: it reads the configured base head and sets
-   * the record's base to it, which is what gives the next implementation
-   * reservation a NEW identity after a settled failed attempt. The observed
-   * head must be a valid SHA different from the pinned base; an unreadable head
-   * or an unchanged base refuses.
-   */
-  advanceBaseToObservedHead: boolean;
   /** Exact accepted review receipt ref that must be retained. */
   evidenceRef: string;
   /** Exact review receipt ids that must survive; a missing one refuses. */
@@ -167,8 +156,7 @@ export interface Issue48QuotaRecoveryBindingV1 {
 export const ISSUE48_QUOTA_PRODUCTION_BINDING: Issue48QuotaRecoveryBindingV1 = {
   targetId: "issue-ubiquity-sentinel-48" as WorkItemId,
   counters: { attempts: 3, retries: 0, reviewRounds: 6 },
-  grantedImplementationAttempts: 0,
-  advanceBaseToObservedHead: true,
+  grantedImplementationAttempts: 1,
   evidenceRef:
     "artifact:review-receipt/review-receipt:2e4e595978d5ca887abcad4a31b0ac94ea7d548227792f85b0d210078d3c1446",
   reviewIds: [
@@ -187,14 +175,6 @@ export interface Issue48QuotaRecoveryDepsV1 {
   state: StateReadView & RepairStateWriter;
   clock: { now(): number };
   binding: Issue48QuotaRecoveryBindingV1;
-  /**
-   * Bounded read of the configured base branch head. The runtime's own
-   * candidate-base refresh is what normally advances a record's base; a record
-   * whose implementation reservation identity is already settled needs that
-   * same advance to obtain a NEW identity, so the recoverable transition may
-   * apply it here when the observed head provably differs from the pinned base.
-   */
-  readBaseHead: () => Promise<PortResultV1<GitSha>>;
 }
 
 /** Closed set of static result reasons; never built from raw error text. */
@@ -207,8 +187,6 @@ export type Issue48QuotaRecoveryReasonV1 =
   | "release_read_failed"
   | "runtime_mismatch"
   | "release_not_terminal"
-  | "base_read_failed"
-  | "base_unchanged"
   | "target_missing"
   | "target_precondition_mismatch"
   | "clock_invalid"
@@ -366,8 +344,6 @@ export function buildNextQuotaSnapshot(
   observedHead: GitSha,
   now: number,
   grantedImplementationAttempts: 0 | 1 = 0,
-  /** Observed configured base head, when the refresh advance applies. */
-  baseHead: GitSha | null = null,
 ): RepairStateSnapshotV1 {
   const work = prior.work.map((record) =>
     record.id === targetId
@@ -377,9 +353,6 @@ export function buildNextQuotaSnapshot(
         wait: null,
         blocker: null,
         intent: null,
-        target: baseHead === null
-          ? record.target
-          : { ...record.target, base: baseHead },
         counters: grantedImplementationAttempts === 0 ? record.counters : {
           ...record.counters,
           attempts: record.counters.attempts - grantedImplementationAttempts,
@@ -514,28 +487,6 @@ export async function runIssue48QuotaRecovery(
     }
   }
 
-  // The settled failed implementation left this record's base unchanged, so
-  // its next reservation identity (task/base/attempt/purpose) would collide
-  // with the settled attempt. The runtime's own refresh advances exactly this
-  // value; apply it only when the observed configured base is a DIFFERENT
-  // exact SHA, and refuse when it cannot be observed.
-  let baseHead: GitSha | null = null;
-  if (binding.advanceBaseToObservedHead) {
-    let observedBase: PortResultV1<GitSha>;
-    try {
-      observedBase = await deps.readBaseHead();
-    } catch {
-      return failed("base_read_failed", observedHead);
-    }
-    if (!observedBase.ok || !isGitSha(observedBase.value)) {
-      return failed("base_read_failed", observedHead);
-    }
-    if (observedBase.value === target.target.base) {
-      return failed("base_unchanged", observedHead);
-    }
-    baseHead = observedBase.value;
-  }
-
   const now = deps.clock.now();
   if (
     !Number.isSafeInteger(now) ||
@@ -552,7 +503,6 @@ export async function runIssue48QuotaRecovery(
       observedHead,
       now,
       binding.grantedImplementationAttempts,
-      baseHead,
     );
     parseRepairStateSnapshotV1(next);
   } catch {
@@ -722,64 +672,6 @@ async function readCheckoutFacts(): Promise<
   }
 }
 
-/** Fixed, bounded read of the configured base branch head. */
-const BASE_HEAD_TIMEOUT_MS = 10_000;
-const BASE_HEAD_RESPONSE_LIMIT = 65_536;
-
-export async function readGitHubBaseHead(
-  token: string,
-  transport: typeof fetch = fetch,
-): Promise<PortResultV1<GitSha>> {
-  const url =
-    `https://api.github.com/repos/${ISSUE48_QUOTA_REPOSITORY}/git/ref/heads/development`;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), BASE_HEAD_TIMEOUT_MS);
-  try {
-    let response: Response;
-    try {
-      response = await transport(url, {
-        method: "GET",
-        redirect: "error",
-        signal: controller.signal,
-        headers: {
-          accept: "application/vnd.github+json",
-          authorization: `Bearer ${token}`,
-          "user-agent": "sentinel-issue48-quota-recovery",
-          "x-github-api-version": "2022-11-28",
-        },
-      });
-    } catch {
-      return portError("unavailable", "GitHub base head read failed");
-    }
-    if (!response.ok) {
-      try {
-        await response.body?.cancel();
-      } catch {
-        // Best-effort body release; the static failure below is unaffected.
-      }
-      return portError("unavailable", "GitHub base head read failed");
-    }
-    const text = await response.text();
-    if (text.length > BASE_HEAD_RESPONSE_LIMIT) {
-      return portError("invalid", "GitHub base head response was too large");
-    }
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(text);
-    } catch {
-      return portError("invalid", "GitHub base head response was not JSON");
-    }
-    const record = parsed as { object?: { sha?: unknown } };
-    const sha = record.object?.sha;
-    if (typeof sha !== "string" || !isGitSha(sha)) {
-      return portError("invalid", "GitHub base head identity was malformed");
-    }
-    return portOk(sha);
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
 function report(result: Issue48QuotaRecoveryResultV1): number {
   console.log(JSON.stringify(result));
   return result.status === "failed" ? 1 : 0;
@@ -833,7 +725,6 @@ export async function runIssue48QuotaRecoveryMain(): Promise<number> {
       state,
       clock: { now: () => Date.now() },
       binding: ISSUE48_QUOTA_PRODUCTION_BINDING,
-      readBaseHead: () => readGitHubBaseHead(token),
     });
   } catch {
     result = failed("unexpected_failure");
