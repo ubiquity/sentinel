@@ -93,17 +93,28 @@ preserved: runtime model gpt-5.6-luna/max, the shared durable 120/hour start gat
 with no reset or refund of the original charge, no credential/state/promotion
 authority in any model worker, and no review-gate relaxation.
 
-Remaining boundary, recorded before any live write: the hosted runtime executes
-the PROMOTED pointer (`92f3a87…`, generation 7), so this fix changes repair
-behavior only once the runtime revision carries it. The loop cannot move the
-pointer by itself while it is deadlocked on PR 51, every other work item
-(`61`, `21`) is `blocked` and the loop never retries a blocked record, and the
-M17 owner-install chain is complete and deliberately inert at generation 7
-("the fixed owner development installation is complete"). Activating the fix
-therefore needs an owner-authorized pointer movement (extend the fixed
-owner-development-install chain to the verified revision carrying this fix) or an
-owner-authorized un-block of one work item so the runtime delivers a revision of
-its own. That decision is the next action; no live write was made in this entry.
+Remaining boundary and the owner's decision (2026-09-17): the hosted runtime
+executes the PROMOTED pointer (`92f3a87…`, generation 7), so this fix changes
+repair behavior only once the runtime revision carries it. The loop cannot move
+the pointer by itself while it is deadlocked on PR 51, every other work item
+(`61`, `21`) is `blocked` and the loop never retries a blocked record, no
+eligible `<!-- sentinel:repair -->` issue is open, and the M17 owner-install
+chain is inert at generation 7. Asked whether to install the tested fix and let
+the bot finish issue 48, the owner answered yes on 2026-09-17. The activation is
+therefore the fixed owner-development-install chain extended by one step:
+aggregate generation 7 -> review recovery generation 8
+(`4e8245de734683c7d4bda22a221bb28f52ebcfac`, the CI-verified development
+revision carrying this fix), authorized by the recorded aggregate generation 7
+healthy proof, with the same one-time rollback to that recorded prior and the
+same completion no-op afterwards (`src/host/owner-development-install.ts`, plan
+tests extended). The movement is the existing owner-install record in the state
+commit: it claims no review, release or autonomous receipt, and it changes no
+admission, quota, reviewer or model policy. Once the pointer moves, the
+supervisor's health-gap path starts an ordinary execution at generation 8 and
+the runtime recovers issue 48 through its own reviewed path: one bounded fresh
+review attempt of head `2789ba07…` under its own identity, then the exact-head
+merge, release request, prior/candidate proofs and promotion, whose live
+evidence is recorded here after it settles.
 
 Continuation state, verified facts, next work and local environment traps are in
 `docs/implementation-handoff-2026-09-16.md`. Read it with this register; it is
