@@ -50,6 +50,8 @@ Deno.test("createPullRequest: publishes with source body preserved except close 
     "https://example.test/?x=fixes:#123, and " +
     "https://example.test/foo.fixes:#123 remain unchanged.\n" +
     "Markdown [link](https://example.test)Fixes:#123 remains a reference.\n" +
+    "Relative [link](/foo:fixes:#123) remains unchanged.\n" +
+    "Angle [link](<https://example.test/foo)Fixes:#123>) remains unchanged.\n" +
     "References ubiquity/repo.fixes#123 remain unchanged.\n" +
     "Literal fixes#117 remains unchanged.\n" +
     "Fixes fixed-tools/widget#123 is sanitized without losing its owner.";
@@ -101,6 +103,8 @@ Deno.test("createPullRequest: publishes with source body preserved except close 
       "https://example.test/?x=fixes:#123, and " +
       "https://example.test/foo.fixes:#123 remain unchanged.\n" +
       "Markdown [link](https://example.test)#123 remains a reference.\n" +
+      "Relative [link](/foo:fixes:#123) remains unchanged.\n" +
+      "Angle [link](<https://example.test/foo)Fixes:#123>) remains unchanged.\n" +
       "References ubiquity/repo.fixes#123 remain unchanged.\n" +
       "Literal fixes#117 remains unchanged.\n" +
       "fixed-tools/widget#123 is sanitized without losing its owner.",
