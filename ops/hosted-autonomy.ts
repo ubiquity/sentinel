@@ -318,12 +318,10 @@ export function planHostedRetries(
     const blocker = record.blocker;
     if (blocker === null) continue;
     if (record.counters.retries >= HOSTED_AUTONOMY_MAX_RETRIES) continue;
-    if (
-      !Number.isSafeInteger(now) ||
-      now - blocker.since < HOSTED_AUTONOMY_RETRY_COOLDOWN_MS
-    ) {
-      continue;
-    }
+    if (!Number.isSafeInteger(now)) continue;
+    // The cooldown spaces out same-base retries. A wedged attempt budget is
+    // not a loop: its only remedy is the base refresh below, so it is exempt.
+    const cooled = now - blocker.since >= HOSTED_AUTONOMY_RETRY_COOLDOWN_MS;
     const rule = HOSTED_AUTONOMY_RETRYABLE.find((item) =>
       blocker.message.startsWith(item.prefix)
     );
@@ -385,6 +383,7 @@ export function planHostedRetries(
       });
       continue;
     }
+    if (!cooled) continue;
     plans.push({
       id: record.id,
       grant,
