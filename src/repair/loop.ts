@@ -1984,20 +1984,51 @@ function summaryErrorType(
  * head alongside a published PR, so the rejection is read from durable
  * evidence, not from a cleared field).
  */
-function headRejectedByReview(
+function rejectedReceipt(
   snapshot: RepairStateSnapshotV1,
   record: WorkRecordV1,
-): boolean {
+): ReviewReceiptV1 | null {
   const head = record.target.head;
   const pr = record.target.pr;
-  if (head === null || pr === null) return false;
+  if (head === null || pr === null) return null;
   const receipt = snapshot.reviews.find(
     (review) =>
       review.pullRequest.number === pr &&
       review.pullRequest.head === head &&
       review.outcome === "completed",
   );
-  return receipt !== undefined && receipt.unresolvedSeverities.length > 0;
+  return receipt !== undefined && receipt.unresolvedSeverities.length > 0
+    ? receipt
+    : null;
+}
+
+function headRejectedByReview(
+  snapshot: RepairStateSnapshotV1,
+  record: WorkRecordV1,
+): boolean {
+  return rejectedReceipt(snapshot, record) !== null;
+}
+
+/** Bounded batch of the exact unresolved findings a correction must resolve. */
+export const MAX_CORRECTION_FINDINGS = 8;
+/** Bound of one finding message carried into the correction prompt. */
+export const MAX_CORRECTION_FINDING_CHARS = 2_000;
+
+function correctionFindings(
+  snapshot: RepairStateSnapshotV1,
+  record: WorkRecordV1,
+): { severity: string; path: string | null; message: string }[] | null {
+  const receipt = rejectedReceipt(snapshot, record);
+  if (receipt === null) return null;
+  const findings = receipt.findings
+    .filter((finding) => !finding.resolved)
+    .slice(0, MAX_CORRECTION_FINDINGS)
+    .map((finding) => ({
+      severity: finding.severity,
+      path: finding.path,
+      message: finding.message.slice(0, MAX_CORRECTION_FINDING_CHARS),
+    }));
+  return findings.length === 0 ? null : findings;
 }
 
 /** Candidate validation before publication (incident tasks only). */
@@ -2593,6 +2624,7 @@ async function executeImplementationStep(
   }
 
   const rejectedHead = headRejectedByReview(context.snapshot, withIntent);
+  const findings = correctionFindings(context.snapshot, withIntent);
   const receipt = await deps.model.runModel({
     taskId: withIntent.id,
     repository: withIntent.repository,
@@ -2602,6 +2634,7 @@ async function executeImplementationStep(
       : {}),
     issue,
     evidence: withIntent.evidence,
+    ...(findings === null ? {} : { reviewFindings: findings }),
     model: MODEL_ID,
     reasoning: REASONING,
     maxDurationMs: bound.maxDurationMs,
