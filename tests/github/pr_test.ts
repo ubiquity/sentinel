@@ -39,6 +39,7 @@ Deno.test("createPullRequest: publishes with source body preserved except close 
     "close:#104, Closes: #105, CLOSES: #106, " +
     "closed: ubiquity/sentinel#107; " +
     "resolve #108, RESOLVES: #109, resolved ubiquity/sentinel#110.\n" +
+    "Fixes#113, CLOSES:#114, RESOLVES:ubiquity/sentinel#115.\n" +
     "References #111 and ubiquity/sentinel#112 remain.\n" +
     "References fixed-tools/widget#123; keep this text.\n" +
     "fixesowner/repo#123, closed-source/project#123, and " +
@@ -82,6 +83,7 @@ Deno.test("createPullRequest: publishes with source body preserved except close 
       "#101, #102, ubiquity/sentinel#103; " +
       "#104, #105, #106, ubiquity/sentinel#107; " +
       "#108, #109, ubiquity/sentinel#110.\n" +
+      "#113, #114, ubiquity/sentinel#115.\n" +
       "References #111 and ubiquity/sentinel#112 remain.\n" +
       "References fixed-tools/widget#123; keep this text.\n" +
       "fixesowner/repo#123, closed-source/project#123, and " +
@@ -416,6 +418,10 @@ Deno.test("sanitizeAutoCloseKeywords: removes close keywords, preserves everythi
   assert.equal(
     sanitizeAutoCloseKeywords("Fixes: ubiquity/sentinel#123"),
     "ubiquity/sentinel#123",
+  );
+  assert.equal(
+    sanitizeAutoCloseKeywords("Fixes#123 and CLOSES:#124"),
+    "#123 and #124",
   );
   assert.equal(
     sanitizeAutoCloseKeywords("ordinary prose and references #123 remain"),
