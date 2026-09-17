@@ -43,6 +43,7 @@ Deno.test("createPullRequest: publishes with source body preserved except close 
     "References fixed-tools/widget#123; keep this text.\n" +
     "fixesowner/repo#123, closed-source/project#123, and " +
     "resolved-tools/project#123 remain unchanged.\n" +
+    "Links https://example.test/fixes#123 remain unchanged.\n" +
     "Fixes fixed-tools/widget#123 is sanitized without losing its owner.";
   const { port, transport } = makePort({
     script: [
@@ -85,6 +86,7 @@ Deno.test("createPullRequest: publishes with source body preserved except close 
       "References fixed-tools/widget#123; keep this text.\n" +
       "fixesowner/repo#123, closed-source/project#123, and " +
       "resolved-tools/project#123 remain unchanged.\n" +
+      "Links https://example.test/fixes#123 remain unchanged.\n" +
       "fixed-tools/widget#123 is sanitized without losing its owner.",
   );
 });
