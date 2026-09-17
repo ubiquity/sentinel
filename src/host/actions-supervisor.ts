@@ -966,6 +966,23 @@ export async function runHostedSupervisorPrepare(
         input.clock.now() + HOUR_MS,
       );
     }
+
+    if (
+      runtime.lastHealthyProof === null ||
+      runtime.lastHealthyProof.execution.revision !== runtime.activeRevision ||
+      runtime.lastHealthyProof.execution.generation !== runtime.generation
+    ) {
+      return await startExecution(
+        input,
+        cursor,
+        runtime,
+        releases,
+        "ordinary",
+        runtime.activeRevision,
+        null,
+        input.clock.now() + HOUR_MS,
+      );
+    }
     return idle(STATIC_IDLE_NONE);
   }
   return pending(STATIC_BOUND);
