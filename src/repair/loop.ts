@@ -2013,21 +2013,51 @@ function headRejectedByReview(
 export const MAX_CORRECTION_FINDINGS = 8;
 /** Bound of one finding message carried into the correction prompt. */
 export const MAX_CORRECTION_FINDING_CHARS = 2_000;
+/** Bound of earlier rejection receipts folded into one correction prompt. */
+export const MAX_CORRECTION_HISTORY_RECEIPTS = 3;
 
 function correctionFindings(
   snapshot: RepairStateSnapshotV1,
   record: WorkRecordV1,
 ): { severity: string; path: string | null; message: string }[] | null {
-  const receipt = rejectedReceipt(snapshot, record);
-  if (receipt === null) return null;
-  const findings = receipt.findings
-    .filter((finding) => !finding.resolved)
-    .slice(0, MAX_CORRECTION_FINDINGS)
-    .map((finding) => ({
-      severity: finding.severity,
-      path: finding.path,
-      message: finding.message.slice(0, MAX_CORRECTION_FINDING_CHARS),
-    }));
+  const current = rejectedReceipt(snapshot, record);
+  if (current === null) return null;
+  // The candidate that rejected this attempt FIRST, then the unresolved
+  // findings of the most recent earlier rejections of the SAME pull request:
+  // one receipt is not enough evidence when the task has been refused several
+  // times for different cases of the same rule, which is exactly how a
+  // correction converges on the rule instead of the last reported case.
+  const history = snapshot.reviews
+    .filter((review) =>
+      review.pullRequest.number === current.pullRequest.number &&
+      review.outcome === "completed" &&
+      review.unresolvedSeverities.length > 0 &&
+      review.id !== current.id
+    )
+    .sort((a, b) => b.observedAt - a.observedAt)
+    .slice(0, MAX_CORRECTION_HISTORY_RECEIPTS);
+  const seen = new Set<string>();
+  const findings: { severity: string; path: string | null; message: string }[] =
+    [];
+  for (const review of [current, ...history]) {
+    for (const finding of review.findings) {
+      if (finding.resolved) continue;
+      const message = finding.message.slice(0, MAX_CORRECTION_FINDING_CHARS);
+      const key = `${finding.severity}\u0000${
+        finding.path ?? ""
+      }\u0000${message}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      findings.push({
+        severity: finding.severity,
+        path: finding.path,
+        message,
+      });
+      if (findings.length >= MAX_CORRECTION_FINDINGS) {
+        return findings;
+      }
+    }
+  }
   return findings.length === 0 ? null : findings;
 }
 

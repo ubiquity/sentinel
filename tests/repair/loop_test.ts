@@ -1237,6 +1237,7 @@ Deno.test("P1 findings trigger a fresh bounded implementation/candidate/replay p
       undefined,
       "a first implementation carries no rejection findings",
     );
+
     state = await rig.snapshot();
     const work = state.work[0];
     assert.equal(work.nextStep, "review");
@@ -1296,6 +1297,31 @@ Deno.test("P1 findings trigger a fresh bounded implementation/candidate/replay p
         review.unresolvedSeverities.includes("P1")
       ),
       "P1 finding is durably recorded",
+    );
+    // A LATER correction also carries the earlier rejections of the same pull
+    // request, so the model can converge on the rule rather than the last case.
+    rig.clock.advance(15 * 60_000 + 1);
+    rig.github.completeReview([{
+      id: "finding-2",
+      severity: "P2",
+      path: "src/github/text.ts",
+      message: "second required fix",
+      fingerprint: "b".repeat(64),
+      resolved: false,
+      resolutionEvidence: null,
+    }], rig.clock.now());
+    const third = await rig.run();
+    assert.equal(third.status, "idle", JSON.stringify(third));
+    assert.equal(rig.model.requests.length, 3);
+    const history = rig.model.requests[2]?.reviewFindings ?? [];
+    const messages = history.map((finding) => finding.message);
+    assert.ok(
+      messages.includes("second required fix"),
+      "the current rejection is carried",
+    );
+    assert.ok(
+      messages.includes("required fix"),
+      "the earlier rejection of the same pull request is carried too",
     );
   } finally {
     await rig.ctx.cleanup();
