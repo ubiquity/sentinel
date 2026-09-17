@@ -37,6 +37,7 @@ import {
   OWNER_DEVELOPMENT_INSTALL_ORIGINAL_REVISION,
   OWNER_DEVELOPMENT_INSTALL_READER_GENERATION,
   OWNER_DEVELOPMENT_INSTALL_READER_REVISION,
+  OWNER_DEVELOPMENT_INSTALL_RECOVERY_REVISION,
   ownerDevelopmentInstallCommitMessage,
   ownerDevelopmentInstallFiles,
   planOwnerDevelopmentInstall,
@@ -53,6 +54,7 @@ const DIGEST = "d".repeat(64);
 const ORIGINAL = OWNER_DEVELOPMENT_INSTALL_ORIGINAL_REVISION;
 const READER = OWNER_DEVELOPMENT_INSTALL_READER_REVISION;
 const AGGREGATE = OWNER_DEVELOPMENT_INSTALL_AGGREGATE_REVISION;
+const RECOVERY = OWNER_DEVELOPMENT_INSTALL_RECOVERY_REVISION;
 
 function hostedProof(input: {
   runId: number;
@@ -621,7 +623,71 @@ Deno.test(
         }),
         NOW,
       ).status,
+      "install",
+      "the aggregate healthy proof authorizes the review recovery install",
+    );
+    // The review recovery generation is the fixed end of the chain: its own
+    // healthy proof is the completion, and no later movement exists.
+    const recoveryHealthy = healthyProof(RECOVERY, 8, 75);
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: RECOVERY,
+            generation: 8,
+            healthyProof: recoveryHealthy,
+          }),
+        }),
+        NOW,
+      ).status,
       "no_change",
+    );
+    // A failed review recovery candidate rolls back once, to the exact
+    // aggregate revision, authorized by its recorded healthy proof.
+    const recoveryFailed = releaseSnapshot({
+      runtime: runtimeRecord({
+        revision: RECOVERY,
+        generation: 8,
+        healthyProof: aggregateHealthy,
+        executionProof: failedProof(RECOVERY, 8, 76),
+      }),
+    });
+    const recoveryRollback = planOwnerDevelopmentInstall(recoveryFailed, NOW);
+    assert.equal(recoveryRollback.status, "rollback");
+    if (recoveryRollback.status !== "rollback") {
+      throw new Error("expected rollback");
+    }
+    assert.equal(recoveryRollback.move.priorRevision, RECOVERY);
+    assert.equal(recoveryRollback.move.nextRevision, AGGREGATE);
+    assert.equal(recoveryRollback.move.nextGeneration, 9);
+    assert.equal(
+      canonicalStringify(recoveryRollback.move.priorHealthyProof),
+      canonicalStringify(aggregateHealthy),
+    );
+    // Without the recorded aggregate healthy proof the rollback waits.
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: RECOVERY,
+            generation: 8,
+            executionProof: failedProof(RECOVERY, 8, 77),
+          }),
+        }),
+        NOW,
+      ).status,
+      "waiting",
+    );
+    // A review recovery pointer without any proof yet is an ordinary wait for
+    // the verification execution's healthy proof.
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({ revision: RECOVERY, generation: 8 }),
+        }),
+        NOW,
+      ).status,
+      "waiting",
     );
     assert.equal(
       planOwnerDevelopmentInstall(

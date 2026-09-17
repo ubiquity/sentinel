@@ -3,9 +3,9 @@
  *
  * This fixed trusted operation performs at most one pointer movement in the
  * hosted release state: original generation 5 -> reader generation 6 ->
- * aggregate generation 7, plus a one-time rollback of an exact failed
- * candidate to its recorded previously healthy revision. It is NOT a runtime
- * redesign and NOT a recurring global gate: every other state is a zero-write
+ * aggregate generation 7 -> review recovery generation 8, plus a one-time
+ * rollback of an exact failed candidate to its recorded previously healthy
+ * revision. It is NOT a runtime redesign and NOT a recurring global gate: every other state is a zero-write
  * waiting/no-change outcome so the unchanged protected supervisor continues
  * to settle and verify its own work. A rollback state never reattempts
  * installation by itself.
@@ -80,6 +80,13 @@ export const OWNER_DEVELOPMENT_INSTALL_READER_GENERATION = 6;
 export const OWNER_DEVELOPMENT_INSTALL_AGGREGATE_REVISION =
   "92f3a87f0d0bfb0f0784bf9af4e5402800086852" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_AGGREGATE_GENERATION = 7;
+/**
+ * Exact revision carrying the review no-verdict recovery fix, installed only
+ * after the aggregate generation 7 healthy proof.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_RECOVERY_REVISION =
+  "4e8245de734683c7d4bda22a221bb28f52ebcfac" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_RECOVERY_GENERATION = 8;
 
 const API_BASE = "https://api.github.com";
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -250,9 +257,48 @@ export function planOwnerDevelopmentInstall(
       );
     }
     if (healthy !== null) {
-      return noChange("the fixed owner development installation is complete");
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_RECOVERY_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_RECOVERY_GENERATION,
+        healthy,
+        "install the review recovery revision after the aggregate healthy proof",
+      );
     }
     return waiting("the aggregate generation 7 healthy proof is not recorded");
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_RECOVERY_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_RECOVERY_GENERATION
+  ) {
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_AGGREGATE_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_AGGREGATE_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded aggregate healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_AGGREGATE_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed review recovery candidate to its recorded prior",
+      );
+    }
+    if (healthy !== null) {
+      return noChange("the owner development installation is complete");
+    }
+    return waiting(
+      "the review recovery generation 8 healthy proof is not recorded",
+    );
   }
 
   // Any other pointer, including a completed rollback target, is deliberately
