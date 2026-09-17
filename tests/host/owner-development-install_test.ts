@@ -36,6 +36,7 @@ import {
   OWNER_DEVELOPMENT_INSTALL_EXIT_CONTRACT_REVISION,
   OWNER_DEVELOPMENT_INSTALL_FINDINGS_REVISION,
   OWNER_DEVELOPMENT_INSTALL_HISTORY_REVISION,
+  OWNER_DEVELOPMENT_INSTALL_LEDGER_REVISION,
   OWNER_DEVELOPMENT_INSTALL_ORIGINAL_GENERATION,
   OWNER_DEVELOPMENT_INSTALL_ORIGINAL_REVISION,
   OWNER_DEVELOPMENT_INSTALL_READER_GENERATION,
@@ -69,6 +70,7 @@ const ROUND8 = OWNER_DEVELOPMENT_INSTALL_ROUND8_REVISION;
 const FINDINGS = OWNER_DEVELOPMENT_INSTALL_FINDINGS_REVISION;
 const HISTORY = OWNER_DEVELOPMENT_INSTALL_HISTORY_REVISION;
 const RECEIPT = OWNER_DEVELOPMENT_INSTALL_RECEIPT_REVISION;
+const LEDGER = OWNER_DEVELOPMENT_INSTALL_LEDGER_REVISION;
 
 function hostedProof(input: {
   runId: number;
@@ -754,15 +756,30 @@ Deno.test(
     if (receiptPlan.status !== "install") throw new Error("expected install");
     assert.equal(receiptPlan.move.nextRevision, RECEIPT);
     assert.equal(receiptPlan.move.nextGeneration, 15);
-    // The receipt-submission generation is the fixed end of the chain.
+    // The receipt-submission healthy proof authorizes the ledger install.
     const receiptHealthy = healthyProof(RECEIPT, 15, 86);
+    const ledgerPlan = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: RECEIPT,
+          generation: 15,
+          healthyProof: receiptHealthy,
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(ledgerPlan.status, "install");
+    if (ledgerPlan.status !== "install") throw new Error("expected install");
+    assert.equal(ledgerPlan.move.nextRevision, LEDGER);
+    assert.equal(ledgerPlan.move.nextGeneration, 16);
+    // The ledger generation is the fixed end of the chain.
     assert.equal(
       planOwnerDevelopmentInstall(
         releaseSnapshot({
           runtime: runtimeRecord({
-            revision: RECEIPT,
-            generation: 15,
-            healthyProof: receiptHealthy,
+            revision: LEDGER,
+            generation: 16,
+            healthyProof: healthyProof(LEDGER, 16, 87),
           }),
         }),
         NOW,

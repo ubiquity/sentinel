@@ -141,6 +141,15 @@ export const OWNER_DEVELOPMENT_INSTALL_HISTORY_GENERATION = 14;
 export const OWNER_DEVELOPMENT_INSTALL_RECEIPT_REVISION =
   "9fcc959bcdc903aed21f2bbe968c8838d86010ef" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_RECEIPT_GENERATION = 15;
+/**
+ * Exact revision carrying the delivery-evidence ledger and the local case
+ * evaluator (the CI-verified development tip); its install also triggers an
+ * immediate execution, so a delivered review round is observed without waiting
+ * for the hourly ordinary cadence.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_LEDGER_REVISION =
+  "2b6a25b7d9992c6a027448e43d5ce104d8f1a93e" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_LEDGER_GENERATION = 16;
 
 const API_BASE = "https://api.github.com";
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -621,11 +630,48 @@ export function planOwnerDevelopmentInstall(
       );
     }
     if (healthy !== null) {
-      return noChange("the owner development installation is complete");
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_LEDGER_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_LEDGER_GENERATION,
+        healthy,
+        "install the ledger revision after the receipt-submission healthy proof",
+      );
     }
     return waiting(
       "the receipt-submission generation 15 healthy proof is not recorded",
     );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_LEDGER_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_LEDGER_GENERATION
+  ) {
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_RECEIPT_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_RECEIPT_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded receipt-submission healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_RECEIPT_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed ledger candidate to its recorded prior",
+      );
+    }
+    if (healthy !== null) {
+      return noChange("the owner development installation is complete");
+    }
+    return waiting("the ledger generation 16 healthy proof is not recorded");
   }
 
   // Any other pointer, including a completed rollback target, is deliberately
