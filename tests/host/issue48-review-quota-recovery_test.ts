@@ -43,7 +43,13 @@ import type {
   Issue48QuotaRecoveryBindingV1,
   Issue48QuotaRecoveryResultV1,
 } from "../../ops/issue48-review-quota-recovery.ts";
-import { makeRemoteCtx, REPO, reviewReceipt, SHA1 } from "../state/helpers.ts";
+import {
+  makeRemoteCtx,
+  REPO,
+  reservation,
+  reviewReceipt,
+  SHA1,
+} from "../state/helpers.ts";
 
 const T0 = 1_700_000_000_000;
 const SHA_A = "a".repeat(40) as GitSha;
@@ -133,6 +139,23 @@ function repairSnapshot(
     replays: [],
     releaseRequests: [],
     githubCooldowns: [],
+  });
+}
+
+function repairSnapshotWithReservations(
+  record: WorkRecordV1,
+  reservations: { id: string; outcome: string }[],
+): RepairStateSnapshotV1 {
+  const base = repairSnapshot(record);
+  return parseRepairStateSnapshotV1({
+    ...base,
+    reservations: reservations.map((item) =>
+      reservation(item.id, {
+        taskId: record.id,
+        head: record.target.head,
+        outcome: item.outcome,
+      })
+    ),
   });
 }
 
@@ -482,6 +505,7 @@ Deno.test(
       record?: Record<string, unknown>;
       binding?: Partial<Issue48QuotaRecoveryBindingV1>;
       runtime?: Partial<HostedRuntimeRecordV1>;
+      reservations?: { id: string; outcome: string }[];
       expected: string;
     }[] = [
       {
@@ -595,8 +619,9 @@ Deno.test(
     ];
     for (const item of cases) {
       const rig = await makeRig(`quota-refuse-${item.name}`, {
-        repair: repairSnapshot(
+        repair: repairSnapshotWithReservations(
           quotaWorkRecord(item.record ?? {}),
+          item.reservations ?? [],
         ),
         runtime: item.runtime === undefined
           ? undefined

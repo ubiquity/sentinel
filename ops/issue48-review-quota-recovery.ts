@@ -26,7 +26,9 @@
  *   work item still carries the exact counters, evidence, target and PR
  *   identity this binding pins, and only while the single hosted runtime is
  *   settled, healthy at its exact revision/generation and every hosted release
- *   is terminal.
+ *   is terminal. A leftover implementation intent is closed ONLY when the
+ *   reservation it names is provably settled, which is the proof that the
+ *   failed attempt can no longer publish a candidate.
  * - Exactly one `writeRepair` with the observed head as its expected parent is
  *   attempted; its typed disposition is preserved and never retried. An applied
  *   outcome is reported only after a full readback proves the returned head, the
@@ -263,8 +265,9 @@ function sameCounters(
 export function targetPreconditionHolds(
   record: WorkRecordV1,
   binding: Issue48QuotaRecoveryBindingV1,
+  /** Snapshot reservations; used to prove a failed attempt is fully settled. */
+  reservations: readonly { id: string; outcome: string }[] = [],
 ): boolean {
-  if (record.intent !== null) return false;
   if (!sameCounters(record, binding)) return false;
   if (
     record.target.pr !== binding.pullRequestNumber ||
@@ -282,16 +285,33 @@ export function targetPreconditionHolds(
   ) {
     return false;
   }
-  if (record.nextStep === "review") return true;
+  if (record.nextStep === "review") return record.intent === null;
   if (record.nextStep !== "blocked") return false;
   const blocker = record.blocker;
   if (blocker === null) return false;
   if (blocker.kind === "review_quota") {
+    if (record.intent !== null) return false;
     return blocker.message.startsWith(ISSUE48_QUOTA_BLOCKER_PREFIX) ||
       blocker.message.startsWith(ISSUE48_QUOTA_BUDGET_BLOCKER_PREFIX);
   }
-  return blocker.kind === "other" &&
-    blocker.message.startsWith(ISSUE48_QUOTA_CANDIDATE_BLOCKER_PREFIX);
+  if (
+    blocker.kind !== "other" ||
+    !blocker.message.startsWith(ISSUE48_QUOTA_CANDIDATE_BLOCKER_PREFIX)
+  ) {
+    return false;
+  }
+  // A failed implementation attempt leaves its intent in place after the run
+  // settled it. That intent may only be closed when it is provably CLOSED: it
+  // names a reservation of this exact record that is settled (never reserved),
+  // which is what proves the attempt cannot still publish a candidate. Any
+  // other intent — including an unsettled or foreign one — refuses.
+  if (record.intent === null) return true;
+  if (record.intent.kind !== "implementation") return false;
+  const reservationId = record.intent.requestId;
+  if (reservationId === null || reservationId === "") return false;
+  return reservations.some((reservation) =>
+    reservation.id === reservationId && reservation.outcome !== "reserved"
+  );
 }
 
 /**
@@ -435,7 +455,7 @@ export async function runIssue48QuotaRecovery(
 
   const target = snapshot.work.find((record) => record.id === binding.targetId);
   if (target === undefined) return failed("target_missing", observedHead);
-  if (!targetPreconditionHolds(target, binding)) {
+  if (!targetPreconditionHolds(target, binding, snapshot.reservations)) {
     // A record that already moved on (the runtime re-armed it, another actor
     // advanced it, or the counters/identity drifted) is an ordinary zero-write
     // skip, never a failure this one-shot may push through.
