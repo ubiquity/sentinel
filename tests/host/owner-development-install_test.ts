@@ -34,6 +34,7 @@ import {
   OWNER_DEVELOPMENT_INSTALL_AGGREGATE_GENERATION,
   OWNER_DEVELOPMENT_INSTALL_AGGREGATE_REVISION,
   OWNER_DEVELOPMENT_INSTALL_EXIT_CONTRACT_REVISION,
+  OWNER_DEVELOPMENT_INSTALL_FINDINGS_REVISION,
   OWNER_DEVELOPMENT_INSTALL_ORIGINAL_GENERATION,
   OWNER_DEVELOPMENT_INSTALL_ORIGINAL_REVISION,
   OWNER_DEVELOPMENT_INSTALL_READER_GENERATION,
@@ -63,6 +64,7 @@ const REVIEW_STEP = OWNER_DEVELOPMENT_INSTALL_REVIEW_STEP_REVISION;
 const REVIEWER = OWNER_DEVELOPMENT_INSTALL_REVIEWER_REVISION;
 const EXIT_CONTRACT = OWNER_DEVELOPMENT_INSTALL_EXIT_CONTRACT_REVISION;
 const ROUND8 = OWNER_DEVELOPMENT_INSTALL_ROUND8_REVISION;
+const FINDINGS = OWNER_DEVELOPMENT_INSTALL_FINDINGS_REVISION;
 
 function hostedProof(input: {
   runId: number;
@@ -700,15 +702,31 @@ Deno.test(
     if (round8Plan.status !== "install") throw new Error("expected install");
     assert.equal(round8Plan.move.nextRevision, ROUND8);
     assert.equal(round8Plan.move.nextGeneration, 12);
-    // The corrected-grant generation is the fixed end of the chain.
+    // The corrected-grant healthy proof authorizes the findings install.
     const round8Healthy = healthyProof(ROUND8, 12, 83);
+    const findingsPlan = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: ROUND8,
+          generation: 12,
+          healthyProof: round8Healthy,
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(findingsPlan.status, "install");
+    if (findingsPlan.status !== "install") throw new Error("expected install");
+    assert.equal(findingsPlan.move.nextRevision, FINDINGS);
+    assert.equal(findingsPlan.move.nextGeneration, 13);
+    // The findings generation is the fixed end of the chain.
+    const findingsHealthy = healthyProof(FINDINGS, 13, 84);
     assert.equal(
       planOwnerDevelopmentInstall(
         releaseSnapshot({
           runtime: runtimeRecord({
-            revision: ROUND8,
-            generation: 12,
-            healthyProof: round8Healthy,
+            revision: FINDINGS,
+            generation: 13,
+            healthyProof: findingsHealthy,
           }),
         }),
         NOW,

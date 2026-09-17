@@ -119,6 +119,13 @@ export const OWNER_DEVELOPMENT_INSTALL_EXIT_CONTRACT_GENERATION = 11;
 export const OWNER_DEVELOPMENT_INSTALL_ROUND8_REVISION =
   "e2bb6c2b1d0cafaefe9e16c16b421522819c823e" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_ROUND8_GENERATION = 12;
+/**
+ * Exact revision that carries the review findings into a correction prompt; its
+ * install is also what gives the runtime an immediate health-gap execution.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_FINDINGS_REVISION =
+  "664a52ddeb4f23eafa58a32e8394754f3303f0c4" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_FINDINGS_GENERATION = 13;
 
 const API_BASE = "https://api.github.com";
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -482,10 +489,49 @@ export function planOwnerDevelopmentInstall(
       );
     }
     if (healthy !== null) {
-      return noChange("the owner development installation is complete");
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_FINDINGS_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_FINDINGS_GENERATION,
+        healthy,
+        "install the findings-feedback revision after the round-8 grant healthy proof",
+      );
     }
     return waiting(
       "the corrected grant generation 12 healthy proof is not recorded",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_FINDINGS_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_FINDINGS_GENERATION
+  ) {
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_ROUND8_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_ROUND8_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded round-8 grant healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_ROUND8_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed findings-feedback candidate to its recorded prior",
+      );
+    }
+    if (healthy !== null) {
+      return noChange("the owner development installation is complete");
+    }
+    return waiting(
+      "the findings-feedback generation 13 healthy proof is not recorded",
     );
   }
 
