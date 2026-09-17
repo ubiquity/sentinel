@@ -704,6 +704,31 @@ Deno.test(
 );
 
 Deno.test(
+  "hosted autonomy: a task whose retries reached its attempts is left alone, never invalid",
+  () => {
+    const record = blockedRecord({
+      blocker: {
+        kind: "review_quota",
+        message: "implementation attempt budget exhausted",
+        since: T0 + 3000,
+      },
+      counters: { attempts: 4, retries: 3, reviewRounds: 1 },
+      target: {
+        base: BASE,
+        branch: "sentinel/repair/issue-ubiquity-sentinel-48",
+        checkpoint: null,
+        head: HEAD,
+        pr: 51,
+      },
+    });
+    const snapshot = repairSnapshot([record], [authorizingReceipt()]);
+    // `retries <= attempts` is a frozen invariant and this pass increments
+    // retries, so no grant exists here and nothing may be written.
+    assert.equal(planHostedRetries(snapshot, T0 + 5000, SHA1).length, 0);
+  },
+);
+
+Deno.test(
   "hosted autonomy: an unsettled implementation intent is never cleared",
   () => {
     const unsettled = repairSnapshot(
