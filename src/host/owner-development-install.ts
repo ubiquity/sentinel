@@ -117,7 +117,7 @@ export const OWNER_DEVELOPMENT_INSTALL_EXIT_CONTRACT_GENERATION = 11;
  * grant in the same run the maintenance job applies it.
  */
 export const OWNER_DEVELOPMENT_INSTALL_ROUND8_REVISION =
-  "800b4bd1b2fb3778cc96b0292ee673c07ca73302" as GitSha;
+  "e2bb6c2b1d0cafaefe9e16c16b421522819c823e" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_ROUND8_GENERATION = 12;
 
 const API_BASE = "https://api.github.com";
