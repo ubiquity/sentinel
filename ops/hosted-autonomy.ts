@@ -64,8 +64,16 @@ export const HOSTED_AUTONOMY_BASE_BRANCH = "development";
 /** The deterministic check the merge requires on the exact reviewed head. */
 export const HOSTED_AUTONOMY_REQUIRED_CHECK = "test-local";
 
-/** Bounded automatic retries per task, counted in the preserved `retries`. */
-export const HOSTED_AUTONOMY_MAX_RETRIES = 3;
+/**
+ * Sanity bound on automatic retries per task, counted in the preserved
+ * `retries` counter. The real limiter is the cooldown below: a transient
+ * provider outage must never permanently kill a task, and it must never let one
+ * task loop faster than the cooldown either.
+ */
+export const HOSTED_AUTONOMY_MAX_RETRIES = 200;
+
+/** Minimum age of a transient blocker before it may be retried again. */
+export const HOSTED_AUTONOMY_RETRY_COOLDOWN_MS = 30 * 60_000;
 
 /** The runtime's own implementation-attempt ceiling. */
 export const HOSTED_AUTONOMY_MAX_IMPLEMENTATION_ATTEMPTS = 4;
@@ -291,6 +299,7 @@ export interface RetryPlanV1 {
  */
 export function planHostedRetries(
   snapshot: RepairStateSnapshotV1,
+  now: number,
 ): RetryPlanV1[] {
   const plans: RetryPlanV1[] = [];
   for (const record of snapshot.work) {
@@ -298,6 +307,12 @@ export function planHostedRetries(
     const blocker = record.blocker;
     if (blocker === null) continue;
     if (record.counters.retries >= HOSTED_AUTONOMY_MAX_RETRIES) continue;
+    if (
+      !Number.isSafeInteger(now) ||
+      now - blocker.since < HOSTED_AUTONOMY_RETRY_COOLDOWN_MS
+    ) {
+      continue;
+    }
     const rule = HOSTED_AUTONOMY_RETRYABLE.find((item) =>
       blocker.message.startsWith(item.prefix)
     );
@@ -550,7 +565,7 @@ export async function runHostedAutonomy(
   // A task whose pull request is already merged or closed is delivered or
   // abandoned: retrying it would only spend model starts on a branch that can
   // no longer be published, so those plans are dropped before any write.
-  const planned = planHostedRetries(snapshot);
+  const planned = planHostedRetries(snapshot, deps.clock.now());
   const plans: RetryPlanV1[] = [];
   for (const plan of planned) {
     const record = snapshot.work.find((item) => item.id === plan.id);

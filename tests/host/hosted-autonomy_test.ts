@@ -36,6 +36,7 @@ import {
   applyHostedRetries,
   buildHostedReleaseRequest,
   HOSTED_AUTONOMY_MAX_RETRIES,
+  HOSTED_AUTONOMY_RETRY_COOLDOWN_MS,
   isHardAutonomyFailure,
   planHostedClosures,
   planHostedRetries,
@@ -351,7 +352,7 @@ async function run(
   return await runHostedAutonomy({
     state: rig.state,
     github,
-    clock: { now: () => T0 + 5000 },
+    clock: { now: () => T0 + 5_000_000 },
   });
 }
 
@@ -549,7 +550,10 @@ Deno.test(
         settledAt: T0 + 2000,
       }),
     ]);
-    const plans = planHostedRetries(snapshot);
+    const plans = planHostedRetries(
+      snapshot,
+      T0 + 3000 + HOSTED_AUTONOMY_RETRY_COOLDOWN_MS,
+    );
     assert.equal(plans.length, 1);
     assert.equal(plans[0].id, TARGET);
     assert.equal(plans[0].nextStep, "work");
@@ -572,13 +576,13 @@ Deno.test(
     const exhausted = repairSnapshot([
       blockedRecord({
         counters: {
-          attempts: 4,
+          attempts: HOSTED_AUTONOMY_MAX_RETRIES,
           retries: HOSTED_AUTONOMY_MAX_RETRIES,
           reviewRounds: 1,
         },
       }),
     ]);
-    assert.equal(planHostedRetries(exhausted).length, 0);
+    assert.equal(planHostedRetries(exhausted, T0 + 5000).length, 0);
 
     const reviewRounds = repairSnapshot([
       blockedRecord({
@@ -591,7 +595,10 @@ Deno.test(
         counters: { attempts: 1, retries: 0, reviewRounds: 14 },
       }),
     ]);
-    const plans = planHostedRetries(reviewRounds);
+    const plans = planHostedRetries(
+      reviewRounds,
+      T0 + 3000 + HOSTED_AUTONOMY_RETRY_COOLDOWN_MS,
+    );
     assert.equal(plans.length, 1);
     assert.equal(plans[0].nextStep, "review");
     assert.equal(plans[0].resetReviewRounds, true);
@@ -609,7 +616,10 @@ Deno.test(
         counters: { attempts: 4, retries: 0, reviewRounds: 5 },
       }),
     ]);
-    const budgetPlans = planHostedRetries(budget);
+    const budgetPlans = planHostedRetries(
+      budget,
+      T0 + 3000 + HOSTED_AUTONOMY_RETRY_COOLDOWN_MS,
+    );
     assert.equal(budgetPlans.length, 1);
     assert.equal(budgetPlans[0].grant, 1);
     const budgetNext = applyHostedRetries(budget, SHA1, budgetPlans, T0 + 5000);
@@ -624,7 +634,7 @@ Deno.test(
         },
       }),
     ]);
-    assert.equal(planHostedRetries(foreign).length, 0);
+    assert.equal(planHostedRetries(foreign, T0 + 5000).length, 0);
   },
 );
 
@@ -660,7 +670,7 @@ Deno.test(
         }),
       ],
     );
-    assert.equal(planHostedRetries(unsettled).length, 0);
+    assert.equal(planHostedRetries(unsettled, T0 + 5000).length, 0);
 
     const settled = repairSnapshot(
       [
@@ -692,7 +702,15 @@ Deno.test(
         }),
       ],
     );
-    assert.equal(planHostedRetries(settled).length, 1);
+    assert.equal(
+      planHostedRetries(
+        settled,
+        T0 + 3000 + HOSTED_AUTONOMY_RETRY_COOLDOWN_MS,
+      ).length,
+      1,
+    );
+    // Inside the cooldown the same blocker is left alone.
+    assert.equal(planHostedRetries(settled, T0 + 4000).length, 0);
   },
 );
 
