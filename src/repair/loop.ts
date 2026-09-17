@@ -3970,6 +3970,15 @@ async function observeReview(
   if (pr === null || head === null) {
     return { kind: "state_error", detail: "review without PR/head identity" };
   }
+  // A saved candidate-base refresh is reconciled WHEREVER it is observed — the
+  // work and delivery steps already do — and the review step is where that
+  // intent is created: the freshness gate persists it instead of spending a
+  // review on a stale base. Without this reconciliation the record would wait
+  // at `review` on a request the gate must keep refusing, so the refresh is
+  // completed first and the refreshed candidate is reviewed afterwards.
+  if (record.intent !== null && record.intent.kind === "base_refresh") {
+    return executeBaseRefreshIntent(deps, context, record);
+  }
   // Review observation is a GitHub read: gate before the external call. A
   // cooldown deferral mutates nothing (the pending wait and review intent stay
   // durable) so the next run observes the exact remote state once.
