@@ -57,6 +57,27 @@ jobs:
           --allow-net=api.github.com
           --allow-env=HOME,PATH,GITHUB_TOKEN,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_REPOSITORY,GITHUB_REF,GITHUB_SHA,GITHUB_WORKFLOW_SHA,GITHUB_WORKFLOW_REF,GITHUB_JOB
           ops/issue48-review-quota-recovery.ts
+      # Bounded owner-authorized delivery observation. The runtime's own merge
+      # port refuses to merge while the `development` ruleset carries no active
+      # `pull_request` rule — the owner removed that rule on 2026-09-16 and
+      # ordered that no branch protection be added back — so the operator
+      # performs the expected-head merge under the runtime's own acceptance
+      # criteria. This step records the ONE release request the runtime's
+      # delivery step would have written, after re-verifying the merge and the
+      # completed current-head review receipt against GitHub. It writes no
+      # review, receipt, proof, promotion or acceptance, is idempotent, and
+      # exits zero on every non-applied outcome.
+      - name: Record the operator-performed delivery
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          deno run --no-lock
+          --allow-read
+          --allow-write
+          --allow-run=git
+          --allow-net=api.github.com
+          --allow-env=HOME,PATH,GITHUB_TOKEN,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_REPOSITORY,GITHUB_REF,GITHUB_SHA,GITHUB_WORKFLOW_SHA,GITHUB_WORKFLOW_REF,GITHUB_JOB
+          ops/issue48-delivery-observation.ts
 
   prepare:
     needs: maintenance
