@@ -114,6 +114,20 @@ const CASES: { body: string; expect: "strip" | "keep"; source: string }[] = [
     expect: "strip",
     source: "angle-bracket URL then directive",
   },
+  {
+    // The reviewer is explicit: a relative link destination is still a URL and
+    // must never be rewritten.
+    body: "[link](/foo:fixes:#123)",
+    expect: "keep",
+    source: "review round 12 relative link destination",
+  },
+  {
+    // An angle-delimited Markdown destination ends at `>`, so the `)` inside it
+    // is URL content, not the link close.
+    body: "[link](<https://example.test/foo)Fixes:#123>)",
+    expect: "keep",
+    source: "review round 12 angle-delimited URL",
+  },
 ];
 
 let failures = 0;
