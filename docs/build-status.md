@@ -11,6 +11,43 @@ status, acceptance and write ownership here.
 
 ### Current checkpoint
 
+**The silent review-record deadlock is fixed and live, and the runtime is making
+an informed correction.** The armed record had been re-armed as `review_pending`
+by two executions without any diagnosable detail; the cause was in the receipt
+itself: after a bounded recovery cleared the record's wait, the receipt's
+`submittedAt` was derived from the wait (or from "now"), which then POST-DATED
+the review's completion, and the strict receipt parser refused the inversion —
+so the completed round-10 review (ready journal with a P2, published 13:18:20Z)
+was never recorded and the state stayed at sequence 339 while the loop polled
+forever.
+
+- Fixed `3b78061…`/`9fcc959…` (generation 15, installed at 17:05Z): the
+  transport's own reported submission instant stays authoritative whenever the
+  record still holds it, and the derivation is only CAPPED at the observed
+  completion, so the receipt can never invert. The first CI run caught the
+  over-broad earlier revision (it replaced the transport's instant outright and
+  the existing "review receipt preserves the actual submission timestamp" test
+  failed) — corrected before any install, which is exactly why the runtime gate
+  is CI-first.
+- Live proof: the generation-15 execution observed round 10, **recorded the
+  receipt** (evidence 5 → 6), routed the task to a correction and admitted an
+  implementation at attempt 3 with the reviewer's findings AND the earlier
+  rejection history in its prompt — the first fully informed correction.
+- `ops/sanitizer-check.ts` is a new read-only local evaluator: it fetches the
+  repair branch, imports the candidate's own `sanitizeAutoCloseKeywords` and
+  runs every case the review ever reported plus the issue's acceptance cases, so
+  the next review round can be predicted without waiting for it. Against the
+  rejected round-10 candidate it reproduces exactly the two open cases
+  (`References ubiquity/repo.fixes #123` and `https://example.test/foo.fixes:#123`
+  both corrupted at the `.`), confirming the tool and the reviewer agree.
+
+Remaining boundary: the informed candidate must satisfy the evaluator and then
+the reviewer; only after a completed current-head verdict with no unresolved
+P0/P1 may the merge, release request, supervisor prior/candidate proofs,
+promotion, acceptance and issue closure follow. No merge, release, closure or
+receipt has been fabricated, and the goal stays active.
+
+
 **The correction loop is now informed, and the only remaining work is the
 candidate content itself.** Four consecutive review rounds (7, 8, 9, 10)
 rejected the candidate for four separate punctuation cases of one over-broad
