@@ -9,7 +9,7 @@
  */
 
 const AUTO_CLOSE_KEYWORD_RE =
-  /(?<![\w/-])(?:fix|fixes|fixed|close|closes|closed|resolve|resolves|resolved)(?![\w-])(?:\s+:\s*|\s+|:\s*)(?=(?:[\w-]+\/[\w.-]+)?#\d+\b)/giu;
+  /(?<![\w/?&=/-])(?:fix|fixes|fixed|close|closes|closed|resolve|resolves|resolved)(?![\w-])(?:\s+:\s*|\s+|:\s*)(?=(?:[\w-]+\/[\w.-]+)?#\d+\b)/giu;
 
 export function sanitizeAutoCloseKeywords(body: string): string {
   return body.replace(AUTO_CLOSE_KEYWORD_RE, "");
