@@ -79,9 +79,13 @@ capability; it validates exact request identity before closure. Local scope
 cannot consume Deno release receipts. Gateway release behavior is unchanged.
 Astra bootstraps the reviewed supervisor and initial pointer; runtime agents
 cannot modify supervisor or receipt authority files, credentials or state.
-Local coding tasks opt in with the exact standalone first-line HTML comment
-`<!-- sentinel:repair -->` in the issue body; source is re-read before admission.
-Do not use labels for admission: ubiquity-os[bot] removes the default labels.
+Local coding tasks are repaired BY DEFAULT: every open issue is in scope, and an
+issue is excluded only by an explicit opt-out — the exact standalone first-line
+HTML comment `<!-- sentinel:skip -->` in the issue body, or the `sentinel:skip`
+label. Source is re-read before admission, so gaining either opt-out revokes
+eligibility before any budget is spent. Owner update, 2026-09-17: the earlier
+opt-in marker `<!-- sentinel:repair -->` is no longer required; nothing is
+silently filtered out of the repair queue.
 
 
 ## 2. Canonical goal identity

@@ -1089,32 +1089,37 @@ class FaultyIssueGithub extends FakeGithub {
   }
 }
 
-// Exact literal, deliberately not imported from the host module: the contract
-// is this standalone first line, so a typo in either copy must fail here.
+// Exact literals, deliberately not imported from the host module: the contract
+// is these standalone first lines, so a typo in either copy must fail here.
 const LOCAL_REPAIR_MARKER = "<!-- sentinel:repair -->";
+const LOCAL_SKIP_MARKER = "<!-- sentinel:skip -->";
 
 Deno.test(
-  "local issue scope: only the exact standalone first-line marker admits",
+  "local issue scope: every open issue is admitted unless it opts out",
   async () => {
     const github = new FakeGithub({
       openIssues: [
         { number: 1, body: `${LOCAL_REPAIR_MARKER}\n` },
         { number: 2, body: LOCAL_REPAIR_MARKER },
-        { number: 3, body: `${LOCAL_REPAIR_MARKER}\r\nbody` },
-        { number: 4, body: `${LOCAL_REPAIR_MARKER} extra\n` },
-        { number: 5, body: ` ${LOCAL_REPAIR_MARKER}\n` },
-        { number: 6, body: `intro\n${LOCAL_REPAIR_MARKER}\n` },
-        { number: 7, body: `> ${LOCAL_REPAIR_MARKER}\n` },
-        { number: 8, body: `\`\`\`\n${LOCAL_REPAIR_MARKER}\n\`\`\`\n` },
-        { number: 9, body: LOCAL_REPAIR_MARKER.slice(0, -1) },
-        { number: 10, body: "unmarked prose" },
-        { number: 11, body: "unmarked but labelled", labels: ["bug"] },
-        // Labels have no role at all: a marked issue is admitted even while it
-        // still carries the labels the repository bot removes.
+        { number: 3, body: "unmarked prose" },
+        { number: 4, body: "" },
+        { number: 5, body: "unmarked but labelled", labels: ["bug"] },
+        { number: 6, body: `${LOCAL_SKIP_MARKER}\nskip me` },
+        { number: 7, body: LOCAL_SKIP_MARKER },
+        { number: 8, body: `${LOCAL_SKIP_MARKER}\r\nskip me` },
+        { number: 9, body: `${LOCAL_SKIP_MARKER} extra\nnot a skip` },
+        { number: 10, body: ` ${LOCAL_SKIP_MARKER}\nnot a skip` },
+        { number: 11, body: `intro\n${LOCAL_SKIP_MARKER}\nnot a skip` },
+        { number: 12, body: "skip by label", labels: ["sentinel:skip"] },
         {
-          number: 12,
-          body: LOCAL_REPAIR_MARKER,
-          labels: ["bug", "enhancement", "question"],
+          number: 13,
+          body: "skip by mixed-case label",
+          labels: ["Sentinel:Skip"],
+        },
+        {
+          number: 14,
+          body: `${LOCAL_SKIP_MARKER}\nskip by marker and label`,
+          labels: ["sentinel:skip"],
         },
       ],
     });
@@ -1124,36 +1129,34 @@ Deno.test(
     assert.ok(listed.ok);
     assert.deepEqual(
       listed.ok ? listed.value.map((issue) => issue.number) : [],
-      [1, 2, 3, 12],
+      [1, 2, 3, 4, 5, 9, 10, 11],
     );
     assert.deepEqual(github.calls, ["listOpenIssues"]);
   },
 );
 
 Deno.test(
-  "local issue scope: read re-check admits marked issues and nulls the rest",
+  "local issue scope: read re-check admits by default and nulls opt-outs",
   async () => {
-    const marked: Partial<GitHubIssueV1> = {
+    const plain: Partial<GitHubIssueV1> = {
       number: 11,
-      body: `${LOCAL_REPAIR_MARKER}\nbody`,
+      body: "ordinary issue body",
     };
     const github = new FakeGithub({
       issues: [
-        marked,
-        { number: 12, body: `body\n${LOCAL_REPAIR_MARKER}` },
+        plain,
+        { number: 12, body: "skipped upstream\n" },
       ],
     });
     const scoped = scopeLocalRepairIssues(github);
     const admitted = await scoped.readIssue(11);
     assert.ok(admitted.ok);
     assert.equal(admitted.value?.number, 11);
-    assert.deepEqual(await scoped.readIssue(12), portOk(null));
     assert.deepEqual(await scoped.readIssue(99), portOk(null));
 
-    // The loop re-reads the real source before admission: removing the marker
-    // from the FakeGithub record revokes eligibility instead of consuming
-    // budget.
-    marked.body = "marker removed upstream";
+    // The loop re-reads the real source before admission: adding the opt-out to
+    // the FakeGithub record revokes eligibility instead of consuming budget.
+    plain.body = `${LOCAL_SKIP_MARKER}\nnow skipped`;
     assert.deepEqual(await scoped.readIssue(11), portOk(null));
   },
 );

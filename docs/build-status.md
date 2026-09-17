@@ -58,6 +58,17 @@ allow; no gate was weakened and nothing was fabricated.
   release controller is deliberately disabled; hosted promotion owns the self
   scope).
 
+**Owner update, 2026-09-17 22:35Z — nothing is filtered out of the repair queue.**
+The intake rule is inverted: every open issue is now repaired BY DEFAULT, and an
+issue is excluded only by an explicit opt-out — the exact standalone first line
+`<!-- sentinel:skip -->` or the `sentinel:skip` label. The historical
+`<!-- sentinel:repair -->` opt-in marker is still accepted but no longer
+required, and `MASTER-PLAN.md` records the new rule. `src/host/local.ts`
+(`scopeLocalRepairIssues`) re-reads the source before every admission, so an
+issue that gains either opt-out revokes eligibility before any budget is spent.
+Focused coverage: `tests/host/local_test.ts` (25 tests, including the rewritten
+"every open issue is admitted unless it opts out" case) passes.
+
 **Delivery record (live evidence).**
 - Hosted release `release:56fae4b9358db4e74c19a91054aef926b07202c05738dd688562ad8614e2e9b7`
   for PR 51: created 20:45:33Z, **phase `accepted` at 20:53:19Z**; revision
