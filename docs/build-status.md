@@ -11,10 +11,11 @@ status, acceptance and write ownership here.
 
 ### Current checkpoint
 
-Updated 2026-09-17 18:35 UTC. **Issue 48 is at the final merge: the corrected
-candidate is under review on the current base, and the delivery path is armed
-end to end.** The self-repair review-gate contradiction is resolved in the only
-way the owner's own rules allow; no gate was weakened and nothing was
+Updated 2026-09-17 20:10 UTC. **Issue 48 is merged: the reviewed head was
+merged into `development` under the runtime's own acceptance rule, and the
+release request, supervisor prior/candidate proofs, promotion, acceptance and
+closure follow.** The self-repair review-gate contradiction is resolved in the
+only way the owner's own rules allow; no gate was weakened and nothing was
 fabricated.
 
 - Round 11 completed 17:37:05Z on head `38dff3a3` with exactly one P2 — "URL
