@@ -11,6 +11,36 @@ status, acceptance and write ownership here.
 
 ### Current checkpoint
 
+**The review pipeline is repaired and the runtime is refusing an incomplete
+candidate, which is the correct outcome.** The counter-granted retry was
+admitted at 09:14:16Z with a NEW reservation identity (task/base/attempt 3), the
+runtime's own model worker produced a corrected candidate (`ec27bf7d…`,
+published to PR 51), and review round 7 (09:38:39Z, review `5233650313`, key
+`review:51:ec27bf7d…:attempt-7`) returned another real Luna/max verdict: findings,
+P2 "The sanitizer can corrupt non-closing URLs." The merge gate therefore still
+holds — no merge, no release request, no acceptance claim, no fabricated receipt.
+
+- State at this entry: `issue-ubiquity-sentinel-48` is at `review` with counters
+  3/0/7, head `ec27bf7d…`, base `3dfb3402…`, no intent, no blocker and a bounded
+  `review_pending` wait; the hosted runtime is generation 10 (`80384fc3…`,
+  reviewer provenance) and idle.
+- The next ordinary execution (~10:14Z, hourly cadence) observes round 7, routes
+  the task to a correction and admits the next implementation attempt (counter 3
+  → 4, still inside the runtime's four-attempt bound) through its own model
+  worker; the changed candidate must then pass review round 8 before any merge.
+- All three deployed fixes are live and independently evidenced: the terminal
+  no-verdict recovery (generation 8), the review-step base-refresh
+  reconciliation (generation 9) and the reviewer provenance fix for the
+  installed 0.154 unified-exec sources (generation 10). Real reviews, real
+  executions (gpt-5.6-luna, max reasoning) and real findings are the proof; the
+  earlier rounds' twenty-to-thirty-second no-verdict refusals are gone.
+- Recorded boundary for the next round: the candidate content must satisfy the
+  reviewer's URL/non-closing-reference criterion, which two model corrections
+  have not yet achieved; the delivery, the supervisor's prior/candidate proofs,
+  the promotion and the live delivery evidence therefore remain outstanding, and
+  the goal stays active. `docs/build-status.md` remains the only authoritative
+  ledger and every charge, receipt, reservation and candidate is preserved.
+
 **The root cause of the "unreleasable self-repair" was a reviewer-provenance
 defect, and it is fixed and live.** Review rounds 3 (02:12:21Z) and 4
 (04:25:03Z) each ended about thirty seconds after their request with `verdict
