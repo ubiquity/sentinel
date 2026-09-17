@@ -672,9 +672,22 @@ async function readCheckoutFacts(): Promise<
   }
 }
 
+/**
+ * True only for the two reasons that mean the one-shot itself could not run
+ * safely. Every other typed reason — a drifted precondition, a moved head, a
+ * non-terminal release, a lost CAS — is a bounded NO-OP of a one-shot that must
+ * never make the unchanged supervisor look broken; the single JSON line is the
+ * record of it.
+ */
+export function isHardRecoveryFailure(
+  reason: Issue48QuotaRecoveryReasonV1,
+): boolean {
+  return reason === "identity_rejected" || reason === "unexpected_failure";
+}
+
 function report(result: Issue48QuotaRecoveryResultV1): number {
   console.log(JSON.stringify(result));
-  return result.status === "failed" ? 1 : 0;
+  return isHardRecoveryFailure(result.reason) ? 1 : 0;
 }
 
 /**

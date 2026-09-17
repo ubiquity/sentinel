@@ -33,6 +33,7 @@ import {
 } from "../../src/state/mod.ts";
 import {
   buildNextQuotaSnapshot,
+  isHardRecoveryFailure,
   ISSUE48_QUOTA_ADMISSION_BLOCKER_PREFIX,
   ISSUE48_QUOTA_BLOCKER_PREFIX,
   ISSUE48_QUOTA_CANDIDATE_BLOCKER_PREFIX,
@@ -673,6 +674,30 @@ Deno.test(
         await cleanup(rig);
       }
     }
+  },
+);
+
+Deno.test(
+  "issue48 review quota recovery: only identity and unexpected failures exit nonzero",
+  () => {
+    // A one-shot that reports a drifted precondition, a moved head, a
+    // non-terminal release or a lost CAS must not fail the supervisor workflow.
+    for (
+      const reason of [
+        "target_precondition_mismatch",
+        "already_recovered",
+        "runtime_mismatch",
+        "release_not_terminal",
+        "clock_invalid",
+        "write_conflict",
+        "write_ambiguous",
+        "readback_unverified",
+      ] as const
+    ) {
+      assert.equal(isHardRecoveryFailure(reason), false, reason);
+    }
+    assert.equal(isHardRecoveryFailure("identity_rejected"), true);
+    assert.equal(isHardRecoveryFailure("unexpected_failure"), true);
   },
 );
 
