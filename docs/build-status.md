@@ -11,12 +11,32 @@ status, acceptance and write ownership here.
 
 ### Current checkpoint
 
-Updated 2026-09-17 20:10 UTC. **Issue 48 is merged: the reviewed head was
-merged into `development` under the runtime's own acceptance rule, and the
-release request, supervisor prior/candidate proofs, promotion, acceptance and
-closure follow.** The self-repair review-gate contradiction is resolved in the
-only way the owner's own rules allow; no gate was weakened and nothing was
-fabricated.
+Updated 2026-09-17 20:54 UTC. **Issue 48 is delivered: the reviewed head was
+merged, the trusted supervisor accepted the hosted release for the merged
+revision, and the issue is closed with that evidence.** The self-repair
+review-gate contradiction is resolved in the only way the owner's own rules
+allow; no gate was weakened and nothing was fabricated.
+
+**Delivery record (live evidence).**
+- Hosted release `release:56fae4b9358db4e74c19a91054aef926b07202c05738dd688562ad8614e2e9b7`
+  for PR 51: created 20:45:33Z, **phase `accepted` at 20:53:19Z**; revision
+  `1ed66cd191271cc206aaf436d0f93d245aaee936` (the merge), source head
+  `2bce980`, base `fc25d71`, review receipt
+  `review-receipt:7826d27e94648e79d03f7f3900e721345c63c06edac2982de0b79b3144240e12`.
+- Proofs: prior `fc25d71`/generation 17 in run `35272524410` (healthy);
+  candidate `1ed66cd`/generation 18 in run `35273273110` (healthy). The runtime
+  pointer reads revision `1ed66cd` at generation 18 with that candidate proof as
+  `lastHealthyProof`.
+- Issue 48 closed 20:53:56Z with this evidence.
+- Invariants preserved: every implementation and review session observed
+  `gpt-5.6-luna` with `max` reasoning, the shared 120-starts-per-rolling-hour
+  admission policy was never modified, every reservation, charge, receipt and
+  candidate is intact (the two bounded recoveries only lowered the attempt
+  counter with all reservations preserved), and no quota or model fallback
+  occurred. Credentials, state writes and promotion authority stayed out of
+  model workers: the request was recorded by the protected maintenance job, and
+  the supervisor and release controller owned the proofs, promotion and
+  acceptance.
 
 - Round 11 completed 17:37:05Z on head `38dff3a3` with exactly one P2 — "URL
   token can consume adjacent Markdown prose": the URL token matcher consumed
