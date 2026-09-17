@@ -1174,6 +1174,87 @@ Deno.test("review request ambiguous/failed stays charged once and never resubmit
   }
 });
 
+Deno.test(
+  "review receipt: a completed observation is recorded even after its wait was cleared",
+  async () => {
+    const rig = await makeRig("clearedwait", {
+      model: { heads: [SHA3, SHA4] },
+      github: { candidateLifecycle: positiveLifecycle() },
+    });
+    try {
+      // Run 1: the candidate reaches the review wait, which persists the
+      // durable review-request reservation for this round.
+      const first = await rig.run();
+      assert.equal(first.status, "idle", JSON.stringify(first));
+      const state = await rig.snapshot();
+      assert.equal(state.work[0].nextStep, "review");
+      assert.equal(state.reservations.length, 2, "review is charged");
+
+      // A bounded recovery cleared the wait while the review was completing,
+      // so the record carries no wait to quote and its updatedAt is LATER than
+      // the completion. The receipt must still be built from the reservation.
+      rig.github.completeReview([{
+        id: "finding-1",
+        severity: "P1",
+        path: "src/app.ts",
+        message: "required fix",
+        fingerprint: "a".repeat(64),
+        resolved: false,
+        resolutionEvidence: null,
+      }], rig.clock.now());
+      const read = await rig.store.readRepair();
+      assert.ok(read.ok && read.value.status === "found");
+      if (!read.ok || read.value.status !== "found") return;
+      rig.clock.advance(5 * 60_000);
+      const cleared = {
+        ...read.value.snapshot.work[0]!,
+        wait: null,
+        updatedAt: rig.clock.now(),
+      };
+      const written = await rig.store.writeRepair({
+        ...read.value.snapshot,
+        stateHead: read.value.head,
+        sequence: read.value.snapshot.sequence + 1,
+        updatedAt: rig.clock.now(),
+        work: [cleared],
+      }, read.value.head);
+      assert.ok(
+        written.ok && written.value.status === "applied",
+        JSON.stringify(written),
+      );
+
+      rig.clock.advance(15 * 60_000 + 1);
+      const second = await rig.run();
+      assert.equal(second.status, "idle", JSON.stringify(second));
+      const after = await rig.snapshot();
+      const record = after.work[0]!;
+      // The settled observation was recorded instead of being re-armed
+      // forever: the receipt is durable and the task continues to a correction
+      // that carries the exact finding.
+      assert.ok(
+        record.evidence.some((ref) =>
+          ref.kind === "review_receipt" && ref.ref.includes("review-receipt:")
+        ),
+        "the completed review is recorded as a receipt",
+      );
+      // The recorded finding drove a correction in the SAME run: a fresh
+      // implementation ran with the finding, published a new head and
+      // requested its review, so the task is back at `review`.
+      assert.equal(record.nextStep, "review");
+      assert.equal(record.target.head, SHA4, "corrected candidate head");
+      assert.equal(record.counters.reviewRounds, 2, "fresh correction round");
+      assert.equal(rig.model.requests.length, 2);
+      assert.deepEqual(rig.model.requests[1]?.reviewFindings, [{
+        severity: "P1",
+        path: "src/app.ts",
+        message: "required fix",
+      }]);
+    } finally {
+      await rig.ctx.cleanup();
+    }
+  },
+);
+
 Deno.test("P1 findings trigger a fresh bounded implementation/candidate/replay path", async () => {
   const rig = await makeRig("p1fresh", {
     model: { heads: [SHA3, SHA4] },

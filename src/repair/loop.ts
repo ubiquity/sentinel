@@ -4303,7 +4303,12 @@ async function applyObservedReview(
       // may report several findings at one severity; passing duplicates makes
       // the strict receipt parser reject an otherwise valid result.
       unresolvedSeverities: deriveUnresolvedSeverities(value.findings),
-      submittedAt: reviewWaitSince(record, now),
+      submittedAt: reviewSubmittedAt(
+        context.snapshot,
+        record,
+        value.completedAt,
+        now,
+      ),
       completedAt: value.completedAt,
       observedAt: value.receivedAt,
     });
@@ -5664,6 +5669,38 @@ function reviewWaitSince(record: WorkRecordV1, fallback: number): number {
     return record.intent.startedAt;
   }
   return Math.min(record.updatedAt, fallback);
+}
+
+/**
+ * Exact submission instant of the review attempt being observed.
+ *
+ * The durable review-request reservation of THIS round is the authoritative
+ * record of when the review was submitted; a record whose wait was cleared (a
+ * bounded recovery, a re-arm after a settled observation) has no wait left to
+ * quote, and deriving the instant from "now" makes the strict receipt parser
+ * refuse a completion that predates it — the observation is then silently
+ * re-armed forever. The reservation is therefore preferred, and only its
+ * absence falls back to the bounded wait/updatedAt derivation capped at the
+ * observed completion so the receipt can never invert.
+ */
+function reviewSubmittedAt(
+  snapshot: RepairStateSnapshotV1,
+  record: WorkRecordV1,
+  observedCompletedAt: number | null,
+  fallback: number,
+): number {
+  const round = record.counters.reviewRounds;
+  const reservation = snapshot.reservations.find((item) =>
+    item.taskId === record.id &&
+    item.purpose === "review_request" &&
+    item.attempt === round
+  );
+  const base = reservation === undefined
+    ? reviewWaitSince(record, fallback)
+    : reservation.createdAt;
+  return observedCompletedAt === null
+    ? base
+    : Math.min(base, observedCompletedAt);
 }
 
 function mergeEvidence(
