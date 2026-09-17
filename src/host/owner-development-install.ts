@@ -174,6 +174,14 @@ export const OWNER_DEVELOPMENT_INSTALL_RELEASED_GENERATION = 18;
 export const OWNER_DEVELOPMENT_INSTALL_TRIGGER_REVISION =
   "0853a5c0454d17ab73856d3c9621dc534a0fa706" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_TRIGGER_GENERATION = 19;
+/**
+ * Exact revision carrying the base-advance recovery for a wedged attempt
+ * budget. Its install triggers an immediate execution, which is how the loop
+ * reconciles the pending refresh and runs the next model session now.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_ADVANCE_REVISION =
+  "33ff7fb27c5cb272d953f9ddaae3be1271212afd" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_ADVANCE_GENERATION = 20;
 
 const API_BASE = "https://api.github.com";
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -788,10 +796,49 @@ export function planOwnerDevelopmentInstall(
       );
     }
     if (healthy !== null) {
-      return noChange("the owner development installation is complete");
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_ADVANCE_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_ADVANCE_GENERATION,
+        healthy,
+        "install the base-advance revision after the trigger healthy proof",
+      );
     }
     return waiting(
       "the trigger generation 19 healthy proof is not recorded",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_ADVANCE_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_ADVANCE_GENERATION
+  ) {
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_TRIGGER_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_TRIGGER_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded trigger healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_TRIGGER_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed base-advance candidate to the trigger revision",
+      );
+    }
+    if (healthy !== null) {
+      return noChange("the owner development installation is complete");
+    }
+    return waiting(
+      "the base-advance generation 20 healthy proof is not recorded",
     );
   }
 

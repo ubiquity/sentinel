@@ -31,6 +31,7 @@ import { parseReleaseStateSnapshotV1 } from "../../src/contracts/state-snapshots
 import type { ReleaseStateSnapshotV1 } from "../../src/contracts/state-snapshots.ts";
 import {
   buildOwnerDevelopmentInstallSnapshot,
+  OWNER_DEVELOPMENT_INSTALL_ADVANCE_REVISION,
   OWNER_DEVELOPMENT_INSTALL_AGGREGATE_GENERATION,
   OWNER_DEVELOPMENT_INSTALL_AGGREGATE_REVISION,
   OWNER_DEVELOPMENT_INSTALL_EXIT_CONTRACT_REVISION,
@@ -77,6 +78,7 @@ const LEDGER = OWNER_DEVELOPMENT_INSTALL_LEDGER_REVISION;
 const SETTLEMENT = OWNER_DEVELOPMENT_INSTALL_SETTLEMENT_REVISION;
 const RELEASED = OWNER_DEVELOPMENT_INSTALL_RELEASED_REVISION;
 const TRIGGER = OWNER_DEVELOPMENT_INSTALL_TRIGGER_REVISION;
+const ADVANCE = OWNER_DEVELOPMENT_INSTALL_ADVANCE_REVISION;
 
 function hostedProof(input: {
   runId: number;
@@ -827,14 +829,30 @@ Deno.test(
     if (releasedPlan.status !== "install") throw new Error("expected install");
     assert.equal(releasedPlan.move.nextRevision, TRIGGER);
     assert.equal(releasedPlan.move.nextGeneration, 19);
-    // The trigger generation is the fixed end of the chain.
+    // The trigger healthy proof authorizes the base-advance install.
+    const triggerHealthy = healthyProof(TRIGGER, 19, 90);
+    const advancePlan = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: TRIGGER,
+          generation: 19,
+          healthyProof: triggerHealthy,
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(advancePlan.status, "install");
+    if (advancePlan.status !== "install") throw new Error("expected install");
+    assert.equal(advancePlan.move.nextRevision, ADVANCE);
+    assert.equal(advancePlan.move.nextGeneration, 20);
+    // The base-advance generation is the fixed end of the chain.
     assert.equal(
       planOwnerDevelopmentInstall(
         releaseSnapshot({
           runtime: runtimeRecord({
-            revision: TRIGGER,
-            generation: 19,
-            healthyProof: healthyProof(TRIGGER, 19, 90),
+            revision: ADVANCE,
+            generation: 20,
+            healthyProof: healthyProof(ADVANCE, 20, 91),
           }),
         }),
         NOW,
