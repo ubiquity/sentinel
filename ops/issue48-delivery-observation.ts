@@ -391,6 +391,34 @@ export async function runIssue48DeliveryObservation(
   };
 }
 
+/**
+ * True only when the exact revision is integrated into the base branch, with
+ * the SAME evidence the runtime's own release verifier reads from
+ * `compare/{revision}...{baseBranch}`: the base commit and merge base of that
+ * comparison must be the revision itself, and the status must be `ahead`
+ * (base branch contains it and moved on) or `identical` (it is the tip).
+ * `behind`/`diverged` and any malformed shape are definitive negatives.
+ */
+export function revisionIntegratedIntoBase(
+  compare: unknown,
+  revision: string,
+): boolean {
+  if (compare === null || typeof compare !== "object") return false;
+  const obj = compare as Record<string, unknown>;
+  const status = obj["status"];
+  if (status !== "ahead" && status !== "identical") return false;
+  const baseCommit = obj["base_commit"];
+  const mergeBase = obj["merge_base_commit"];
+  if (
+    baseCommit === null || typeof baseCommit !== "object" ||
+    mergeBase === null || typeof mergeBase !== "object"
+  ) {
+    return false;
+  }
+  return (baseCommit as Record<string, unknown>)["sha"] === revision &&
+    (mergeBase as Record<string, unknown>)["sha"] === revision;
+}
+
 /** Bounded, credential-free-enough GitHub reader for the three observed facts. */
 export function createIssue48DeliveryGitHub(
   token: string,
@@ -451,9 +479,11 @@ export function createIssue48DeliveryGitHub(
       const compare = await get(
         `/repos/${ISSUE48_QUOTA_REPOSITORY}/compare/${mergeCommitSha}...${ISSUE48_DELIVERY_BASE_BRANCH}`,
       );
-      const status = compare !== null && typeof compare === "object"
-        ? (compare as Record<string, unknown>)["status"]
-        : null;
+      // The runtime's own verifier reads `compare/{revision}...development`:
+      // development is AHEAD of an integrated revision, and the compare base
+      // commit must be that exact revision. "behind"/"diverged" is never
+      // integration.
+      const integrated = revisionIntegratedIntoBase(compare, mergeCommitSha);
       return {
         ok: true,
         value: {
@@ -467,7 +497,7 @@ export function createIssue48DeliveryGitHub(
             ? String(user["login"])
             : null,
           parents: parentShas,
-          revisionOnBaseBranch: status === "behind" || status === "identical",
+          revisionOnBaseBranch: integrated,
         },
       };
     },

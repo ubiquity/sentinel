@@ -33,6 +33,7 @@ import {
 import {
   buildIssue48ReleaseRequest,
   isHardDeliveryFailure,
+  revisionIntegratedIntoBase,
   runIssue48DeliveryObservation,
 } from "../../ops/issue48-delivery-observation.ts";
 import type {
@@ -511,5 +512,55 @@ Deno.test(
     assert.equal(isHardDeliveryFailure("merge_not_observed"), false);
     assert.equal(isHardDeliveryFailure("identity_rejected"), true);
     assert.equal(isHardDeliveryFailure("unexpected_failure"), true);
+  },
+);
+
+Deno.test(
+  "issue48 delivery observation: integration evidence mirrors the runtime verifier",
+  async () => {
+    const revision = MERGE;
+    const shape = (status: string, baseSha: string, mergeSha: string) => ({
+      status,
+      base_commit: { sha: baseSha },
+      merge_base_commit: { sha: mergeSha },
+      ahead_by: status === "identical" ? 0 : 3,
+      behind_by: 0,
+      total_commits: status === "identical" ? 0 : 3,
+    });
+    assert.equal(
+      revisionIntegratedIntoBase(shape("ahead", revision, revision), revision),
+      true,
+    );
+    assert.equal(
+      revisionIntegratedIntoBase(
+        shape("identical", revision, revision),
+        revision,
+      ),
+      true,
+    );
+    assert.equal(
+      revisionIntegratedIntoBase(shape("behind", revision, revision), revision),
+      false,
+    );
+    assert.equal(
+      revisionIntegratedIntoBase(
+        shape("diverged", revision, revision),
+        revision,
+      ),
+      false,
+    );
+    assert.equal(
+      revisionIntegratedIntoBase(shape("ahead", SHA1, revision), revision),
+      false,
+    );
+    assert.equal(
+      revisionIntegratedIntoBase(shape("ahead", revision, SHA1), revision),
+      false,
+    );
+    assert.equal(revisionIntegratedIntoBase(null, revision), false);
+    assert.equal(
+      revisionIntegratedIntoBase({ status: "ahead" }, revision),
+      false,
+    );
   },
 );
