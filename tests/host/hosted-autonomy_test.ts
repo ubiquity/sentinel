@@ -639,6 +639,72 @@ Deno.test(
 );
 
 Deno.test(
+  "hosted autonomy: a wedged attempt budget advances the base through the runtime's own refresh intent",
+  () => {
+    const record = blockedRecord({
+      blocker: {
+        kind: "review_quota",
+        message: "implementation attempt budget exhausted",
+        since: T0 + 3000,
+      },
+      counters: { attempts: 4, retries: 0, reviewRounds: 1 },
+      target: {
+        base: BASE,
+        branch: "sentinel/repair/issue-ubiquity-sentinel-48",
+        checkpoint: null,
+        head: HEAD,
+        pr: 51,
+      },
+    });
+    const charges = [1, 2, 3, 4].map((attempt) =>
+      reservation(`r-${attempt}`, {
+        taskId: TARGET,
+        head: BASE,
+        attempt,
+        purpose: "implementation",
+        outcome: "submitted",
+        settledAt: T0 + 2000,
+      })
+    );
+    const snapshot = repairSnapshot(
+      [record],
+      [authorizingReceipt()],
+      [],
+      charges,
+    );
+    const now = T0 + 3000 + HOSTED_AUTONOMY_RETRY_COOLDOWN_MS;
+    // With no newer base the task stays put: nothing may invent an identity.
+    assert.equal(planHostedRetries(snapshot, now, BASE).length, 0);
+    // With a newer base the runtime's own refresh gives fresh identities.
+    const newerBase = SHA1;
+    const plans = planHostedRetries(snapshot, now, newerBase);
+    assert.equal(plans.length, 1);
+    assert.equal(plans[0].advanceBase, true);
+    assert.equal(plans[0].grant, 1);
+    assert.equal(plans[0].observedBase, newerBase);
+    const next = applyHostedRetries(snapshot, SHA1, plans, now);
+    const applied = next.work[0];
+    assert.equal(applied.nextStep, "work");
+    assert.equal(applied.blocker, null);
+    assert.equal(applied.counters.attempts, 3);
+    assert.equal(applied.counters.retries, 1);
+    assert.equal(
+      applied.target.base,
+      BASE,
+      "the refresh advances the base, not this pass",
+    );
+    assert.ok(
+      applied.intent !== null && applied.intent.kind === "base_refresh",
+    );
+    assert.equal(
+      applied.intent?.key,
+      `base_refresh:51:${HEAD}:${newerBase}`,
+    );
+    assert.equal(next.reservations.length, 4);
+  },
+);
+
+Deno.test(
   "hosted autonomy: an unsettled implementation intent is never cleared",
   () => {
     const unsettled = repairSnapshot(
