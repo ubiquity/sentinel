@@ -185,11 +185,15 @@ async function readReleaseSafely(
  */
 function authorizingReceipt(
   snapshot: RepairStateSnapshotV1,
+  repository: ReleaseRequestV1["target"]["repository"],
   pullRequest: number,
   head: string,
   base: string,
 ): ReviewReceiptV1 | null {
   const found = snapshot.reviews.find((review) =>
+    review.repository.owner === repository.owner &&
+    review.repository.name === repository.name &&
+    review.repository.installationId === repository.installationId &&
     review.pullRequest.number === pullRequest &&
     review.pullRequest.head === head &&
     review.pullRequest.base === base &&
@@ -280,6 +284,7 @@ export async function runIssue48DeliveryObservation(
 
   const receipt = authorizingReceipt(
     snapshot,
+    record.repository,
     ISSUE48_DELIVERY_PULL_REQUEST,
     head,
     base,
