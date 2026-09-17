@@ -65,15 +65,15 @@ export const HOSTED_AUTONOMY_BASE_BRANCH = "development";
 export const HOSTED_AUTONOMY_REQUIRED_CHECK = "test-local";
 
 /**
- * Sanity bound on automatic retries per task, counted in the preserved
- * `retries` counter. The real limiter is the cooldown below: a transient
- * provider outage must never permanently kill a task, and it must never let one
- * task loop faster than the cooldown either.
+ * Bound on automatic retries per task, counted in the preserved `retries`
+ * counter. A transient provider outage must never permanently kill a task, and
+ * a single task must never loop cheaply either: the retry only ever runs inside
+ * an execution, and executions are hourly unless a release or a health gap
+ * starts one, so the cadence itself is the rate limit. (An earlier 30-minute
+ * blocker cooldown also gated retries that carry a fresh reservation identity,
+ * which merely wedged tasks that were otherwise recoverable.)
  */
 export const HOSTED_AUTONOMY_MAX_RETRIES = 200;
-
-/** Minimum age of a transient blocker before it may be retried again. */
-export const HOSTED_AUTONOMY_RETRY_COOLDOWN_MS = 30 * 60_000;
 
 /** The runtime's own implementation-attempt ceiling. */
 export const HOSTED_AUTONOMY_MAX_IMPLEMENTATION_ATTEMPTS = 4;
@@ -318,12 +318,7 @@ export function planHostedRetries(
     const blocker = record.blocker;
     if (blocker === null) continue;
     if (record.counters.retries >= HOSTED_AUTONOMY_MAX_RETRIES) continue;
-    if (
-      !Number.isSafeInteger(now) ||
-      now - blocker.since < HOSTED_AUTONOMY_RETRY_COOLDOWN_MS
-    ) {
-      continue;
-    }
+    if (!Number.isSafeInteger(now)) continue;
     const rule = HOSTED_AUTONOMY_RETRYABLE.find((item) =>
       blocker.message.startsWith(item.prefix)
     );

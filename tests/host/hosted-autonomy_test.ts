@@ -36,7 +36,6 @@ import {
   applyHostedRetries,
   buildHostedReleaseRequest,
   HOSTED_AUTONOMY_MAX_RETRIES,
-  HOSTED_AUTONOMY_RETRY_COOLDOWN_MS,
   isHardAutonomyFailure,
   planHostedClosures,
   planHostedRetries,
@@ -552,7 +551,7 @@ Deno.test(
     ]);
     const plans = planHostedRetries(
       snapshot,
-      T0 + 3000 + HOSTED_AUTONOMY_RETRY_COOLDOWN_MS,
+      T0 + 5000,
     );
     assert.equal(plans.length, 1);
     assert.equal(plans[0].id, TARGET);
@@ -597,7 +596,7 @@ Deno.test(
     ]);
     const plans = planHostedRetries(
       reviewRounds,
-      T0 + 3000 + HOSTED_AUTONOMY_RETRY_COOLDOWN_MS,
+      T0 + 5000,
     );
     assert.equal(plans.length, 1);
     assert.equal(plans[0].nextStep, "review");
@@ -618,7 +617,7 @@ Deno.test(
     ]);
     const budgetPlans = planHostedRetries(
       budget,
-      T0 + 3000 + HOSTED_AUTONOMY_RETRY_COOLDOWN_MS,
+      T0 + 5000,
     );
     assert.equal(budgetPlans.length, 1);
     assert.equal(budgetPlans[0].grant, 1);
@@ -672,7 +671,7 @@ Deno.test(
       [],
       charges,
     );
-    const now = T0 + 3000 + HOSTED_AUTONOMY_RETRY_COOLDOWN_MS;
+    const now = T0 + 5000;
     // With no newer base the task stays put: nothing may invent an identity.
     assert.equal(planHostedRetries(snapshot, now, BASE).length, 0);
     // With a newer base the runtime's own refresh gives fresh identities.
@@ -771,12 +770,10 @@ Deno.test(
     assert.equal(
       planHostedRetries(
         settled,
-        T0 + 3000 + HOSTED_AUTONOMY_RETRY_COOLDOWN_MS,
+        T0 + 5000,
       ).length,
       1,
     );
-    // Inside the cooldown the same blocker is left alone.
-    assert.equal(planHostedRetries(settled, T0 + 4000).length, 0);
   },
 );
 
