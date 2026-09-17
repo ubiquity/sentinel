@@ -172,7 +172,7 @@ export const OWNER_DEVELOPMENT_INSTALL_RELEASED_GENERATION = 18;
  * of waiting for the hourly ordinary cadence.
  */
 export const OWNER_DEVELOPMENT_INSTALL_TRIGGER_REVISION =
-  "9c4f658e93ff28c60eb55f80669e589d51373b89" as GitSha;
+  "0853a5c0454d17ab73856d3c9621dc534a0fa706" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_TRIGGER_GENERATION = 19;
 
 const API_BASE = "https://api.github.com";
