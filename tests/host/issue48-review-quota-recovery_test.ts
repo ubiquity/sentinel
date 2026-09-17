@@ -18,6 +18,7 @@ import type {
   StateReadView,
   StateWriteResultV1,
 } from "../../src/contracts/ports.ts";
+import { portError, portOk } from "../../src/contracts/ports.ts";
 import {
   parseReleaseStateSnapshotV1,
   parseRepairStateSnapshotV1,
@@ -33,6 +34,7 @@ import {
 } from "../../src/state/mod.ts";
 import {
   buildNextQuotaSnapshot,
+  ISSUE48_QUOTA_ADMISSION_BLOCKER_PREFIX,
   ISSUE48_QUOTA_BLOCKER_PREFIX,
   ISSUE48_QUOTA_CANDIDATE_BLOCKER_PREFIX,
   runIssue48QuotaRecovery,
@@ -355,6 +357,7 @@ async function makeRig(
       targetId: TARGET,
       counters: { attempts: 4, retries: 0, reviewRounds: 5 },
       grantedImplementationAttempts: 1,
+      advanceBaseToObservedHead: false,
       evidenceRef: EVIDENCE_REF,
       reviewIds: [RECEIPT_ID],
       pullRequestNumber: 51,
@@ -385,12 +388,20 @@ function runRig(
   overrides: {
     binding?: Partial<Issue48QuotaRecoveryBindingV1>;
     now?: number;
+    baseHead?: GitSha;
+    baseUnavailable?: boolean;
   } = {},
 ): Promise<Issue48QuotaRecoveryResultV1> {
   return runIssue48QuotaRecovery({
     state: rig.state,
     clock: { now: () => overrides.now ?? T0 + 10_000 },
     binding: { ...rig.binding, ...overrides.binding },
+    readBaseHead: () =>
+      Promise.resolve(
+        overrides.baseUnavailable
+          ? portError("unavailable", "synthetic")
+          : portOk(overrides.baseHead ?? BASE),
+      ),
   });
 }
 
@@ -519,6 +530,28 @@ Deno.test(
           },
         },
         expected: "applied",
+      },
+      {
+        name: "admission-duplicate-blocker-is-cleared",
+        record: {
+          blocker: {
+            kind: "unavailable",
+            message: `${ISSUE48_QUOTA_ADMISSION_BLOCKER_PREFIX}`,
+            since: T0 + 1000,
+          },
+        },
+        expected: "applied",
+      },
+      {
+        name: "unrelated-unavailable-blocker",
+        record: {
+          blocker: {
+            kind: "unavailable",
+            message: "review transport failure",
+            since: T0 + 1000,
+          },
+        },
+        expected: "target_precondition_mismatch",
       },
       {
         name: "unrelated-other-blocker",
@@ -654,6 +687,59 @@ Deno.test(
 );
 
 Deno.test(
+  "issue48 review quota recovery: the base advance grants a fresh implementation identity",
+  async () => {
+    const moved = "b".repeat(40) as GitSha;
+    const rig = await makeRig("quota-base-advance");
+    try {
+      const result = await runRig(rig, {
+        binding: { advanceBaseToObservedHead: true },
+        baseHead: moved,
+      });
+      assert.equal(result.status, "applied", JSON.stringify(result));
+      const after = await rig.repair.readRepair();
+      assert.ok(after.ok && after.value.status === "found");
+      if (!after.ok || after.value.status !== "found") return;
+      const record = after.value.snapshot.work[0]!;
+      // The base is the observed configured head: the next implementation
+      // reservation identity (task/base/attempt/purpose) is therefore new.
+      assert.equal(record.target.base, moved);
+      assert.equal(record.target.head, HEAD, "the candidate head is unchanged");
+      assert.equal(record.nextStep, "work");
+      assert.equal(record.intent, null);
+    } finally {
+      await cleanup(rig);
+    }
+
+    // An unreadable head or an unchanged base refuses with zero writes.
+    for (
+      const overrides of [
+        { baseUnavailable: true },
+        { baseHead: BASE },
+      ]
+    ) {
+      const healthy = await makeRig(
+        `quota-base-refuse-${JSON.stringify(overrides).length}`,
+      );
+      try {
+        const refused = await runRig(healthy, {
+          binding: { advanceBaseToObservedHead: true },
+          ...overrides,
+        });
+        assert.equal(refused.status, "failed", JSON.stringify(refused));
+        assert.equal(
+          refused.reason,
+          overrides.baseUnavailable ? "base_read_failed" : "base_unchanged",
+        );
+        assert.equal(healthy.writes, 0);
+      } finally {
+        await cleanup(healthy);
+      }
+    }
+  },
+);
+
+Deno.test(
   "issue48 review quota recovery: an already advanced task is a zero-write skip",
   async () => {
     const rig = await makeRig("quota-skip", {
@@ -707,6 +793,7 @@ Deno.test(
         state: racing,
         clock: { now: () => T0 + 10_000 },
         binding: rig.binding,
+        readBaseHead: () => Promise.resolve(portOk(BASE)),
       });
       assert.equal(result.status, "failed", JSON.stringify(result));
       assert.equal(result.reason, "write_conflict");
@@ -808,6 +895,7 @@ Deno.test(
       targetId: TARGET,
       counters: { attempts: 4, retries: 0, reviewRounds: 5 },
       grantedImplementationAttempts: 1,
+      advanceBaseToObservedHead: false,
       evidenceRef: EVIDENCE_REF,
       reviewIds: [RECEIPT_ID],
       pullRequestNumber: 51,
@@ -864,6 +952,7 @@ Deno.test(
         state: failing as StateReadView & RepairStateWriter,
         clock: { now: () => T0 + 10_000 },
         binding: rig.binding,
+        readBaseHead: () => Promise.resolve(portOk(BASE)),
       });
       assert.equal(result.status, "failed");
       assert.equal(result.reason, "write_rate_limited");
