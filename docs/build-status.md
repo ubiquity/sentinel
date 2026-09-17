@@ -114,6 +114,23 @@ fabricated.
   reviewed head `2bce980`; `compare/1ed66cd...development` is `identical` with
   both compare commits equal to the merge commit, and the pull request is
   `closed`/`merged` with `merge_commit_sha = 1ed66cd`.
+- Release request recorded by the runtime's own one-shot: with the round-14
+  receipt in state (evidence 9 → 10), the protected maintenance job ran
+  `ops/issue48-delivery-observation.ts` and wrote the single request
+  `release:56fae4b9358d…` (revision `1ed66cd`, source PR 51, head `2bce980`,
+  base `fc25d71`, review receipt bound to that exact pair) at 20:45:18Z. The
+  trusted supervisor then created the hosted release for it and started the
+  prior-revision proof execution (pointer `fc25d71`/generation 17) without any
+  operator write of proofs, promotion or acceptance.
+- The repair record itself is `blocked` with the implementation intent of the
+  follow-on round: the model's next session ran after the pull request was
+  already merged, so it published no candidate and the durable blocker
+  `model run did not complete with a trusted candidate` remains. That is the
+  honest steady state (no stray commit on the candidate branch, which still
+  points at the reviewed head `2bce980`), and it is why issue closure is the
+  operator's remaining act once the hosted release is accepted: the runtime's
+  own closure step requires a `delivery` step that only a clean no-finding
+  verdict can reach, and this pull request is already merged.
 - Deferred, recorded as future work rather than hidden (all five are P2 and the
   plan keeps them out of the merge gate): an invalid Markdown marker `](` can
   shield a directive, link titles and reference-definition labels are rewritten,
