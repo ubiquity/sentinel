@@ -72,6 +72,48 @@ const CASES: { body: string; expect: "strip" | "keep"; source: string }[] = [
     expect: "keep",
     source: "review round 10",
   },
+  { body: "Fixes: #123", expect: "strip", source: "GitHub colon form" },
+  { body: "Fix #123", expect: "strip", source: "singular keyword" },
+  { body: "Resolved owner/repo#7", expect: "strip", source: "qualified form" },
+  { body: "please fix this later", expect: "keep", source: "ordinary prose" },
+  {
+    body: "See www.example.test/fixes:#123 for details",
+    expect: "keep",
+    source: "www URL token",
+  },
+  {
+    body: "prefix fixes #123 suffix",
+    expect: "strip",
+    source: "mid-line directive",
+  },
+  {
+    // The reviewer is explicit: the directive here is real and must be
+    // removed, so this case expects the keyword to be stripped even though a
+    // Markdown ")" precedes it.
+    body: "[link](https://example.test)Fixes:#123",
+    expect: "strip",
+    source: "review round 11",
+  },
+  {
+    body: "[a](https://example.test/path) and Fixes #123",
+    expect: "strip",
+    source: "directive after a link",
+  },
+  {
+    body: "see https://example.test/Fixes:#123 now",
+    expect: "keep",
+    source: "directive inside a URL",
+  },
+  {
+    body: "(https://example.test) fixes #123",
+    expect: "strip",
+    source: "directive after parentheses",
+  },
+  {
+    body: "text <https://example.test> then closes: #9",
+    expect: "strip",
+    source: "angle-bracket URL then directive",
+  },
 ];
 
 let failures = 0;
