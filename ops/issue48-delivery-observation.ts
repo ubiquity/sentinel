@@ -315,11 +315,9 @@ export async function runIssue48DeliveryObservation(
   // same deterministic id) is never duplicated.
   if (
     snapshot.releaseRequests.some((request) =>
-      request.id ===
-        `release:${revision}` ||
-      (request.source.pullRequest === ISSUE48_DELIVERY_PULL_REQUEST &&
-        request.source.head === head && request.source.base === base &&
-        request.target.environment === "production")
+      request.source.pullRequest === ISSUE48_DELIVERY_PULL_REQUEST &&
+      request.source.head === head && request.source.base === base &&
+      request.target.environment === "production"
     )
   ) {
     return skipped("already_recorded", observedHead);
