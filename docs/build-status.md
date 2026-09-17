@@ -70,7 +70,20 @@ its own model worker on PR 51; the changed candidate will be reviewed again
 proofs are unchanged. The lane promotion carrying the runtime-pinned operator
 (`9b06622…`) was published under local verification (10/10 operator tests, lint,
 `deno check`) with its own CI run in flight (35189179293) to meet the
-ordinary-execution window; its result is recorded in the next entry.
+ordinary-execution window; that run and the promotion merge both completed green
+afterwards.
+
+At07:30 the granted correction attempt ended WITHOUT a trusted candidate: the
+runtime blocked `issue-ubiquity-sentinel-48` with kind `other` and the exact
+reason "model run did not complete with a trusted candidate", consuming the one
+granted attempt (counters 4/0/6, head `430b9760…`, base `3dfb3402…`). That is a
+failed attempt, not substantive progress, so the same owner-directed bound is
+re-applied once: the one-shot recovery now also clears that third, explicitly
+closed blocker (its exact reason prefix, never a general `other` block) and is
+re-pinned to this live identity (`92e1da6…`, lane `a1007c0…`). Every charge,
+receipt, reservation and counter is still preserved, the granted amount remains a
+closed 0-or-1 value, and the next ordinary execution retries the correction
+before any re-review. Nothing was merged and no receipt was fabricated.
 
 **Live: the deadlock is broken and the runtime is recovering issue 48 on its own.**
 The fix below was activated by the owner's 2026-09-17 decision and is proven in
