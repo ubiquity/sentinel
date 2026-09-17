@@ -82,6 +82,23 @@ fabricated.
   (`35258805683`, plus the `codex/ci-head-check` fallback run `35258832432`).
   `sentinel-ci` is not required by any ruleset anymore, so it is evidence, not
   a blocker; the runtime's own gates stay unchanged.
+- Round 13 (review `5240254113`, 19:18:5xZ, head `fa97f29`) rejected the
+  attempt-4 candidate with a P1 and a P2, both acceptance-relevant: `www.` is
+  matched at any position, so a valid qualified reference such as
+  `Fixes ubiquity/www.repo#123` is split at `www.` and the keyword survives in
+  the published body (the issue's primary acceptance), and a reference-style
+  destination `[r]: /foo:fixes:#123` is rewritten because only inline `](…)`
+  destinations were protected. Both cases are permanent evaluator entries
+  (24/26 for that head, failing exactly the two reported cases). A second
+  owner-authorized bounded recovery was re-pinned to the live identity
+  (counters `4/0/13`, head `fa97f29`, base `2b6a25b`, runtime generation 16) and
+  granted **two** counter units (4 → 2), because attempt 4 was already charged
+  at this base and attempt 3 was charged at the previous base `9fcc959`; the
+  generation-17 install pinned to the CI-verified `fc25d71` (its `test-local`
+  run `35261462685` succeeded, and the revision was pushed to `development`)
+  then bought the immediate execution that consumed the grant. Live proof: the
+  record recorded the round-13 receipt (evidence 8 → 9) and admitted the next
+  implementation attempt at 19:24Z with counters `3/0/13`.
 - Self-inflicted liveness gap found and fixed, recorded honestly: cancelling a
   supervisor run (`35260296167`) killed a repair job before it printed its
   signed terminal, and the runtime settled that as `unavailable`, so the saved
