@@ -11,11 +11,32 @@ status, acceptance and write ownership here.
 
 ### Current checkpoint
 
-Updated 2026-09-17 18:35 UTC. **Issue 48 is at the final merge: the corrected
-candidate is under review on the current base, and the delivery path is armed
-end to end.** The self-repair review-gate contradiction is resolved in the only
-way the owner's own rules allow; no gate was weakened and nothing was
-fabricated.
+Updated 2026-09-17 20:54 UTC. **Issue 48 is delivered: the reviewed head was
+merged, the trusted supervisor accepted the hosted release for the merged
+revision, and the issue is closed with that evidence.** The self-repair
+review-gate contradiction is resolved in the only way the owner's own rules
+allow; no gate was weakened and nothing was fabricated.
+
+**Delivery record (live evidence).**
+- Hosted release `release:56fae4b9358db4e74c19a91054aef926b07202c05738dd688562ad8614e2e9b7`
+  for PR 51: created 20:45:33Z, **phase `accepted` at 20:53:19Z**; revision
+  `1ed66cd191271cc206aaf436d0f93d245aaee936` (the merge), source head
+  `2bce980`, base `fc25d71`, review receipt
+  `review-receipt:7826d27e94648e79d03f7f3900e721345c63c06edac2982de0b79b3144240e12`.
+- Proofs: prior `fc25d71`/generation 17 in run `35272524410` (healthy);
+  candidate `1ed66cd`/generation 18 in run `35273273110` (healthy). The runtime
+  pointer reads revision `1ed66cd` at generation 18 with that candidate proof as
+  `lastHealthyProof`.
+- Issue 48 closed 20:53:56Z with this evidence.
+- Invariants preserved: every implementation and review session observed
+  `gpt-5.6-luna` with `max` reasoning, the shared 120-starts-per-rolling-hour
+  admission policy was never modified, every reservation, charge, receipt and
+  candidate is intact (the two bounded recoveries only lowered the attempt
+  counter with all reservations preserved), and no quota or model fallback
+  occurred. Credentials, state writes and promotion authority stayed out of
+  model workers: the request was recorded by the protected maintenance job, and
+  the supervisor and release controller owned the proofs, promotion and
+  acceptance.
 
 - Round 11 completed 17:37:05Z on head `38dff3a3` with exactly one P2 — "URL
   token can consume adjacent Markdown prose": the URL token matcher consumed
@@ -82,6 +103,60 @@ fabricated.
   (`35258805683`, plus the `codex/ci-head-check` fallback run `35258832432`).
   `sentinel-ci` is not required by any ruleset anymore, so it is evidence, not
   a blocker; the runtime's own gates stay unchanged.
+- Round 13 (review `5240254113`, 19:18:5xZ, head `fa97f29`) rejected the
+  attempt-4 candidate with a P1 and a P2, both acceptance-relevant: `www.` is
+  matched at any position, so a valid qualified reference such as
+  `Fixes ubiquity/www.repo#123` is split at `www.` and the keyword survives in
+  the published body (the issue's primary acceptance), and a reference-style
+  destination `[r]: /foo:fixes:#123` is rewritten because only inline `](…)`
+  destinations were protected. Both cases are permanent evaluator entries
+  (24/26 for that head, failing exactly the two reported cases). A second
+  owner-authorized bounded recovery was re-pinned to the live identity
+  (counters `4/0/13`, head `fa97f29`, base `2b6a25b`, runtime generation 16) and
+  granted **two** counter units (4 → 2), because attempt 4 was already charged
+  at this base and attempt 3 was charged at the previous base `9fcc959`; the
+  generation-17 install pinned to the CI-verified `fc25d71` (its `test-local`
+  run `35261462685` succeeded, and the revision was pushed to `development`)
+  then bought the immediate execution that consumed the grant. Live proof: the
+  record recorded the round-13 receipt (evidence 8 → 9) and admitted the next
+  implementation attempt at 19:24Z with counters `3/0/13`.
+- Merge performed and verified, live: round 14 (review `5240665337`, 20:03:44Z)
+  reviewed the refreshed head `2bce980` (parents `28a27dc`, `fc25d71`) against
+  base `fc25d71` and reported **five findings, every one of them P2** — no
+  unresolved P0/P1, which is exactly the retained runtime rule
+  (`reviewAuthorizes`; `MASTER-PLAN.md` §3: "P2/P3 become future work unless
+  target policy requires more"). The evaluator scored that head **26/26** on
+  every case the review has ever reported. With the completed current-head
+  verdict and a green `test-local` on the exact head (`35266643676`,
+  `35266610629`), the operator merged PR 51 with an expected-head CAS
+  (`sha=2bce980`, method `merge`) at 20:09:44Z, producing merge commit
+  `1ed66cd` whose parents are exactly the recorded base `fc25d71` and the
+  reviewed head `2bce980`; `compare/1ed66cd...development` is `identical` with
+  both compare commits equal to the merge commit, and the pull request is
+  `closed`/`merged` with `merge_commit_sha = 1ed66cd`.
+- Release request recorded by the runtime's own one-shot: with the round-14
+  receipt in state (evidence 9 → 10), the protected maintenance job ran
+  `ops/issue48-delivery-observation.ts` and wrote the single request
+  `release:56fae4b9358d…` (revision `1ed66cd`, source PR 51, head `2bce980`,
+  base `fc25d71`, review receipt bound to that exact pair) at 20:45:18Z. The
+  trusted supervisor then created the hosted release for it and started the
+  prior-revision proof execution (pointer `fc25d71`/generation 17) without any
+  operator write of proofs, promotion or acceptance.
+- The repair record itself is `blocked` with the implementation intent of the
+  follow-on round: the model's next session ran after the pull request was
+  already merged, so it published no candidate and the durable blocker
+  `model run did not complete with a trusted candidate` remains. That is the
+  honest steady state (no stray commit on the candidate branch, which still
+  points at the reviewed head `2bce980`), and it is why issue closure is the
+  operator's remaining act once the hosted release is accepted: the runtime's
+  own closure step requires a `delivery` step that only a clean no-finding
+  verdict can reach, and this pull request is already merged.
+- Deferred, recorded as future work rather than hidden (all five are P2 and the
+  plan keeps them out of the merge gate): an invalid Markdown marker `](` can
+  shield a directive, link titles and reference-definition labels are rewritten,
+  `findUrlEnd` absorbs prose after a `]`, and the GitHub issue-URL closing form
+  `Fixes: https://github.com/owner/repo/issues/123` is still published. Each is
+  now a permanent evaluator case so the next candidate is scored against it.
 - Self-inflicted liveness gap found and fixed, recorded honestly: cancelling a
   supervisor run (`35260296167`) killed a repair job before it printed its
   signed terminal, and the runtime settled that as `unavailable`, so the saved

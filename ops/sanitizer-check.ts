@@ -142,6 +142,35 @@ const CASES: { body: string; expect: "strip" | "keep"; source: string }[] = [
     expect: "keep",
     source: "review round 13 reference-style destination",
   },
+  {
+    // The reviewer is explicit: only a valid Markdown link may protect a range,
+    // so this real directive must be removed.
+    body: "text ](Fixes #123)",
+    expect: "strip",
+    source: "review round 14 invalid Markdown marker",
+  },
+  {
+    body: '[link](/foo "Fixes #123")',
+    expect: "keep",
+    source: "review round 14 link title",
+  },
+  {
+    body: "[Fixes #123]: /foo",
+    expect: "keep",
+    source: "review round 14 reference-definition label",
+  },
+  {
+    // `]` terminates the URL, so the adjacent directive is real and removed.
+    body: "[https://example.test]Fixes #123",
+    expect: "strip",
+    source: "review round 14 closing bracket adjacency",
+  },
+  {
+    // This repository treats GitHub issue URLs as closing references.
+    body: "Fixes: https://github.com/owner/repo/issues/123",
+    expect: "strip",
+    source: "review round 14 issue-URL closing form",
+  },
 ];
 
 let failures = 0;
