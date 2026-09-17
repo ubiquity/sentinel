@@ -28,10 +28,13 @@ jobs:
     if: github.ref == 'refs/heads/sentinel-supervisor'
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # `issues: write` is what the autonomy pass needs to close an issue once its
+    # exact reviewed head has an ACCEPTED hosted release.
     permissions:
       contents: write
       pull-requests: write
       checks: read
+      issues: write
     concurrency:
       group: sentinel-repair
       cancel-in-progress: false
