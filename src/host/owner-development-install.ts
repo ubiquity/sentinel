@@ -85,7 +85,7 @@ export const OWNER_DEVELOPMENT_INSTALL_AGGREGATE_GENERATION = 7;
  * after the aggregate generation 7 healthy proof.
  */
 export const OWNER_DEVELOPMENT_INSTALL_RECOVERY_REVISION =
-  "4e8245de734683c7d4bda22a221bb28f52ebcfac" as GitSha;
+  "fd5902a8998a7dd906fa15666c448fdb4b845aec" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_RECOVERY_GENERATION = 8;
 
 const API_BASE = "https://api.github.com";
