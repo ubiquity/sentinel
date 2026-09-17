@@ -46,6 +46,7 @@ import {
   OWNER_DEVELOPMENT_INSTALL_REVIEW_STEP_REVISION,
   OWNER_DEVELOPMENT_INSTALL_REVIEWER_REVISION,
   OWNER_DEVELOPMENT_INSTALL_ROUND8_REVISION,
+  OWNER_DEVELOPMENT_INSTALL_SETTLEMENT_REVISION,
   ownerDevelopmentInstallCommitMessage,
   ownerDevelopmentInstallFiles,
   planOwnerDevelopmentInstall,
@@ -71,6 +72,7 @@ const FINDINGS = OWNER_DEVELOPMENT_INSTALL_FINDINGS_REVISION;
 const HISTORY = OWNER_DEVELOPMENT_INSTALL_HISTORY_REVISION;
 const RECEIPT = OWNER_DEVELOPMENT_INSTALL_RECEIPT_REVISION;
 const LEDGER = OWNER_DEVELOPMENT_INSTALL_LEDGER_REVISION;
+const SETTLEMENT = OWNER_DEVELOPMENT_INSTALL_SETTLEMENT_REVISION;
 
 function hostedProof(input: {
   runId: number;
@@ -772,14 +774,32 @@ Deno.test(
     if (ledgerPlan.status !== "install") throw new Error("expected install");
     assert.equal(ledgerPlan.move.nextRevision, LEDGER);
     assert.equal(ledgerPlan.move.nextGeneration, 16);
-    // The ledger generation is the fixed end of the chain.
+    // The ledger healthy proof authorizes the settlement install, and the
+    // settlement generation is the fixed end of the chain.
+    const ledgerHealthy = healthyProof(LEDGER, 16, 87);
+    const settlementPlan = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: LEDGER,
+          generation: 16,
+          healthyProof: ledgerHealthy,
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(settlementPlan.status, "install");
+    if (settlementPlan.status !== "install") {
+      throw new Error("expected install");
+    }
+    assert.equal(settlementPlan.move.nextRevision, SETTLEMENT);
+    assert.equal(settlementPlan.move.nextGeneration, 17);
     assert.equal(
       planOwnerDevelopmentInstall(
         releaseSnapshot({
           runtime: runtimeRecord({
-            revision: LEDGER,
-            generation: 16,
-            healthyProof: healthyProof(LEDGER, 16, 87),
+            revision: SETTLEMENT,
+            generation: 17,
+            healthyProof: healthyProof(SETTLEMENT, 17, 88),
           }),
         }),
         NOW,
