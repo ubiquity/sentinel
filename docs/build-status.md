@@ -99,6 +99,26 @@ fabricated.
   then bought the immediate execution that consumed the grant. Live proof: the
   record recorded the round-13 receipt (evidence 8 → 9) and admitted the next
   implementation attempt at 19:24Z with counters `3/0/13`.
+- Merge performed and verified, live: round 14 (review `5240665337`, 20:03:44Z)
+  reviewed the refreshed head `2bce980` (parents `28a27dc`, `fc25d71`) against
+  base `fc25d71` and reported **five findings, every one of them P2** — no
+  unresolved P0/P1, which is exactly the retained runtime rule
+  (`reviewAuthorizes`; `MASTER-PLAN.md` §3: "P2/P3 become future work unless
+  target policy requires more"). The evaluator scored that head **26/26** on
+  every case the review has ever reported. With the completed current-head
+  verdict and a green `test-local` on the exact head (`35266643676`,
+  `35266610629`), the operator merged PR 51 with an expected-head CAS
+  (`sha=2bce980`, method `merge`) at 20:09:44Z, producing merge commit
+  `1ed66cd` whose parents are exactly the recorded base `fc25d71` and the
+  reviewed head `2bce980`; `compare/1ed66cd...development` is `identical` with
+  both compare commits equal to the merge commit, and the pull request is
+  `closed`/`merged` with `merge_commit_sha = 1ed66cd`.
+- Deferred, recorded as future work rather than hidden (all five are P2 and the
+  plan keeps them out of the merge gate): an invalid Markdown marker `](` can
+  shield a directive, link titles and reference-definition labels are rewritten,
+  `findUrlEnd` absorbs prose after a `]`, and the GitHub issue-URL closing form
+  `Fixes: https://github.com/owner/repo/issues/123` is still published. Each is
+  now a permanent evaluator case so the next candidate is scored against it.
 - Self-inflicted liveness gap found and fixed, recorded honestly: cancelling a
   supervisor run (`35260296167`) killed a repair job before it printed its
   signed terminal, and the runtime settled that as `unavailable`, so the saved
