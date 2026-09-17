@@ -44,7 +44,9 @@ Deno.test("createPullRequest: publishes with source body preserved except close 
     "References fixed-tools/widget#123; keep this text.\n" +
     "fixesowner/repo#123, closed-source/project#123, and " +
     "resolved-tools/project#123 remain unchanged.\n" +
-    "Links https://example.test/fixes#123 remain unchanged.\n" +
+    "Links https://example.test/fixes#123 and " +
+    "https://example.test/?fixes#116 remain unchanged.\n" +
+    "Literal fixes#117 remains unchanged.\n" +
     "Fixes fixed-tools/widget#123 is sanitized without losing its owner.";
   const { port, transport } = makePort({
     script: [
@@ -83,12 +85,14 @@ Deno.test("createPullRequest: publishes with source body preserved except close 
       "#101, #102, ubiquity/sentinel#103; " +
       "#104, #105, #106, ubiquity/sentinel#107; " +
       "#108, #109, ubiquity/sentinel#110.\n" +
-      "#113, #114, ubiquity/sentinel#115.\n" +
+      "Fixes#113, #114, ubiquity/sentinel#115.\n" +
       "References #111 and ubiquity/sentinel#112 remain.\n" +
       "References fixed-tools/widget#123; keep this text.\n" +
       "fixesowner/repo#123, closed-source/project#123, and " +
       "resolved-tools/project#123 remain unchanged.\n" +
-      "Links https://example.test/fixes#123 remain unchanged.\n" +
+      "Links https://example.test/fixes#123 and " +
+      "https://example.test/?fixes#116 remain unchanged.\n" +
+      "Literal fixes#117 remains unchanged.\n" +
       "fixed-tools/widget#123 is sanitized without losing its owner.",
   );
 });
@@ -419,9 +423,11 @@ Deno.test("sanitizeAutoCloseKeywords: removes close keywords, preserves everythi
     sanitizeAutoCloseKeywords("Fixes: ubiquity/sentinel#123"),
     "ubiquity/sentinel#123",
   );
+  // A colon or space separates a closing keyword from its reference; a
+  // zero-width form is ordinary text and must not rewrite URLs or prose.
   assert.equal(
     sanitizeAutoCloseKeywords("Fixes#123 and CLOSES:#124"),
-    "#123 and #124",
+    "Fixes#123 and #124",
   );
   assert.equal(
     sanitizeAutoCloseKeywords("ordinary prose and references #123 remain"),
