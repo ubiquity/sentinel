@@ -8,8 +8,10 @@
  * while the rest of the text stays byte-identical.
  */
 
-const URL_START_RE = /(?:(?:https?|ftp):\/\/|www\.)/giu;
+const URL_START_RE = /(?:(?<![\w./])(?:https?|ftp):\/\/|(?<![\w./-])www\.)/giu;
 const MARKDOWN_LINK_START_RE = /\]\(/gu;
+const MARKDOWN_REFERENCE_START_RE =
+  /(?:^|\r?\n)[ \t]{0,3}\[[^\]\r\n]+\]:[ \t]*/gmu;
 const URL_DELIMITER_RE = /[\s<>"'`]/u;
 
 const AUTO_CLOSE_KEYWORD_RE =
@@ -86,6 +88,13 @@ function protectedRanges(body: string): ProtectedRange[] {
     if (destination !== undefined && destination.end > destination.start) {
       ranges.push(destination);
     }
+  }
+
+  for (const match of body.matchAll(MARKDOWN_REFERENCE_START_RE)) {
+    const start = (match.index ?? 0) + match[0].length;
+    const lineEnd = body.indexOf("\n", start);
+    const end = lineEnd < 0 ? body.length : lineEnd;
+    if (end > start) ranges.push({ start, end });
   }
 
   for (const match of body.matchAll(URL_START_RE)) {
