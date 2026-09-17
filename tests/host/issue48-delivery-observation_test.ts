@@ -517,7 +517,7 @@ Deno.test(
 
 Deno.test(
   "issue48 delivery observation: integration evidence mirrors the runtime verifier",
-  async () => {
+  () => {
     const revision = MERGE;
     const shape = (status: string, baseSha: string, mergeSha: string) => ({
       status,
