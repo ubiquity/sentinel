@@ -289,6 +289,16 @@ export interface RetryPlanV1 {
   grant: number;
   nextStep: "work" | "review";
   resetReviewRounds: boolean;
+  /**
+   * True when every attempt identity at the record's CURRENT base is already
+   * charged, so the only way to admit another attempt is the runtime's own
+   * deterministic base refresh: the plan persists that intent and the loop
+   * republishes the candidate on the newest base, which gives fresh
+   * reservation identities.
+   */
+  advanceBase: boolean;
+  /** Exact base observed for an advancing plan. */
+  observedBase: string | null;
   detail: string;
 }
 
@@ -300,6 +310,7 @@ export interface RetryPlanV1 {
 export function planHostedRetries(
   snapshot: RepairStateSnapshotV1,
   now: number,
+  baseTip: string | null = null,
 ): RetryPlanV1[] {
   const plans: RetryPlanV1[] = [];
   for (const record of snapshot.work) {
@@ -342,12 +353,45 @@ export function planHostedRetries(
       grant = candidate;
       break;
     }
-    if (grant === null) continue;
+    if (grant === null) {
+      // Every attempt number at this base is charged. The runtime's own base
+      // refresh is what gives an unused identity, and only an attempt-ceiling
+      // blocker may spend it.
+      const pr = record.target.pr;
+      const head = record.target.head;
+      const branch = record.target.branch;
+      if (
+        !rule.budget || pr === null || head === null || branch === null ||
+        baseTip === null || baseTip === base
+      ) {
+        continue;
+      }
+      const ceilingGrant = attempts -
+        (HOSTED_AUTONOMY_MAX_IMPLEMENTATION_ATTEMPTS - 1);
+      if (ceilingGrant < 0 || ceilingGrant > 3) continue;
+      if (
+        attempts - ceilingGrant >= HOSTED_AUTONOMY_MAX_IMPLEMENTATION_ATTEMPTS
+      ) {
+        continue;
+      }
+      plans.push({
+        id: record.id,
+        grant: ceilingGrant,
+        nextStep: rule.nextStep,
+        resetReviewRounds: false,
+        advanceBase: true,
+        observedBase: baseTip,
+        detail: `${blocker.kind}:${rule.prefix}:base-advance`,
+      });
+      continue;
+    }
     plans.push({
       id: record.id,
       grant,
       nextStep: rule.nextStep,
       resetReviewRounds: rule.nextStep === "review",
+      advanceBase: false,
+      observedBase: null,
       detail: `${blocker.kind}:${rule.prefix}`,
     });
   }
@@ -370,12 +414,28 @@ export function applyHostedRetries(
     work: snapshot.work.map((record) => {
       const plan = byId.get(record.id);
       if (plan === undefined) return record;
+      const refresh = plan.advanceBase && plan.observedBase !== null &&
+          record.target.pr !== null && record.target.head !== null &&
+          record.target.branch !== null
+        ? {
+          kind: "base_refresh" as const,
+          key:
+            `base_refresh:${record.target.pr}:${record.target.head}:${plan.observedBase}`,
+          startedAt: now,
+          branch: record.target.branch,
+          expectedHead: record.target.head,
+          observedBase: plan.observedBase,
+          pr: record.target.pr,
+          requestId: null,
+          resultId: null,
+        }
+        : null;
       return {
         ...record,
         nextStep: plan.nextStep,
         wait: null,
         blocker: null,
-        intent: null,
+        intent: refresh,
         counters: {
           attempts: record.counters.attempts - plan.grant,
           retries: record.counters.retries + 1,
@@ -565,7 +625,13 @@ export async function runHostedAutonomy(
   // A task whose pull request is already merged or closed is delivered or
   // abandoned: retrying it would only spend model starts on a branch that can
   // no longer be published, so those plans are dropped before any write.
-  const planned = planHostedRetries(snapshot, deps.clock.now());
+  let tip: string | null = null;
+  try {
+    tip = await deps.github.readBaseTip();
+  } catch {
+    tip = null;
+  }
+  const planned = planHostedRetries(snapshot, deps.clock.now(), tip);
   const plans: RetryPlanV1[] = [];
   for (const plan of planned) {
     const record = snapshot.work.find((item) => item.id === plan.id);
