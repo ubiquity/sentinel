@@ -682,8 +682,7 @@ Deno.test(
     if (exitPlan.status !== "install") throw new Error("expected install");
     assert.equal(exitPlan.move.nextRevision, EXIT_CONTRACT);
     assert.equal(exitPlan.move.nextGeneration, 11);
-    // The exit-contract generation is the fixed end of the chain: its own
-    // healthy proof is the completion, and no later movement exists.
+    // The exit-contract generation is the fixed end of the chain.
     const exitHealthy = healthyProof(EXIT_CONTRACT, 11, 81);
     assert.equal(
       planOwnerDevelopmentInstall(

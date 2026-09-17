@@ -168,8 +168,8 @@ export const ISSUE48_QUOTA_PRODUCTION_BINDING: Issue48QuotaRecoveryBindingV1 = {
   pullRequestBase: "b9a12ebd93d62869bddc490b3ade7ab77751ad10" as GitSha,
   repository: ISSUE48_QUOTA_REPOSITORY,
   runtimeId: "ubiquity/sentinel:0:production",
-  runtimeRevision: "80384fc3668c246297621aa1c588c0e49ea516c6" as GitSha,
-  runtimeGeneration: 10,
+  runtimeRevision: "3f500514f464c7c1ae66cc02bfe6fc4963387d04" as GitSha,
+  runtimeGeneration: 11,
 };
 
 export interface Issue48QuotaRecoveryDepsV1 {
@@ -294,8 +294,9 @@ export function targetPreconditionHolds(
     return false;
   }
   if (
-    binding.grantedImplementationAttempts !== 0 &&
-    binding.grantedImplementationAttempts !== 1
+    binding.grantedImplementationAttempts < 0 ||
+    binding.grantedImplementationAttempts > 3 ||
+    binding.grantedImplementationAttempts > binding.counters.attempts
   ) {
     return false;
   }

@@ -704,6 +704,45 @@ Deno.test(
 );
 
 Deno.test(
+  "issue48 review quota recovery: the production-shaped binding applies from the blocked state",
+  async () => {
+    // Regression: the closed grant set must accept the production value (2)
+    // for a blocked record whose budget blocker is the runtime's exact reason.
+    const rig = await makeRig("quota-production-shape", {
+      repair: repairSnapshot(
+        quotaWorkRecord({
+          counters: { attempts: 4, retries: 0, reviewRounds: 8 },
+        }),
+      ),
+    });
+    try {
+      const binding = {
+        ...rig.binding,
+        counters: { attempts: 4, retries: 0, reviewRounds: 8 },
+        grantedImplementationAttempts: 2 as const,
+      };
+      const result = await runRig(rig, { binding });
+      assert.equal(result.status, "applied", JSON.stringify(result));
+      const after = await rig.repair.readRepair();
+      assert.ok(after.ok && after.value.status === "found");
+      if (!after.ok || after.value.status !== "found") return;
+      const record = after.value.snapshot.work[0]!;
+      // Exactly two units are given back: the next admission is attempt 3.
+      assert.deepEqual(record.counters, {
+        attempts: 2,
+        retries: 0,
+        reviewRounds: 8,
+      });
+      assert.equal(record.nextStep, "work", "a blocked step returns to work");
+      assert.equal(record.blocker, null);
+      assert.equal(record.intent, null);
+    } finally {
+      await cleanup(rig);
+    }
+  },
+);
+
+Deno.test(
   "issue48 review quota recovery: an already advanced task is a zero-write skip",
   async () => {
     const rig = await makeRig("quota-skip", {
