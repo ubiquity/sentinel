@@ -345,6 +345,9 @@ export function planHostedRetries(
         continue;
       }
       if (used.has(remaining + 1)) continue;
+      // The frozen record invariant is `retries <= attempts`, and this pass
+      // increments retries, so a grant that would break it is not a plan.
+      if (record.counters.retries + 1 > remaining) continue;
       grant = candidate;
       break;
     }
@@ -369,6 +372,9 @@ export function planHostedRetries(
       ) {
         continue;
       }
+      // Same invariant: retries is incremented by this pass, so the counter
+      // arithmetic must still satisfy `retries <= attempts` afterwards.
+      if (record.counters.retries + 1 > attempts - ceilingGrant) continue;
       plans.push({
         id: record.id,
         grant: ceilingGrant,
