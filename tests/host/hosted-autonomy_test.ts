@@ -32,10 +32,12 @@ import {
   createRepairStateStore,
 } from "../../src/state/mod.ts";
 import {
+  applyHostedClosures,
   applyHostedRetries,
   buildHostedReleaseRequest,
   HOSTED_AUTONOMY_MAX_RETRIES,
   isHardAutonomyFailure,
+  planHostedClosures,
   planHostedRetries,
   revisionIntegratedIntoBase,
   runHostedAutonomy,
@@ -217,6 +219,43 @@ interface RigV1 {
   readonly state: StateReadView & RepairStateWriter;
   writes: number;
   merges: number;
+  closed: number[];
+}
+
+/** Minimal valid healthy candidate proof for an accepted hosted release. */
+function healthyProof(
+  revision: string,
+  generation: number,
+  releaseId: string,
+  purpose: "prior" | "candidate" = "candidate",
+) {
+  return {
+    execution: {
+      id: "35273273110:1:repair",
+      runId: 35273273110,
+      runAttempt: 1,
+      launcherSha: SHA1,
+      purpose,
+      revision,
+      generation,
+      releaseId,
+      createdAt: T0 + 3000,
+    },
+    workflowId: 357012162,
+    workflowPath: ".github/workflows/supervisor.yml",
+    repository: "ubiquity/sentinel",
+    ref: "refs/heads/sentinel-supervisor",
+    jobId: 1,
+    startedAt: T0 + 3100,
+    finishedAt: T0 + 3200,
+    observedAt: T0 + 3300,
+    outcome: "healthy" as const,
+    startupReady: true,
+    settled: true,
+    baseSha: BASE,
+    terminalAt: T0 + 3200,
+    logDigest: "d".repeat(64),
+  };
 }
 
 async function makeRig(
@@ -274,6 +313,7 @@ async function makeRig(
     } as unknown as StateReadView & RepairStateWriter,
     writes: 0,
     merges: 0,
+    closed: [],
   };
   let mergedNow = false;
   const github: HostedAutonomyGitHubV1 = {
@@ -288,6 +328,10 @@ async function makeRig(
           ? pullFacts()
           : options.pull,
       ),
+    closeIssue: (number: number) => {
+      rig.closed.push(number);
+      return Promise.resolve(true);
+    },
     merge: () => {
       rig.merges++;
       mergedNow = true;
@@ -689,6 +733,55 @@ Deno.test(
       result.actions.some((action) => action.endsWith("pr_not_open")),
     );
     await Deno.remove(rig.tmp, { recursive: true });
+  },
+);
+
+Deno.test(
+  "hosted autonomy: an accepted release closes the delivered issue and marks the record done",
+  async () => {
+    const request = await buildHostedReleaseRequest(
+      SELF_REPO,
+      MERGE,
+      HEAD,
+      BASE,
+      51,
+      authorizingReceipt(),
+      T0 + 2000,
+    );
+    if (request === null) throw new Error("fixture request invalid");
+    const { parseHostedReleaseRecordV1 } = await import(
+      "../../src/contracts/hosted-supervisor.ts"
+    );
+    const accepted = parseHostedReleaseRecordV1({
+      version: "v1",
+      kind: "hosted_release",
+      id: request.id,
+      request,
+      phase: "accepted",
+      priorRevision: BASE,
+      priorProof: healthyProof(BASE, 17, request.id, "prior"),
+      candidateProof: healthyProof(MERGE, 18, request.id),
+      rollbackProof: null,
+      pointerIntent: null,
+      createdAt: T0 + 2500,
+      updatedAt: T0 + 3000,
+    });
+    const snapshot = repairSnapshot([blockedRecord()], [authorizingReceipt()], [
+      request,
+    ]);
+    const released = new Map([[`51:${HEAD}`, accepted]]);
+    const plans = planHostedClosures(snapshot, released);
+    assert.deepEqual(plans, [{ id: TARGET, issueNumber: 48 }]);
+    const next = applyHostedClosures(snapshot, SHA1, plans, T0 + 5000);
+    assert.equal(next.work[0].nextStep, "done");
+    assert.equal(next.work[0].blocker, null);
+    assert.equal(next.work[0].intent, null);
+    assert.equal(next.sequence, snapshot.sequence + 1);
+    // An accepted release that delivered another head closes nothing.
+    assert.deepEqual(
+      planHostedClosures(snapshot, new Map([[`51:${SHA1}`, accepted]])),
+      [],
+    );
   },
 );
 

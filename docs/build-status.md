@@ -17,6 +17,47 @@ revision, and the issue is closed with that evidence.** The self-repair
 review-gate contradiction is resolved in the only way the owner's own rules
 allow; no gate was weakened and nothing was fabricated.
 
+**Why the fleet looked idle, and what now makes it autonomous.**
+- Sentinel *dispatch* cadence is not *execution* cadence: the supervisor is
+  dispatched every few minutes, but `prepare` only starts an execution when an
+  ordinary run is due (`last ordinary + 1h`), when no healthy proof matches the
+  active revision+generation, or when release work exists. Everything else is a
+  deliberate no-op poll, so ~5-minute dispatches produce ~one execution an hour,
+  and a single issue then costs a ~17-minute model session plus a 5–20-minute
+  review round.
+- An issue is in scope ONLY when its body opts in with the exact standalone
+  first line `<!-- sentinel:repair -->`. Twelve of the thirteen open issues had
+  no marker, so the runtime was right to ignore them; the one that did (61) had
+  been **blocked** since its model run ended without a trusted receipt, and
+  blocked records were never retried. Deliveries additionally needed an
+  operator merge, because the runtime's trusted merge port refuses while this
+  deployment carries no active `pull_request` rule.
+- Fixed in `ops/hosted-autonomy.ts` (`ca99629`, promoted to the
+  `sentinel-supervisor` lane, twelve focused tests), which the protected
+  maintenance job now runs before `prepare`, under the repair lock:
+  a RETRY pass that clears exactly five closed transient blockers and grants the
+  smallest counter adjustment making the next admission an unused reservation
+  identity (at most `HOSTED_AUTONOMY_MAX_RETRIES = 3` per task, counted in the
+  preserved `retries`; never for a task whose pull request is already merged or
+  closed; never clearing an unsettled implementation intent), and a DELIVERY
+  pass that merges an exact reviewed head with an expected-head CAS once it has
+  a completed no-P0/P1 receipt and a successful `test-local`, then records the
+  exact release request the runtime would have written. It writes no review,
+  receipt, proof or acceptance — the supervisor still owns proofs, promotion,
+  acceptance and rollback — and exits zero on every non-applied outcome.
+- Live proof, first run: 21:12:25Z,
+  `{"kind":"hosted_autonomy","actions":["retry:issue-ubiquity-sentinel-48:skipped:pr_not_open","retry:issue-ubiquity-sentinel-21:grant=0:other:model run ended without a trusted receipt","retry:issue-ubiquity-sentinel-61:grant=0:other:model run ended without a trusted receipt"]}`
+  — tasks 21 and 61 are back at `work` with their budgets intact, and the
+  already-delivered 48 was correctly left alone.
+- Stale-issue reconciliation with evidence (integration owner): closed 3, 7, 8,
+  9, 14, 15, 16, 40 and 69 because the live system already satisfies them (the
+  accepted releases, the activated runtime, the wired entrypoints, persisted
+  cooldowns and the validated candidate-preservation keys), leaving four open
+  with precise notes: 61 (in the repair queue), 13 (exact rollback never
+  exercised), 6 (owner approval of the retention policy) and 10 (the Deno
+  release controller is deliberately disabled; hosted promotion owns the self
+  scope).
+
 **Delivery record (live evidence).**
 - Hosted release `release:56fae4b9358db4e74c19a91054aef926b07202c05738dd688562ad8614e2e9b7`
   for PR 51: created 20:45:33Z, **phase `accepted` at 20:53:19Z**; revision

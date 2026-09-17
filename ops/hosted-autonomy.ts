@@ -124,6 +124,7 @@ export type HostedAutonomyReasonV1 =
   | "merge_refused"
   | "merge_not_observed"
   | "already_recorded"
+  | "closed_issues"
   | "foreign_author"
   | "release_not_terminal"
   | "clock_invalid"
@@ -169,6 +170,8 @@ export interface HostedAutonomyGitHubV1 {
     number: number,
     head: string,
   ): Promise<{ merged: boolean; sha: string | null } | null>;
+  /** Idempotent issue closure: true when the issue ends closed. */
+  closeIssue(number: number): Promise<boolean>;
 }
 
 export interface HostedAutonomyDepsV1 {
@@ -435,10 +438,86 @@ export async function buildHostedReleaseRequest(
   }
 }
 
+/** Hosted releases that are accepted, keyed by the exact source they delivered. */
+function acceptedReleases(
+  releases: readonly {
+    readonly phase: string;
+    readonly request: ReleaseRequestV1;
+    readonly candidateProof: unknown;
+  }[],
+): Map<string, unknown> {
+  const accepted = new Map<string, unknown>();
+  for (const release of releases) {
+    if (release.phase !== "accepted") continue;
+    if (release.candidateProof === null) continue;
+    accepted.set(
+      `${release.request.source.pullRequest}:${release.request.source.head}`,
+      release,
+    );
+  }
+  return accepted;
+}
+
 /**
- * One bounded autonomy pass. Retries first (one CAS batch), then at most one
- * delivery action (one CAS write), so a single maintenance run can never write
- * an unbounded amount of state.
+ * Records whose exact pull request and reviewed head are delivered by an
+ * ACCEPTED hosted release, whose issue is still open and whose implementation
+ * intent (when present) is provably settled. These are the tasks the runtime's
+ * own closure step would finish; marking them done here is the same conclusion
+ * from the same evidence, never an earlier one.
+ */
+export function planHostedClosures(
+  snapshot: RepairStateSnapshotV1,
+  released: ReadonlyMap<string, unknown>,
+): { id: string; issueNumber: number }[] {
+  const plans: { id: string; issueNumber: number }[] = [];
+  for (const record of snapshot.work) {
+    if (record.nextStep === "done") continue;
+    const issueNumber = record.related.issueNumber;
+    if (issueNumber === null) continue;
+    const pullRequest = record.target.pr;
+    const head = record.target.head;
+    if (pullRequest === null || head === null) continue;
+    if (!released.has(`${pullRequest}:${head}`)) continue;
+    if (!intentClosable(record, snapshot.reservations)) continue;
+    plans.push({ id: record.id, issueNumber });
+  }
+  return plans;
+}
+
+/** Mark the given records done (pure). */
+export function applyHostedClosures(
+  snapshot: RepairStateSnapshotV1,
+  head: GitSha,
+  plans: readonly { id: string; issueNumber: number }[],
+  now: number,
+): RepairStateSnapshotV1 {
+  const ids = new Set(plans.map((plan) => plan.id));
+  return parseRepairStateSnapshotV1({
+    ...snapshot,
+    stateHead: head,
+    sequence: snapshot.sequence + 1,
+    updatedAt: now,
+    work: snapshot.work.map((record) =>
+      ids.has(record.id)
+        ? {
+          ...record,
+          nextStep: "done",
+          wait: null,
+          blocker: null,
+          intent: null,
+          updatedAt: now,
+        }
+        : record
+    ),
+  });
+}
+
+/**
+ * One bounded autonomy pass: retries first (one CAS batch), then at most one
+ * delivery action (one CAS write), then the closure of every task whose exact
+ * reviewed head already has an ACCEPTED hosted release (one CAS batch). A
+ * single maintenance run can therefore never write an unbounded amount of
+ * state.
  */
 export async function runHostedAutonomy(
   deps: HostedAutonomyDepsV1,
@@ -716,6 +795,83 @@ export async function runHostedAutonomy(
     };
   }
 
+  // ---- closure pass -------------------------------------------------------
+  const released = acceptedReleases(releaseRead.value.snapshot.hostedReleases);
+  const closures = planHostedClosures(snapshot, released).slice(0, 5);
+  if (closures.length > 0) {
+    for (const plan of closures) {
+      let closed = false;
+      try {
+        closed = await deps.github.closeIssue(plan.issueNumber);
+      } catch {
+        closed = false;
+      }
+      if (!closed) {
+        actions.push(`close:${plan.id}:issue=${plan.issueNumber}:refused`);
+        continue;
+      }
+      actions.push(`close:${plan.id}:issue=${plan.issueNumber}`);
+    }
+    const closedIds = new Set(
+      actions
+        .filter((action) => /^close:[^:]+:issue=\d+$/.test(action))
+        .map((action) =>
+          action.slice("close:".length, action.indexOf(":issue="))
+        ),
+    );
+    const applied = closures.filter((plan) => closedIds.has(plan.id));
+    if (applied.length > 0) {
+      const now = deps.clock.now();
+      if (!Number.isSafeInteger(now) || now < snapshot.updatedAt) {
+        return skipped("clock_invalid", observedHead, actions);
+      }
+      let next: RepairStateSnapshotV1;
+      try {
+        next = applyHostedClosures(
+          snapshot,
+          observedHead as GitSha,
+          applied,
+          now,
+        );
+      } catch {
+        return skipped("snapshot_invalid", observedHead, actions);
+      }
+      let write: PortResultV1<StateWriteResultV1> | null;
+      try {
+        write = await deps.state.writeRepair(next, observedHead as GitSha);
+      } catch {
+        return failed("write_unavailable", observedHead, actions);
+      }
+      if (write === null || !write.ok) {
+        return failed("write_unavailable", observedHead, actions);
+      }
+      if (write.value.status === "conflict") {
+        return skipped("write_conflict", observedHead, actions);
+      }
+      if (write.value.status === "ambiguous") {
+        return failed("write_ambiguous", observedHead, actions);
+      }
+      const readback = await readRepairSafely(deps.state);
+      if (
+        readback === null || !readback.ok ||
+        readback.value.status !== "found" ||
+        readback.value.head !== write.value.head ||
+        canonicalStringify(readback.value.snapshot) !== canonicalStringify(next)
+      ) {
+        return failed("readback_unverified", observedHead, actions);
+      }
+      return {
+        kind: "hosted_autonomy",
+        status: "applied",
+        reason: "closed_issues",
+        beforeHead: observedHead,
+        appliedHead: write.value.head,
+        actions,
+        revisions,
+      };
+    }
+  }
+
   const suffix = (value: string) =>
     actions.some((action) => action.endsWith(value));
   const reason: HostedAutonomyReasonV1 =
@@ -865,6 +1021,15 @@ export function createHostedAutonomyGitHub(
       );
     },
     readPull,
+    async closeIssue(number: number) {
+      const closed = await request(
+        "PATCH",
+        `/repos/${ISSUE48_QUOTA_REPOSITORY}/issues/${number}`,
+        { state: "closed" },
+      );
+      if (closed === null || typeof closed !== "object") return false;
+      return (closed as Record<string, unknown>)["state"] === "closed";
+    },
     async merge(number: number, head: string) {
       const response = await request(
         "PUT",
