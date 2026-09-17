@@ -111,6 +111,14 @@ export const OWNER_DEVELOPMENT_INSTALL_REVIEWER_GENERATION = 10;
 export const OWNER_DEVELOPMENT_INSTALL_EXIT_CONTRACT_REVISION =
   "3f500514f464c7c1ae66cc02bfe6fc4963387d04" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_EXIT_CONTRACT_GENERATION = 11;
+/**
+ * Exact revision carrying the corrected closed grant set; its install is also
+ * what gives the runtime an immediate health-gap execution that consumes the
+ * grant in the same run the maintenance job applies it.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_ROUND8_REVISION =
+  "800b4bd1b2fb3778cc96b0292ee673c07ca73302" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_ROUND8_GENERATION = 12;
 
 const API_BASE = "https://api.github.com";
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -435,10 +443,49 @@ export function planOwnerDevelopmentInstall(
       );
     }
     if (healthy !== null) {
-      return noChange("the owner development installation is complete");
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_ROUND8_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_ROUND8_GENERATION,
+        healthy,
+        "install the corrected grant revision after the exit-contract healthy proof",
+      );
     }
     return waiting(
       "the exit contract generation 11 healthy proof is not recorded",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_ROUND8_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_ROUND8_GENERATION
+  ) {
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_EXIT_CONTRACT_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_EXIT_CONTRACT_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded exit-contract healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_EXIT_CONTRACT_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed corrected grant candidate to its recorded prior",
+      );
+    }
+    if (healthy !== null) {
+      return noChange("the owner development installation is complete");
+    }
+    return waiting(
+      "the corrected grant generation 12 healthy proof is not recorded",
     );
   }
 

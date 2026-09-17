@@ -41,6 +41,7 @@ import {
   OWNER_DEVELOPMENT_INSTALL_RECOVERY_REVISION,
   OWNER_DEVELOPMENT_INSTALL_REVIEW_STEP_REVISION,
   OWNER_DEVELOPMENT_INSTALL_REVIEWER_REVISION,
+  OWNER_DEVELOPMENT_INSTALL_ROUND8_REVISION,
   ownerDevelopmentInstallCommitMessage,
   ownerDevelopmentInstallFiles,
   planOwnerDevelopmentInstall,
@@ -61,6 +62,7 @@ const RECOVERY = OWNER_DEVELOPMENT_INSTALL_RECOVERY_REVISION;
 const REVIEW_STEP = OWNER_DEVELOPMENT_INSTALL_REVIEW_STEP_REVISION;
 const REVIEWER = OWNER_DEVELOPMENT_INSTALL_REVIEWER_REVISION;
 const EXIT_CONTRACT = OWNER_DEVELOPMENT_INSTALL_EXIT_CONTRACT_REVISION;
+const ROUND8 = OWNER_DEVELOPMENT_INSTALL_ROUND8_REVISION;
 
 function hostedProof(input: {
   runId: number;
@@ -682,15 +684,31 @@ Deno.test(
     if (exitPlan.status !== "install") throw new Error("expected install");
     assert.equal(exitPlan.move.nextRevision, EXIT_CONTRACT);
     assert.equal(exitPlan.move.nextGeneration, 11);
-    // The exit-contract generation is the fixed end of the chain.
+    // The exit-contract healthy proof authorizes the corrected-grant install.
     const exitHealthy = healthyProof(EXIT_CONTRACT, 11, 81);
+    const round8Plan = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: EXIT_CONTRACT,
+          generation: 11,
+          healthyProof: exitHealthy,
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(round8Plan.status, "install");
+    if (round8Plan.status !== "install") throw new Error("expected install");
+    assert.equal(round8Plan.move.nextRevision, ROUND8);
+    assert.equal(round8Plan.move.nextGeneration, 12);
+    // The corrected-grant generation is the fixed end of the chain.
+    const round8Healthy = healthyProof(ROUND8, 12, 83);
     assert.equal(
       planOwnerDevelopmentInstall(
         releaseSnapshot({
           runtime: runtimeRecord({
-            revision: EXIT_CONTRACT,
-            generation: 11,
-            healthyProof: exitHealthy,
+            revision: ROUND8,
+            generation: 12,
+            healthyProof: round8Healthy,
           }),
         }),
         NOW,
