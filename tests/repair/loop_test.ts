@@ -5422,16 +5422,16 @@ Deno.test(
       assert.equal(record.target.head, work.target.head);
       assert.equal(record.blocker, null);
       assert.equal(
-        rig.github.reviewRequests.length,
+        rig.github.reviewRequestIdentities.length,
         2,
         "the rejected head keeps exactly one request per attempt",
       );
       assert.equal(
-        rig.github.reviewRequests[0]!.operationKey,
+        rig.github.reviewRequestIdentities[0]!.operationKey,
         `review:7:${work.target.head}`,
       );
       assert.equal(
-        rig.github.reviewRequests[1]!.operationKey,
+        rig.github.reviewRequestIdentities[1]!.operationKey,
         `review:7:${work.target.head}:attempt-2`,
       );
       const reviewCharges = state.reservations.filter((reservation) =>
@@ -5522,7 +5522,7 @@ Deno.test(
       }
       let state = await rig.snapshot();
       assert.equal(state.work[0]!.counters.reviewRounds, 3);
-      const requestsBefore = rig.github.reviewRequests.length;
+      const requestsBefore = rig.github.reviewRequestIdentities.length;
       const chargesBefore = state.reservations.length;
 
       const blocked = await rig.run();
@@ -5538,7 +5538,7 @@ Deno.test(
         `blocker names the observed reason: ${record.blocker?.message}`,
       );
       assert.equal(record.wait, null);
-      assert.equal(rig.github.reviewRequests.length, requestsBefore);
+      assert.equal(rig.github.reviewRequestIdentities.length, requestsBefore);
       assert.equal(state.reservations.length, chargesBefore);
     } finally {
       await rig.ctx.cleanup();
@@ -5596,7 +5596,7 @@ Deno.test(
       assert.equal(record.counters.reviewRounds, 3);
       assert.equal(record.nextStep, "review");
       assert.equal(
-        rig.github.reviewRequests[1]!.operationKey,
+        rig.github.reviewRequestIdentities[1]!.operationKey,
         `review:7:${head}:attempt-3`,
       );
     } finally {

@@ -255,7 +255,7 @@ export class FakeGithub implements GitHubPort {
   /** Every review operation key observed, in call order. */
   readonly observedReviewKeys: string[] = [];
   /** Every review request identity submitted, in call order. */
-  readonly reviewRequests: {
+  readonly reviewRequestIdentities: {
     operationKey: string;
     prNumber: number;
     expectedHead: string;
@@ -563,7 +563,7 @@ export class FakeGithub implements GitHubPort {
       prNumber?: unknown;
       expectedHead?: unknown;
     };
-    this.reviewRequests.push({
+    this.reviewRequestIdentities.push({
       operationKey: typeof identity.operationKey === "string"
         ? identity.operationKey
         : "",
