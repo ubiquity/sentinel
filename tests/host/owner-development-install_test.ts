@@ -40,6 +40,7 @@ import {
   OWNER_DEVELOPMENT_INSTALL_ORIGINAL_REVISION,
   OWNER_DEVELOPMENT_INSTALL_READER_GENERATION,
   OWNER_DEVELOPMENT_INSTALL_READER_REVISION,
+  OWNER_DEVELOPMENT_INSTALL_RECEIPT_REVISION,
   OWNER_DEVELOPMENT_INSTALL_RECOVERY_REVISION,
   OWNER_DEVELOPMENT_INSTALL_REVIEW_STEP_REVISION,
   OWNER_DEVELOPMENT_INSTALL_REVIEWER_REVISION,
@@ -67,6 +68,7 @@ const EXIT_CONTRACT = OWNER_DEVELOPMENT_INSTALL_EXIT_CONTRACT_REVISION;
 const ROUND8 = OWNER_DEVELOPMENT_INSTALL_ROUND8_REVISION;
 const FINDINGS = OWNER_DEVELOPMENT_INSTALL_FINDINGS_REVISION;
 const HISTORY = OWNER_DEVELOPMENT_INSTALL_HISTORY_REVISION;
+const RECEIPT = OWNER_DEVELOPMENT_INSTALL_RECEIPT_REVISION;
 
 function hostedProof(input: {
   runId: number;
@@ -736,15 +738,31 @@ Deno.test(
     if (historyPlan.status !== "install") throw new Error("expected install");
     assert.equal(historyPlan.move.nextRevision, HISTORY);
     assert.equal(historyPlan.move.nextGeneration, 14);
-    // The rejection-history generation is the fixed end of the chain.
+    // The rejection-history healthy proof authorizes the receipt install.
     const historyHealthy = healthyProof(HISTORY, 14, 85);
+    const receiptPlan = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: HISTORY,
+          generation: 14,
+          healthyProof: historyHealthy,
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(receiptPlan.status, "install");
+    if (receiptPlan.status !== "install") throw new Error("expected install");
+    assert.equal(receiptPlan.move.nextRevision, RECEIPT);
+    assert.equal(receiptPlan.move.nextGeneration, 15);
+    // The receipt-submission generation is the fixed end of the chain.
+    const receiptHealthy = healthyProof(RECEIPT, 15, 86);
     assert.equal(
       planOwnerDevelopmentInstall(
         releaseSnapshot({
           runtime: runtimeRecord({
-            revision: HISTORY,
-            generation: 14,
-            healthyProof: historyHealthy,
+            revision: RECEIPT,
+            generation: 15,
+            healthyProof: receiptHealthy,
           }),
         }),
         NOW,
