@@ -47,6 +47,7 @@ import {
   OWNER_DEVELOPMENT_INSTALL_RECEIPT_REVISION,
   OWNER_DEVELOPMENT_INSTALL_RECOVERY_REVISION,
   OWNER_DEVELOPMENT_INSTALL_RELEASED_REVISION,
+  OWNER_DEVELOPMENT_INSTALL_RETIRE_REVISION,
   OWNER_DEVELOPMENT_INSTALL_REVIEW_STEP_REVISION,
   OWNER_DEVELOPMENT_INSTALL_REVIEWER_REVISION,
   OWNER_DEVELOPMENT_INSTALL_ROUND8_REVISION,
@@ -83,6 +84,7 @@ const TRIGGER = OWNER_DEVELOPMENT_INSTALL_TRIGGER_REVISION;
 const ADVANCE = OWNER_DEVELOPMENT_INSTALL_ADVANCE_REVISION;
 const CADENCE = OWNER_DEVELOPMENT_INSTALL_CADENCE_REVISION;
 const GUARD = OWNER_DEVELOPMENT_INSTALL_GUARD_REVISION;
+const RETIRE = OWNER_DEVELOPMENT_INSTALL_RETIRE_REVISION;
 
 function hostedProof(input: {
   runId: number;
@@ -881,14 +883,30 @@ Deno.test(
     if (guardPlan.status !== "install") throw new Error("expected install");
     assert.equal(guardPlan.move.nextRevision, GUARD);
     assert.equal(guardPlan.move.nextGeneration, 22);
-    // The guard generation is the fixed end of the chain.
+    // The guard healthy proof authorizes the retirement install.
+    const guardHealthy = healthyProof(GUARD, 22, 93);
+    const retirePlan = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: GUARD,
+          generation: 22,
+          healthyProof: guardHealthy,
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(retirePlan.status, "install");
+    if (retirePlan.status !== "install") throw new Error("expected install");
+    assert.equal(retirePlan.move.nextRevision, RETIRE);
+    assert.equal(retirePlan.move.nextGeneration, 23);
+    // The retirement generation is the fixed end of the chain.
     assert.equal(
       planOwnerDevelopmentInstall(
         releaseSnapshot({
           runtime: runtimeRecord({
-            revision: GUARD,
-            generation: 22,
-            healthyProof: healthyProof(GUARD, 22, 93),
+            revision: RETIRE,
+            generation: 23,
+            healthyProof: healthyProof(RETIRE, 23, 94),
           }),
         }),
         NOW,
