@@ -336,6 +336,8 @@ async function makeRig(
       return Promise.resolve(true);
     },
     readIssueOpen: () => Promise.resolve(true),
+    listParkedRuns: () => Promise.resolve([]),
+    approveRun: () => Promise.resolve(true),
     merge: () => {
       rig.merges++;
       mergedNow = true;
@@ -778,6 +780,30 @@ Deno.test(
     assert.equal(parked.blocker?.message, HOSTED_AUTONOMY_RETIRED);
     // The retirement reason matches no retryable prefix.
     assert.equal(planHostedRetries(next, T0 + 900000).length, 0);
+  },
+);
+
+Deno.test(
+  "hosted autonomy: a parked deterministic check on the reviewed head is approved",
+  async () => {
+    const { rig, github } = await makeRig("autonomy-approve", {
+      repair: repairSnapshot([deliveryRecord()], [authorizingReceipt()]),
+      pull: pullFacts({ state: "open", merged: false, mergeCommitSha: null }),
+      checkGreen: false,
+    });
+    const calls: number[] = [];
+    github.listParkedRuns = (head: string) => {
+      assert.equal(head, HEAD);
+      return Promise.resolve([4242]);
+    };
+    github.approveRun = (id: number) => {
+      calls.push(id);
+      return Promise.resolve(true);
+    };
+    const result = await run(rig, github);
+    assert.deepEqual(calls, [4242]);
+    assert.ok(result.actions.includes(`approve:${TARGET}:run=4242:approved`));
+    await Deno.remove(rig.tmp, { recursive: true });
   },
 );
 

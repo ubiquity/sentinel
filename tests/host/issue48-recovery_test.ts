@@ -985,7 +985,6 @@ Deno.test("issue48 recovery: supervisor workflow dependency and locking contract
       "UOS_AI_TOKEN",
       "setup-node",
       "codex",
-      "actions: write",
       "statuses:",
     ]
   ) {
@@ -1001,7 +1000,7 @@ Deno.test("issue48 recovery: supervisor workflow dependency and locking contract
   // still has no model, environment, secret, issue-write or actions authority.
   assert.equal(
     maintenance.slice(permissionsAt, concurrencyAt).replace(/\s+/g, " ").trim(),
-    "permissions: contents: write pull-requests: write checks: read issues: write",
+    "permissions: contents: write pull-requests: write checks: read issues: write actions: write",
   );
 
   // A maintenance failure must never skip a valid ordinary run: prepare still

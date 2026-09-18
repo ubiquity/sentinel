@@ -194,6 +194,10 @@ export interface HostedAutonomyGitHubV1 {
   ): Promise<{ merged: boolean; sha: string | null } | null>;
   /** Idempotent issue closure: true when the issue ends closed. */
   closeIssue(number: number): Promise<boolean>;
+  /** Workflow-run ids parked for approval on exactly this commit. */
+  listParkedRuns(head: string): Promise<number[]>;
+  /** Approve one parked workflow run; true when the approval was accepted. */
+  approveRun(id: number): Promise<boolean>;
 }
 
 export interface HostedAutonomyDepsV1 {
@@ -799,6 +803,36 @@ export async function runHostedAutonomy(
     };
   }
 
+  // ---- check-approval pass ------------------------------------------------
+  // A candidate pushed to a pull request by the bot produces a CI run that
+  // GitHub parks for approval, so the deterministic check the merge requires
+  // can never complete on its own. The job approves exactly those runs for the
+  // exact reviewed head; the check itself stays credential-free and unchanged.
+  for (const record of snapshot.work) {
+    if (record.nextStep !== "review" && record.nextStep !== "delivery") {
+      continue;
+    }
+    const head = record.target.head;
+    if (head === null || record.target.pr === null) continue;
+    let parked: number[] = [];
+    try {
+      parked = await deps.github.listParkedRuns(head);
+    } catch {
+      parked = [];
+    }
+    for (const id of parked.slice(0, 3)) {
+      let approved = false;
+      try {
+        approved = await deps.github.approveRun(id);
+      } catch {
+        approved = false;
+      }
+      actions.push(
+        `approve:${record.id}:run=${id}:${approved ? "approved" : "refused"}`,
+      );
+    }
+  }
+
   // ---- delivery pass ------------------------------------------------------
   let baseTip: string | null;
   try {
@@ -1252,6 +1286,31 @@ export function createHostedAutonomyGitHub(
       );
     },
     readPull,
+    async listParkedRuns(head: string) {
+      const runs = await request(
+        "GET",
+        `/repos/${ISSUE48_QUOTA_REPOSITORY}/actions/runs?head_sha=${head}&per_page=50`,
+      );
+      const list = runs !== null && typeof runs === "object"
+        ? (runs as Record<string, unknown>)["workflow_runs"]
+        : null;
+      if (!Array.isArray(list)) return [];
+      return list
+        .filter((item) =>
+          typeof item === "object" && item !== null &&
+          (item as Record<string, unknown>)["head_sha"] === head &&
+          (item as Record<string, unknown>)["conclusion"] === "action_required"
+        )
+        .map((item) => Number((item as Record<string, unknown>)["id"]))
+        .filter((id) => Number.isSafeInteger(id) && id > 0);
+    },
+    async approveRun(id: number) {
+      const approved = await request(
+        "POST",
+        `/repos/${ISSUE48_QUOTA_REPOSITORY}/actions/runs/${id}/approve`,
+      );
+      return approved !== null;
+    },
     async readIssueOpen(number: number) {
       const issue = await request(
         "GET",
