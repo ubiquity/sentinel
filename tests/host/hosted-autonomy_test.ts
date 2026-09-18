@@ -36,9 +36,11 @@ import {
   applyHostedRetirements,
   applyHostedRetries,
   buildHostedReleaseRequest,
+  createHostedAutonomyGitHub,
   HOSTED_AUTONOMY_MAX_RETRIES,
   HOSTED_AUTONOMY_RETIRED,
   isHardAutonomyFailure,
+  parseHostedAutonomyPull,
   planHostedClosures,
   planHostedRetirements,
   planHostedRetries,
@@ -951,6 +953,116 @@ Deno.test(
 );
 
 Deno.test(
+  "hosted autonomy: an unmerged pull parses without a merge commit and a merged pull still resolves",
+  async () => {
+    const live = parseHostedAutonomyPull({
+      state: "open",
+      merged: false,
+      merge_commit_sha: null,
+      head: { sha: HEAD },
+      base: { ref: "development" },
+      user: { login: "github-actions[bot]" },
+      number: 63,
+    });
+    assert.deepEqual(live, {
+      number: 63,
+      state: "open",
+      merged: false,
+      mergeCommitSha: null,
+      headSha: HEAD,
+      baseRef: "development",
+      author: "github-actions[bot]",
+      parents: [],
+      revisionOnBaseBranch: false,
+    });
+    const merged = parseHostedAutonomyPull({
+      state: "closed",
+      merged: true,
+      merge_commit_sha: MERGE,
+      head: { sha: HEAD },
+      base: { ref: "development" },
+      user: { login: "github-actions[bot]" },
+      number: 51,
+    });
+    assert.equal(merged?.merged, true);
+    assert.equal(merged?.mergeCommitSha, MERGE);
+    assert.equal(merged?.headSha, HEAD);
+    assert.equal(merged?.baseRef, "development");
+    // A merged pull must still name the merge commit it was merged as.
+    assert.equal(
+      parseHostedAutonomyPull({
+        state: "closed",
+        merged: true,
+        merge_commit_sha: null,
+        head: { sha: HEAD },
+        base: { ref: "development" },
+        user: { login: "github-actions[bot]" },
+        number: 51,
+      }),
+      null,
+    );
+
+    const original = globalThis.fetch;
+    const requests: string[] = [];
+    globalThis.fetch = ((input: string | URL | Request) => {
+      const url = String(input);
+      requests.push(url);
+      const payload = url.includes("/pulls/63")
+        ? {
+          state: "open",
+          merged: false,
+          merge_commit_sha: null,
+          head: { sha: HEAD },
+          base: { ref: "development" },
+          user: { login: "github-actions[bot]" },
+          number: 63,
+        }
+        : url.includes("/pulls/51")
+        ? {
+          state: "closed",
+          merged: true,
+          merge_commit_sha: MERGE,
+          head: { sha: HEAD },
+          base: { ref: "development" },
+          user: { login: "github-actions[bot]" },
+          number: 51,
+        }
+        : url.includes("/commits/")
+        ? { parents: [{ sha: BASE }, { sha: HEAD }] }
+        : {
+          status: "ahead",
+          base_commit: { sha: MERGE },
+          merge_base_commit: { sha: MERGE },
+        };
+      return Promise.resolve(
+        new Response(JSON.stringify(payload), { status: 200 }),
+      );
+    }) as typeof fetch;
+    try {
+      const github = createHostedAutonomyGitHub("fixture-token");
+      const unmerged = await github.readPull(63);
+      assert.equal(unmerged?.state, "open");
+      assert.equal(unmerged?.merged, false);
+      assert.equal(unmerged?.mergeCommitSha, null);
+      assert.equal(unmerged?.headSha, HEAD);
+      assert.equal(unmerged?.baseRef, "development");
+      assert.equal(unmerged?.author, "github-actions[bot]");
+      assert.equal(requests.length, 1);
+
+      const afterMerge = await github.readPull(51);
+      if (afterMerge === null) throw new Error("merged pull unreadable");
+      assert.equal(afterMerge.merged, true);
+      assert.equal(afterMerge.mergeCommitSha, MERGE);
+      assert.deepEqual([...afterMerge.parents], [BASE, HEAD]);
+      assert.equal(afterMerge.revisionOnBaseBranch, true);
+      assert.equal(requests.length, 4);
+    } finally {
+      globalThis.fetch = original;
+    }
+  },
+);
+
+Deno.test(
   "hosted autonomy: a blocked task with an open pull request is retried in one write",
   async () => {
     const { rig, github } = await makeRig("autonomy-retry", {
@@ -987,6 +1099,50 @@ Deno.test(
     assert.ok(
       result.actions.some((action) => action.endsWith("pr_not_open")),
     );
+    await Deno.remove(rig.tmp, { recursive: true });
+  },
+);
+
+Deno.test(
+  "hosted autonomy: an unreadable pull skips as a read failure while an open one is still planned",
+  async () => {
+    const { rig, github } = await makeRig("autonomy-retry-read", {
+      repair: repairSnapshot([blockedRecord()], [authorizingReceipt()]),
+    });
+    const throwing: HostedAutonomyGitHubV1 = {
+      ...github,
+      readPull: () => Promise.reject(new Error("transient read failure")),
+    };
+    const thrown = await run(rig, throwing);
+    assert.equal(rig.writes, 0);
+    assert.ok(
+      thrown.actions.some((action) => action.endsWith("pr_read_failed")),
+    );
+    assert.ok(
+      !thrown.actions.some((action) => action.endsWith("pr_not_open")),
+    );
+
+    const unreadable: HostedAutonomyGitHubV1 = {
+      ...github,
+      readPull: () => Promise.resolve(null),
+    };
+    const unread = await run(rig, unreadable);
+    assert.equal(rig.writes, 0);
+    assert.ok(
+      unread.actions.some((action) => action.endsWith("pr_read_failed")),
+    );
+
+    const open: HostedAutonomyGitHubV1 = {
+      ...github,
+      readPull: () =>
+        Promise.resolve(
+          pullFacts({ state: "open", merged: false, mergeCommitSha: null }),
+        ),
+    };
+    const retried = await run(rig, open);
+    assert.equal(retried.status, "applied");
+    assert.equal(retried.reason, "retried");
+    assert.equal(rig.writes, 1);
     await Deno.remove(rig.tmp, { recursive: true });
   },
 );
