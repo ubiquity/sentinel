@@ -802,7 +802,9 @@ export async function runHostedAutonomy(
   // ---- retry pass ---------------------------------------------------------
   // A task whose pull request is already merged or closed is delivered or
   // abandoned: retrying it would only spend model starts on a branch that can
-  // no longer be published, so those plans are dropped before any write.
+  // no longer be published, so those plans are dropped before any write. A
+  // pull that cannot be read is also not retried, but it is recorded as a read
+  // failure rather than as the definitive not-open verdict it never was.
   let tip: string | null = null;
   try {
     tip = await deps.github.readBaseTip();
@@ -842,7 +844,11 @@ export async function runHostedAutonomy(
     } catch {
       pull = null;
     }
-    if (pull !== null && pull.state === "open" && pull.merged === false) {
+    if (pull === null) {
+      // A read that threw or returned nothing is transient: it is no evidence
+      // that the pull is closed, so it must not be reported as not open.
+      actions.push(`retry:${plan.id}:skipped:pr_read_failed`);
+    } else if (pull.state === "open" && pull.merged === false) {
       plans.push(plan);
     } else {
       actions.push(`retry:${plan.id}:skipped:pr_not_open`);
@@ -1256,6 +1262,41 @@ export async function runHostedAutonomy(
   return skipped(reason, observedHead, actions);
 }
 
+/**
+ * Parse one raw `GET /pulls/{number}` response into the remote merge facts the
+ * helper needs. GitHub assigns `merge_commit_sha` only once a pull is merged,
+ * so an unmerged pull legitimately carries it as null (or omits it); a merged
+ * pull must name its merge commit. `parents` and `revisionOnBaseBranch` are
+ * resolved afterwards by the live reader from the commit and compare
+ * endpoints, so this parse stays pure.
+ */
+export function parseHostedAutonomyPull(
+  raw: unknown,
+): HostedAutonomyPullV1 | null {
+  if (raw === null || typeof raw !== "object") return null;
+  const obj = raw as Record<string, unknown>;
+  const head = obj["head"] as Record<string, unknown> | undefined;
+  const base = obj["base"] as Record<string, unknown> | undefined;
+  const user = obj["user"] as Record<string, unknown> | undefined;
+  const merged = obj["merged"] === true;
+  const mergeCommitSha = obj["merge_commit_sha"];
+  const headSha = head?.["sha"];
+  const baseRef = base?.["ref"];
+  if (typeof headSha !== "string" || typeof baseRef !== "string") return null;
+  if (merged && typeof mergeCommitSha !== "string") return null;
+  return {
+    number: Number(obj["number"]),
+    state: String(obj["state"] ?? ""),
+    merged,
+    mergeCommitSha: typeof mergeCommitSha === "string" ? mergeCommitSha : null,
+    headSha,
+    baseRef,
+    author: typeof user?.["login"] === "string" ? String(user["login"]) : null,
+    parents: [],
+    revisionOnBaseBranch: false,
+  };
+}
+
 /** Live GitHub surface this helper needs, over one repository token. */
 export function createHostedAutonomyGitHub(
   token: string,
@@ -1297,58 +1338,34 @@ export function createHostedAutonomyGitHub(
       "GET",
       `/repos/${ISSUE48_QUOTA_REPOSITORY}/pulls/${number}`,
     );
-    if (pull === null || typeof pull !== "object") return null;
-    const obj = pull as Record<string, unknown>;
-    const head = obj["head"] as Record<string, unknown> | undefined;
-    const base = obj["base"] as Record<string, unknown> | undefined;
-    const user = obj["user"] as Record<string, unknown> | undefined;
-    const mergeCommitSha = obj["merge_commit_sha"];
-    const headSha = head?.["sha"];
-    const baseRef = base?.["ref"];
-    if (
-      typeof mergeCommitSha !== "string" || typeof headSha !== "string" ||
-      typeof baseRef !== "string"
-    ) {
-      return null;
-    }
+    const parsed = parseHostedAutonomyPull(pull);
+    if (parsed === null || parsed.merged !== true) return parsed;
+    const mergeCommitSha = parsed.mergeCommitSha;
+    if (mergeCommitSha === null) return null;
     let parents: string[] = [];
     let revisionOnBaseBranch = false;
-    if (obj["merged"] === true) {
-      const commit = await request(
-        "GET",
-        `/repos/${ISSUE48_QUOTA_REPOSITORY}/commits/${mergeCommitSha}`,
-      );
-      const parentList = commit !== null && typeof commit === "object"
-        ? (commit as Record<string, unknown>)["parents"]
-        : null;
-      if (!Array.isArray(parentList)) return null;
-      parents = parentList.map((parent) =>
-        typeof parent === "object" && parent !== null
-          ? String((parent as Record<string, unknown>)["sha"] ?? "")
-          : ""
-      );
-      const compare = await request(
-        "GET",
-        `/repos/${ISSUE48_QUOTA_REPOSITORY}/compare/${mergeCommitSha}...${HOSTED_AUTONOMY_BASE_BRANCH}`,
-      );
-      revisionOnBaseBranch = revisionIntegratedIntoBase(
-        compare,
-        mergeCommitSha,
-      );
-    }
-    return {
-      number: Number(obj["number"]),
-      state: String(obj["state"] ?? ""),
-      merged: obj["merged"] === true,
+    const commit = await request(
+      "GET",
+      `/repos/${ISSUE48_QUOTA_REPOSITORY}/commits/${mergeCommitSha}`,
+    );
+    const parentList = commit !== null && typeof commit === "object"
+      ? (commit as Record<string, unknown>)["parents"]
+      : null;
+    if (!Array.isArray(parentList)) return null;
+    parents = parentList.map((parent) =>
+      typeof parent === "object" && parent !== null
+        ? String((parent as Record<string, unknown>)["sha"] ?? "")
+        : ""
+    );
+    const compare = await request(
+      "GET",
+      `/repos/${ISSUE48_QUOTA_REPOSITORY}/compare/${mergeCommitSha}...${HOSTED_AUTONOMY_BASE_BRANCH}`,
+    );
+    revisionOnBaseBranch = revisionIntegratedIntoBase(
+      compare,
       mergeCommitSha,
-      headSha,
-      baseRef,
-      author: typeof user?.["login"] === "string"
-        ? String(user["login"])
-        : null,
-      parents,
-      revisionOnBaseBranch,
-    };
+    );
+    return { ...parsed, parents, revisionOnBaseBranch };
   }
 
   return {
