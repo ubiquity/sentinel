@@ -9,6 +9,96 @@ GPT-6 Astra integration owner on 2026-09-16 for not completing this job and
 transferred ownership to the primary local agent, which may now change scope,
 status, acceptance and write ownership here.
 
+### Owner-authorized fix session, 2026-09-18 11:24-19:32 UTC (issue 61 closed)
+
+The owner said "Ok fix!" to the diagnosis of issue 61 and then "Proceed" through
+the session. Outcome: the retry deadlock is fixed, the backlog is drained, and
+every open issue is now either closed or a recorded owner decision.
+
+**Defect A — retry-planner deadlock (fixed, delivered).** The planner lowered
+`attempts` by a grant and also incremented `retries`. A record at attempts 4 /
+retries 3 with a spent attempt budget satisfied neither the runtime ceiling
+(`attempts - grant < 4`) nor the frozen `retries <= attempts` invariant, so no
+plan was representable and issue 61 could never be retried. Fixed on the
+supervisor lane, cherry-picked to development as `14a94f5` (lane merge
+`7443473`): a grant now lowers only `attempts` and never touches the preserved
+`retries` history; the per-task grant bound counts durable reservations (all
+purposes, `reserved` included) instead of `retries`; every work-returning grant
+must land strictly below the attempt ceiling (no more grant-0 spin); the
+base-advance recovery applies to all work rules; and a `reserved`
+implementation/retry identity now counts as occupied. 25 focused tests green,
+including the live 4/3/1 shape. Live proof, run `35383154313` at 18:57Z:
+`{"kind":"hosted_autonomy","status":"applied","reason":"retried","actions":["retry:issue-ubiquity-sentinel-61:grant=1:review_quota:implementation attempt budget exhausted:base-advance"]}`
+with the record moving `blocked` -> `work`, `attempts` 4 -> 3, `retries` 3
+preserved, and a `base_refresh` intent recorded against the preserved candidate
+`af252716` / PR 63.
+
+**Defect B — open pull reported as `pr_not_open` (fixed, delivered).** That
+same run's first maintenance pass skipped the plan with
+`skipped:pr_not_open` while PR 63 was genuinely OPEN.
+`createHostedAutonomyGitHub.readPull` required `merge_commit_sha` to be a
+string, but GitHub assigns that field only once a pull is merged, so every
+unmerged pull parsed as `null`. That also silently disabled the delivery pass's
+own open-head merge path for the same shape. Fixed as `5796363` (cherry-pick
+`094f5ba`): the parse is now a pure exported `parseHostedAutonomyPull` that
+accepts null when unmerged and still requires the merge commit when merged, and
+a failed read is reported as `skipped:pr_read_failed` instead of a definitive
+not-open verdict. 27 focused tests green (evidence `73ec8350`).
+
+**Issue 61 closed as already satisfied (integration-owner reconciliation).**
+With the deadlock cleared, the base refresh was resolvable but would provably
+conflict: PR 63's two files were superseded by work already merged for issue 77
+/ PR 78. The RFC-850 acceptance from issue 61 is already met on `development`
+and in accepted runtime generation 24: `src/github/rate-limit.ts` resolves
+RFC-850 years from the observation clock with the RFC 9110 50-year rule, and
+`tests/github/cooldown-client_test.ts` ("RFC-850 Retry-After years resolve from
+the observation time") asserts the issue's exact reproduction (`06-Nov-75` +
+`observedAt = Date.UTC(2026, 8, 15)` -> `Date.UTC(2075, 10, 6, 8, 49, 37)`,
+`fallback: false`) plus the >50-year boundary, stale-past, upper-bound and both
+unrepresentable cases. Verified on `094f5bab`: 2 passed / 0 failed (evidence
+`41598c56`); fix commit `e90d45a` is an ancestor of both `development` and
+`38c70a5`. PR 63 was closed superseded with that evidence (comment
+`5735014249`) and issue 61 closed with the same. Every historical charge,
+reservation, review receipt and the disputed P1 finding remain preserved,
+never rewritten.
+
+**Defect C — unretirable zombie records (fixed, delivered, live-verified).**
+Three records polled every maintenance pass forever at zero cost: closed-issue
+facts were collected only for already-blocked records, and a record whose issue
+closed with a closed-unmerged pull had no terminal path. Fixed as `5402127`
+(cherry-pick `657d29a`): closed-issue facts cover every non-done record, and a
+record is retired when its pull is definitively closed without a merge
+(successful read, `merged !== true`, `state !== "open"`; a failed read is never
+evidence), while an unsettled implementation intent still blocks retirement
+exactly as the runtime never clears one itself. 36 focused tests green
+(evidence `9031a8ae`, then `54eef13b` on the committed bytes). Live proof, run
+`35386233935` at 19:31Z: records 61, 21 and 76 are all parked `blocked` with
+`source issue is closed; the repair no longer exists`, waits and intents
+cleared, no further polling.
+
+**Live refs and their evidence.** `development` = `657d29ab`; protected
+`sentinel-supervisor` = `54021272`; the two shared files are byte-identical
+between the refs. `sentinel-ci` and `sentinel-supervisor` runs are green on
+both; the one observed `sentinel-observe` failure at 19:15Z was the unrelated
+gateway outage (`gateway producer is unavailable`), which succeeded before and
+after. The accepted hosted runtime remains `38c70a5`/generation 24; no pointer
+or generation change was made. Issue 61 is closed; issues 6, 10 and 13 remain
+open with their explicit `sentinel:skip` and their recorded owner decisions.
+
+**Residual, recorded not silently dropped:** (1) the runtime advance predicate
+in `src/repair/loop.ts` still treats ANY unresolved finding as requiring a
+correction round instead of P0/P1, so the parked P2 belongs to that future
+runtime revision; (2) the grant accounting now freezes `retries` as history, so
+making that counter honest again is a future runtime revision; (3) a record at
+`retries == attempts == 4` remains unrecoverable inside the deployed contract,
+though no live record has that shape.
+
+Lane state: m18 worktree `master-plan-m18-retry-accounting-a1f3607a002` at
+`657d29a` (development) is clean; integrate worktree
+`sentinel-supervisor-integrate-m18` at `5402127` is clean. Both may be removed
+after review; no remote branch was deleted, and the pre-existing VPS canonical
+lane (`f18ac8e`) and its untracked files remain untouched.
+
 ### Current checkpoint
 
 **Owner-requested end-to-end run verification, 2026-09-18 02:29–03:47 UTC. Issue
