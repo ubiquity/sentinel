@@ -169,47 +169,89 @@ function evalRetryAfter(value: string, observedAt: number): HintResult {
     return evalSecondsDelta(value, observedAt);
   }
   if (HTTP_DATE.test(value)) {
-    const deadline = parseHttpDate(value, observedAt);
-    if (Number.isNaN(deadline)) return { kind: "malformed" };
-    if (!Number.isSafeInteger(deadline)) {
-      return { kind: "unrepresentable" };
-    }
-    return { kind: "valid", deadline };
+    return parseHttpDate(value, observedAt);
   }
   return { kind: "malformed" };
 }
 
-/** Parse HTTP-date, resolving obsolete RFC-850 years relative to observedAt. */
-function parseHttpDate(value: string, observedAt: number): number {
+/**
+ * Parse HTTP-date, resolving obsolete RFC-850 years relative to observedAt.
+ * A past current-century interpretation stays past; only an interpretation
+ * more than 50 years ahead is moved back by one century.
+ */
+function parseHttpDate(value: string, observedAt: number): HintResult {
   const match = RFC850_DATE.exec(value);
-  if (match === null) return Date.parse(value);
+  if (match === null) {
+    const deadline = Date.parse(value);
+    if (Number.isNaN(deadline)) return { kind: "malformed" };
+    if (!Number.isSafeInteger(deadline)) return { kind: "unrepresentable" };
+    return { kind: "valid", deadline };
+  }
 
-  const observedYear = new Date(observedAt).getUTCFullYear();
-  if (!Number.isInteger(observedYear)) return NaN;
+  const observedDate = new Date(observedAt);
+  // Date's range is narrower than the classifier's accepted safe-integer
+  // range. A valid hint outside Date's range is unrepresentable, not malformed
+  // (and must not enable the secondary fallback).
+  if (Number.isNaN(observedDate.getTime())) {
+    return { kind: "unrepresentable" };
+  }
 
+  const observedYear = observedDate.getUTCFullYear();
   const [, weekday, day, month, year, hours, minutes, seconds] = match;
   const baseYear = Math.floor(observedYear / 100) * 100 + Number(year);
-  let selected: number | null = null;
-  let selectedDistance = Infinity;
-
-  for (const candidateYear of [baseYear, baseYear - 100, baseYear + 100]) {
-    const candidate = Date.parse(
+  const parseYear = (candidateYear: number): number =>
+    Date.parse(
       `${weekday}, ${day}-${month}-${candidateYear} ` +
         `${hours}:${minutes}:${seconds} GMT`,
     );
-    if (Number.isNaN(candidate)) continue;
-    const distance = Math.abs(candidate - observedAt);
-    if (
-      selected === null ||
-      distance < selectedDistance ||
-      (distance === selectedDistance && candidate > observedAt)
-    ) {
-      selected = candidate;
-      selectedDistance = distance;
-    }
+
+  let deadline = parseYear(baseYear);
+  if (Number.isNaN(deadline)) return { kind: "malformed" };
+  if (!Number.isSafeInteger(deadline)) {
+    return { kind: "unrepresentable" };
   }
 
-  return selected ?? NaN;
+  if (isMoreThanFiftyYearsAhead(deadline, observedDate)) {
+    deadline = parseYear(baseYear - 100);
+    if (Number.isNaN(deadline)) return { kind: "malformed" };
+  }
+
+  if (!Number.isSafeInteger(deadline)) return { kind: "unrepresentable" };
+  return { kind: "valid", deadline };
+}
+
+/** Compare an RFC-850 candidate with the observation plus fifty calendar years. */
+function isMoreThanFiftyYearsAhead(
+  candidate: number,
+  observedDate: Date,
+): boolean {
+  const candidateDate = new Date(candidate);
+  const cutoffYear = observedDate.getUTCFullYear() + 50;
+  const candidateYear = candidateDate.getUTCFullYear();
+  if (candidateYear !== cutoffYear) return candidateYear > cutoffYear;
+
+  const candidateParts = [
+    candidateDate.getUTCMonth(),
+    candidateDate.getUTCDate(),
+    candidateDate.getUTCHours(),
+    candidateDate.getUTCMinutes(),
+    candidateDate.getUTCSeconds(),
+    candidateDate.getUTCMilliseconds(),
+  ];
+  const observedParts = [
+    observedDate.getUTCMonth(),
+    observedDate.getUTCDate(),
+    observedDate.getUTCHours(),
+    observedDate.getUTCMinutes(),
+    observedDate.getUTCSeconds(),
+    observedDate.getUTCMilliseconds(),
+  ];
+  for (let i = 0; i < candidateParts.length; i++) {
+    if (candidateParts[i] !== observedParts[i]) {
+      return candidateParts[i] > observedParts[i];
+    }
+  }
+  return false;
 }
 
 /** Evaluate a strict decimal seconds delta; huge values are unrepresentable. */

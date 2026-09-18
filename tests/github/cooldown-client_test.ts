@@ -205,4 +205,32 @@ Deno.test("RFC-850 Retry-After years resolve from the observation time", async (
   );
   assert.equal(beyondFutureWindow?.retryNotBefore, observedAt);
   assert.equal(beyondFutureWindow?.fallback, false);
+
+  const stalePastDate = await classifyGitHubRateLimit(
+    response("Saturday, 01-Jan-00 00:00:00 GMT"),
+    Date.UTC(2070, 5, 1),
+  );
+  assert.equal(stalePastDate?.retryNotBefore, Date.UTC(2070, 5, 1));
+  assert.equal(stalePastDate?.fallback, false);
+
+  const outsideDateRange = Number.MAX_SAFE_INTEGER;
+  const unrepresentablePrimary = await classifyGitHubRateLimit(
+    response("Wednesday, 06-Nov-75 08:49:37 GMT"),
+    outsideDateRange,
+  );
+  assert.equal(unrepresentablePrimary?.retryNotBefore, null);
+  assert.equal(unrepresentablePrimary?.fallback, false);
+
+  const unrepresentableSecondary = await classifyGitHubRateLimit(
+    {
+      status: 429,
+      headers: new Headers({
+        "retry-after": "Wednesday, 06-Nov-75 08:49:37 GMT",
+      }),
+      bodyText: "",
+    },
+    outsideDateRange,
+  );
+  assert.equal(unrepresentableSecondary?.retryNotBefore, null);
+  assert.equal(unrepresentableSecondary?.fallback, false);
 });
