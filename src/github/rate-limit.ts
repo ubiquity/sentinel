@@ -54,6 +54,11 @@ const HTTP_DATE = new RegExp(
     ")$",
 );
 
+const RFC850_DATE = new RegExp(
+  `^(${HTTP_DATE_WEEKDAY_FULL}), (\\d{2})-(${HTTP_DATE_MONTH})-(\\d{2}) ` +
+    `(\\d{2}):(\\d{2}):(\\d{2}) GMT$`,
+);
+
 /** Outcome of evaluating one server hint header. */
 type HintResult =
   | { kind: "valid"; deadline: number }
@@ -164,7 +169,7 @@ function evalRetryAfter(value: string, observedAt: number): HintResult {
     return evalSecondsDelta(value, observedAt);
   }
   if (HTTP_DATE.test(value)) {
-    const deadline = Date.parse(value);
+    const deadline = parseHttpDate(value, observedAt);
     if (Number.isNaN(deadline)) return { kind: "malformed" };
     if (!Number.isSafeInteger(deadline)) {
       return { kind: "unrepresentable" };
@@ -172,6 +177,39 @@ function evalRetryAfter(value: string, observedAt: number): HintResult {
     return { kind: "valid", deadline };
   }
   return { kind: "malformed" };
+}
+
+/** Parse HTTP-date, resolving obsolete RFC-850 years relative to observedAt. */
+function parseHttpDate(value: string, observedAt: number): number {
+  const match = RFC850_DATE.exec(value);
+  if (match === null) return Date.parse(value);
+
+  const observedYear = new Date(observedAt).getUTCFullYear();
+  if (!Number.isInteger(observedYear)) return NaN;
+
+  const [, weekday, day, month, year, hours, minutes, seconds] = match;
+  const baseYear = Math.floor(observedYear / 100) * 100 + Number(year);
+  let selected: number | null = null;
+  let selectedDistance = Infinity;
+
+  for (const candidateYear of [baseYear, baseYear - 100, baseYear + 100]) {
+    const candidate = Date.parse(
+      `${weekday}, ${day}-${month}-${candidateYear} ` +
+        `${hours}:${minutes}:${seconds} GMT`,
+    );
+    if (Number.isNaN(candidate)) continue;
+    const distance = Math.abs(candidate - observedAt);
+    if (
+      selected === null ||
+      distance < selectedDistance ||
+      (distance === selectedDistance && candidate > observedAt)
+    ) {
+      selected = candidate;
+      selectedDistance = distance;
+    }
+  }
+
+  return selected ?? NaN;
 }
 
 /** Evaluate a strict decimal seconds delta; huge values are unrepresentable. */

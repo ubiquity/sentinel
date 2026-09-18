@@ -177,3 +177,32 @@ Deno.test("github client cooldown classification and request ordering", async ()
     "PASS 10 classification cases and 4 actual-client request ordering cases",
   );
 });
+
+Deno.test("RFC-850 Retry-After years resolve from the observation time", async () => {
+  const observedAt = Date.UTC(2026, 8, 15);
+  const response = (retryAfter: string) => ({
+    status: 403,
+    headers: new Headers({
+      "x-ratelimit-remaining": "0",
+      "retry-after": retryAfter,
+    }),
+    bodyText: "",
+  });
+
+  const nearFuture = await classifyGitHubRateLimit(
+    response("Wednesday, 06-Nov-75 08:49:37 GMT"),
+    observedAt,
+  );
+  assert.equal(
+    nearFuture?.retryNotBefore,
+    Date.UTC(2075, 10, 6, 8, 49, 37),
+  );
+  assert.equal(nearFuture?.fallback, false);
+
+  const beyondFutureWindow = await classifyGitHubRateLimit(
+    response("Saturday, 06-Nov-76 08:49:37 GMT"),
+    observedAt,
+  );
+  assert.equal(beyondFutureWindow?.retryNotBefore, observedAt);
+  assert.equal(beyondFutureWindow?.fallback, false);
+});
