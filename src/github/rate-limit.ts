@@ -54,6 +54,11 @@ const HTTP_DATE = new RegExp(
     ")$",
 );
 
+const RFC850_DATE = new RegExp(
+  `^(${HTTP_DATE_WEEKDAY_FULL}), (\\d{2})-(${HTTP_DATE_MONTH})-(\\d{2}) ` +
+    `(\\d{2}):(\\d{2}):(\\d{2}) GMT$`,
+);
+
 /** Outcome of evaluating one server hint header. */
 type HintResult =
   | { kind: "valid"; deadline: number }
@@ -164,14 +169,162 @@ function evalRetryAfter(value: string, observedAt: number): HintResult {
     return evalSecondsDelta(value, observedAt);
   }
   if (HTTP_DATE.test(value)) {
-    const deadline = Date.parse(value);
-    if (Number.isNaN(deadline)) return { kind: "malformed" };
-    if (!Number.isSafeInteger(deadline)) {
-      return { kind: "unrepresentable" };
-    }
-    return { kind: "valid", deadline };
+    return parseHttpDate(value, observedAt);
   }
   return { kind: "malformed" };
+}
+
+/**
+ * Parse HTTP-date, resolving obsolete RFC-850 years relative to observedAt.
+ * A past current-century interpretation stays past; only an interpretation
+ * more than 50 years ahead is moved back by one century.
+ */
+function parseHttpDate(value: string, observedAt: number): HintResult {
+  const match = RFC850_DATE.exec(value);
+  if (match === null) {
+    const deadline = Date.parse(value);
+    if (Number.isNaN(deadline)) return { kind: "malformed" };
+    if (!Number.isSafeInteger(deadline)) return { kind: "unrepresentable" };
+    return { kind: "valid", deadline };
+  }
+
+  const observedDate = new Date(observedAt);
+  // Date's range is narrower than the classifier's accepted safe-integer
+  // range. A valid hint outside Date's range is unrepresentable, not malformed
+  // (and must not enable the secondary fallback).
+  if (Number.isNaN(observedDate.getTime())) {
+    return { kind: "unrepresentable" };
+  }
+
+  const observedYear = observedDate.getUTCFullYear();
+  const [, weekday, day, month, year, hours, minutes, seconds] = match;
+  const baseYear = Math.floor(observedYear / 100) * 100 + Number(year);
+  const monthIndex = HTTP_DATE_MONTH.split("|").indexOf(month);
+  const dayNumber = Number(day);
+  const hourNumber = Number(hours);
+  const minuteNumber = Number(minutes);
+  const secondNumber = Number(seconds);
+  const parseYear = (candidateYear: number): number =>
+    Date.parse(
+      `${weekday}, ${day}-${month}-${candidateYear} ` +
+        `${hours}:${minutes}:${seconds} GMT`,
+    );
+  const baseDeadline = parseYear(baseYear);
+  if (
+    Number.isNaN(baseDeadline) &&
+    !isValidDateParts(
+      baseYear,
+      monthIndex,
+      dayNumber,
+      hourNumber,
+      minuteNumber,
+      secondNumber,
+    )
+  ) {
+    return { kind: "malformed" };
+  }
+
+  const deadlineYear = isMoreThanFiftyYearsAhead(
+      baseYear,
+      monthIndex,
+      dayNumber,
+      hourNumber,
+      minuteNumber,
+      secondNumber,
+      observedDate,
+    )
+    ? baseYear - 100
+    : baseYear;
+  const deadline = deadlineYear === baseYear
+    ? baseDeadline
+    : parseYear(deadlineYear);
+  if (Number.isNaN(deadline)) {
+    return isValidDateParts(
+        deadlineYear,
+        monthIndex,
+        dayNumber,
+        hourNumber,
+        minuteNumber,
+        secondNumber,
+      )
+      ? { kind: "unrepresentable" }
+      : { kind: "malformed" };
+  }
+
+  if (!Number.isSafeInteger(deadline)) return { kind: "unrepresentable" };
+  return { kind: "valid", deadline };
+}
+
+/** Compare an RFC-850 candidate with the observation plus fifty calendar years. */
+function isMoreThanFiftyYearsAhead(
+  candidateYear: number,
+  candidateMonth: number,
+  candidateDay: number,
+  candidateHours: number,
+  candidateMinutes: number,
+  candidateSeconds: number,
+  observedDate: Date,
+): boolean {
+  const cutoffYear = observedDate.getUTCFullYear() + 50;
+  if (candidateYear !== cutoffYear) return candidateYear > cutoffYear;
+
+  const candidateParts = [
+    candidateMonth,
+    candidateDay,
+    candidateHours,
+    candidateMinutes,
+    candidateSeconds,
+    0,
+  ];
+  const observedParts = [
+    observedDate.getUTCMonth(),
+    observedDate.getUTCDate(),
+    observedDate.getUTCHours(),
+    observedDate.getUTCMinutes(),
+    observedDate.getUTCSeconds(),
+    observedDate.getUTCMilliseconds(),
+  ];
+  for (let i = 0; i < candidateParts.length; i++) {
+    if (candidateParts[i] !== observedParts[i]) {
+      return candidateParts[i] > observedParts[i];
+    }
+  }
+  return false;
+}
+
+/** Distinguish an invalid calendar date from a valid date outside Date's range. */
+function isValidDateParts(
+  year: number,
+  month: number,
+  day: number,
+  hours: number,
+  minutes: number,
+  seconds: number,
+): boolean {
+  if (
+    month < 0 ||
+    day < 1 ||
+    hours > 23 ||
+    minutes > 59 ||
+    seconds > 59
+  ) {
+    return false;
+  }
+  const daysInMonth = [
+    31,
+    (year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0)) ? 29 : 28,
+    31,
+    30,
+    31,
+    30,
+    31,
+    31,
+    30,
+    31,
+    30,
+    31,
+  ][month];
+  return daysInMonth !== undefined && day <= daysInMonth;
 }
 
 /** Evaluate a strict decimal seconds delta; huge values are unrepresentable. */
