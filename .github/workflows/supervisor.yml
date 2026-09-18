@@ -57,8 +57,13 @@ jobs:
       # state changes are visible to this run's own execution:
       #   1. a record blocked by a TRANSIENT model-run failure is retried with
       #      the smallest closed counter grant that makes its next admission an
-      #      unused reservation identity, at most three times per task, counted
-      #      in the record's preserved `retries` counter;
+      #      unused reservation identity below the runtime's own attempt
+      #      ceiling (or with the runtime's base-refresh intent when every
+      #      identity at the current base is charged), at most
+      #      HOSTED_AUTONOMY_MAX_RETRIES (200) grants per task, counted in the
+      #      task's durable reservations (every purpose, including one still
+      #      reserved); the preserved `retries` counter is history and is never
+      #      incremented or reset;
       #   2. a record whose exact reviewed head carries a completed receipt with
       #      no unresolved P0/P1 and a successful deterministic check is
       #      delivered end to end: the expected-head merge is performed with a

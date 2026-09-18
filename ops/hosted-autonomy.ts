@@ -9,11 +9,18 @@
  *     an exhausted attempt budget, exhausted review rounds, or a reservation
  *     identity that is already settled at the current base) is granted the
  *     smallest closed counter adjustment that makes its next admission an
- *     UNUSED reservation identity at the record's CURRENT base. Each task may
- *     use at most `HOSTED_AUTONOMY_MAX_RETRIES` such grants, counted in the
- *     record's own preserved `retries` counter, so a task can never cycle
- *     forever. Nothing is deleted: every charge, reservation, receipt, review
- *     and candidate is preserved.
+ *     UNUSED reservation identity; a work-returning grant must also land
+ *     strictly below the runtime's own implementation-attempt ceiling, because
+ *     admission at or above that ceiling is refused outright. When every
+ *     identity at the record's current base is already charged, the grant
+ *     instead records the runtime's own base-refresh intent for the newest
+ *     observed base, which is what supplies fresh identities. Each task may use
+ *     at most `HOSTED_AUTONOMY_MAX_RETRIES` such grants, counted in the task's
+ *     durable reservations (every purpose, including one still `reserved`), so
+ *     no uncharged retry cycle exists and a task can never loop forever.
+ *     Nothing is deleted or reset: the preserved `retries` counter, every
+ *     charge, reservation, receipt, review and candidate stay exactly as they
+ *     are, and only `attempts` is lowered by the grant.
  *
  *  2. DELIVERY PASS — a record whose exact reviewed head carries a completed
  *     review receipt with no unresolved P0/P1 (the runtime's own retained
@@ -92,13 +99,18 @@ export const HOSTED_AUTONOMY_BASE_BRANCH = "development";
 export const HOSTED_AUTONOMY_REQUIRED_CHECK = "test-local";
 
 /**
- * Bound on automatic retries per task, counted in the preserved `retries`
- * counter. A transient provider outage must never permanently kill a task, and
- * a single task must never loop cheaply either: the retry only ever runs inside
- * an execution, and executions are hourly unless a release or a health gap
- * starts one, so the cadence itself is the rate limit. (An earlier 30-minute
- * blocker cooldown also gated retries that carry a fresh reservation identity,
- * which merely wedged tasks that were otherwise recoverable.)
+ * Bound on automatic retry grants per task, counted in the task's durable
+ * reservations: every reservation for the task counts, whatever its purpose or
+ * outcome, including one still `reserved`. A reservation is the charge the
+ * runtime persists before any model start, so this unit cannot be reset,
+ * refunded away or left uncharged by this pass; the preserved `retries` counter
+ * is history and is never incremented or reset here. A transient provider
+ * outage must never permanently kill a task, and a single task must never loop
+ * cheaply either: the retry only ever runs inside an execution, and executions
+ * are hourly unless a release or a health gap starts one, so the cadence itself
+ * is the rate limit. (An earlier 30-minute blocker cooldown also gated retries
+ * that carry a fresh reservation identity, which merely wedged tasks that were
+ * otherwise recoverable.)
  */
 export const HOSTED_AUTONOMY_MAX_RETRIES = 200;
 
@@ -130,33 +142,26 @@ export const HOSTED_AUTONOMY_TRUSTED_AUTHOR = "github-actions[bot]";
 export const HOSTED_AUTONOMY_RETRYABLE: readonly {
   readonly prefix: string;
   readonly nextStep: "work" | "review";
-  /** True when the blocker is an attempt ceiling that must be lowered. */
-  readonly budget: boolean;
 }[] = [
   {
     prefix: "model run ended without a trusted receipt",
     nextStep: "work",
-    budget: false,
   },
   {
     prefix: "model run did not complete with a trusted candidate",
     nextStep: "work",
-    budget: false,
   },
   {
     prefix: "implementation attempt budget exhausted",
     nextStep: "work",
-    budget: true,
   },
   {
     prefix: "review rounds exhausted without an accepted verdict",
     nextStep: "review",
-    budget: false,
   },
   {
     prefix: "model admission refused: duplicate",
     nextStep: "work",
-    budget: true,
   },
 ];
 
@@ -304,7 +309,25 @@ async function readReleaseSafely(
   }
 }
 
-/** Attempt numbers already charged at one base for one purpose. */
+/**
+ * Durable reservations charged to one task, across every purpose and outcome
+ * (including one still `reserved`). This is the automatic-retry bound's unit:
+ * this pass no longer increments the preserved `retries` counter, and a
+ * reservation is the charge the runtime always persists before a model start,
+ * so the bound cannot be reset or evaded by an uncharged retry cycle.
+ */
+function taskReservationCount(
+  snapshot: RepairStateSnapshotV1,
+  taskId: string,
+): number {
+  let count = 0;
+  for (const reservation of snapshot.reservations) {
+    if (reservation.taskId === taskId) count++;
+  }
+  return count;
+}
+
+/** Attempt numbers already occupied at one base for one purpose. */
 function usedAttempts(
   snapshot: RepairStateSnapshotV1,
   taskId: string,
@@ -316,7 +339,15 @@ function usedAttempts(
     if (reservation.taskId !== taskId) continue;
     if (reservation.head !== base) continue;
     if (reservation.purpose !== purpose) continue;
-    if (reservation.outcome === "reserved") continue;
+    // The runtime refuses a duplicate (repository, task, base, attempt,
+    // purpose) identity instead of starting a second session, so a reserved
+    // implementation/retry identity is already occupied and must never be
+    // planned again. A reserved review_request is the one exception: the
+    // review step reconciles that pending request through its own existing
+    // semantics, so it stays eligible here exactly as before.
+    if (reservation.outcome === "reserved" && purpose === "review_request") {
+      continue;
+    }
     used.add(reservation.attempt);
   }
   return used;
@@ -378,19 +409,24 @@ export function planHostedRetries(
     }
     const blocker = record.blocker;
     if (blocker === null) continue;
-    if (record.counters.retries >= HOSTED_AUTONOMY_MAX_RETRIES) continue;
+    if (
+      taskReservationCount(snapshot, record.id) >= HOSTED_AUTONOMY_MAX_RETRIES
+    ) {
+      continue;
+    }
     if (!Number.isSafeInteger(now)) continue;
     const rule = HOSTED_AUTONOMY_RETRYABLE.find((item) =>
       blocker.message.startsWith(item.prefix)
     );
     if (rule === undefined) continue;
     if (!intentClosable(record, snapshot.reservations)) continue;
-    // An attempt-ceiling grant only exists to buy another implementation run.
+    // A work-returning grant only exists to buy another implementation run.
     // Once every review round is spent, that run cannot become a reviewed
     // verdict, so the grant is provably futile and is never planned: the
-    // delivery pass owns the record's receipt instead.
+    // delivery pass owns the record's receipt instead. A review-returning
+    // grant is untouched by this gate.
     if (
-      rule.budget &&
+      rule.nextStep === "work" &&
       record.counters.reviewRounds >= HOSTED_AUTONOMY_MAX_REVIEW_ROUNDS
     ) {
       continue;
@@ -405,8 +441,11 @@ export function planHostedRetries(
       candidate++
     ) {
       const remaining = attempts - candidate;
+      // No work-returning grant may land at or above the runtime's own
+      // implementation ceiling: admission there is refused outright, so such a
+      // grant would only re-block the record instead of buying a run.
       if (
-        rule.budget &&
+        rule.nextStep === "work" &&
         remaining >= HOSTED_AUTONOMY_MAX_IMPLEMENTATION_ATTEMPTS
       ) {
         continue;
@@ -425,21 +464,23 @@ export function planHostedRetries(
         continue;
       }
       // The frozen record invariant is `retries <= attempts`, and this pass
-      // increments retries, so a grant that would break it is not a plan.
-      if (record.counters.retries + 1 > remaining) continue;
+      // only lowers attempts (the preserved `retries` counter is history), so a
+      // grant is valid only while it does not cut attempts below retries.
+      if (record.counters.retries > remaining) continue;
       grant = candidate;
       break;
     }
     if (grant === null) {
       // Every attempt number at this base is charged. The runtime's own base
-      // refresh is what gives an unused identity, and only an attempt-ceiling
-      // blocker may spend it.
+      // refresh is what gives an unused identity, and only a work-returning
+      // rule may spend it: a review-returning grant has its own identity space
+      // and never advances the base.
       const pr = record.target.pr;
       const head = record.target.head;
       const branch = record.target.branch;
       if (
-        !rule.budget || pr === null || head === null || branch === null ||
-        baseTip === null || baseTip === base
+        rule.nextStep !== "work" || pr === null || head === null ||
+        branch === null || baseTip === null || baseTip === base
       ) {
         continue;
       }
@@ -451,9 +492,9 @@ export function planHostedRetries(
       ) {
         continue;
       }
-      // Same invariant: retries is incremented by this pass, so the counter
-      // arithmetic must still satisfy `retries <= attempts` afterwards.
-      if (record.counters.retries + 1 > attempts - ceilingGrant) continue;
+      // Same invariant: the grant lowers attempts, so the preserved retries
+      // counter must still fit under the lowered ceiling.
+      if (record.counters.retries > attempts - ceilingGrant) continue;
       plans.push({
         id: record.id,
         grant: ceilingGrant,
@@ -517,8 +558,11 @@ export function applyHostedRetries(
         blocker: null,
         intent: refresh,
         counters: {
+          // Only the attempt ceiling moves: the grant buys an unused identity
+          // by lowering attempts, while the preserved `retries` counter (and
+          // every other counter) stays exactly as it was.
           attempts: record.counters.attempts - plan.grant,
-          retries: record.counters.retries + 1,
+          retries: record.counters.retries,
           reviewRounds: plan.resetReviewRounds
             ? 0
             : record.counters.reviewRounds,
