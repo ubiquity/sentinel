@@ -33,11 +33,14 @@ import {
 } from "../../src/state/mod.ts";
 import {
   applyHostedClosures,
+  applyHostedRetirements,
   applyHostedRetries,
   buildHostedReleaseRequest,
   HOSTED_AUTONOMY_MAX_RETRIES,
+  HOSTED_AUTONOMY_RETIRED,
   isHardAutonomyFailure,
   planHostedClosures,
+  planHostedRetirements,
   planHostedRetries,
   revisionIntegratedIntoBase,
   runHostedAutonomy,
@@ -741,6 +744,40 @@ Deno.test(
       planHostedRetries(snapshot, T0 + 5000, null, new Set([48])).length,
       0,
     );
+  },
+);
+
+Deno.test(
+  "hosted autonomy: a working record whose source issue closed is parked, never retried",
+  () => {
+    const record = deliveryRecord({
+      nextStep: "work",
+      target: {
+        base: BASE,
+        branch: "sentinel/repair/issue-ubiquity-sentinel-48",
+        checkpoint: null,
+        head: null,
+        pr: null,
+      },
+    });
+    const snapshot = repairSnapshot([record], [authorizingReceipt()]);
+    assert.deepEqual(
+      planHostedRetirements(snapshot, new Set([48])),
+      [{ id: TARGET, issueNumber: 48 }],
+    );
+    // A record with an open pull request still has a delivery path.
+    assert.deepEqual(planHostedRetirements(snapshot, new Set()), []);
+    const next = applyHostedRetirements(
+      snapshot,
+      SHA1,
+      [{ id: TARGET, issueNumber: 48 }],
+      T0 + 5000,
+    );
+    const parked = next.work[0];
+    assert.equal(parked.nextStep, "blocked");
+    assert.equal(parked.blocker?.message, HOSTED_AUTONOMY_RETIRED);
+    // The retirement reason matches no retryable prefix.
+    assert.equal(planHostedRetries(next, T0 + 900000).length, 0);
   },
 );
 
