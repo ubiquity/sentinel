@@ -136,6 +136,72 @@ function blockedRecord(overrides: Record<string, unknown> = {}): WorkRecordV1 {
   });
 }
 
+/** The live zombie record: issue 61 closed, pull request 63 closed unmerged. */
+const ZOMBIE = "issue-ubiquity-sentinel-61" as WorkItemId;
+
+function zombieRecord(overrides: Record<string, unknown> = {}): WorkRecordV1 {
+  return deliveryRecord({
+    id: ZOMBIE,
+    source: { kind: "issue", id: "61", revision: SHA1 },
+    related: { incidentId: null, issueNumber: 61 },
+    target: {
+      base: BASE,
+      branch: "sentinel/repair/issue-ubiquity-sentinel-61",
+      checkpoint: null,
+      head: HEAD,
+      pr: 63,
+    },
+    counters: { attempts: 2, retries: 0, reviewRounds: 1 },
+    ...overrides,
+  });
+}
+
+/** The settled implementation intent and charge the zombie record carries. */
+function zombieIntent() {
+  return {
+    kind: "implementation",
+    key: "implementation:z-2",
+    startedAt: T0 + 1000,
+    branch: "sentinel/repair/issue-ubiquity-sentinel-61",
+    expectedHead: null,
+    observedBase: BASE,
+    pr: null,
+    requestId: "z-2",
+    resultId: null,
+  };
+}
+
+function zombieCharges() {
+  return [
+    reservation("z-2", {
+      taskId: ZOMBIE,
+      head: BASE,
+      attempt: 2,
+      purpose: "implementation",
+      outcome: "submitted",
+      settledAt: T0 + 2000,
+    }),
+  ];
+}
+
+/** The same zombie already parked on the transient retryable blocker. */
+function blockedZombie(): WorkRecordV1 {
+  return blockedRecord({
+    id: ZOMBIE,
+    source: { kind: "issue", id: "61", revision: SHA1 },
+    related: { incidentId: null, issueNumber: 61 },
+    target: {
+      base: BASE,
+      branch: "sentinel/repair/issue-ubiquity-sentinel-61",
+      checkpoint: null,
+      head: HEAD,
+      pr: 63,
+    },
+    counters: { attempts: 2, retries: 0, reviewRounds: 1 },
+    intent: zombieIntent(),
+  });
+}
+
 /**
  * The attempt identities the loop charges at one base: attempt 1 as
  * `implementation` and every later attempt as `retry`.
@@ -855,6 +921,131 @@ Deno.test(
 );
 
 Deno.test(
+  "hosted autonomy: only a definitively closed-unmerged pull parks a record that has one",
+  () => {
+    const snapshot = repairSnapshot([zombieRecord()]);
+    // The pull's own state is the new evidence: a closed issue alone is not.
+    assert.deepEqual(planHostedRetirements(snapshot, new Set([61])), []);
+    assert.deepEqual(
+      planHostedRetirements(snapshot, new Set([61]), new Set([ZOMBIE])),
+      [{ id: ZOMBIE, issueNumber: 61 }],
+    );
+    // A record that produced nothing keeps the existing skip while it is
+    // already parked, whatever the closed-unmerged set says.
+    const parked = repairSnapshot([
+      zombieRecord({
+        nextStep: "blocked",
+        blocker: {
+          kind: "other",
+          message: "model run ended without a trusted receipt",
+          since: T0 + 3000,
+        },
+        target: {
+          base: BASE,
+          branch: "sentinel/repair/issue-ubiquity-sentinel-61",
+          checkpoint: null,
+          head: null,
+          pr: null,
+        },
+      }),
+    ]);
+    assert.deepEqual(
+      planHostedRetirements(
+        parked,
+        new Set([61]),
+        new Set([ZOMBIE]),
+      ),
+      [],
+    );
+  },
+);
+
+Deno.test(
+  "hosted autonomy: a closed-unmerged pull parks an already blocked record",
+  () => {
+    // The record carries a settled implementation intent: retirement may
+    // clear it because the runtime already resolved that charge.
+    const snapshot = repairSnapshot(
+      [blockedZombie()],
+      [authorizingReceipt()],
+      [],
+      zombieCharges(),
+    );
+    assert.deepEqual(
+      planHostedRetirements(snapshot, new Set([61]), new Set([ZOMBIE])),
+      [{ id: ZOMBIE, issueNumber: 61 }],
+    );
+  },
+);
+
+Deno.test(
+  "hosted autonomy: an unsettled implementation intent is never retired",
+  () => {
+    // The companion baseline: the same closed-unmerged record with a SETTLED
+    // implementation reservation is retired (retirement clears that intent).
+    const settled = repairSnapshot(
+      [zombieRecord({ intent: zombieIntent() })],
+      [authorizingReceipt()],
+      [],
+      zombieCharges(),
+    );
+    assert.deepEqual(
+      planHostedRetirements(settled, new Set([61]), new Set([ZOMBIE])),
+      [{ id: ZOMBIE, issueNumber: 61 }],
+    );
+
+    // A matching reservation that is still `reserved` is not settled.
+    const reserved = repairSnapshot(
+      [zombieRecord({ intent: zombieIntent() })],
+      [authorizingReceipt()],
+      [],
+      [
+        reservation("z-2", {
+          taskId: ZOMBIE,
+          head: BASE,
+          attempt: 2,
+          purpose: "implementation",
+          outcome: "reserved",
+        }),
+      ],
+    );
+    assert.deepEqual(
+      planHostedRetirements(reserved, new Set([61]), new Set([ZOMBIE])),
+      [],
+    );
+
+    // No matching reservation at all is not settled either.
+    const missing = repairSnapshot([zombieRecord({ intent: zombieIntent() })]);
+    assert.deepEqual(
+      planHostedRetirements(missing, new Set([61]), new Set([ZOMBIE])),
+      [],
+    );
+
+    // A non-implementation intent stays retirable: the runtime clears an
+    // unprepared base_refresh itself.
+    const refreshing = repairSnapshot([
+      zombieRecord({
+        intent: {
+          kind: "base_refresh",
+          key: "base-refresh:z-2",
+          startedAt: T0 + 1000,
+          branch: "sentinel/repair/issue-ubiquity-sentinel-61",
+          expectedHead: HEAD,
+          observedBase: SHA1,
+          pr: 63,
+          requestId: null,
+          resultId: null,
+        },
+      }),
+    ]);
+    assert.deepEqual(
+      planHostedRetirements(refreshing, new Set([61]), new Set([ZOMBIE])),
+      [{ id: ZOMBIE, issueNumber: 61 }],
+    );
+  },
+);
+
+Deno.test(
   "hosted autonomy: a parked deterministic check on the reviewed head is approved",
   async () => {
     const { rig, github } = await makeRig("autonomy-approve", {
@@ -1143,6 +1334,193 @@ Deno.test(
     assert.equal(retried.status, "applied");
     assert.equal(retried.reason, "retried");
     assert.equal(rig.writes, 1);
+    await Deno.remove(rig.tmp, { recursive: true });
+  },
+);
+
+Deno.test(
+  "hosted autonomy: a closed issue with a closed-unmerged pull retires the record",
+  async () => {
+    const { rig, github } = await makeRig("autonomy-retire-unmerged", {
+      repair: repairSnapshot(
+        [zombieRecord({ intent: zombieIntent() })],
+        [authorizingReceipt()],
+        [],
+        zombieCharges(),
+      ),
+      pull: pullFacts({
+        number: 63,
+        state: "closed",
+        merged: false,
+        mergeCommitSha: null,
+      }),
+    });
+    github.readIssueOpen = () => Promise.resolve(false);
+    const result = await run(rig, github);
+    assert.equal(result.status, "applied");
+    assert.equal(result.reason, "retired_records");
+    assert.equal(rig.writes, 1);
+    assert.ok(result.actions.includes(`retire:${ZOMBIE}:issue=61`));
+    const read = await rig.state.readRepair();
+    if (!read.ok || read.value.status !== "found") {
+      throw new Error("unreadable");
+    }
+    const record = read.value.snapshot.work[0];
+    assert.equal(record.nextStep, "blocked");
+    assert.equal(record.blocker?.message, HOSTED_AUTONOMY_RETIRED);
+    assert.equal(record.intent, null);
+    // Terminal: the retirement reason matches no retryable prefix.
+    assert.equal(planHostedRetries(read.value.snapshot, T0 + 900000).length, 0);
+    await Deno.remove(rig.tmp, { recursive: true });
+  },
+);
+
+Deno.test(
+  "hosted autonomy: a closed issue with an already blocked closed-unmerged record is parked",
+  async () => {
+    const { rig, github } = await makeRig("autonomy-retire-blocked", {
+      repair: repairSnapshot(
+        [blockedZombie()],
+        [authorizingReceipt()],
+        [],
+        zombieCharges(),
+      ),
+      pull: pullFacts({
+        number: 63,
+        state: "closed",
+        merged: false,
+        mergeCommitSha: null,
+      }),
+    });
+    github.readIssueOpen = () => Promise.resolve(false);
+    const result = await run(rig, github);
+    assert.equal(result.status, "applied");
+    assert.equal(result.reason, "retired_records");
+    assert.equal(rig.writes, 1);
+    assert.ok(result.actions.includes(`retire:${ZOMBIE}:issue=61`));
+    const read = await rig.state.readRepair();
+    if (!read.ok || read.value.status !== "found") {
+      throw new Error("unreadable");
+    }
+    const record = read.value.snapshot.work[0];
+    assert.equal(record.nextStep, "blocked");
+    assert.equal(record.blocker?.message, HOSTED_AUTONOMY_RETIRED);
+    assert.equal(record.intent, null);
+    await Deno.remove(rig.tmp, { recursive: true });
+  },
+);
+
+Deno.test(
+  "hosted autonomy: a closed issue with an open pull is not retired",
+  async () => {
+    const { rig, github } = await makeRig("autonomy-retire-open", {
+      repair: repairSnapshot([zombieRecord()]),
+      pull: pullFacts({
+        number: 63,
+        state: "open",
+        merged: false,
+        mergeCommitSha: null,
+      }),
+    });
+    github.readIssueOpen = () => Promise.resolve(false);
+    const result = await run(rig, github);
+    assert.equal(rig.writes, 0);
+    assert.ok(!result.actions.some((action) => action.startsWith("retire:")));
+    const read = await rig.state.readRepair();
+    if (!read.ok || read.value.status !== "found") {
+      throw new Error("unreadable");
+    }
+    const record = read.value.snapshot.work[0];
+    assert.equal(record.nextStep, "delivery");
+    assert.equal(record.blocker, null);
+    await Deno.remove(rig.tmp, { recursive: true });
+  },
+);
+
+Deno.test(
+  "hosted autonomy: a closed issue with a merged pull is not retired",
+  async () => {
+    const { rig, github } = await makeRig("autonomy-retire-merged", {
+      repair: repairSnapshot([zombieRecord()]),
+      pull: pullFacts({ number: 63, state: "closed", merged: true }),
+    });
+    github.readIssueOpen = () => Promise.resolve(false);
+    const result = await run(rig, github);
+    assert.equal(rig.writes, 0);
+    assert.ok(!result.actions.some((action) => action.startsWith("retire:")));
+    const read = await rig.state.readRepair();
+    if (!read.ok || read.value.status !== "found") {
+      throw new Error("unreadable");
+    }
+    const record = read.value.snapshot.work[0];
+    assert.equal(record.nextStep, "delivery");
+    assert.equal(record.blocker, null);
+    await Deno.remove(rig.tmp, { recursive: true });
+  },
+);
+
+Deno.test(
+  "hosted autonomy: a closed issue with an unreadable pull is not retired",
+  async () => {
+    const { rig, github } = await makeRig("autonomy-retire-unreadable", {
+      repair: repairSnapshot([zombieRecord()]),
+    });
+    github.readIssueOpen = () => Promise.resolve(false);
+    const throwing: HostedAutonomyGitHubV1 = {
+      ...github,
+      readPull: () => Promise.reject(new Error("transient read failure")),
+    };
+    const thrown = await run(rig, throwing);
+    assert.equal(rig.writes, 0);
+    assert.ok(!thrown.actions.some((action) => action.startsWith("retire:")));
+    const unreadable: HostedAutonomyGitHubV1 = {
+      ...github,
+      readPull: () => Promise.resolve(null),
+    };
+    const unread = await run(rig, unreadable);
+    assert.equal(rig.writes, 0);
+    assert.ok(!unread.actions.some((action) => action.startsWith("retire:")));
+    const read = await rig.state.readRepair();
+    if (!read.ok || read.value.status !== "found") {
+      throw new Error("unreadable");
+    }
+    const record = read.value.snapshot.work[0];
+    assert.equal(record.nextStep, "delivery");
+    assert.equal(record.blocker, null);
+    await Deno.remove(rig.tmp, { recursive: true });
+  },
+);
+
+Deno.test(
+  "hosted autonomy: a closed issue with no pull is still retired by the runner",
+  async () => {
+    const record = deliveryRecord({
+      nextStep: "work",
+      target: {
+        base: BASE,
+        branch: "sentinel/repair/issue-ubiquity-sentinel-48",
+        checkpoint: null,
+        head: null,
+        pr: null,
+      },
+    });
+    const { rig, github } = await makeRig("autonomy-retire-nopr", {
+      repair: repairSnapshot([record], [authorizingReceipt()]),
+    });
+    github.readIssueOpen = () => Promise.resolve(false);
+    const result = await run(rig, github);
+    assert.equal(result.status, "applied");
+    assert.equal(result.reason, "retired_records");
+    assert.equal(rig.writes, 1);
+    assert.ok(result.actions.includes(`retire:${TARGET}:issue=48`));
+    const read = await rig.state.readRepair();
+    if (!read.ok || read.value.status !== "found") {
+      throw new Error("unreadable");
+    }
+    const parked = read.value.snapshot.work[0];
+    assert.equal(parked.nextStep, "blocked");
+    assert.equal(parked.blocker?.message, HOSTED_AUTONOMY_RETIRED);
+    assert.equal(parked.intent, null);
     await Deno.remove(rig.tmp, { recursive: true });
   },
 );
