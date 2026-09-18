@@ -196,6 +196,14 @@ export const OWNER_DEVELOPMENT_INSTALL_CADENCE_GENERATION = 21;
 export const OWNER_DEVELOPMENT_INSTALL_GUARD_REVISION =
   "6c5ab021deff64f0df38e1841cbed259cc6287fb" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_GUARD_GENERATION = 22;
+/**
+ * Exact revision carrying the retirement pass. Its install triggers the
+ * immediate execution that records the pending review verdict and starts the
+ * correction round.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_RETIRE_REVISION =
+  "cf8e6610b206f80b976785d12eef9d8fa1706311" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_RETIRE_GENERATION = 23;
 
 const API_BASE = "https://api.github.com";
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -927,9 +935,48 @@ export function planOwnerDevelopmentInstall(
       );
     }
     if (healthy !== null) {
-      return noChange("the owner development installation is complete");
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_RETIRE_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_RETIRE_GENERATION,
+        healthy,
+        "install the retirement revision after the guard healthy proof",
+      );
     }
     return waiting("the guard generation 22 healthy proof is not recorded");
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_RETIRE_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_RETIRE_GENERATION
+  ) {
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_GUARD_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_GUARD_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded guard healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_GUARD_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed retirement candidate to the guard revision",
+      );
+    }
+    if (healthy !== null) {
+      return noChange("the owner development installation is complete");
+    }
+    return waiting(
+      "the retirement generation 23 healthy proof is not recorded",
+    );
   }
 
   // Any other pointer, including a completed rollback target, is deliberately
