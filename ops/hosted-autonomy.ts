@@ -24,7 +24,10 @@
  *     rule, so the runtime's trusted merge port refuses by design — and then
  *     the exact release request the runtime's delivery step would have written
  *     is recorded for the trusted supervisor, which still owns prior/candidate
- *     proofs, promotion, acceptance and rollback.
+ *     proofs, promotion, acceptance and rollback. A record the runtime parked
+ *     in `work`/`blocked` because its own correction predicate demanded a round
+ *     it can no longer review is delivered from the same receipt: the review
+ *     budget is spent, so no further verdict is reachable.
  *
  * It writes no review, receipt, proof, promotion or acceptance, and it never
  * merges without a completed current-head receipt, a green deterministic check
@@ -58,6 +61,30 @@ import {
   validateIssue48QuotaHostedIdentity,
 } from "./issue48-review-quota-recovery.ts";
 
+/** Snapshot work record, as read from the durable repair state. */
+type HostedAutonomyRecordV1 = RepairStateSnapshotV1["work"][number];
+
+/**
+ * Delivery eligibility. The ordinary path is the runtime's own `review` and
+ * `delivery` steps. A record parked in `work` or `blocked` is also eligible
+ * once it has spent every review round: the runtime advances to a correction
+ * round for ANY unresolved finding (its `advanceToCorrection` predicate is
+ * stricter than the documented "no unresolved P0/P1 → delivery" rule and than
+ * the trusted acceptance gate), and without a review round left that
+ * correction can never become a reviewed verdict. The receipt in hand is then
+ * the only honest basis for delivery, and P2/P3 findings stay future work. No
+ * other parked step is ever delivered.
+ */
+function deliveryEligible(record: HostedAutonomyRecordV1): boolean {
+  if (record.nextStep === "review" || record.nextStep === "delivery") {
+    return true;
+  }
+  if (record.nextStep !== "work" && record.nextStep !== "blocked") {
+    return false;
+  }
+  return record.counters.reviewRounds >= HOSTED_AUTONOMY_MAX_REVIEW_ROUNDS;
+}
+
 /** The base branch every reviewed candidate must be integrated into. */
 export const HOSTED_AUTONOMY_BASE_BRANCH = "development";
 
@@ -77,6 +104,13 @@ export const HOSTED_AUTONOMY_MAX_RETRIES = 200;
 
 /** The runtime's own implementation-attempt ceiling. */
 export const HOSTED_AUTONOMY_MAX_IMPLEMENTATION_ATTEMPTS = 4;
+
+/**
+ * The runtime's own review-round ceiling. A record that has spent every review
+ * round can never turn another correction into a reviewed verdict, so the only
+ * remaining delivery path is the receipt it already holds.
+ */
+export const HOSTED_AUTONOMY_MAX_REVIEW_ROUNDS = 3;
 
 /**
  * Static blocker message for a record whose source issue no longer exists. It
@@ -351,12 +385,18 @@ export function planHostedRetries(
     );
     if (rule === undefined) continue;
     if (!intentClosable(record, snapshot.reservations)) continue;
+    // An attempt-ceiling grant only exists to buy another implementation run.
+    // Once every review round is spent, that run cannot become a reviewed
+    // verdict, so the grant is provably futile and is never planned: the
+    // delivery pass owns the record's receipt instead.
+    if (
+      rule.budget &&
+      record.counters.reviewRounds >= HOSTED_AUTONOMY_MAX_REVIEW_ROUNDS
+    ) {
+      continue;
+    }
     const base = record.target.base;
     if (base === null) continue;
-    const purpose = rule.nextStep === "review"
-      ? "review_request"
-      : "implementation";
-    const used = usedAttempts(snapshot, record.id, base, purpose);
     const attempts = record.counters.attempts;
     let grant: number | null = null;
     for (
@@ -371,7 +411,19 @@ export function planHostedRetries(
       ) {
         continue;
       }
-      if (used.has(remaining + 1)) continue;
+      // The identity the runtime will charge is fixed by the counters AFTER
+      // this grant: the loop admits corrections with purpose `retry`, and only
+      // a zero-attempt record is admitted as `implementation`.
+      const purpose = rule.nextStep === "review"
+        ? "review_request"
+        : remaining === 0
+        ? "implementation"
+        : "retry";
+      if (
+        usedAttempts(snapshot, record.id, base, purpose).has(remaining + 1)
+      ) {
+        continue;
+      }
       // The frozen record invariant is `retries <= attempts`, and this pass
       // increments retries, so a grant that would break it is not a plan.
       if (record.counters.retries + 1 > remaining) continue;
@@ -809,7 +861,7 @@ export async function runHostedAutonomy(
   // can never complete on its own. The job approves exactly those runs for the
   // exact reviewed head; the check itself stays credential-free and unchanged.
   for (const record of snapshot.work) {
-    if (record.nextStep !== "review" && record.nextStep !== "delivery") {
+    if (!deliveryEligible(record)) {
       continue;
     }
     const head = record.target.head;
@@ -847,7 +899,7 @@ export async function runHostedAutonomy(
   }
 
   for (const record of snapshot.work) {
-    if (record.nextStep !== "review" && record.nextStep !== "delivery") {
+    if (!deliveryEligible(record)) {
       continue;
     }
     const pullRequest = record.target.pr;
