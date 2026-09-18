@@ -189,6 +189,13 @@ export const OWNER_DEVELOPMENT_INSTALL_ADVANCE_GENERATION = 20;
 export const OWNER_DEVELOPMENT_INSTALL_CADENCE_REVISION =
   "9f1bde9e342547c23dc1dc69f7650704d0f43e7f" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_CADENCE_GENERATION = 21;
+/**
+ * Exact revision carrying the closed-issue retry guard, so the next execution
+ * spends its model session on a repairable task instead of a closed one.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_GUARD_REVISION =
+  "6c5ab021deff64f0df38e1841cbed259cc6287fb" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_GUARD_GENERATION = 22;
 
 const API_BASE = "https://api.github.com";
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -881,11 +888,48 @@ export function planOwnerDevelopmentInstall(
       );
     }
     if (healthy !== null) {
-      return noChange("the owner development installation is complete");
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_GUARD_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_GUARD_GENERATION,
+        healthy,
+        "install the guard revision after the cadence healthy proof",
+      );
     }
     return waiting(
       "the cadence generation 21 healthy proof is not recorded",
     );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_GUARD_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_GUARD_GENERATION
+  ) {
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_CADENCE_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_CADENCE_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded cadence healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_CADENCE_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed guard candidate to the cadence revision",
+      );
+    }
+    if (healthy !== null) {
+      return noChange("the owner development installation is complete");
+    }
+    return waiting("the guard generation 22 healthy proof is not recorded");
   }
 
   // Any other pointer, including a completed rollback target, is deliberately
