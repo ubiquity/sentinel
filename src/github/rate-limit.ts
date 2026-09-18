@@ -199,21 +199,56 @@ function parseHttpDate(value: string, observedAt: number): HintResult {
   const observedYear = observedDate.getUTCFullYear();
   const [, weekday, day, month, year, hours, minutes, seconds] = match;
   const baseYear = Math.floor(observedYear / 100) * 100 + Number(year);
+  const monthIndex = HTTP_DATE_MONTH.split("|").indexOf(month);
+  const dayNumber = Number(day);
+  const hourNumber = Number(hours);
+  const minuteNumber = Number(minutes);
+  const secondNumber = Number(seconds);
   const parseYear = (candidateYear: number): number =>
     Date.parse(
       `${weekday}, ${day}-${month}-${candidateYear} ` +
         `${hours}:${minutes}:${seconds} GMT`,
     );
-
-  let deadline = parseYear(baseYear);
-  if (Number.isNaN(deadline)) return { kind: "malformed" };
-  if (!Number.isSafeInteger(deadline)) {
-    return { kind: "unrepresentable" };
+  const baseDeadline = parseYear(baseYear);
+  if (
+    Number.isNaN(baseDeadline) &&
+    !isValidDateParts(
+      baseYear,
+      monthIndex,
+      dayNumber,
+      hourNumber,
+      minuteNumber,
+      secondNumber,
+    )
+  ) {
+    return { kind: "malformed" };
   }
 
-  if (isMoreThanFiftyYearsAhead(deadline, observedDate)) {
-    deadline = parseYear(baseYear - 100);
-    if (Number.isNaN(deadline)) return { kind: "malformed" };
+  const deadlineYear = isMoreThanFiftyYearsAhead(
+      baseYear,
+      monthIndex,
+      dayNumber,
+      hourNumber,
+      minuteNumber,
+      secondNumber,
+      observedDate,
+    )
+    ? baseYear - 100
+    : baseYear;
+  const deadline = deadlineYear === baseYear
+    ? baseDeadline
+    : parseYear(deadlineYear);
+  if (Number.isNaN(deadline)) {
+    return isValidDateParts(
+        deadlineYear,
+        monthIndex,
+        dayNumber,
+        hourNumber,
+        minuteNumber,
+        secondNumber,
+      )
+      ? { kind: "unrepresentable" }
+      : { kind: "malformed" };
   }
 
   if (!Number.isSafeInteger(deadline)) return { kind: "unrepresentable" };
@@ -222,21 +257,24 @@ function parseHttpDate(value: string, observedAt: number): HintResult {
 
 /** Compare an RFC-850 candidate with the observation plus fifty calendar years. */
 function isMoreThanFiftyYearsAhead(
-  candidate: number,
+  candidateYear: number,
+  candidateMonth: number,
+  candidateDay: number,
+  candidateHours: number,
+  candidateMinutes: number,
+  candidateSeconds: number,
   observedDate: Date,
 ): boolean {
-  const candidateDate = new Date(candidate);
   const cutoffYear = observedDate.getUTCFullYear() + 50;
-  const candidateYear = candidateDate.getUTCFullYear();
   if (candidateYear !== cutoffYear) return candidateYear > cutoffYear;
 
   const candidateParts = [
-    candidateDate.getUTCMonth(),
-    candidateDate.getUTCDate(),
-    candidateDate.getUTCHours(),
-    candidateDate.getUTCMinutes(),
-    candidateDate.getUTCSeconds(),
-    candidateDate.getUTCMilliseconds(),
+    candidateMonth,
+    candidateDay,
+    candidateHours,
+    candidateMinutes,
+    candidateSeconds,
+    0,
   ];
   const observedParts = [
     observedDate.getUTCMonth(),
@@ -252,6 +290,41 @@ function isMoreThanFiftyYearsAhead(
     }
   }
   return false;
+}
+
+/** Distinguish an invalid calendar date from a valid date outside Date's range. */
+function isValidDateParts(
+  year: number,
+  month: number,
+  day: number,
+  hours: number,
+  minutes: number,
+  seconds: number,
+): boolean {
+  if (
+    month < 0 ||
+    day < 1 ||
+    hours > 23 ||
+    minutes > 59 ||
+    seconds > 59
+  ) {
+    return false;
+  }
+  const daysInMonth = [
+    31,
+    (year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0)) ? 29 : 28,
+    31,
+    30,
+    31,
+    30,
+    31,
+    31,
+    30,
+    31,
+    30,
+    31,
+  ][month];
+  return daysInMonth !== undefined && day <= daysInMonth;
 }
 
 /** Evaluate a strict decimal seconds delta; huge values are unrepresentable. */

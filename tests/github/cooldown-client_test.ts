@@ -213,6 +213,16 @@ Deno.test("RFC-850 Retry-After years resolve from the observation time", async (
   assert.equal(stalePastDate?.retryNotBefore, Date.UTC(2070, 5, 1));
   assert.equal(stalePastDate?.fallback, false);
 
+  const nearDateUpperBound = await classifyGitHubRateLimit(
+    response("Saturday, 06-Nov-60 08:49:37 GMT"),
+    new Date(Date.UTC(275650, 8, 15)).getTime(),
+  );
+  assert.equal(
+    nearDateUpperBound?.retryNotBefore,
+    Date.parse("Saturday, 06-Nov-275660 08:49:37 GMT"),
+  );
+  assert.equal(nearDateUpperBound?.fallback, false);
+
   const outsideDateRange = Number.MAX_SAFE_INTEGER;
   const unrepresentablePrimary = await classifyGitHubRateLimit(
     response("Wednesday, 06-Nov-75 08:49:37 GMT"),
