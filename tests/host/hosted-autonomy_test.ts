@@ -332,6 +332,7 @@ async function makeRig(
       rig.closed.push(number);
       return Promise.resolve(true);
     },
+    readIssueOpen: () => Promise.resolve(true),
     merge: () => {
       rig.merges++;
       mergedNow = true;
@@ -725,6 +726,21 @@ Deno.test(
     // `retries <= attempts` is a frozen invariant and this pass increments
     // retries, so no grant exists here and nothing may be written.
     assert.equal(planHostedRetries(snapshot, T0 + 5000, SHA1).length, 0);
+  },
+);
+
+Deno.test(
+  "hosted autonomy: a task whose source issue is closed is never retried",
+  () => {
+    const record = blockedRecord({
+      counters: { attempts: 2, retries: 0, reviewRounds: 1 },
+    });
+    const snapshot = repairSnapshot([record], [authorizingReceipt()]);
+    assert.equal(planHostedRetries(snapshot, T0 + 5000).length, 1);
+    assert.equal(
+      planHostedRetries(snapshot, T0 + 5000, null, new Set([48])).length,
+      0,
+    );
   },
 );
 

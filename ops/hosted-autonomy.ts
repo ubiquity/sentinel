@@ -173,6 +173,11 @@ export interface HostedAutonomyGitHubV1 {
   /** True when the exact head carries a successful deterministic check. */
   hasSuccessfulCheck(head: string): Promise<boolean>;
   readPull(number: number): Promise<HostedAutonomyPullV1 | null>;
+  /**
+   * True when the source issue is open, false when it is closed or missing,
+   * null when that cannot be read. Only a definitive false stops a retry.
+   */
+  readIssueOpen(number: number): Promise<boolean | null>;
   /** Expected-head merge; null on any refusal. */
   merge(
     number: number,
@@ -311,10 +316,19 @@ export function planHostedRetries(
   snapshot: RepairStateSnapshotV1,
   now: number,
   baseTip: string | null = null,
+  closedIssues: ReadonlySet<number> = new Set(),
 ): RetryPlanV1[] {
   const plans: RetryPlanV1[] = [];
   for (const record of snapshot.work) {
     if (record.nextStep !== "blocked") continue;
+    // A task whose source issue is closed or gone is not repairable: retrying
+    // it can only spend a model session on work that no longer exists.
+    if (
+      record.related.issueNumber !== null &&
+      closedIssues.has(record.related.issueNumber)
+    ) {
+      continue;
+    }
     const blocker = record.blocker;
     if (blocker === null) continue;
     if (record.counters.retries >= HOSTED_AUTONOMY_MAX_RETRIES) continue;
@@ -632,7 +646,25 @@ export async function runHostedAutonomy(
   } catch {
     tip = null;
   }
-  const planned = planHostedRetries(snapshot, deps.clock.now(), tip);
+  const closedIssues = new Set<number>();
+  for (const record of snapshot.work) {
+    if (record.nextStep !== "blocked") continue;
+    const issueNumber = record.related.issueNumber;
+    if (issueNumber === null) continue;
+    let open: boolean | null = null;
+    try {
+      open = await deps.github.readIssueOpen(issueNumber);
+    } catch {
+      open = null;
+    }
+    if (open === false) closedIssues.add(issueNumber);
+  }
+  const planned = planHostedRetries(
+    snapshot,
+    deps.clock.now(),
+    tip,
+    closedIssues,
+  );
   const plans: RetryPlanV1[] = [];
   for (const plan of planned) {
     const record = snapshot.work.find((item) => item.id === plan.id);
@@ -1103,6 +1135,17 @@ export function createHostedAutonomyGitHub(
       );
     },
     readPull,
+    async readIssueOpen(number: number) {
+      const issue = await request(
+        "GET",
+        `/repos/${ISSUE48_QUOTA_REPOSITORY}/issues/${number}`,
+      );
+      if (issue === null || typeof issue !== "object") return null;
+      const state = (issue as Record<string, unknown>)["state"];
+      if (state === "open") return true;
+      if (state === "closed") return false;
+      return null;
+    },
     async closeIssue(number: number) {
       const closed = await request(
         "PATCH",
