@@ -177,3 +177,70 @@ Deno.test("github client cooldown classification and request ordering", async ()
     "PASS 10 classification cases and 4 actual-client request ordering cases",
   );
 });
+
+Deno.test("RFC-850 Retry-After years resolve from the observation time", async () => {
+  const observedAt = Date.UTC(2026, 8, 15);
+  const response = (retryAfter: string) => ({
+    status: 403,
+    headers: new Headers({
+      "x-ratelimit-remaining": "0",
+      "retry-after": retryAfter,
+    }),
+    bodyText: "",
+  });
+
+  const nearFuture = await classifyGitHubRateLimit(
+    response("Wednesday, 06-Nov-75 08:49:37 GMT"),
+    observedAt,
+  );
+  assert.equal(
+    nearFuture?.retryNotBefore,
+    Date.UTC(2075, 10, 6, 8, 49, 37),
+  );
+  assert.equal(nearFuture?.fallback, false);
+
+  const beyondFutureWindow = await classifyGitHubRateLimit(
+    response("Saturday, 06-Nov-76 08:49:37 GMT"),
+    observedAt,
+  );
+  assert.equal(beyondFutureWindow?.retryNotBefore, observedAt);
+  assert.equal(beyondFutureWindow?.fallback, false);
+
+  const stalePastDate = await classifyGitHubRateLimit(
+    response("Saturday, 01-Jan-00 00:00:00 GMT"),
+    Date.UTC(2070, 5, 1),
+  );
+  assert.equal(stalePastDate?.retryNotBefore, Date.UTC(2070, 5, 1));
+  assert.equal(stalePastDate?.fallback, false);
+
+  const nearDateUpperBound = await classifyGitHubRateLimit(
+    response("Saturday, 06-Nov-60 08:49:37 GMT"),
+    new Date(Date.UTC(275650, 8, 15)).getTime(),
+  );
+  assert.equal(
+    nearDateUpperBound?.retryNotBefore,
+    Date.parse("Saturday, 06-Nov-275660 08:49:37 GMT"),
+  );
+  assert.equal(nearDateUpperBound?.fallback, false);
+
+  const outsideDateRange = Number.MAX_SAFE_INTEGER;
+  const unrepresentablePrimary = await classifyGitHubRateLimit(
+    response("Wednesday, 06-Nov-75 08:49:37 GMT"),
+    outsideDateRange,
+  );
+  assert.equal(unrepresentablePrimary?.retryNotBefore, null);
+  assert.equal(unrepresentablePrimary?.fallback, false);
+
+  const unrepresentableSecondary = await classifyGitHubRateLimit(
+    {
+      status: 429,
+      headers: new Headers({
+        "retry-after": "Wednesday, 06-Nov-75 08:49:37 GMT",
+      }),
+      bodyText: "",
+    },
+    outsideDateRange,
+  );
+  assert.equal(unrepresentableSecondary?.retryNotBefore, null);
+  assert.equal(unrepresentableSecondary?.fallback, false);
+});

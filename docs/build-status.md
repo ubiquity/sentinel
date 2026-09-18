@@ -11,6 +11,96 @@ status, acceptance and write ownership here.
 
 ### Current checkpoint
 
+**Owner-requested end-to-end run verification, 2026-09-18 02:29–03:47 UTC. Issue
+77 / PR 78 is delivered, and the run exposed two live defects that are fixed.**
+The owner asked for a run to be invoked and watched to the end instead of being
+told it works. The protected supervisor was invoked by hand at 02:29:20Z with
+the same primitive the dispatcher uses
+(`gh api --method POST repos/ubiquity/sentinel/actions/workflows/supervisor.yml/dispatches -f ref=sentinel-supervisor`);
+run `35299518858`, repair job 02:29:54–03:04:19Z, settled `healthy`.
+
+Verified timeline (every instant read from the live repair/release state, the
+run logs or the GitHub API — not narrated):
+
+- 02:31:35Z the round-2 P1 receipt was recorded (evidence 1 → 2), the
+  `review_pending` wait cleared and `nextStep` moved `review` → `work`. The
+  journal was first validated locally with the runtime's own
+  `parseReviewJournalBody` (result digest plus byte-exact re-render, review
+  `5243314393`, head `c296551`, base `cf8e661`), so the recording was predicted
+  before it happened rather than observed after.
+- 02:31:27Z → 02:47:45Z the correction was admitted as attempt 4 (purpose
+  `retry`, head `cf8e661`) and published candidate head
+  `ee2307bbc5e066aeb80736ea91b19e91469005c5` at 02:48:16Z; review round 3 was
+  requested 02:48:40Z and verdict `5243780886` posted 03:04:07Z with **one P2
+  finding and no P0/P1**.
+- The fix was verified independently on the new head, not taken on trust: the
+  round-2 hazard reproduces on the reviewed head (secondary out-of-range
+  RFC-850 `Retry-After` → `retryNotBefore = now + 60s`, `fallback: true`) and
+  the same probe on `ee2307b` returns `retryNotBefore: null`,
+  `fallback: false`, with the RFC-mandated 100-year backshift now resolving
+  instead of reporting `malformed`. `tests/github/` passes; the 25 failures it
+  also reports locally are byte-identical on the pre-change base, so they are
+  an environment artifact, not a regression.
+- `test-local` on `ee2307b` is green (started 03:04:20Z, run `35300799331`
+  completed 03:17:45Z). GitHub parked the bot-authored run at
+  `action_required` and the runtime's own trusted helper
+  (`src/host/actions-ci.ts`) approved it at 03:04:17Z.
+- 03:40:50Z the maintenance pass merged the reviewed head with an expected-head
+  compare-and-swap: merge `38c70a5bf3e58ff3fb1c7cfeb7a91e98105c3d1a` with
+  exactly the parents `cf8e661` + `ee2307b`.
+- 03:41:15Z release request `release:c9405599111ee3176eaeb57cdfae043693ced4089dc3d68e28fd338649ec928e`
+  was recorded (revision `38c70a5`, receipt `ffa3b095…`, request
+  `review-review:78:ee2307b…:attempt-3`), prior proof `cf8e661`/generation 23
+  (run `35304095632`), candidate proof `38c70a5`/generation 24 (run
+  `35304290387`, purpose `candidate`), **phase `accepted` at 03:46:26Z**, and
+  the runtime pointer promoted to `38c70a5`/generation 24 with that healthy
+  proof.
+- 03:46:45Z issue 77 was closed COMPLETED; the autonomy record reads
+  `{"status":"applied","reason":"closed_issues","actions":["delivery:issue-ubiquity-sentinel-77:already_recorded","close:issue-ubiquity-sentinel-77:issue=77"]}`.
+
+**Defect 1, found live and fixed (supervisor lane `4a38a91`, cherry-picked to
+development as `c022936`).** The runtime advances to a correction round for ANY
+unresolved finding — `src/repair/loop.ts` uses
+`receipt.unresolvedSeverities.length > 0` — which is stricter than its own
+documented transition ("Completed current-head review with no unresolved P0/P1 →
+delivery", `src/repair/transitions.ts:379`) and than the trusted gate
+(`reviewAuthorizes`, `authorizingReceipt`). A P2-only verdict therefore parked
+the record in `blocked` once the attempt budget was spent, where the delivery
+pass could not see it, and the retry pass then kept granting an attempt-ceiling
+retry whose reservation identity was already charged (its identity check used
+purpose `implementation` while the loop charges `retry` for every correction),
+so the record would have livelocked on `model admission refused: duplicate`
+without ever delivering. The fix, all on the supervisor lane: delivery and
+check-approval eligibility also cover a record parked in `work`/`blocked` once
+`reviewRounds` has reached the runtime ceiling, because no correction can become
+a verdict any more and the receipt in hand is the only honest basis for
+delivery; an attempt-ceiling grant is never planned once the review budget is
+spent; and the identity check uses the purpose the runtime actually charges
+after the grant. 22 autonomy tests green, four of them new.
+
+**Deferred P2, future work (exact location).** Review `5243780886` finding 0,
+`src/github/rate-limit.ts:195-196`: when `observedAt` is outside JavaScript
+Date's range the early branch returns `unrepresentable` before validating the
+captured date fields, so a malformed value suppresses the documented
+secondary-limit fallback. This sits in the same class as the deferred issue-48
+P2s and does not gate acceptance.
+
+**Follow-up recorded, not yet done.** The correction predicate above should
+become P0/P1-based in a future runtime revision; `src/repair/loop.ts` is
+protected, so it cannot be changed by a model worker and needs a promotion
+cycle. Until then the delivery pass carries the correct rule.
+
+**Cadence measured, not assumed.** `supervisor-dispatch.yml`'s `*/5` cron is
+heavily throttled by GitHub on this repository: observed dispatch instants
+02:05:57, 01:53:55, 01:37:03, 01:14:01, 00:52:21, 23:57:50, 23:50:35, 23:42:35,
+23:35:03 and 23:25:30Z — 12 to 55 minutes apart, never 5. The supervisor also
+serializes the cheap maintenance pass behind the long repair job through the
+workflow concurrency group, so while an execution is in flight no retry,
+approval, delivery or closure pass can run. Both are why the fleet can look
+idle while a run is genuinely working. The operator dispatches recorded above
+were used to keep the pipeline moving inside this window; the scheduled path
+alone adds 10–25 minutes per stage.
+
 Updated 2026-09-17 20:54 UTC. **Issue 48 is delivered: the reviewed head was
 merged, the trusted supervisor accepted the hosted release for the merged
 revision, and the issue is closed with that evidence.** The self-repair

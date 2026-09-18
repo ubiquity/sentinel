@@ -134,6 +134,23 @@ function blockedRecord(overrides: Record<string, unknown> = {}): WorkRecordV1 {
   });
 }
 
+/**
+ * The attempt identities the loop charges at one base: attempt 1 as
+ * `implementation` and every later attempt as `retry`.
+ */
+function chargedAttempts(base: GitSha = BASE) {
+  return [1, 2, 3, 4].map((attempt) =>
+    reservation(`charged-${attempt}`, {
+      taskId: TARGET,
+      head: base,
+      attempt,
+      purpose: attempt === 1 ? "implementation" : "retry",
+      outcome: "submitted",
+      settledAt: T0 + 2000,
+    })
+  );
+}
+
 function finding(severity: "P1" | "P2") {
   return {
     id: "github-review-1-finding-0",
@@ -535,7 +552,7 @@ Deno.test(
   "hosted autonomy: a transient blocker is retried with a closed grant and a preserved budget",
   () => {
     const record = blockedRecord({
-      counters: { attempts: 2, retries: 0, reviewRounds: 3 },
+      counters: { attempts: 2, retries: 0, reviewRounds: 1 },
     });
     const snapshot = repairSnapshot([record], [authorizingReceipt()], [], [
       reservation("r-1", {
@@ -567,9 +584,10 @@ Deno.test(
     const applied = next.work[0];
     assert.equal(applied.nextStep, "work");
     assert.equal(applied.blocker, null);
-    assert.equal(applied.counters.retries, 1);
+    // The preserved counters are history: only the attempt ceiling moves.
+    assert.equal(applied.counters.retries, 0);
     assert.equal(applied.counters.attempts, 2);
-    assert.equal(applied.counters.reviewRounds, 3);
+    assert.equal(applied.counters.reviewRounds, 1);
     assert.equal(next.reservations.length, 2);
     assert.equal(next.sequence, snapshot.sequence + 1);
   },
@@ -578,16 +596,40 @@ Deno.test(
 Deno.test(
   "hosted autonomy: the retry budget is closed and non-transient blockers are untouched",
   () => {
-    const exhausted = repairSnapshot([
-      blockedRecord({
-        counters: {
-          attempts: HOSTED_AUTONOMY_MAX_RETRIES,
-          retries: HOSTED_AUTONOMY_MAX_RETRIES,
-          reviewRounds: 1,
-        },
-      }),
-    ]);
-    assert.equal(planHostedRetries(exhausted, T0 + 5000).length, 0);
+    // The cap's unit is durable reservations (every purpose and outcome,
+    // including one still `reserved`), not the preserved `retries` counter.
+    const capFixture = (count: number) =>
+      repairSnapshot(
+        [
+          blockedRecord({
+            counters: { attempts: 2, retries: 0, reviewRounds: 1 },
+          }),
+        ],
+        [authorizingReceipt()],
+        [],
+        Array.from({ length: count }, (_, index) =>
+          reservation(`cap-${index + 1}`, {
+            taskId: TARGET,
+            head: BASE,
+            attempt: index + 1,
+            purpose: "continuation",
+            outcome: index % 2 === 0 ? "reserved" : "submitted",
+            settledAt: index % 2 === 0 ? null : T0 + 2000,
+          })),
+      );
+    // One reservation below the cap still permits a grant; the cap is closed.
+    assert.equal(
+      planHostedRetries(
+        capFixture(HOSTED_AUTONOMY_MAX_RETRIES - 1),
+        T0 + 5000,
+      ).length,
+      1,
+    );
+    assert.equal(
+      planHostedRetries(capFixture(HOSTED_AUTONOMY_MAX_RETRIES), T0 + 5000)
+        .length,
+      0,
+    );
 
     const reviewRounds = repairSnapshot([
       blockedRecord({
@@ -646,13 +688,17 @@ Deno.test(
 Deno.test(
   "hosted autonomy: a wedged attempt budget advances the base through the runtime's own refresh intent",
   () => {
+    // The live shape: attempts 4, retries 3, one review round spent, and every
+    // attempt identity at the old base already charged. Incrementing `retries`
+    // here used to make every grant invalid; the preserved counter now stays
+    // put and only the attempt ceiling is lowered.
     const record = blockedRecord({
       blocker: {
         kind: "review_quota",
         message: "implementation attempt budget exhausted",
         since: T0 + 3000,
       },
-      counters: { attempts: 4, retries: 0, reviewRounds: 1 },
+      counters: { attempts: 4, retries: 3, reviewRounds: 1 },
       target: {
         base: BASE,
         branch: "sentinel/repair/issue-ubiquity-sentinel-48",
@@ -673,9 +719,13 @@ Deno.test(
         settledAt: T0 + 2000,
       })
     );
+    const p1Receipt = authorizingReceipt({
+      findings: [finding("P1")],
+      unresolvedSeverities: ["P1"],
+    });
     const snapshot = repairSnapshot(
       [record],
-      [authorizingReceipt()],
+      [p1Receipt],
       [],
       charges,
     );
@@ -693,8 +743,16 @@ Deno.test(
     const applied = next.work[0];
     assert.equal(applied.nextStep, "work");
     assert.equal(applied.blocker, null);
+    // The applied record is valid (the frozen parser accepted it) with only
+    // attempts lowered: retries and review rounds are untouched history.
     assert.equal(applied.counters.attempts, 3);
-    assert.equal(applied.counters.retries, 1);
+    assert.equal(applied.counters.retries, 3);
+    assert.equal(applied.counters.reviewRounds, 1);
+    assert.deepEqual(applied.target, record.target);
+    assert.deepEqual(applied.evidence, record.evidence);
+    assert.deepEqual(next.evidence, snapshot.evidence);
+    assert.deepEqual(next.reviews, snapshot.reviews);
+    assert.deepEqual(next.reservations, snapshot.reservations);
     assert.equal(
       applied.target.base,
       BASE,
@@ -703,6 +761,9 @@ Deno.test(
     assert.ok(
       applied.intent !== null && applied.intent.kind === "base_refresh",
     );
+    assert.equal(applied.intent?.expectedHead, HEAD);
+    assert.equal(applied.intent?.observedBase, newerBase);
+    assert.equal(applied.intent?.pr, 51);
     assert.equal(
       applied.intent?.key,
       `base_refresh:51:${HEAD}:${newerBase}`,
@@ -720,7 +781,7 @@ Deno.test(
         message: "implementation attempt budget exhausted",
         since: T0 + 3000,
       },
-      counters: { attempts: 4, retries: 3, reviewRounds: 1 },
+      counters: { attempts: 4, retries: 4, reviewRounds: 1 },
       target: {
         base: BASE,
         branch: "sentinel/repair/issue-ubiquity-sentinel-48",
@@ -730,9 +791,15 @@ Deno.test(
       },
     });
     const snapshot = repairSnapshot([record], [authorizingReceipt()]);
-    // `retries <= attempts` is a frozen invariant and this pass increments
-    // retries, so no grant exists here and nothing may be written.
+    // `retries <= attempts` is a frozen invariant and this pass only lowers
+    // attempts, so neither a normal grant nor the base-advance grant that would
+    // land at 3 is representable here: the plan refuses instead of writing an
+    // invalid snapshot, even with a newer base available.
+    assert.equal(planHostedRetries(snapshot, T0 + 5000).length, 0);
     assert.equal(planHostedRetries(snapshot, T0 + 5000, SHA1).length, 0);
+    const next = applyHostedRetries(snapshot, SHA1, [], T0 + 5000);
+    assert.equal(next.work[0].counters.attempts, 4);
+    assert.equal(next.work[0].counters.retries, 4);
   },
 );
 
@@ -902,7 +969,8 @@ Deno.test(
     const record = read.value.snapshot.work[0];
     assert.equal(record.nextStep, "work");
     assert.equal(record.blocker, null);
-    assert.equal(record.counters.retries, 1);
+    assert.equal(record.counters.retries, 0);
+    assert.equal(record.counters.attempts, 1);
     await Deno.remove(rig.tmp, { recursive: true });
   },
 );
@@ -1192,5 +1260,157 @@ Deno.test(
       [authorizingReceipt()],
     );
     assert.equal(planHostedRetries(earlier, T0 + 5000).length, 1);
+  },
+);
+
+Deno.test(
+  "hosted autonomy: a transient blocker at the attempt ceiling advances the base, never a zero grant",
+  () => {
+    const record = blockedRecord({
+      counters: { attempts: 4, retries: 0, reviewRounds: 1 },
+      target: {
+        base: BASE,
+        branch: "sentinel/repair/issue-ubiquity-sentinel-48",
+        checkpoint: null,
+        head: HEAD,
+        pr: 51,
+      },
+    });
+    const snapshot = repairSnapshot(
+      [record],
+      [authorizingReceipt()],
+      [],
+      chargedAttempts(),
+    );
+    const newerBase = SHA1;
+    const plans = planHostedRetries(snapshot, T0 + 5000, newerBase);
+    assert.equal(plans.length, 1);
+    // A grant of 0 would leave attempts at 4, exactly where the runtime refuses
+    // admission: the grant must land below the ceiling through the runtime's
+    // own base refresh instead of re-blocking the record unchanged.
+    assert.equal(plans[0].grant, 1);
+    assert.equal(plans[0].advanceBase, true);
+    assert.equal(plans[0].nextStep, "work");
+    const applied = applyHostedRetries(snapshot, SHA1, plans, T0 + 5000)
+      .work[0];
+    assert.equal(applied.counters.attempts, 3);
+    assert.equal(applied.counters.retries, 0);
+    assert.ok(
+      applied.intent !== null && applied.intent.kind === "base_refresh",
+    );
+  },
+);
+
+Deno.test(
+  "hosted autonomy: a work-returning grant is never planned once the review budget is spent",
+  () => {
+    const target = {
+      base: BASE,
+      branch: "sentinel/repair/issue-ubiquity-sentinel-48",
+      checkpoint: null,
+      head: HEAD,
+      pr: 51,
+    };
+    // The transient (non-budget) work rule is retryable while a review round is
+    // left, even at the attempt ceiling with every identity charged...
+    const earlier = repairSnapshot(
+      [blockedRecord({
+        counters: { attempts: 4, retries: 0, reviewRounds: 2 },
+        target,
+      })],
+      [authorizingReceipt()],
+      [],
+      chargedAttempts(),
+    );
+    assert.equal(planHostedRetries(earlier, T0 + 5000, SHA1).length, 1);
+    // ...but once every review round is spent another implementation run can
+    // never become a reviewed verdict: no grant, base advance included.
+    const spent = repairSnapshot(
+      [blockedRecord({
+        counters: { attempts: 4, retries: 0, reviewRounds: 3 },
+        target,
+      })],
+      [authorizingReceipt()],
+      [],
+      chargedAttempts(),
+    );
+    assert.equal(planHostedRetries(spent, T0 + 5000, SHA1).length, 0);
+    assert.equal(planHostedRetries(spent, T0 + 5000, BASE).length, 0);
+  },
+);
+
+Deno.test(
+  "hosted autonomy: a reserved retry identity is occupied while a reserved review request stays reconcilable",
+  () => {
+    const record = blockedRecord({
+      counters: { attempts: 3, retries: 0, reviewRounds: 1 },
+    });
+    const reservedRetry = reservation("reserved-retry", {
+      taskId: TARGET,
+      head: BASE,
+      attempt: 4,
+      purpose: "retry",
+      outcome: "reserved",
+    });
+    const snapshot = repairSnapshot(
+      [record],
+      [authorizingReceipt()],
+      [],
+      [reservedRetry],
+    );
+    const plans = planHostedRetries(snapshot, T0 + 5000);
+    assert.equal(plans.length, 1);
+    // Identity 4 is already reserved and the runtime refuses that duplicate
+    // instead of starting a second session, so the grant must step to identity
+    // 3 rather than re-plan 4 forever.
+    assert.equal(plans[0].grant, 1);
+    const applied = applyHostedRetries(snapshot, SHA1, plans, T0 + 5000)
+      .work[0];
+    assert.equal(applied.counters.attempts, 2);
+    assert.equal(applied.counters.attempts + 1, 3);
+    assert.ok(
+      !snapshot.reservations.some((entry) =>
+        entry.taskId === TARGET && entry.head === BASE &&
+        entry.attempt === 3 && entry.purpose === "retry"
+      ),
+    );
+
+    // A reserved review_request is the one identity the review step still
+    // reconciles, so it stays eligible exactly as before.
+    const reviewRecord = blockedRecord({
+      blocker: {
+        kind: "review_quota",
+        message: "review rounds exhausted without an accepted verdict",
+        since: T0 + 3000,
+      },
+      counters: { attempts: 1, retries: 0, reviewRounds: 3 },
+    });
+    const reservedReview = reservation("reserved-review", {
+      taskId: TARGET,
+      head: BASE,
+      attempt: 2,
+      purpose: "review_request",
+      outcome: "reserved",
+    });
+    const reviewSnapshot = repairSnapshot(
+      [reviewRecord],
+      [authorizingReceipt()],
+      [],
+      [reservedReview],
+    );
+    const reviewPlans = planHostedRetries(reviewSnapshot, T0 + 5000);
+    assert.equal(reviewPlans.length, 1);
+    assert.equal(reviewPlans[0].nextStep, "review");
+    assert.equal(reviewPlans[0].grant, 0);
+    assert.equal(reviewPlans[0].resetReviewRounds, true);
+    const reviewNext = applyHostedRetries(
+      reviewSnapshot,
+      SHA1,
+      reviewPlans,
+      T0 + 5000,
+    ).work[0];
+    assert.equal(reviewNext.counters.reviewRounds, 0);
+    assert.equal(reviewNext.counters.attempts, 1);
+    assert.equal(reviewNext.counters.retries, 0);
   },
 );
