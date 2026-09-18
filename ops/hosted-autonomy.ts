@@ -684,22 +684,51 @@ export function planHostedClosures(
 }
 
 /**
- * Records whose source issue is closed or gone and which produced nothing (no
- * pull request): the work no longer exists, so the record is parked as blocked
- * with a static reason that the retry pass refuses to clear. Only records with
- * no pull request are parked — a record with an open pull request still has a
- * delivery path.
+ * Records whose source issue is closed or gone and which can no longer produce
+ * anything: the work no longer exists, so the record is parked as blocked with
+ * a static reason that the retry pass refuses to clear. A record that produced
+ * nothing (no pull request) is parked from a live step only, exactly as before:
+ * an already blocked record keeps its own blocker. A record with a pull request
+ * still has a delivery path unless that pull request is definitively closed
+ * without a merge, and that verdict is evidence from any step — an already
+ * blocked record whose pull can never merge is parked with the same static
+ * reason. `closedUnmerged` carries the ids whose pull request is closed without
+ * a merge; an open, merged or unreadable pull is not evidence. A record with a
+ * pull request and an UNSETTLED implementation intent is never retired: the
+ * runtime's own uncertainty handler owns that intent, and only a settled
+ * implementation intent may be cleared here. Non-implementation intents (the
+ * runtime clears an unprepared `base_refresh` itself) and null intents stay
+ * retirable.
  */
 export function planHostedRetirements(
   snapshot: RepairStateSnapshotV1,
   closedIssues: ReadonlySet<number>,
+  closedUnmerged: ReadonlySet<string> = new Set(),
 ): { id: string; issueNumber: number }[] {
   const plans: { id: string; issueNumber: number }[] = [];
   for (const record of snapshot.work) {
-    if (record.nextStep === "done" || record.nextStep === "blocked") continue;
+    if (record.nextStep === "done") continue;
     const issueNumber = record.related.issueNumber;
     if (issueNumber === null || !closedIssues.has(issueNumber)) continue;
-    if (record.target.pr !== null) continue;
+    if (record.target.pr === null) {
+      // Existing behavior: only a non-blocked record that produced nothing is
+      // parked; an already blocked record keeps its own blocker.
+      if (record.nextStep === "blocked") continue;
+      plans.push({ id: record.id, issueNumber });
+      continue;
+    }
+    // Only a definitively closed-unmerged pull proves the task can never
+    // deliver; anything else leaves the record alone.
+    if (!closedUnmerged.has(record.id)) continue;
+    // Retirement clears the intent, so it must never take an unsettled
+    // implementation intent away from the runtime's own uncertainty handler.
+    // `intentClosable` is that same settled-intent rule; it is consulted only
+    // for implementation intents, so non-implementation and null intents stay
+    // retirable exactly as before.
+    if (
+      record.intent !== null && record.intent.kind === "implementation" &&
+      !intentClosable(record, snapshot.reservations)
+    ) continue;
     plans.push({ id: record.id, issueNumber });
   }
   return plans;
@@ -811,9 +840,13 @@ export async function runHostedAutonomy(
   } catch {
     tip = null;
   }
+  // The closed-issue fact is collected for every record that is not done, not
+  // only for blocked ones: the retirement pass needs it for a live record whose
+  // source issue is already gone. The retry pass keeps consuming it for blocked
+  // records exactly as before.
   const closedIssues = new Set<number>();
   for (const record of snapshot.work) {
-    if (record.nextStep !== "blocked") continue;
+    if (record.nextStep === "done") continue;
     const issueNumber = record.related.issueNumber;
     if (issueNumber === null) continue;
     let open: boolean | null = null;
@@ -1110,7 +1143,34 @@ export async function runHostedAutonomy(
 
   // ---- closure pass -------------------------------------------------------
   const released = acceptedReleases(releaseRead.value.snapshot.hostedReleases);
-  const retirements = planHostedRetirements(snapshot, closedIssues).slice(0, 5);
+  // A record whose source issue is closed and whose own pull request is
+  // definitively closed without a merge can never deliver, whatever step it is
+  // parked at. That verdict requires the read to succeed and the pull to be
+  // neither merged nor open; a failed or empty read is not evidence and leaves
+  // the record alone.
+  const closedUnmerged = new Set<string>();
+  for (const record of snapshot.work) {
+    if (record.nextStep === "done") continue;
+    const issueNumber = record.related.issueNumber;
+    if (issueNumber === null || !closedIssues.has(issueNumber)) continue;
+    const pullRequest = record.target.pr;
+    if (pullRequest === null) continue;
+    let pull: HostedAutonomyPullV1 | null;
+    try {
+      pull = await deps.github.readPull(pullRequest);
+    } catch {
+      pull = null;
+    }
+    if (pull === null) continue;
+    if (pull.merged !== true && pull.state !== "open") {
+      closedUnmerged.add(record.id);
+    }
+  }
+  const retirements = planHostedRetirements(
+    snapshot,
+    closedIssues,
+    closedUnmerged,
+  ).slice(0, 5);
   if (retirements.length > 0) {
     const now = deps.clock.now();
     if (!Number.isSafeInteger(now) || now < snapshot.updatedAt) {
