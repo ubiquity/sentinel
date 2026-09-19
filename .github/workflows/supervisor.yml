@@ -114,6 +114,21 @@ jobs:
       - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
         with:
           deno-version: v2.x
+      # The App installation token is scoped to exactly the repositories the
+      # committed target setting names. The array is the single source of
+      # truth, so a target can never be repaired under a token that does not
+      # include it, and an empty or missing setting fails here instead of
+      # minting a pointlessly narrow token.
+      - name: Resolve the committed target repositories
+        id: targets
+        run: |
+          set -euo pipefail
+          repositories=$(jq -r 'join(",")' sentinel.targets.json)
+          if [ -z "$repositories" ]; then
+            echo "sentinel.targets.json names no repository" >&2
+            exit 1
+          fi
+          echo "repositories=$repositories" >> "$GITHUB_OUTPUT"
       - name: Mint the scoped supervisor installation token
         id: app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
@@ -121,7 +136,7 @@ jobs:
           client-id: Iv23liB8E2FcIZd9i7Pg
           private-key: ${{ secrets.SENTINEL_SUPERVISOR_APP_PRIVATE_KEY }}
           owner: ubiquity
-          repositories: sentinel
+          repositories: ${{ steps.targets.outputs.repositories }}
           permission-contents: write
       # One-shot fixed owner-authorized development installation. It reads and
       # validates the complete release state with the App token, verifies the
@@ -235,6 +250,21 @@ jobs:
       - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
         with:
           deno-version: v2.x
+      # The App installation token is scoped to exactly the repositories the
+      # committed target setting names. The array is the single source of
+      # truth, so a target can never be repaired under a token that does not
+      # include it, and an empty or missing setting fails here instead of
+      # minting a pointlessly narrow token.
+      - name: Resolve the committed target repositories
+        id: targets
+        run: |
+          set -euo pipefail
+          repositories=$(jq -r 'join(",")' sentinel.targets.json)
+          if [ -z "$repositories" ]; then
+            echo "sentinel.targets.json names no repository" >&2
+            exit 1
+          fi
+          echo "repositories=$repositories" >> "$GITHUB_OUTPUT"
       - name: Mint the scoped supervisor installation token
         id: app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
@@ -242,7 +272,7 @@ jobs:
           client-id: Iv23liB8E2FcIZd9i7Pg
           private-key: ${{ secrets.SENTINEL_SUPERVISOR_APP_PRIVATE_KEY }}
           owner: ubiquity
-          repositories: sentinel
+          repositories: ${{ steps.targets.outputs.repositories }}
           permission-contents: write
       - name: Finalize hosted supervisor run
         env:
