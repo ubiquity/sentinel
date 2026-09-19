@@ -32,6 +32,12 @@ import {
 import { readHostedReleaseReceipt } from "./actions-release.ts";
 import { createActionsCandidateRestorer } from "./actions-candidates.ts";
 import type { ReleaseRequestV1 } from "../contracts/release.ts";
+import {
+  createDefaultBranchResolver,
+  loadTargetConfigsV1,
+  STATIC_TARGETS_EMPTY,
+  STATIC_TARGETS_UNSUPPORTED,
+} from "./targets.ts";
 import { createRepairStateStore, DenoGitRunner } from "../state/mod.ts";
 import {
   composeLocalGitHub,
@@ -179,6 +185,46 @@ export async function runActionsRepairHost(): Promise<
     trustedPath,
     gitExecutable,
   });
+
+  // The committed target setting is the ONLY source of target repositories.
+  // It is read before any port is composed, so an unusable setting refuses the
+  // run instead of quietly repairing nothing and instead of falling back to a
+  // built-in repository. `createLocalRepositoryConfig()` is the trusted
+  // per-repository template (commands, protected paths, limits) and the
+  // identity this host addresses; it is no longer a target list.
+  const templateConfig = createLocalRepositoryConfig();
+  const targets = await loadTargetConfigsV1({
+    template: templateConfig,
+    resolveDefaultBranch: createDefaultBranchResolver({
+      http,
+      token: githubToken,
+    }),
+  });
+  if (targets.configs.length === 0) throw new Error(STATIC_TARGETS_EMPTY);
+  const config = targets.configs.find((candidate) =>
+    candidate.repository.owner === templateConfig.repository.owner &&
+    candidate.repository.name === templateConfig.repository.name &&
+    candidate.repository.installationId ===
+      templateConfig.repository.installationId
+  );
+  if (config === undefined) throw new Error(STATIC_TARGETS_UNSUPPORTED);
+  // Targets this host cannot address yet are reported, never silently dropped
+  // and never acted on through another repository's port. The diagnostic line
+  // carries no `status` property, so it can never be read as a child status
+  // record by the launcher.
+  if (targets.configs.length > 1) {
+    console.log(JSON.stringify({
+      version: "v1",
+      kind: "sentinel_targets_diagnostic",
+      addressed: `${config.repository.owner}/${config.repository.name}`,
+      unaddressable: targets.configs
+        .filter((candidate) => candidate !== config)
+        .map((candidate) =>
+          `${candidate.repository.owner}/${candidate.repository.name}`
+        ),
+      skipped: [...targets.skipped],
+    }));
+  }
   const github = scopeLocalRepairIssues(composeLocalGitHub({
     clock,
     state,
@@ -214,7 +260,6 @@ export async function runActionsRepairHost(): Promise<
     localIteration: false,
     ensureCandidateObjects: candidates.ensure,
   });
-  const config = createLocalRepositoryConfig();
 
   // The hosted self release path reads the protected supervisor's persisted
   // strict receipt from the same release state this host already reads. No

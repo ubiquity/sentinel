@@ -86,6 +86,18 @@ label. Source is re-read before admission, so gaining either opt-out revokes
 eligibility before any budget is spent. Owner update, 2026-09-17: the earlier
 opt-in marker `<!-- sentinel:repair -->` is no longer required; nothing is
 silently filtered out of the repair queue.
+Owner update, 2026-09-18: the repositories this deployment may repair are a
+committed setting, not code. `sentinel.targets.json` at the repository root is
+the ONLY source of targets: a plain, bounded, duplicate-free JSON array of
+`owner/name` slugs, listed in `protectedPaths` so no model worker can add itself
+a target repository. Each target's base branch is that repository's own default
+branch, read from GitHub — never a value in the file and never a constant in the
+runtime. Per-repository conventions (commands, protected paths, session bounds,
+live-start limits) come from the trusted template, so a slug cannot introduce a
+command or drop a protection. An absent, empty or malformed setting leaves the
+deployment with NO targets and the run refuses instead of falling back to any
+built-in repository; the shared 120-starts-per-hour admission cap still applies
+across all targets.
 
 
 ## 2. Canonical goal identity

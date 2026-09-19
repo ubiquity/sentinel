@@ -45,6 +45,12 @@ import type { BudgetReservationV1 } from "../contracts/budget-reservation.ts";
 import type { IncidentEvidenceV1 } from "../contracts/incident.ts";
 import { parseRepositoryConfigV1 } from "../contracts/repository-config.ts";
 import type { RepositoryConfigV1 } from "../contracts/repository-config.ts";
+import {
+  createDefaultBranchResolver,
+  loadTargetConfigsV1,
+  STATIC_TARGETS_EMPTY,
+  STATIC_TARGETS_UNSUPPORTED,
+} from "./targets.ts";
 import type { RepositoryIdentityV1 } from "../contracts/shared.ts";
 import type { RepairStateSnapshotV1 } from "../contracts/state-snapshots.ts";
 import { MaxText } from "../contracts/validation.ts";
@@ -213,6 +219,11 @@ export function createLocalRepositoryConfig(): RepositoryConfigV1 {
       "MASTER-PLAN.md",
       "deno.json",
       "docs/build-status.md",
+      // The committed target setting decides which repositories this
+      // deployment may repair. A model worker must never be able to add itself
+      // a target repository, so the file is protected like every other
+      // authority artifact.
+      "sentinel.targets.json",
       "src/contracts/github-cooldown.ts",
       "src/contracts/hosted-execution.ts",
       "src/contracts/hosted-supervisor.ts",
@@ -859,7 +870,31 @@ export async function runLocalRepairHost(
     );
     markerWritten = true;
 
-    const appliedConfig = createLocalRepositoryConfig();
+    // The committed target setting is the ONLY source of target repositories.
+    // The local host addresses exactly one repository (its fixed identity), so
+    // the setting must name it: an empty or foreign setting refuses the run
+    // instead of repairing a repository the owner never listed.
+    const localTemplate = createLocalRepositoryConfig();
+    const localTargets = await loadTargetConfigsV1({
+      template: localTemplate,
+      resolveDefaultBranch: createDefaultBranchResolver({
+        http,
+        token: input.githubToken,
+      }),
+      root: sourcePath,
+    });
+    if (localTargets.configs.length === 0) {
+      throw new Error(STATIC_TARGETS_EMPTY);
+    }
+    const appliedConfig = localTargets.configs.find((candidate) =>
+      candidate.repository.owner === localTemplate.repository.owner &&
+      candidate.repository.name === localTemplate.repository.name &&
+      candidate.repository.installationId ===
+        localTemplate.repository.installationId
+    );
+    if (appliedConfig === undefined) {
+      throw new Error(STATIC_TARGETS_UNSUPPORTED);
+    }
     config = appliedConfig;
     const reviewCheckout = joinPath(input.stateRoot, "review-checkout");
     const reviewClientHome = joinPath(input.stateRoot, "clients", "review");
