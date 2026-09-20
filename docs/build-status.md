@@ -9,6 +9,56 @@ GPT-6 Astra integration owner on 2026-09-16 for not completing this job and
 transferred ownership to the primary local agent, which may now change scope,
 status, acceptance and write ownership here.
 
+### Single ubiquity-sentinel App identity, 2026-09-20 02:40-06:27 UTC (owner-directed)
+
+The owner deleted the dedicated `sentinel-supervisor-ubiq-260913` App and
+ordered: use `ubiquity-sentinel` for everything. Every repository-visible
+Sentinel code change is now attributed to `ubiquity-sentinel[bot]`.
+
+Delivered and pushed:
+
+- `development` @ `b6e6c6c` (runtime + host code): `src/host/actions.ts` and
+  `ops/hosted-autonomy.ts` split credentials by purpose — the App installation
+  token authorizes branch pushes, pull create/merge, review publication, issue
+  closure and CI approval, while the native Actions token keeps the state refs
+  (`sentinel-state/repair`, `sentinel-state/release`), source refresh and the
+  release-state store. Candidate commits are authored
+  `ubiquity-sentinel[bot] <319834869+ubiquity-sentinel[bot]@users.noreply.github.com>`;
+  state commits are `github-actions[bot]`. `src/github/client.ts` and
+  `src/host/hosted-runtime.ts` accept exactly the native and App bot logins as
+  a bounded transition rule; `deno.json` passes the new variable through.
+- `sentinel-supervisor` @ `d70c81b` (live launcher): `maintenance` and `repair`
+  join the `sentinel-supervisor` environment and mint the `ubiquity-sentinel`
+  installation token (client id `Iv23liHUJNXds9mU3j7Q`); `prepare`/`finalize`
+  keep their existing scoped mint. The launcher forwards the optional App token
+  to the child and accepts both bot logins.
+- Ruleset `23197448` (Sentinel release state) bypass actor moved
+  `4926599` -> `4682172`.
+- The App private key is installed as the `SENTINEL_SUPERVISOR_APP_PRIVATE_KEY`
+  environment secret on the `sentinel-supervisor` environment.
+- `docs/DECISIONS.md` records the single-identity policy.
+
+Evidence: focused real-git suite `90 passed / 0 failed` on the development
+lane; `deno check` clean on every edited file in both lanes; supervisor runs
+`35494121968` and `35494232171` show the maintenance job's
+`Mint the scoped sentinel App token` step **succeeded** with the new key, which
+proves the App credential path end to end. The one advisory-filter case that
+failed in the launcher lane's focused run was re-run on the pristine base and
+fails identically there: pre-existing, machine-load dependent, unrelated.
+
+**Open blocker (owner-performed, one step).** `prepare` and `finalize` still
+fail at their mint step with `422 The permissions requested are not granted`
+because the installation still carries only `actions:write` + `metadata:read`.
+GitHub exposes no API to change an App's permissions (the public OpenAPI spec
+lists only `GET /app`), and the dedicated browser profile is not signed in, so
+the grant must be made in the App settings UI: add repo permissions
+`contents` write, `pull_requests` write, `issues` write, `checks` read,
+`statuses` read, then accept the pending request on installation `155687488`.
+The installation already covers every repository (`repository_selection:
+all`), so no repository selection change is needed. After the grant the next
+five-minute dispatch completes and the first App-authored write can be
+verified.
+
 ### Owner-authorized fix session, 2026-09-18 11:24-19:32 UTC (issue 61 closed)
 
 The owner said "Ok fix!" to the diagnosis of issue 61 and then "Proceed" through
