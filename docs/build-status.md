@@ -46,7 +46,21 @@ proves the App credential path end to end. The one advisory-filter case that
 failed in the launcher lane's focused run was re-run on the pristine base and
 fails identically there: pre-existing, machine-load dependent, unrelated.
 
-**Open blocker (owner-performed, one step).** `prepare` and `finalize` still
+**Resolved, 2026-09-20 06:53 UTC.** The owner granted `ubiquity-sentinel` the
+repository permissions (contents/pull-requests/issues write, checks/statuses
+read) and accepted them on installation `155687488`; the installation then
+reported the full set and minting `contents`+`pull_requests`+`issues` write
+returned 201.
+
+**Live verification, 2026-09-20 07:02 UTC.** Run `35495702375` on launcher
+`f853760` is green in all four jobs. The one-shot owner install moved the
+runtime pointer to the App identity revision `c07fc944` at generation 25, and
+that revision's first child settled `healthy` (`hosted_runtime_terminal`
+carries `revision c07fc944`, `generation 25`, `runId 35495702375`). All four
+mint steps succeeded and the repair step's environment shows
+`SENTINEL_SUPERVISOR_TOKEN: ***` beside the native token.
+
+**Historical blocker (closed).** `prepare` and `finalize` still
 fail at their mint step with `422 The permissions requested are not granted`
 because the installation still carries only `actions:write` + `metadata:read`.
 GitHub exposes no API to change an App's permissions (the public OpenAPI spec
