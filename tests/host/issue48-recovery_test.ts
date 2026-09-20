@@ -977,11 +977,45 @@ Deno.test("issue48 recovery: supervisor workflow dependency and locking contract
   assert.ok(maintenance.includes("--allow-run=git"));
   assert.ok(maintenance.includes("--allow-net=api.github.com"));
   assert.ok(maintenance.includes("GITHUB_TOKEN: ${{ github.token }}"));
+  // The pass authenticates its code-change writes as the `ubiquity-sentinel`
+  // App: it mounts the protected environment, resolves the committed targets
+  // and mints the installation token from the environment secret.
+  assert.ok(maintenance.includes("environment:"));
+  assert.ok(maintenance.includes("name: sentinel-supervisor"));
+  assert.ok(maintenance.includes("client-id: Iv23liHUJNXds9mU3j7Q"));
+  assert.ok(
+    maintenance.includes(
+      "Resolve the committed target repositories",
+    ),
+  );
+  assert.ok(
+    maintenance.includes(
+      "repositories: ${{ steps.targets.outputs.repositories }}",
+    ),
+  );
+  assert.ok(
+    maintenance.includes(
+      "SENTINEL_SUPERVISOR_TOKEN: ${{ steps.app-token.outputs.token }}",
+    ),
+  );
+  assert.ok(
+    maintenance.includes("GITHUB_JOB,SENTINEL_SUPERVISOR_TOKEN"),
+    "the autonomy pass may read the minted App token",
+  );
+  const readSecrets = [
+    ...new Set(
+      [...maintenance.matchAll(/secrets\.[A-Z0-9_]+/g)].map((match) =>
+        match[0]
+      ),
+    ),
+  ];
+  assert.deepEqual(
+    readSecrets,
+    ["secrets.SENTINEL_SUPERVISOR_APP_PRIVATE_KEY"],
+    "the maintenance job reads exactly the App private key",
+  );
   for (
     const forbidden of [
-      "environment:",
-      "secrets.",
-      "SENTINEL_SUPERVISOR_TOKEN",
       "UOS_AI_TOKEN",
       "setup-node",
       "codex",
@@ -991,16 +1025,27 @@ Deno.test("issue48 recovery: supervisor workflow dependency and locking contract
     assert.ok(!maintenance.includes(forbidden), `forbidden: ${forbidden}`);
   }
   const permissionsAt = maintenance.indexOf("permissions:");
+  const environmentAt = maintenance.indexOf("environment:");
   const concurrencyAt = maintenance.indexOf("concurrency:");
-  assert.ok(permissionsAt > 0 && concurrencyAt > permissionsAt);
+  assert.ok(
+    permissionsAt > 0 && environmentAt > permissionsAt &&
+      concurrencyAt > environmentAt,
+  );
   // The job's authority is exactly what the bounded autonomy pass needs and
   // nothing more: it writes repair state, merges an already-reviewed head with
   // an expected-head CAS under the runtime's own acceptance criteria (no
-  // P0/P1 plus a green deterministic check) and closes a delivered issue. It
-  // still has no model, environment, secret, issue-write or actions authority.
+  // P0/P1 plus a green deterministic check) and closes a delivered issue. The
+  // App token it mints authenticates those code-change writes as
+  // `ubiquity-sentinel[bot]`; it still starts no model and holds no promotion,
+  // proof or acceptance authority.
   assert.equal(
-    maintenance.slice(permissionsAt, concurrencyAt).replace(/\s+/g, " ").trim(),
+    maintenance.slice(permissionsAt, environmentAt).replace(/\s+/g, " ").trim(),
     "permissions: contents: write pull-requests: write checks: read issues: write actions: write",
+  );
+  assert.equal(
+    maintenance.slice(environmentAt, concurrencyAt).replace(/\s+/g, " ").trim(),
+    "environment: name: sentinel-supervisor",
+    "the maintenance job mounts the protected environment",
   );
 
   // A maintenance failure must never skip a valid ordinary run: prepare still

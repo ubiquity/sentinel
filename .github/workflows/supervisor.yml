@@ -1,10 +1,13 @@
 # Fixed hosted Sentinel supervisor.
 #
 # Dispatched at the immutable protected source ref by supervisor-dispatch.yml
-# (five-minute cadence) and by repair.yml (hourly/manual). prepare and finalize
-# run under the sentinel-supervisor environment, which alone may read the App
-# private key; the repair job runs the selected runtime with no App credential
-# and starts no model for verification executions.
+# (five-minute cadence) and by repair.yml (hourly/manual). prepare, maintenance,
+# repair and finalize run under the sentinel-supervisor environment, which alone
+# may read the App private key. Every one of them mints a fresh scoped
+# installation token so that the code changes Sentinel makes (branch pushes,
+# pull requests, merges, reviews, issue writes) are authenticated as
+# `ubiquity-sentinel[bot]`; state-ref bookkeeping stays on the native Actions
+# token. The repair job starts no model for verification executions.
 name: sentinel-supervisor
 
 on:
@@ -38,6 +41,8 @@ jobs:
       checks: read
       issues: write
       actions: write
+    environment:
+      name: sentinel-supervisor
     concurrency:
       group: sentinel-repair
       cancel-in-progress: false
@@ -75,16 +80,39 @@ jobs:
       #      still owns proofs, promotion, acceptance and rollback. It writes
       #      no review, receipt, proof or acceptance, is idempotent, and exits
       #      zero on every non-applied outcome.
+      - name: Resolve the committed target repositories
+        id: targets
+        run: |
+          set -euo pipefail
+          repositories=$(jq -r 'join(",")' sentinel.targets.json)
+          if [ -z "$repositories" ]; then
+            echo "sentinel.targets.json names no repository" >&2
+            exit 1
+          fi
+          echo "repositories=$repositories" >> "$GITHUB_OUTPUT"
+      # This mint passes no `permission-*` input on purpose: the token inherits
+      # the whole installation grant (contents, pull requests, issues, actions,
+      # checks, statuses) so every code change this pass writes is
+      # authenticated as `ubiquity-sentinel[bot]`.
+      - name: Mint the scoped sentinel App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: Iv23liHUJNXds9mU3j7Q
+          private-key: ${{ secrets.SENTINEL_SUPERVISOR_APP_PRIVATE_KEY }}
+          owner: ubiquity
+          repositories: ${{ steps.targets.outputs.repositories }}
       - name: Run hosted autonomy (retry transient failures, deliver reviewed heads)
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          SENTINEL_SUPERVISOR_TOKEN: ${{ steps.app-token.outputs.token }}
         run: >-
           deno run --no-lock
           --allow-read
           --allow-write
           --allow-run=git
           --allow-net=api.github.com
-          --allow-env=HOME,PATH,GITHUB_TOKEN,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_REPOSITORY,GITHUB_REF,GITHUB_SHA,GITHUB_WORKFLOW_SHA,GITHUB_WORKFLOW_REF,GITHUB_JOB
+          --allow-env=HOME,PATH,GITHUB_TOKEN,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_REPOSITORY,GITHUB_REF,GITHUB_SHA,GITHUB_WORKFLOW_SHA,GITHUB_WORKFLOW_REF,GITHUB_JOB,SENTINEL_SUPERVISOR_TOKEN
           ops/hosted-autonomy.ts
 
   prepare:
@@ -133,7 +161,7 @@ jobs:
         id: app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          client-id: Iv23liB8E2FcIZd9i7Pg
+          client-id: Iv23liHUJNXds9mU3j7Q
           private-key: ${{ secrets.SENTINEL_SUPERVISOR_APP_PRIVATE_KEY }}
           owner: ubiquity
           repositories: ${{ steps.targets.outputs.repositories }}
@@ -174,6 +202,8 @@ jobs:
       pull-requests: write
       checks: read
       statuses: read
+    environment:
+      name: sentinel-supervisor
     concurrency:
       group: sentinel-repair
       cancel-in-progress: false
@@ -219,18 +249,48 @@ jobs:
           if [ -n "$current_apparmor" ] && [ "$current_apparmor" != "0" ]; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
+      # The App installation token is scoped to exactly the repositories the
+      # committed target setting names. The array is the single source of
+      # truth, so a target can never be repaired under a token that does not
+      # include it, and an empty or missing setting fails here instead of
+      # minting a pointlessly narrow token. The protected source lives in the
+      # `launcher` checkout, so the committed setting is read from there.
+      - name: Resolve the committed target repositories
+        id: targets
+        working-directory: launcher
+        run: |
+          set -euo pipefail
+          repositories=$(jq -r 'join(",")' sentinel.targets.json)
+          if [ -z "$repositories" ]; then
+            echo "sentinel.targets.json names no repository" >&2
+            exit 1
+          fi
+          echo "repositories=$repositories" >> "$GITHUB_OUTPUT"
+      # This mint passes no `permission-*` input on purpose: the token inherits
+      # the whole installation grant (contents, pull requests, issues, actions,
+      # checks, statuses) so every code change the selected runtime writes is
+      # authenticated as `ubiquity-sentinel[bot]`.
+      - name: Mint the scoped sentinel App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: Iv23liHUJNXds9mU3j7Q
+          private-key: ${{ secrets.SENTINEL_SUPERVISOR_APP_PRIVATE_KEY }}
+          owner: ubiquity
+          repositories: ${{ steps.targets.outputs.repositories }}
       - name: Run selected Sentinel runtime
         working-directory: launcher
         env:
           GITHUB_TOKEN: ${{ github.token }}
           UOS_AI_TOKEN: ${{ secrets.UOS_AI_TOKEN }}
+          SENTINEL_SUPERVISOR_TOKEN: ${{ steps.app-token.outputs.token }}
         run: >-
           deno run
           --allow-read
           --allow-write
           --allow-run
           --allow-net="api.github.com,*.blob.core.windows.net"
-          --allow-env=HOME,PATH,GITHUB_TOKEN,UOS_AI_TOKEN,NODE_V8_COVERAGE,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_REPOSITORY,GITHUB_REF,GITHUB_SHA,GITHUB_WORKFLOW_SHA,GITHUB_WORKFLOW_REF,GITHUB_JOB
+          --allow-env=HOME,PATH,GITHUB_TOKEN,UOS_AI_TOKEN,NODE_V8_COVERAGE,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_REPOSITORY,GITHUB_REF,GITHUB_SHA,GITHUB_WORKFLOW_SHA,GITHUB_WORKFLOW_REF,GITHUB_JOB,SENTINEL_SUPERVISOR_TOKEN
           src/host/hosted-runtime.ts
 
   finalize:
@@ -269,7 +329,7 @@ jobs:
         id: app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          client-id: Iv23liB8E2FcIZd9i7Pg
+          client-id: Iv23liHUJNXds9mU3j7Q
           private-key: ${{ secrets.SENTINEL_SUPERVISOR_APP_PRIVATE_KEY }}
           owner: ubiquity
           repositories: ${{ steps.targets.outputs.repositories }}

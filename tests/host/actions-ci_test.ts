@@ -37,6 +37,8 @@ const HEAD_REF = "sentinel/repair/issue-1";
 const PR_NUMBER = 30;
 const RUN_ID = 34_722_408_066;
 const PUBLISHER = "github-actions[bot]";
+/** Login of the surviving `ubiquity-sentinel` App's bot identity. */
+const APP_PUBLISHER = "ubiquity-sentinel[bot]";
 const WORKFLOW_PATH = ".github/workflows/ci.yml";
 const API_BASE = "https://api.github.com";
 /** Real raw PR repository id and minimal API URL for ubiquity/sentinel. */
@@ -155,6 +157,7 @@ function runBody(
     id?: number;
     attempt?: number;
     actor?: string;
+    triggeringActor?: string;
     path?: string;
     headSha?: string;
     headRepo?: string;
@@ -183,7 +186,7 @@ function runBody(
     head_branch: HEAD_REF,
     head_repository: { full_name: overrides.headRepo ?? "ubiquity/sentinel" },
     actor: { login: overrides.actor ?? PUBLISHER },
-    triggering_actor: { login: PUBLISHER },
+    triggering_actor: { login: overrides.triggeringActor ?? PUBLISHER },
     status: overrides.status ?? "completed",
     conclusion,
     pull_requests: [{
@@ -306,6 +309,46 @@ Deno.test(
         `POST ${APPROVE_PATH}`,
       ],
     );
+  },
+);
+
+Deno.test(
+  "ci approval: a pull request and run published by the sentinel App are approved during the transition",
+  async () => {
+    for (const login of [PUBLISHER, APP_PUBLISHER]) {
+      const rig = makeRig();
+      rig.http.on(
+        "GET",
+        PULL_PATH,
+        () => response(200, pullBody({ author: login })),
+      );
+      rig.http.on(
+        "GET",
+        LIST_PATH,
+        () =>
+          response(
+            200,
+            runsBody([runBody({ actor: login, triggeringActor: login })]),
+          ),
+      );
+      rig.http.on(
+        "GET",
+        RUN_PATH,
+        () => response(200, runBody({ actor: login, triggeringActor: login })),
+      );
+      const summary = await rig.run();
+      assert.deepEqual(
+        summary,
+        { approved: 1, pending: 0, unavailable: 0 },
+        login,
+      );
+      assert.equal(rig.http.posts().length, 1, login);
+      assert.equal(
+        new URL(rig.http.posts()[0]!.url).pathname,
+        APPROVE_PATH,
+        login,
+      );
+    }
   },
 );
 

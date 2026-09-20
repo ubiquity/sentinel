@@ -594,9 +594,9 @@ export class LocalCandidateCommitter implements CandidateCommitterV1 {
     if (diff === null || diff.code === 0 || diff.code !== 1) return false;
     const committed = await this.runResult([
       "-c",
-      "user.name=Sentinel",
+      "user.name=ubiquity-sentinel[bot]",
       "-c",
-      "user.email=sentinel@localhost",
+      "user.email=319834869+ubiquity-sentinel[bot]@users.noreply.github.com",
       "commit",
       "--no-verify",
       "-m",

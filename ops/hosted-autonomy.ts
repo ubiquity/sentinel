@@ -132,8 +132,24 @@ export const HOSTED_AUTONOMY_MAX_REVIEW_ROUNDS = 3;
 export const HOSTED_AUTONOMY_RETIRED =
   "source issue is closed; the repair no longer exists";
 
-/** The trusted publication identity of autonomously repaired pull requests. */
+/**
+ * The trusted publication identity of autonomously repaired pull requests
+ * before the App migration. Kept as the single legacy login for callers that
+ * still name it.
+ */
 export const HOSTED_AUTONOMY_TRUSTED_AUTHOR = "github-actions[bot]";
+
+/**
+ * Bounded transition set: a pull request published by a runtime at an older
+ * installed revision is authored by `github-actions[bot]`, one published after
+ * this migration by `ubiquity-sentinel[bot]`. This dual acceptance is a scoped
+ * transition rule; remove the old login after the first app-authored delivery
+ * is observed.
+ */
+export const HOSTED_AUTONOMY_TRUSTED_AUTHORS: readonly string[] = [
+  HOSTED_AUTONOMY_TRUSTED_AUTHOR,
+  "ubiquity-sentinel[bot]",
+];
 
 /**
  * The exact transient blockers the retry pass may clear, with the step the
@@ -1014,7 +1030,10 @@ export async function runHostedAutonomy(
       pull = null;
     }
     if (pull === null || pull.headSha !== head) continue;
-    if (pull.author !== HOSTED_AUTONOMY_TRUSTED_AUTHOR) {
+    if (
+      pull.author === null ||
+      !HOSTED_AUTONOMY_TRUSTED_AUTHORS.includes(pull.author)
+    ) {
       actions.push(`delivery:${record.id}:foreign_author`);
       continue;
     }
@@ -1567,7 +1586,10 @@ export async function runHostedAutonomyMain(): Promise<number> {
     checkoutClean: facts.clean,
   });
   if (!validated.ok) return report(failed("identity_rejected", null));
-  const token = readEnv("GITHUB_TOKEN");
+  // The App token authenticates every code-change write this pass makes; the
+  // native token remains the state-ref credential and the fallback for a
+  // runtime at an older installed revision. Either one must be non-empty.
+  const token = readEnv("SENTINEL_SUPERVISOR_TOKEN") ?? readEnv("GITHUB_TOKEN");
   if (token === null || token.length === 0) {
     return report(failed("identity_rejected", null));
   }

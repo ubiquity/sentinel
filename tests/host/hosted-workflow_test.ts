@@ -546,6 +546,152 @@ Deno.test("hosted workflow: the shared cooldown gate blocks a new native request
   }
 });
 
+// ---------------------------------------------------------------------------
+// Workflow structure: every job that writes code mints the sentinel App token.
+// ---------------------------------------------------------------------------
+
+interface BlockV1 {
+  start: number;
+  end: number;
+}
+
+/** One top-level workflow job's lines: its key through the line before the next. */
+function jobLines(workflow: string, job: string): string[] {
+  const lines = workflow.split("\n");
+  const start = lines.findIndex((line) => line === `  ${job}:`);
+  if (start < 0) throw new Error(`supervisor job ${job} is missing`);
+  let end = lines.length;
+  for (let index = start + 1; index < lines.length; index++) {
+    if (/^ {2}[a-z][a-z-]*:$/.test(lines[index])) {
+      end = index;
+      break;
+    }
+  }
+  return lines.slice(start, end);
+}
+
+/** The first step line after `from`, or the end of the job. */
+function nextStepIndex(job: readonly string[], from: number): number {
+  for (let index = from + 1; index < job.length; index++) {
+    if (job[index].startsWith("      - ")) return index;
+  }
+  return job.length;
+}
+
+/** One exact `- name: <name>` step inside a job, up to the next step. */
+function namedStepRange(job: readonly string[], name: string): BlockV1 {
+  const start = job.findIndex((line) => line === `      - name: ${name}`);
+  if (start < 0) throw new Error(`step ${name} is missing`);
+  return { start, end: nextStepIndex(job, start) };
+}
+
+/** The one App-token mint step inside a job, up to the next step. */
+function mintStepRange(job: readonly string[]): BlockV1 {
+  const uses = job.findIndex((line) =>
+    line.startsWith("        uses: actions/create-github-app-token@")
+  );
+  if (uses < 0) throw new Error("the App-token mint step is missing");
+  let start = uses;
+  while (start > 0 && !job[start].startsWith("      - ")) start -= 1;
+  if (!job[start].startsWith("      - ")) {
+    throw new Error("the App-token mint step has no step start");
+  }
+  return { start, end: nextStepIndex(job, uses) };
+}
+
+function blockText(job: readonly string[], range: BlockV1): string {
+  return job.slice(range.start, range.end).join("\n");
+}
+
+Deno.test("hosted workflow: every code-writing job mints the ubiquity-sentinel App token", async () => {
+  const workflow = await Deno.readTextFile(
+    `${ROOT}/.github/workflows/supervisor.yml`,
+  );
+  assert.equal(
+    workflow.includes("Iv23liB8E2FcIZd9i7Pg"),
+    false,
+    "the deleted supervisor App client id is gone",
+  );
+  assert.equal(
+    workflow.split("uses: actions/create-github-app-token@").length - 1,
+    4,
+    "exactly the four code-writing jobs mint an installation token",
+  );
+
+  for (const job of ["maintenance", "prepare", "repair", "finalize"]) {
+    const lines = jobLines(workflow, job);
+    const mint = blockText(lines, mintStepRange(lines));
+    assert.ok(
+      mint.includes("client-id: Iv23liHUJNXds9mU3j7Q"),
+      `${job} mints from the surviving ubiquity-sentinel client id`,
+    );
+    assert.ok(
+      mint.includes(
+        "private-key: ${{ secrets.SENTINEL_SUPERVISOR_APP_PRIVATE_KEY }}",
+      ),
+      `${job} mints with the environment-scoped App private key`,
+    );
+    assert.ok(
+      mint.includes("repositories: ${{ steps.targets.outputs.repositories }}"),
+      `${job} scopes the token to the committed target repositories`,
+    );
+  }
+
+  for (const job of ["maintenance", "repair"]) {
+    const lines = jobLines(workflow, job);
+    assert.ok(
+      lines.includes("    environment:") &&
+        lines.includes("      name: sentinel-supervisor"),
+      `${job} runs under the sentinel-supervisor environment`,
+    );
+    const targets = namedStepRange(
+      lines,
+      "Resolve the committed target repositories",
+    );
+    const targetsText = blockText(lines, targets);
+    assert.ok(
+      targetsText.includes(
+        `repositories=$(jq -r 'join(",")' sentinel.targets.json)`,
+      ),
+      `${job} resolves the committed target repositories with the jq join`,
+    );
+    if (job === "repair") {
+      assert.ok(
+        targetsText.includes("working-directory: launcher"),
+        "the repair job reads the committed setting from the launcher checkout",
+      );
+    }
+    const mint = mintStepRange(lines);
+    assert.equal(
+      /permission-[a-z-]+:/.test(blockText(lines, mint)),
+      false,
+      `${job} inherits the whole installation grant`,
+    );
+    assert.ok(
+      targets.start < mint.start,
+      `${job} resolves its targets before the mint`,
+    );
+    const writeStep = job === "maintenance"
+      ? "Run hosted autonomy (retry transient failures, deliver reviewed heads)"
+      : "Run selected Sentinel runtime";
+    const write = blockText(lines, namedStepRange(lines, writeStep));
+    assert.ok(
+      write.includes(
+        "SENTINEL_SUPERVISOR_TOKEN: ${{ steps.app-token.outputs.token }}",
+      ),
+      `${job}: ${writeStep} receives the minted App token`,
+    );
+    assert.ok(
+      /--allow-env=\S*SENTINEL_SUPERVISOR_TOKEN/.test(write),
+      `${job}: ${writeStep} may read the minted App token`,
+    );
+    assert.ok(
+      write.includes("GITHUB_TOKEN: ${{ github.token }}"),
+      `${job} keeps the native token for state bookkeeping`,
+    );
+  }
+});
+
 Deno.test("hosted workflow: the release-role store can never write repair state", async () => {
   const rig = await makeRig();
   try {

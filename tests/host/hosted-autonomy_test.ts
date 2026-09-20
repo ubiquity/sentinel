@@ -39,6 +39,7 @@ import {
   createHostedAutonomyGitHub,
   HOSTED_AUTONOMY_MAX_RETRIES,
   HOSTED_AUTONOMY_RETIRED,
+  HOSTED_AUTONOMY_TRUSTED_AUTHORS,
   isHardAutonomyFailure,
   parseHostedAutonomyPull,
   planHostedClosures,
@@ -613,6 +614,37 @@ Deno.test(
         Deno.remove(entry.rig.tmp, { recursive: true })
       ),
     );
+  },
+);
+
+Deno.test(
+  "hosted autonomy: a delivered head authored by the sentinel App login is accepted during the transition",
+  async () => {
+    assert.deepEqual(
+      [...HOSTED_AUTONOMY_TRUSTED_AUTHORS].sort(),
+      ["github-actions[bot]", "ubiquity-sentinel[bot]"],
+      "the transition set accepts exactly the native and App logins",
+    );
+    for (const [index, author] of HOSTED_AUTONOMY_TRUSTED_AUTHORS.entries()) {
+      const { rig, github } = await makeRig(`autonomy-author-${index}`, {
+        pull: pullFacts({ author }),
+      });
+      try {
+        const result = await run(rig, github);
+        assert.equal(
+          result.status,
+          "applied",
+          `${author}: ${JSON.stringify(result)}`,
+        );
+        assert.equal(result.reason, "applied", author);
+        assert.equal(rig.writes, 1, author);
+        const requests = await readRequests(rig);
+        assert.equal(requests.length, 1, author);
+        assert.equal(requests[0].revision, MERGE, author);
+      } finally {
+        await Deno.remove(rig.tmp, { recursive: true });
+      }
+    }
   },
 );
 

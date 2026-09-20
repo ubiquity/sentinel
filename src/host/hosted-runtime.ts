@@ -63,11 +63,17 @@ export const HOSTED_RUNTIME_DEADLINE_MS = 112 * 60 * 1000;
 /** Combined retained child stdout+stderr bound (4 MiB). */
 export const HOSTED_RUNTIME_MAX_OUTPUT_BYTES = 4 * 1024 * 1024;
 
-/** Exact complete-only child environment (no App token, no Actions files). */
+/**
+ * Child environment allow-list: the only keys that may cross into the child.
+ * `GITHUB_TOKEN` and `UOS_AI_TOKEN` stay required; the App token
+ * (`SENTINEL_SUPERVISOR_TOKEN`) is allowed but never required, because a
+ * runtime revision older than the App migration has no such credential.
+ */
 export const HOSTED_RUNTIME_CHILD_ENV_KEYS = [
   "HOME",
   "PATH",
   "GITHUB_TOKEN",
+  "SENTINEL_SUPERVISOR_TOKEN",
   "UOS_AI_TOKEN",
   "GITHUB_RUN_ID",
   "GITHUB_RUN_ATTEMPT",
@@ -97,6 +103,14 @@ export const HOSTED_RUNTIME_UNAVAILABLE_DETAIL =
   "hosted runtime result is unavailable";
 
 const ACTIONS_LOGIN = "github-actions[bot]";
+const APP_LOGIN = "ubiquity-sentinel[bot]";
+/**
+ * Bounded transition set: a child at an older installed revision settles as
+ * `github-actions[bot]`, a child after this migration as
+ * `ubiquity-sentinel[bot]`. This dual acceptance is a scoped transition rule;
+ * remove the old login after the first app-login child settles healthy.
+ */
+const ACCEPTED_CHILD_LOGINS: readonly string[] = [ACTIONS_LOGIN, APP_LOGIN];
 const REMOTE_URL = "https://github.com/ubiquity/sentinel.git";
 const GIT_EXECUTABLE = "/usr/bin/git";
 const GIT_TIMEOUT_MS = 10_000;
@@ -569,7 +583,12 @@ function parseChildStatus(
     return null;
   }
   if (record.controllerSha !== execution.revision) return null;
-  if (record.login !== ACTIONS_LOGIN) return null;
+  if (
+    typeof record.login !== "string" ||
+    !ACCEPTED_CHILD_LOGINS.includes(record.login)
+  ) {
+    return null;
+  }
   if (typeof record.startupReady !== "boolean") return null;
   if (!isCiApproval(record.ciApproval)) return null;
   if (typeof record.baseSha !== "string") return null;
@@ -637,6 +656,7 @@ function buildChildEnvironment(
 ): Record<string, string> {
   const path = env.PATH;
   const githubToken = env.GITHUB_TOKEN;
+  const appToken = env.SENTINEL_SUPERVISOR_TOKEN;
   const modelToken = env.UOS_AI_TOKEN;
   if (
     !isNonEmptyText(path) || !isNonEmptyText(githubToken) ||
@@ -644,13 +664,17 @@ function buildChildEnvironment(
   ) {
     throw new Error(HOSTED_RUNTIME_STATIC_ENV);
   }
-  // Complete-only child environment: the two existing credentials and the
-  // validated standard identity, plus private HOME/cache/temp. No App token,
-  // no Actions output/env/path files and no host variable crosses over.
+  // Complete-only child environment: the two required credentials, the
+  // optional App token when it is non-empty text, the validated standard
+  // identity, plus private HOME/cache/temp. No Actions output/env/path file and
+  // no host variable crosses over.
   return {
     HOME: dirs.home,
     PATH: path,
     GITHUB_TOKEN: githubToken,
+    ...(isNonEmptyText(appToken)
+      ? { SENTINEL_SUPERVISOR_TOKEN: appToken }
+      : {}),
     UOS_AI_TOKEN: modelToken,
     GITHUB_RUN_ID: String(identity.runId),
     GITHUB_RUN_ATTEMPT: String(identity.runAttempt),
@@ -796,20 +820,22 @@ function unavailableResult(): HostedRuntimeLauncherResultV1 {
 /**
  * Production entrypoint: fixed launcher cwd, fixed sibling runtime, the actual
  * Deno executable and the existing native token for a read-only release-state
- * read in the private ignored launcher scratch. No App credential is read and
- * no test-only override exists in this path.
+ * read in the private ignored launcher scratch. The optional App token is read
+ * only to forward it to the child for code-change writes. No test-only override
+ * exists in this path.
  */
 export async function runHostedRuntimeMain(): Promise<
   HostedRuntimeLauncherResultV1
 > {
   try {
-    // Only the named keys are read: the eight identity fields plus the four
-    // existing process inputs. No unrestricted env access is required.
+    // Only the named keys are read: the eight identity fields plus the five
+    // process inputs. No unrestricted env access is required.
     const env = {
       ...readHostedIdentityEnv(),
       HOME: Deno.env.get("HOME"),
       PATH: Deno.env.get("PATH"),
       GITHUB_TOKEN: Deno.env.get("GITHUB_TOKEN"),
+      SENTINEL_SUPERVISOR_TOKEN: Deno.env.get("SENTINEL_SUPERVISOR_TOKEN"),
       UOS_AI_TOKEN: Deno.env.get("UOS_AI_TOKEN"),
     };
     // Native identity is the first check: a malformed job identity fails

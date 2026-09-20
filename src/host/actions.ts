@@ -2,11 +2,14 @@
  * Trusted GitHub Actions repair host.
  *
  * This is the hosted counterpart of the owner's local host. The workflow
- * supplies the two existing credentials (`GITHUB_TOKEN` and `UOS_AI_TOKEN`)
- * to this process only. GitHub state is written through the dedicated
- * `sentinel-state/repair` ref, while the model receives an isolated checkout
- * and a credential-free environment. No release writer, state credential or
- * GitHub token crosses into the model child.
+ * supplies the native `GITHUB_TOKEN` and the model `UOS_AI_TOKEN` to this
+ * process, plus the optional `SENTINEL_SUPERVISOR_TOKEN` minted for the
+ * `ubiquity-sentinel` App. The split is fixed: the native token stays on
+ * state-ref bookkeeping (`sentinel-state/repair`) and Actions metadata, while
+ * the App token authenticates every code change this host writes (branch
+ * pushes, pull requests, reviews, merges, issue writes). The model receives an
+ * isolated checkout and a credential-free environment: no release writer, state
+ * credential or GitHub token crosses into the model child.
  */
 
 import { isGitSha } from "../contracts/brands.ts";
@@ -63,6 +66,7 @@ export const ACTIONS_UOS_BASE_URL = "https://ai.ubq.fi/v1";
 const RUN_DEADLINE_MS = 110 * 60 * 1000;
 const STEP_LIMIT = 64;
 const ACTIONS_LOGIN = "github-actions[bot]";
+const APP_LOGIN = "ubiquity-sentinel[bot]";
 const STATIC_ENV = "hosted repair host requires its configured credentials";
 const STATIC_CONTROLLER =
   "hosted repair host could not read an exact controller commit";
@@ -95,8 +99,14 @@ export async function runActionsRepairHost(): Promise<
   const identity = parseHostedEnvironment(readHostedIdentityEnv(), "repair");
 
   const githubToken = requireEnv("GITHUB_TOKEN");
+  const appToken = optionalEnv("SENTINEL_SUPERVISOR_TOKEN");
   const modelToken = requireEnv("UOS_AI_TOKEN");
   const trustedPath = requireEnv("PATH");
+  // Every code-change write goes through the App token when the workflow
+  // minted one; the native token keeps the state store and Actions metadata.
+  // An older installed revision has no App credential at all and still runs.
+  const writeToken = appToken ?? githubToken;
+  const login = appToken === undefined ? ACTIONS_LOGIN : APP_LOGIN;
   const sourceDir = Deno.cwd();
   const denoExecutable = Deno.execPath();
   const codexExecutable = await resolveExecutable("codex", trustedPath);
@@ -177,7 +187,7 @@ export async function runActionsRepairHost(): Promise<
   const candidates = createActionsCandidateRestorer({
     state,
     gate,
-    token: githubToken,
+    token: writeToken,
     http,
     clock,
     sourcePath,
@@ -230,8 +240,8 @@ export async function runActionsRepairHost(): Promise<
     state,
     gate,
     http,
-    token: githubToken,
-    login: ACTIONS_LOGIN,
+    token: writeToken,
+    login,
     invocationId: crypto.randomUUID(),
     stateRoot,
     sourcePath,
@@ -339,7 +349,7 @@ export async function runActionsRepairHost(): Promise<
     outcome,
     controllerSha,
     baseSha,
-    login: ACTIONS_LOGIN,
+    login,
     startupReady,
     ciApproval,
     execution,
@@ -388,6 +398,12 @@ function requireEnv(name: string): string {
   const value = Deno.env.get(name);
   if (value === undefined || value.length === 0) throw new Error(STATIC_ENV);
   return value;
+}
+
+/** An optional credential: absent and empty both mean "not supplied". */
+function optionalEnv(name: string): string | undefined {
+  const value = Deno.env.get(name);
+  return value === undefined || value.length === 0 ? undefined : value;
 }
 
 async function resolveExecutable(

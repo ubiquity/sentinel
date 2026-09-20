@@ -63,6 +63,9 @@ const RUN_ATTEMPT = 2;
 const FIXED_LAUNCHER = "a".repeat(40) as GitSha;
 const OTHER_REVISION = "f".repeat(40) as GitSha;
 const OBSERVED_BASE = "b".repeat(40) as GitSha;
+const NATIVE_LOGIN = "github-actions[bot]";
+const APP_LOGIN = "ubiquity-sentinel[bot]";
+const APP_TOKEN = "test-app-token";
 
 class FakeClock implements Clock {
   constructor(private t: number) {}
@@ -156,7 +159,7 @@ function childLine(
     outcome: { status: "idle", detail: "no declared work" },
     controllerSha: execution.revision,
     baseSha: OBSERVED_BASE,
-    login: "github-actions[bot]",
+    login: NATIVE_LOGIN,
     startupReady: true,
     ciApproval: { approved: 0, pending: 0, unavailable: 0 },
     execution,
@@ -652,9 +655,13 @@ Deno.test("hosted runtime: exact identity and clean source settle one healthy te
     assert.equal(child.cwd, await Deno.realPath(rig.runtimeDir));
     assert.equal(child.maxDurationMs, HOSTED_RUNTIME_DEADLINE_MS);
     assert.equal(child.maxOutputBytes, HOSTED_RUNTIME_MAX_OUTPUT_BYTES);
+    // The allow-list is exact: every listed key crosses except the one
+    // optional credential this run did not supply.
     assert.deepEqual(
       Object.keys(child.env).sort(),
-      [...HOSTED_RUNTIME_CHILD_ENV_KEYS].sort(),
+      HOSTED_RUNTIME_CHILD_ENV_KEYS.filter((key) =>
+        key !== "SENTINEL_SUPERVISOR_TOKEN"
+      ).sort(),
     );
     assert.equal("SENTINEL_SUPERVISOR_TOKEN" in child.env, false);
     assert.equal("GITHUB_OUTPUT" in child.env, false);
@@ -777,6 +784,78 @@ Deno.test("hosted runtime: duplicate, malformed, foreign or forged child records
       const result = await launch(rig);
       assert.equal(result.status, "unavailable", stdout);
       assert.equal(result.terminal, null, stdout);
+    }
+  } finally {
+    await rig.cleanup();
+  }
+});
+
+Deno.test("hosted runtime: the optional sentinel App token crosses only when it is non-empty text", async () => {
+  const rig = await makeRig();
+  try {
+    await seedRelease(rig);
+    rig.process.child = exited(childLine(rig.execution));
+    const withoutToken = await launch(rig);
+    assert.equal(withoutToken.status, "healthy", JSON.stringify(withoutToken));
+    let child = rig.process.childCalls().at(-1);
+    assert.ok(child !== undefined);
+    assert.equal("SENTINEL_SUPERVISOR_TOKEN" in child.env, false);
+    assert.equal(child.env.GITHUB_TOKEN, rig.env.GITHUB_TOKEN);
+
+    rig.process.child = exited(childLine(rig.execution));
+    const withToken = await launch(rig, {
+      env: { ...rig.env, SENTINEL_SUPERVISOR_TOKEN: APP_TOKEN },
+    });
+    assert.equal(withToken.status, "healthy", JSON.stringify(withToken));
+    child = rig.process.childCalls().at(-1);
+    assert.ok(child !== undefined);
+    assert.equal(child.env.SENTINEL_SUPERVISOR_TOKEN, APP_TOKEN);
+    assert.deepEqual(
+      Object.keys(child.env).sort(),
+      [...HOSTED_RUNTIME_CHILD_ENV_KEYS].sort(),
+      "a supplied App token completes the exact allow-list",
+    );
+    assert.equal(child.env.GITHUB_TOKEN, rig.env.GITHUB_TOKEN);
+
+    rig.process.child = exited(childLine(rig.execution));
+    const emptyToken = await launch(rig, {
+      env: { ...rig.env, SENTINEL_SUPERVISOR_TOKEN: "" },
+    });
+    assert.equal(emptyToken.status, "healthy", JSON.stringify(emptyToken));
+    child = rig.process.childCalls().at(-1);
+    assert.ok(child !== undefined);
+    assert.equal(
+      "SENTINEL_SUPERVISOR_TOKEN" in child.env,
+      false,
+      "an empty App token never crosses",
+    );
+  } finally {
+    await rig.cleanup();
+  }
+});
+
+Deno.test("hosted runtime: a child settled as the sentinel App login is accepted during the transition", async () => {
+  const rig = await makeRig();
+  try {
+    await seedRelease(rig);
+    for (const login of [NATIVE_LOGIN, APP_LOGIN]) {
+      rig.process.child = exited(childLine(rig.execution, { login }));
+      const result = await launch(rig);
+      assert.equal(
+        result.status,
+        "healthy",
+        `${login}: ${JSON.stringify(result)}`,
+      );
+      assert.equal(result.terminal?.outcome, "healthy", login);
+      assert.equal(result.terminal?.baseSha, OBSERVED_BASE, login);
+    }
+    // Any other login is still refused: the transition set is bounded, not
+    // an open prefix or suffix match.
+    for (const login of ["ubiquity-sentinel", "github-actions"]) {
+      rig.process.child = exited(childLine(rig.execution, { login }));
+      const foreign = await launch(rig);
+      assert.equal(foreign.status, "unavailable", login);
+      assert.equal(foreign.terminal, null, login);
     }
   } finally {
     await rig.cleanup();

@@ -111,7 +111,18 @@ const CI_REPOSITORY_API_URL = "https://api.github.com/repos/ubiquity/sentinel";
 const CI_WORKFLOW_FILE = "ci.yml";
 const CI_WORKFLOW_PATH = ".github/workflows/ci.yml";
 const CI_BASE_REF = "development";
-const CI_APPROVER_LOGIN = "github-actions[bot]";
+/**
+ * Bounded transition set for the pull-request author and run actor of an exact
+ * self-target run: a runtime at an older installed revision acts as
+ * `github-actions[bot]`, one after this migration as `ubiquity-sentinel[bot]`,
+ * the login of the surviving `ubiquity-sentinel` App. This dual acceptance is a
+ * scoped transition rule; remove the old login after the first app-authored
+ * approval is observed.
+ */
+const CI_APPROVER_LOGINS: readonly string[] = [
+  "github-actions[bot]",
+  "ubiquity-sentinel[bot]",
+];
 /** One page only: a longer or truncated list is never partially approved. */
 const CI_APPROVAL_MAX_RUNS = 100;
 const CI_APPROVAL_SCOPE =
@@ -2030,8 +2041,9 @@ function parseExactCiPull(
   expectEnum(obj.state, ["open"], "$.state");
   const user = expectRecord(obj.user, "$.user");
   if (
-    expectNonEmptyString(user.login, "$.user.login", MaxText.login) !==
-      CI_APPROVER_LOGIN
+    !CI_APPROVER_LOGINS.includes(
+      expectNonEmptyString(user.login, "$.user.login", MaxText.login),
+    )
   ) {
     fail("$.user.login", "invalid_value", "unexpected pull request author");
   }
@@ -2209,8 +2221,9 @@ function expectAssociationRepository(
 function expectCiActor(value: unknown, path: string): void {
   const actor = expectRecord(value, path);
   if (
-    expectNonEmptyString(actor.login, `${path}.login`, MaxText.login) !==
-      CI_APPROVER_LOGIN
+    !CI_APPROVER_LOGINS.includes(
+      expectNonEmptyString(actor.login, `${path}.login`, MaxText.login),
+    )
   ) {
     fail(`${path}.login`, "invalid_value", "unexpected run actor");
   }
