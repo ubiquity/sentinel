@@ -124,6 +124,7 @@ function hostedEnv(launcherSha: GitSha): Record<string, string> {
     GITHUB_WORKFLOW_REF: HOSTED_RUNTIME_WORKFLOW_REF,
     GITHUB_JOB: "repair",
     GITHUB_TOKEN: "test-native-token",
+    SENTINEL_SUPERVISOR_TOKEN: "test-app-token",
     UOS_AI_TOKEN: "test-model-token",
     PATH: Deno.env.get("PATH") ?? "/usr/bin:/bin",
     HOME: "/tmp",
@@ -656,7 +657,7 @@ Deno.test("hosted runtime: exact identity and clean source settle one healthy te
       Object.keys(child.env).sort(),
       [...HOSTED_RUNTIME_CHILD_ENV_KEYS].sort(),
     );
-    assert.equal("SENTINEL_SUPERVISOR_TOKEN" in child.env, false);
+    assert.equal(child.env.SENTINEL_SUPERVISOR_TOKEN, "test-app-token");
     assert.equal("GITHUB_OUTPUT" in child.env, false);
     assert.equal("GITHUB_ENV" in child.env, false);
     assert.equal(child.env.GITHUB_JOB, "repair");
@@ -736,6 +737,46 @@ Deno.test("hosted runtime: settled early failure is failed; unattestable zero ex
     assert.equal((await launch(rig)).status, "healthy");
   } finally {
     await rig.cleanup();
+  }
+});
+
+Deno.test("hosted runtime: the sentinel App bot login is accepted and an absent App token still forwards the strict child environment", async () => {
+  // App-login transition case: a child at or after the migration reports
+  // `ubiquity-sentinel[bot]`; it must settle exactly like the native identity.
+  const appRig = await makeRig();
+  try {
+    await seedRelease(appRig);
+    appRig.process.child = exited(
+      childLine(appRig.execution, { login: "ubiquity-sentinel[bot]" }),
+    );
+    const result = await launch(appRig);
+    assert.equal(result.status, "healthy", JSON.stringify(result));
+    assert.equal(result.terminal?.outcome, "healthy");
+  } finally {
+    await appRig.cleanup();
+  }
+
+  // Absence case: without the App token the child environment keeps exactly
+  // the declared key set, and the App token key is genuinely absent rather
+  // than present-and-empty.
+  const noAppRig = await makeRig();
+  try {
+    await seedRelease(noAppRig);
+    noAppRig.process.child = exited(childLine(noAppRig.execution));
+    const env = { ...hostedEnv(noAppRig.identity.launcherSha) };
+    delete env.SENTINEL_SUPERVISOR_TOKEN;
+    const result = await launch(noAppRig, { env });
+    assert.equal(result.status, "healthy", JSON.stringify(result));
+    const child = noAppRig.process.childCalls()[0];
+    assert.equal("SENTINEL_SUPERVISOR_TOKEN" in child.env, false);
+    assert.deepEqual(
+      Object.keys(child.env).sort(),
+      [...HOSTED_RUNTIME_CHILD_ENV_KEYS].filter((key) =>
+        key !== "SENTINEL_SUPERVISOR_TOKEN"
+      ).sort(),
+    );
+  } finally {
+    await noAppRig.cleanup();
   }
 });
 

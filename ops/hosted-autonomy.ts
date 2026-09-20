@@ -134,6 +134,18 @@ export const HOSTED_AUTONOMY_RETIRED =
 
 /** The trusted publication identity of autonomously repaired pull requests. */
 export const HOSTED_AUTONOMY_TRUSTED_AUTHOR = "github-actions[bot]";
+/** The sentinel App bot identity that now authors repaired pull requests. */
+export const HOSTED_AUTONOMY_TRUSTED_APP_AUTHOR = "ubiquity-sentinel[bot]";
+/**
+ * Bounded identity-transition acceptance: pull requests published before the
+ * sentinel App migration still carry the native Actions identity, and every
+ * pull request published after it carries the App bot. Remove the old login
+ * after the first App-authored pull request is delivered.
+ */
+export const HOSTED_AUTONOMY_TRUSTED_AUTHORS: readonly string[] = [
+  HOSTED_AUTONOMY_TRUSTED_AUTHOR,
+  HOSTED_AUTONOMY_TRUSTED_APP_AUTHOR,
+];
 
 /**
  * The exact transient blockers the retry pass may clear, with the step the
@@ -1014,7 +1026,10 @@ export async function runHostedAutonomy(
       pull = null;
     }
     if (pull === null || pull.headSha !== head) continue;
-    if (pull.author !== HOSTED_AUTONOMY_TRUSTED_AUTHOR) {
+    if (
+      typeof pull.author !== "string" ||
+      !HOSTED_AUTONOMY_TRUSTED_AUTHORS.includes(pull.author)
+    ) {
       actions.push(`delivery:${record.id}:foreign_author`);
       continue;
     }
@@ -1567,8 +1582,16 @@ export async function runHostedAutonomyMain(): Promise<number> {
     checkoutClean: facts.clean,
   });
   if (!validated.ok) return report(failed("identity_rejected", null));
-  const token = readEnv("GITHUB_TOKEN");
-  if (token === null || token.length === 0) {
+  // Split by purpose, mirroring the hosted runtime: the scoped sentinel App
+  // token authenticates every repository-visible code-change op (merge, issue
+  // closure, CI approval) so it is attributed to ubiquity-sentinel[bot], while
+  // the native Actions token keeps owning the state refs it has always owned.
+  const stateToken = readEnv("GITHUB_TOKEN");
+  const apiToken = readEnv("SENTINEL_SUPERVISOR_TOKEN") ?? stateToken;
+  if (
+    stateToken === null || stateToken.length === 0 ||
+    apiToken === null || apiToken.length === 0
+  ) {
     return report(failed("identity_rejected", null));
   }
   let result: HostedAutonomyResultV1;
@@ -1577,7 +1600,7 @@ export async function runHostedAutonomyMain(): Promise<number> {
     Deno.mkdirSync(scratch, { recursive: true, mode: 0o700 });
     const runner = new DenoGitRunner(
       `${scratch}/git-home`,
-      githubGitAuthEnv(token),
+      githubGitAuthEnv(stateToken),
     );
     const state = createRepairStateStore({
       scratchDir: `${scratch}/state`,
@@ -1586,7 +1609,7 @@ export async function runHostedAutonomyMain(): Promise<number> {
     });
     result = await runHostedAutonomy({
       state,
-      github: createHostedAutonomyGitHub(token),
+      github: createHostedAutonomyGitHub(apiToken),
       clock: { now: () => Date.now() },
     });
   } catch {

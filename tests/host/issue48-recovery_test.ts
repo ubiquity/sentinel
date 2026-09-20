@@ -977,11 +977,30 @@ Deno.test("issue48 recovery: supervisor workflow dependency and locking contract
   assert.ok(maintenance.includes("--allow-run=git"));
   assert.ok(maintenance.includes("--allow-net=api.github.com"));
   assert.ok(maintenance.includes("GITHUB_TOKEN: ${{ github.token }}"));
+  // The maintenance job now mints the scoped sentinel App installation token
+  // so its pull-request merge and issue closure are attributed to
+  // ubiquity-sentinel[bot]; it still starts no model and reads no other secret.
+  assert.ok(maintenance.includes("environment:"));
+  assert.ok(maintenance.includes("name: sentinel-supervisor"));
+  assert.ok(maintenance.includes("create-github-app-token"));
+  assert.ok(maintenance.includes("client-id: Iv23liHUJNXds9mU3j7Q"));
+  assert.ok(
+    maintenance.includes(
+      "private-key: ${{ secrets.SENTINEL_SUPERVISOR_APP_PRIVATE_KEY }}",
+    ),
+  );
+  assert.ok(
+    maintenance.includes(
+      "SENTINEL_SUPERVISOR_TOKEN: ${{ steps.app-token.outputs.token }}",
+    ),
+  );
+  assert.ok(
+    maintenance.includes(
+      "--allow-env=HOME,PATH,GITHUB_TOKEN,SENTINEL_SUPERVISOR_TOKEN,",
+    ),
+  );
   for (
     const forbidden of [
-      "environment:",
-      "secrets.",
-      "SENTINEL_SUPERVISOR_TOKEN",
       "UOS_AI_TOKEN",
       "setup-node",
       "codex",

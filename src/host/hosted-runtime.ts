@@ -68,6 +68,7 @@ export const HOSTED_RUNTIME_CHILD_ENV_KEYS = [
   "HOME",
   "PATH",
   "GITHUB_TOKEN",
+  "SENTINEL_SUPERVISOR_TOKEN",
   "UOS_AI_TOKEN",
   "GITHUB_RUN_ID",
   "GITHUB_RUN_ATTEMPT",
@@ -97,6 +98,17 @@ export const HOSTED_RUNTIME_UNAVAILABLE_DETAIL =
   "hosted runtime result is unavailable";
 
 const ACTIONS_LOGIN = "github-actions[bot]";
+const SENTINEL_APP_LOGIN = "ubiquity-sentinel[bot]";
+/**
+ * Bounded identity-transition acceptance: children at older installed
+ * revisions still report the native Actions identity, and children after the
+ * sentinel App migration report the App bot. Remove the old login after the
+ * first App-login child settles healthy.
+ */
+const CHILD_ACCEPTED_LOGINS: readonly string[] = [
+  ACTIONS_LOGIN,
+  SENTINEL_APP_LOGIN,
+];
 const REMOTE_URL = "https://github.com/ubiquity/sentinel.git";
 const GIT_EXECUTABLE = "/usr/bin/git";
 const GIT_TIMEOUT_MS = 10_000;
@@ -569,7 +581,10 @@ function parseChildStatus(
     return null;
   }
   if (record.controllerSha !== execution.revision) return null;
-  if (record.login !== ACTIONS_LOGIN) return null;
+  if (
+    typeof record.login !== "string" ||
+    !CHILD_ACCEPTED_LOGINS.includes(record.login)
+  ) return null;
   if (typeof record.startupReady !== "boolean") return null;
   if (!isCiApproval(record.ciApproval)) return null;
   if (typeof record.baseSha !== "string") return null;
@@ -637,6 +652,7 @@ function buildChildEnvironment(
 ): Record<string, string> {
   const path = env.PATH;
   const githubToken = env.GITHUB_TOKEN;
+  const appToken = env.SENTINEL_SUPERVISOR_TOKEN;
   const modelToken = env.UOS_AI_TOKEN;
   if (
     !isNonEmptyText(path) || !isNonEmptyText(githubToken) ||
@@ -644,10 +660,14 @@ function buildChildEnvironment(
   ) {
     throw new Error(HOSTED_RUNTIME_STATIC_ENV);
   }
-  // Complete-only child environment: the two existing credentials and the
-  // validated standard identity, plus private HOME/cache/temp. No App token,
-  // no Actions output/env/path files and no host variable crosses over.
-  return {
+  // Complete-only child environment: the existing credentials, the optional
+  // scoped sentinel App token that authenticates every code-change write, and
+  // the validated standard identity, plus private HOME/cache/temp. The App
+  // private key never crosses over, no Actions output/env/path files and no
+  // host variable crosses over. The App token is optional only during the
+  // bounded identity transition: a child at an older installed revision
+  // ignores it, and the launcher must not fail when it is absent.
+  const child: Record<string, string> = {
     HOME: dirs.home,
     PATH: path,
     GITHUB_TOKEN: githubToken,
@@ -665,6 +685,10 @@ function buildChildEnvironment(
     TMP: dirs.tmp,
     DENO_DIR: dirs.denoDir,
   };
+  if (isNonEmptyText(appToken)) {
+    child.SENTINEL_SUPERVISOR_TOKEN = appToken;
+  }
+  return child;
 }
 
 /** Canonical real directories: the runtime is the launcher's fixed sibling. */
@@ -810,6 +834,7 @@ export async function runHostedRuntimeMain(): Promise<
       HOME: Deno.env.get("HOME"),
       PATH: Deno.env.get("PATH"),
       GITHUB_TOKEN: Deno.env.get("GITHUB_TOKEN"),
+      SENTINEL_SUPERVISOR_TOKEN: Deno.env.get("SENTINEL_SUPERVISOR_TOKEN"),
       UOS_AI_TOKEN: Deno.env.get("UOS_AI_TOKEN"),
     };
     // Native identity is the first check: a malformed job identity fails

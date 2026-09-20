@@ -28,6 +28,8 @@ jobs:
     if: github.ref == 'refs/heads/sentinel-supervisor'
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    environment:
+      name: sentinel-supervisor
     # `issues: write` is what the autonomy pass needs to close an issue once its
     # exact reviewed head has an ACCEPTED hosted release, and `actions: write`
     # is what it needs to approve the credential-free deterministic check that
@@ -75,16 +77,25 @@ jobs:
       #      still owns proofs, promotion, acceptance and rollback. It writes
       #      no review, receipt, proof or acceptance, is idempotent, and exits
       #      zero on every non-applied outcome.
+      - name: Mint the scoped sentinel App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: Iv23liHUJNXds9mU3j7Q
+          private-key: ${{ secrets.SENTINEL_SUPERVISOR_APP_PRIVATE_KEY }}
+          owner: ubiquity
+          repositories: sentinel
       - name: Run hosted autonomy (retry transient failures, deliver reviewed heads)
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          SENTINEL_SUPERVISOR_TOKEN: ${{ steps.app-token.outputs.token }}
         run: >-
           deno run --no-lock
           --allow-read
           --allow-write
           --allow-run=git
           --allow-net=api.github.com
-          --allow-env=HOME,PATH,GITHUB_TOKEN,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_REPOSITORY,GITHUB_REF,GITHUB_SHA,GITHUB_WORKFLOW_SHA,GITHUB_WORKFLOW_REF,GITHUB_JOB
+          --allow-env=HOME,PATH,GITHUB_TOKEN,SENTINEL_SUPERVISOR_TOKEN,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_REPOSITORY,GITHUB_REF,GITHUB_SHA,GITHUB_WORKFLOW_SHA,GITHUB_WORKFLOW_REF,GITHUB_JOB
           ops/hosted-autonomy.ts
 
   prepare:
@@ -152,6 +163,8 @@ jobs:
     if: ${{ !cancelled() && needs.prepare.result == 'success' && github.ref == 'refs/heads/sentinel-supervisor' && needs.prepare.outputs.run == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    environment:
+      name: sentinel-supervisor
     permissions:
       contents: write
       actions: write
@@ -204,10 +217,19 @@ jobs:
           if [ -n "$current_apparmor" ] && [ "$current_apparmor" != "0" ]; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
+      - name: Mint the scoped sentinel App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: Iv23liHUJNXds9mU3j7Q
+          private-key: ${{ secrets.SENTINEL_SUPERVISOR_APP_PRIVATE_KEY }}
+          owner: ubiquity
+          repositories: sentinel
       - name: Run selected Sentinel runtime
         working-directory: launcher
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          SENTINEL_SUPERVISOR_TOKEN: ${{ steps.app-token.outputs.token }}
           UOS_AI_TOKEN: ${{ secrets.UOS_AI_TOKEN }}
         run: >-
           deno run
@@ -215,7 +237,7 @@ jobs:
           --allow-write
           --allow-run
           --allow-net="api.github.com,*.blob.core.windows.net"
-          --allow-env=HOME,PATH,GITHUB_TOKEN,UOS_AI_TOKEN,NODE_V8_COVERAGE,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_REPOSITORY,GITHUB_REF,GITHUB_SHA,GITHUB_WORKFLOW_SHA,GITHUB_WORKFLOW_REF,GITHUB_JOB
+          --allow-env=HOME,PATH,GITHUB_TOKEN,SENTINEL_SUPERVISOR_TOKEN,UOS_AI_TOKEN,NODE_V8_COVERAGE,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_REPOSITORY,GITHUB_REF,GITHUB_SHA,GITHUB_WORKFLOW_SHA,GITHUB_WORKFLOW_REF,GITHUB_JOB
           src/host/hosted-runtime.ts
 
   finalize:

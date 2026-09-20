@@ -593,11 +593,27 @@ Deno.test(
     const foreign = await makeRig("autonomy-author", {
       pull: pullFacts({ author: "someone-else" }),
     });
+    // The sentinel App bot is now a trusted delivery author; a pull request
+    // authored by it must deliver exactly like the native Actions identity.
+    const appAuthored = await makeRig("autonomy-app-author", {
+      pull: pullFacts({
+        state: "open",
+        merged: false,
+        mergeCommitSha: null,
+        author: "ubiquity-sentinel[bot]",
+      }),
+      afterMerge: pullFacts({ author: "ubiquity-sentinel[bot]" }),
+    });
     const foreignResult = await run(foreign.rig, foreign.github);
     assert.equal(foreignResult.status, "skipped");
     assert.equal(foreignResult.reason, "foreign_author");
     assert.equal(foreign.rig.merges, 0);
     assert.equal(foreign.rig.writes, 0);
+
+    // The App-authored pull request is trusted and delivers end to end.
+    const appResult = await run(appAuthored.rig, appAuthored.github);
+    assert.equal(appResult.status, "applied", JSON.stringify(appResult));
+    assert.equal(appAuthored.rig.merges, 1);
 
     const wrongParents = await makeRig("autonomy-parents", {
       pull: pullFacts({ parents: [BASE] }),
@@ -609,7 +625,7 @@ Deno.test(
     assert.equal(wrongParents.rig.writes, 0);
 
     await Promise.all(
-      [movedBase, pending, foreign, wrongParents].map((entry) =>
+      [movedBase, pending, foreign, appAuthored, wrongParents].map((entry) =>
         Deno.remove(entry.rig.tmp, { recursive: true })
       ),
     );
