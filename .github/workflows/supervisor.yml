@@ -118,7 +118,7 @@ jobs:
         id: app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          client-id: Iv23liB8E2FcIZd9i7Pg
+          client-id: Iv23liHUJNXds9mU3j7Q
           private-key: ${{ secrets.SENTINEL_SUPERVISOR_APP_PRIVATE_KEY }}
           owner: ubiquity
           repositories: sentinel
@@ -239,7 +239,7 @@ jobs:
         id: app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          client-id: Iv23liB8E2FcIZd9i7Pg
+          client-id: Iv23liHUJNXds9mU3j7Q
           private-key: ${{ secrets.SENTINEL_SUPERVISOR_APP_PRIVATE_KEY }}
           owner: ubiquity
           repositories: sentinel
