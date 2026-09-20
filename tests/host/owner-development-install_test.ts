@@ -50,6 +50,7 @@ import {
   OWNER_DEVELOPMENT_INSTALL_RECEIPT_REVISION,
   OWNER_DEVELOPMENT_INSTALL_RECOVERY_REVISION,
   OWNER_DEVELOPMENT_INSTALL_RELEASED_REVISION,
+  OWNER_DEVELOPMENT_INSTALL_RESERVE_MODEL_REVISION,
   OWNER_DEVELOPMENT_INSTALL_RETIRE_REVISION,
   OWNER_DEVELOPMENT_INSTALL_REVIEW_STEP_REVISION,
   OWNER_DEVELOPMENT_INSTALL_REVIEWER_REVISION,
@@ -91,6 +92,7 @@ const RETIRE = OWNER_DEVELOPMENT_INSTALL_RETIRE_REVISION;
 const DELIVERED_ROUND2 = OWNER_DEVELOPMENT_INSTALL_DELIVERED_ROUND2_REVISION;
 const APP_IDENTITY = OWNER_DEVELOPMENT_INSTALL_APP_IDENTITY_REVISION;
 const MODEL_ROUTE = OWNER_DEVELOPMENT_INSTALL_MODEL_ROUTE_REVISION;
+const RESERVE_MODEL = OWNER_DEVELOPMENT_INSTALL_RESERVE_MODEL_REVISION;
 
 function hostedProof(input: {
   runId: number;
@@ -950,14 +952,29 @@ Deno.test(
     if (routePlan.status !== "install") throw new Error("expected install");
     assert.equal(routePlan.move.nextRevision, MODEL_ROUTE);
     assert.equal(routePlan.move.nextGeneration, 26);
-    // The model-route generation is the fixed end of the chain.
+    // The model-route healthy proof authorizes the reserve-model install.
+    const reservePlan = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: MODEL_ROUTE,
+          generation: 26,
+          healthyProof: healthyProof(MODEL_ROUTE, 26, 97),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(reservePlan.status, "install");
+    if (reservePlan.status !== "install") throw new Error("expected install");
+    assert.equal(reservePlan.move.nextRevision, RESERVE_MODEL);
+    assert.equal(reservePlan.move.nextGeneration, 27);
+    // The reserve-model generation is the fixed end of the chain.
     assert.equal(
       planOwnerDevelopmentInstall(
         releaseSnapshot({
           runtime: runtimeRecord({
-            revision: MODEL_ROUTE,
-            generation: 26,
-            healthyProof: healthyProof(MODEL_ROUTE, 26, 97),
+            revision: RESERVE_MODEL,
+            generation: 27,
+            healthyProof: healthyProof(RESERVE_MODEL, 27, 98),
           }),
         }),
         NOW,

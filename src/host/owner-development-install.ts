@@ -230,6 +230,14 @@ export const OWNER_DEVELOPMENT_INSTALL_APP_IDENTITY_GENERATION = 25;
 export const OWNER_DEVELOPMENT_INSTALL_MODEL_ROUTE_REVISION =
   "c09c9fd84614298a6b3fd6eeabd42e9a6b4d6eb8" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_MODEL_ROUTE_GENERATION = 26;
+/**
+ * Exact revision switching the gateway model id to the separately metered
+ * `gpt-reserve` (luna under its own quota class). Installed only after the
+ * model-route revision's own healthy proof.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_RESERVE_MODEL_REVISION =
+  "cbfa39cb8fc35630ea01281bcc5bdf9075d89d1a" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_RESERVE_MODEL_GENERATION = 27;
 
 const API_BASE = "https://api.github.com";
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -1049,10 +1057,29 @@ export function planOwnerDevelopmentInstall(
     generation === OWNER_DEVELOPMENT_INSTALL_MODEL_ROUTE_GENERATION
   ) {
     if (healthy !== null) {
-      return noChange("the owner development installation is complete");
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_RESERVE_MODEL_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_RESERVE_MODEL_GENERATION,
+        healthy,
+        "install the gpt-reserve model revision after the model-route healthy proof",
+      );
     }
     return waiting(
       "the model-route generation 26 healthy proof is not recorded",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_RESERVE_MODEL_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_RESERVE_MODEL_GENERATION
+  ) {
+    if (healthy !== null) {
+      return noChange("the owner development installation is complete");
+    }
+    return waiting(
+      "the reserve-model generation 27 healthy proof is not recorded",
     );
   }
 
