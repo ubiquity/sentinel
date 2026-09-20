@@ -9,6 +9,77 @@ GPT-6 Astra integration owner on 2026-09-16 for not completing this job and
 transferred ownership to the primary local agent, which may now change scope,
 status, acceptance and write ownership here.
 
+### DeepSeek-direct fallback model route, 2026-09-20 08:04-11:00 UTC (owner-directed)
+
+The owner authorized a DeepSeek-direct fallback ("deepseek direct sounds good as
+a backup") after the UOS gateway became unreachable (HTTP 000/522), which had
+stopped all model work. The gateway remains PRIMARY; the fallback is explicit
+and once-per-run. Verified working end to end.
+
+Delivered and pushed:
+
+- `development` @ `c09c9fd` (runtime + host): `src/host/model-route.ts` is the
+  single trusted resolver — owner override (`SENTINEL_MODEL_BASE_URL` +
+  optional `SENTINEL_MODEL_ID`) when valid, else the explicit fallback when
+  `SENTINEL_MODEL_FALLBACK=deepseek` and `SENTINEL_DEEPSEEK_API_KEY` is
+  non-empty, else the gateway. Every invalid case refuses lastingly to
+  fabricate a route, and only the key's variable NAME is ever returned.
+  `ports.ts`/`model-port.ts` replaced the frozen literal model id with the
+  route-selected id while the receipt verifier still requires the requested
+  model to equal the port's configured model and the thread acknowledgement, so
+  a receipt can never claim one model while another was requested.
+  `loop.ts`/`local.ts`/`actions.ts`/`actions-preflight.ts` resolve the route
+  once at host start; the provider name is no longer hardcoded to `uos`.
+- `sentinel-supervisor` @ `c6ccb97` (live launcher): the launcher forwards the
+  four route variables to the child only when non-empty (bounded identity
+  transition, unset keeps today's behaviour) **and** the repair job's
+  `--allow-env` grant now includes them — without that grant `Deno.env.get`
+  returns undefined and the fallback is unreachable.
+- The one-shot owner install chain was extended by one link; the runtime
+  pointer is now `c09c9fd` generation 26 with `lastExecutionProof.outcome`
+  `healthy` and `lastHealthyProof` binding that exact revision and generation.
+- The DeepSeek key is the `sentinel-supervisor` environment secret
+  `SENTINEL_DEEPSEEK_API_KEY`; the selector is the repository variable
+  `SENTINEL_MODEL_FALLBACK`. Neither is ever logged.
+
+Live evidence:
+
+- Run `35506272378` (launcher `c6ccb97`, the allow-env fix) executed revision
+  `c09c9fd` generation 26 and published a `hosted_runtime_terminal` with
+  `outcome: healthy` and `startupReady: true`. That preflight binds the RESOLVED
+  route's provider and model into a real `thread/start` and requires the
+  app-server to acknowledge them, so the DeepSeek provider/model binding is
+  proven accepted by the installed runtime.
+- DeepSeek direct serves the Responses API at `https://api.deepseek.com/v1`
+  (`/v1/responses` returned a real response object), accepts `deepseek-flash`,
+  REJECTS `gpt-5.6-luna` with `invalid_request_error`, and a real Codex
+  app-server executed a shell tool against it — which is exactly why the
+  fallback requests its own model id instead of reusing the gateway's.
+- A rendered-config probe against the resolver produced
+  `model_provider = "deepseek"`, `base_url = "https://api.deepseek.com/v1"`,
+  `wire_api = "responses"`.
+
+Defects found live and fixed on the way (both stranded the runtime pointer):
+
+1. A runtime step that started and concluded failure WITHOUT publishing a
+   terminal (the pre-fallback runtime dying against the unreachable gateway)
+   returned `unavailable` forever because no later observation of that completed
+   job can produce a terminal, so the saved execution was never settled and the
+   install refused with "a hosted runtime execution is in flight"
+   indefinitely. It now settles as an explicit `failed` proof when the step has
+   coherent timestamps and no terminal-looking line; a successful step with no
+   terminal, or any incoherent metadata, still fails closed. Regression test in
+   `tests/github/hosted-execution_test.ts` covers both directions.
+2. The repair job grants the launcher an explicit `--allow-env` list; the route
+   variables were missing, so the launcher could not read them at all and the
+   first fallback run died instantly.
+
+Not yet exercised: an actual repair model call through DeepSeek inside the
+hosted job. No eligible issue exists right now (every open issue carries
+`sentinel:skip`), so the queue is empty by owner choice. The route, the grant,
+the installed runtime and the model binding are proven; the first real repair
+will be the first hosted DeepSeek call.
+
 ### Single ubiquity-sentinel App identity, 2026-09-20 02:40-06:27 UTC (owner-directed)
 
 The owner deleted the dedicated `sentinel-supervisor-ubiq-260913` App and
