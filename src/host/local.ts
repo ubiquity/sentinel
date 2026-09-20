@@ -57,6 +57,7 @@ import { MaxText } from "../contracts/validation.ts";
 import type { WorkRecordV1 } from "../contracts/work-record.ts";
 import { createRepairStateStore } from "../state/mod.ts";
 import { composeLocalReleaseReader } from "./local-release.ts";
+import type { ModelRouteV1 } from "./model-route.ts";
 import {
   earliestRetryAt,
   HOUR_WINDOW_MS,
@@ -115,9 +116,15 @@ const STEP_LIMIT = 64;
 const SESSION_DEADLINE_MS = 1_500_000;
 const REVIEW_SESSION_DEADLINE_MS = 1_200_000;
 
-/** Applied runtime implementation model identity (fixed, not overridable). */
-const IMPLEMENTATION_MODEL = "gpt-5.6-luna";
+/** Applied runtime implementation model identity (route-selected default). */
+const DEFAULT_IMPLEMENTATION_MODEL = "gpt-5.6-luna";
+/** Default isolated client provider name (the primary gateway provider). */
+const DEFAULT_PROVIDER_NAME = "uos";
 const IMPLEMENTATION_REASONING = "max";
+/** Private bound for a selectable implementation model id. */
+const MAX_MODEL_CHARS = 256;
+/** A provider name safe as a TOML bare key and `model_providers` table name. */
+const PROVIDER_NAME_PATTERN = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
 
 const UNAVAILABLE_DETAIL = "local target does not provide this capability";
 
@@ -149,6 +156,8 @@ const STATIC_RECEIPT_DIAGNOSTIC =
   "local model diagnostic persistence failed; the trusted completed receipt is preserved without a durability claim";
 const STATIC_MARKER =
   "local repair host failed: the session marker could not be cleared";
+const STATIC_LOCAL_PROVIDER =
+  "local Codex client rejected: the route provider name is not a valid bare provider name";
 
 /** Caller-supplied trusted inputs for one bounded local run. */
 export interface LocalRepairHostOptionsV1 {
@@ -160,6 +169,12 @@ export interface LocalRepairHostOptionsV1 {
   codexExecutable: string;
   denoExecutable: string;
   trustedPath: string;
+  /**
+   * Route-selected implementation model id for this run. Omitted callers keep
+   * the frozen gateway default (`gpt-5.6-luna`); the exact configured value is
+   * what the implementation port submits and what the status envelope reports.
+   */
+  modelId?: string;
 }
 
 /** Outcome of one startup attempt. Busy is an explicit refusal, not a wait. */
@@ -277,6 +292,13 @@ export interface LocalCodexConfigInputV1 {
   writeGrants: string[];
   /** Trusted provider endpoint; local callers use the loopback default. */
   baseUrl?: string;
+  /**
+   * Trusted route provider name used for `model_provider` and the
+   * `[model_providers.<name>]` block. Defaults to the primary gateway provider
+   * (`uos`); a route-selected fallback names its own provider so the client
+   * config and the submitted thread provider always agree.
+   */
+  providerName?: string;
 }
 
 /**
@@ -290,27 +312,31 @@ const COMMAND_LINE_TOOLS_GIT_CORE =
   "/Library/Developer/CommandLineTools/usr/share/git-core";
 
 /**
- * Render the per-client Codex configuration: provider uos over the local
- * app-server gateway, top-level approval/login/permission defaults, the proved
+ * Render the per-client Codex configuration: the route's provider over its
+ * configured endpoint, top-level approval/login/permission defaults, the proved
  * flat filesystem and network permission tables (relative grants live under
  * `:workspace_roots`) and a fixed minimal environment. Pure text; no token
- * value is ever included.
+ * value is ever included. `wire_api` stays `"responses"` for every provider.
  */
 export function renderLocalCodexConfig(input: LocalCodexConfigInputV1): string {
   const profile = input.profile;
+  const providerName = input.providerName ?? DEFAULT_PROVIDER_NAME;
+  if (!PROVIDER_NAME_PATTERN.test(providerName)) {
+    throw new Error(STATIC_LOCAL_PROVIDER);
+  }
   const lines = [
     "# Sentinel local host client config (generated; do not edit).",
     'approval_policy = "never"',
     "allow_login_shell = false",
     `default_permissions = ${toml(profile)}`,
-    'model_provider = "uos"',
+    `model_provider = ${toml(providerName)}`,
     "",
-    "[model_providers.uos]",
-    'name = "uos"',
+    `[model_providers.${providerName}]`,
+    `name = ${toml(providerName)}`,
     `base_url = "${input.baseUrl ?? DEFAULT_UOS_BASE_URL}"`,
     'wire_api = "responses"',
     "",
-    "[model_providers.uos.auth]",
+    `[model_providers.${providerName}.auth]`,
     'command = "/bin/cat"',
     `args = [${toml(input.tokenFile)}]`,
     "",
@@ -939,6 +965,7 @@ export async function runLocalRepairHost(
       modelToken: input.modelToken,
       tracker,
       clock,
+      modelId: input.modelId,
       localIteration: true,
     });
     github.pushHead = () =>
@@ -1005,6 +1032,7 @@ export async function runLocalRepairHost(
               targetBaseSha,
               login,
               config,
+              modelId: input.modelId,
               startedAt,
               finishedAt: clock.now(),
               outcome,
@@ -1120,6 +1148,13 @@ export interface LocalGitHubInputV1 {
   ) => Promise<PortResultV1<void>>;
   /** Provider endpoint used by the isolated reviewer client. */
   modelBaseUrl?: string;
+  /**
+   * Trusted route selection. The composed reviewer submits the route's
+   * provider (the same provider the review client config names), so a
+   * route-selected fallback never submits a provider the config lacks.
+   * Omitted callers keep the primary gateway provider.
+   */
+  route?: ModelRouteV1;
 }
 
 // ---------------------------------------------------------------------------
@@ -1328,7 +1363,7 @@ export function composeLocalGitHub(input: LocalGitHubInputV1): GitHubPort {
     },
   };
   const reviewer = new CodexStructuredReviewer({
-    provider: "uos",
+    provider: input.route?.provider ?? DEFAULT_PROVIDER_NAME,
     sessionCwd: input.reviewCheckout,
     permissionProfile: "sentinel-review",
     openSession: ({ cwd }) =>
@@ -1583,8 +1618,23 @@ export interface LocalModelInputV1 {
   modelToken: string;
   tracker: LocalSessionTracker;
   clock: Clock;
+  /**
+   * Trusted route selection for the implementation client: the endpoint, the
+   * route model id and the provider name are taken from it. Omitted callers
+   * keep the frozen gateway defaults (`uos` over the loopback endpoint with
+   * `gpt-5.6-luna`).
+   */
+  route?: ModelRouteV1;
+  /**
+   * Route-selected implementation model id this port submits and records.
+   * Defaults to the route's model and then to the frozen gateway model
+   * (`gpt-5.6-luna`) for callers that pass neither; the id is never rewritten.
+   */
+  modelId?: string;
   /** Provider endpoint used by the isolated implementation client. */
   modelBaseUrl?: string;
+  /** Provider name used by the isolated implementation client config. */
+  providerName?: string;
   /** Explicit owner-local pause; hosted Actions must leave this false. */
   localIteration?: boolean;
   /**
@@ -1605,7 +1655,21 @@ export interface LocalModelInputV1 {
  * object repository before returning.
  */
 export class LocalCheckoutModelPort implements ImplementationPort {
-  constructor(private readonly input: LocalModelInputV1) {}
+  /**
+   * Exact route-selected implementation model id this port submits and
+   * records: the explicit `modelId`, else the route's model, else the frozen
+   * gateway default. It is never rewritten after construction.
+   */
+  readonly modelId: string;
+  /** Exact route provider name the app-server session and config both name. */
+  private readonly providerName: string;
+
+  constructor(private readonly input: LocalModelInputV1) {
+    this.modelId = input.modelId ?? input.route?.model ??
+      DEFAULT_IMPLEMENTATION_MODEL;
+    this.providerName = input.providerName ?? input.route?.provider ??
+      DEFAULT_PROVIDER_NAME;
+  }
 
   async runModel(
     request: ModelRunRequestV1,
@@ -1664,7 +1728,8 @@ export class LocalCheckoutModelPort implements ImplementationPort {
       codexExecutable: this.input.codexExecutable,
       denoExecutable: this.input.denoExecutable,
       trustedPath: this.input.trustedPath,
-      baseUrl: this.input.modelBaseUrl,
+      route: this.input.route,
+      baseUrl: this.input.modelBaseUrl ?? this.input.route?.baseUrl,
     });
 
     const commitBase = prepared.commitBase;
@@ -1693,7 +1758,8 @@ export class LocalCheckoutModelPort implements ImplementationPort {
         ),
       checkoutDir: prepared.checkout,
       localIteration: this.input.localIteration === true,
-      modelProvider: "uos",
+      modelProvider: this.providerName,
+      modelId: this.modelId,
       permissionProfile: "sentinel-local",
       commitCandidate: committer,
     });
@@ -2257,10 +2323,22 @@ export async function ensureTaskClient(input: {
   tmpDir: string;
   denoDir: string;
   checkout: string;
+  /** The route's key, written to the private client token file. */
   token: string;
   codexExecutable: string;
   denoExecutable: string;
   trustedPath: string;
+  /**
+   * Trusted route selection: the generated client config names this route's
+   * provider and endpoint so the app-server and the submitted thread provider
+   * always agree. Omitted callers keep the local gateway default.
+   */
+  route?: ModelRouteV1;
+  /**
+   * Explicit endpoint override. The startup preflight uses it to keep its
+   * non-routable dummy endpoint (no model call is ever made there); when
+   * omitted the route's own base URL is written.
+   */
   baseUrl?: string;
 }): Promise<void> {
   await ensurePrivateDir(input.clientHome);
@@ -2281,7 +2359,8 @@ export async function ensureTaskClient(input: {
       codexDistributionDir: codexDistributionDir(input.codexExecutable),
       denoExecutable: input.denoExecutable,
       writeGrants: [input.tmpDir, input.denoDir],
-      baseUrl: input.baseUrl,
+      baseUrl: input.baseUrl ?? input.route?.baseUrl,
+      providerName: input.route?.provider,
     }),
   );
 }
@@ -2292,10 +2371,18 @@ export async function ensureReviewClient(input: {
   reviewClientHome: string;
   reviewTmpDir: string;
   reviewDenoDir: string;
+  /** The route's key, written to the private client token file. */
   token: string;
   codexExecutable: string;
   denoExecutable: string;
   trustedPath: string;
+  /**
+   * Trusted route selection: the generated review client config names this
+   * route's provider and endpoint (the reviewer submits the same provider).
+   * Omitted callers keep the local gateway default.
+   */
+  route?: ModelRouteV1;
+  /** Explicit endpoint override; omitted callers use the route's base URL. */
   baseUrl?: string;
 }): Promise<void> {
   await ensurePrivateDir(input.reviewCheckout);
@@ -2317,7 +2404,8 @@ export async function ensureReviewClient(input: {
       codexDistributionDir: codexDistributionDir(input.codexExecutable),
       denoExecutable: input.denoExecutable,
       writeGrants: [],
-      baseUrl: input.baseUrl,
+      baseUrl: input.baseUrl ?? input.route?.baseUrl,
+      providerName: input.route?.provider,
     }),
   );
 }
@@ -3021,6 +3109,12 @@ export interface LocalStatusInputV1 {
   login: string | null;
   /** Applied trusted repository configuration. */
   config: RepositoryConfigV1;
+  /**
+   * Exact route-selected implementation model this run was configured with.
+   * Absent callers keep the frozen gateway default; the envelope reports the
+   * value the implementation port actually submits.
+   */
+  modelId?: string;
   startedAt: number;
   finishedAt: number;
   outcome: RepairCycleOutcomeV1;
@@ -3096,7 +3190,9 @@ function statusIdentity(input: LocalStatusInputV1): LocalStatusIdentityV1 {
       controllerSha,
       targetBaseSha,
       login,
-      model: IMPLEMENTATION_MODEL,
+      model: isBoundedStatusText(input.modelId, MAX_MODEL_CHARS)
+        ? input.modelId
+        : DEFAULT_IMPLEMENTATION_MODEL,
       reasoning: IMPLEMENTATION_REASONING,
       limits: {
         perHour: STATUS_POLICY_LIMITS.perHour,
@@ -3369,7 +3465,7 @@ function statusTextWithinBounds(text: string): boolean {
 
 function readLocalHostOptions(
   options: LocalRepairHostOptionsV1,
-): LocalRepairHostOptionsV1 {
+): LocalRepairHostOptionsV1 & { modelId: string } {
   let record: Record<string, unknown>;
   try {
     record = options as unknown as Record<string, unknown>;
@@ -3387,7 +3483,32 @@ function readLocalHostOptions(
     codexExecutable: requirePath(record.codexExecutable, "codexExecutable"),
     denoExecutable: requirePath(record.denoExecutable, "denoExecutable"),
     trustedPath: requirePath(record.trustedPath, "trustedPath"),
+    modelId: requireModelId(record.modelId),
   };
+}
+
+/**
+ * Route-selected implementation model id. An absent value keeps the frozen
+ * gateway default; a present but malformed value is refused outright (it is
+ * never silently replaced, so the recorded model always equals the requested
+ * one).
+ */
+function requireModelId(value: unknown): string {
+  if (value === undefined) return DEFAULT_IMPLEMENTATION_MODEL;
+  if (!isBoundedModelId(value)) throw new TypeError(STATIC_INVALID_OPTIONS);
+  return value;
+}
+
+/** A bounded model id: nonempty, exactly trimmed, no control characters. */
+function isBoundedModelId(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  if (value.length === 0 || value.length > MAX_MODEL_CHARS) return false;
+  if (value.trim() !== value) return false;
+  for (let index = 0; index < value.length; index++) {
+    const code = value.charCodeAt(index);
+    if (code <= 0x1f || code === 0x7f) return false;
+  }
+  return true;
 }
 
 function requirePath(value: unknown, _field: string): string {

@@ -284,13 +284,25 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           UOS_AI_TOKEN: ${{ secrets.UOS_AI_TOKEN }}
           SENTINEL_SUPERVISOR_TOKEN: ${{ steps.app-token.outputs.token }}
+          # Explicit DeepSeek-direct fallback selection. It comes from the
+          # repository variable `vars.SENTINEL_MODEL_FALLBACK` (the simplest
+          # source that needs no workflow-dispatch input plumbing): exactly
+          # `deepseek` activates the fallback route when the key below is
+          # non-empty, and any other or unset value keeps the UOS gateway
+          # primary. The trusted resolver owns the decision; nothing is swapped
+          # per request.
+          SENTINEL_MODEL_FALLBACK: ${{ vars.SENTINEL_MODEL_FALLBACK }}
+          # DeepSeek-direct fallback key (the `sentinel-supervisor`
+          # environment secret). It is only ever read by name into the model
+          # client's private token file and is never logged or echoed.
+          SENTINEL_DEEPSEEK_API_KEY: ${{ secrets.SENTINEL_DEEPSEEK_API_KEY }}
         run: >-
           deno run
           --allow-read
           --allow-write
           --allow-run
           --allow-net="api.github.com,*.blob.core.windows.net"
-          --allow-env=HOME,PATH,GITHUB_TOKEN,UOS_AI_TOKEN,NODE_V8_COVERAGE,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_REPOSITORY,GITHUB_REF,GITHUB_SHA,GITHUB_WORKFLOW_SHA,GITHUB_WORKFLOW_REF,GITHUB_JOB,SENTINEL_SUPERVISOR_TOKEN
+          --allow-env=HOME,PATH,GITHUB_TOKEN,UOS_AI_TOKEN,SENTINEL_MODEL_BASE_URL,SENTINEL_MODEL_ID,SENTINEL_MODEL_FALLBACK,SENTINEL_DEEPSEEK_API_KEY,NODE_V8_COVERAGE,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_REPOSITORY,GITHUB_REF,GITHUB_SHA,GITHUB_WORKFLOW_SHA,GITHUB_WORKFLOW_REF,GITHUB_JOB,SENTINEL_SUPERVISOR_TOKEN
           src/host/hosted-runtime.ts
 
   finalize:

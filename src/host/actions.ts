@@ -2,14 +2,20 @@
  * Trusted GitHub Actions repair host.
  *
  * This is the hosted counterpart of the owner's local host. The workflow
- * supplies the native `GITHUB_TOKEN` and the model `UOS_AI_TOKEN` to this
- * process, plus the optional `SENTINEL_SUPERVISOR_TOKEN` minted for the
- * `ubiquity-sentinel` App. The split is fixed: the native token stays on
- * state-ref bookkeeping (`sentinel-state/repair`) and Actions metadata, while
- * the App token authenticates every code change this host writes (branch
- * pushes, pull requests, reviews, merges, issue writes). The model receives an
- * isolated checkout and a credential-free environment: no release writer, state
+ * supplies the native `GITHUB_TOKEN` and the model key to this process, plus
+ * the optional `SENTINEL_SUPERVISOR_TOKEN` minted for the `ubiquity-sentinel`
+ * App. The split is fixed: the native token stays on state-ref bookkeeping
+ * (`sentinel-state/repair`) and Actions metadata, while the App token
+ * authenticates every code change this host writes (branch pushes, pull
+ * requests, reviews, merges, issue writes). The model receives an isolated
+ * checkout and a credential-free environment: no release writer, state
  * credential or GitHub token crosses into the model child.
+ *
+ * The model route (endpoint + model id + key environment) is resolved EXACTLY
+ * ONCE here through the trusted route resolver: the UOS gateway stays primary
+ * and the DeepSeek-direct route is used only when an explicit override or the
+ * explicit fallback selector (with its key present) selects it. The route's
+ * model id is what the runtime requests and records.
  */
 
 import { isGitSha } from "../contracts/brands.ts";
@@ -42,6 +48,7 @@ import {
   STATIC_TARGETS_UNSUPPORTED,
 } from "./targets.ts";
 import { createRepairStateStore, DenoGitRunner } from "../state/mod.ts";
+import { resolveModelRoute } from "./model-route.ts";
 import {
   composeLocalGitHub,
   createLocalRepositoryConfig,
@@ -59,7 +66,11 @@ import {
 } from "./local.ts";
 
 const REMOTE_URL = "https://github.com/ubiquity/sentinel.git";
-/** Public UOS gateway used by hosted Codex app-server sessions. */
+/**
+ * Public base URL of the primary gateway route. The trusted route resolver
+ * (`src/host/model-route.ts`) owns route selection; this constant only names
+ * the primary endpoint for callers that refer to it.
+ */
 export const ACTIONS_UOS_BASE_URL = "https://ai.ubq.fi/v1";
 
 // Leave the workflow's final ten minutes for bounded drain and runner exit.
@@ -98,9 +109,29 @@ export async function runActionsRepairHost(): Promise<
   // and no durable write.
   const identity = parseHostedEnvironment(readHostedIdentityEnv(), "repair");
 
+  // The trusted model route is resolved EXACTLY ONCE at host start, before any
+  // credential read or client composition, and recorded as one bounded
+  // advisory line: provider, model id and endpoint only — never the key value
+  // and never the key environment's contents. Selection is explicit and
+  // deterministic (owner override, then the explicit DeepSeek fallback with
+  // its key present, else the primary gateway); it is never a per-request
+  // swap, and the resolved model id is the id the runtime requests and records.
+  const modelRoute = resolveModelRoute(Deno.env.toObject());
+  console.log(JSON.stringify({
+    kind: "sentinel_model_route",
+    provider: modelRoute.provider,
+    model: modelRoute.model,
+    baseUrl: modelRoute.baseUrl,
+  }));
+
   const githubToken = requireEnv("GITHUB_TOKEN");
   const appToken = optionalEnv("SENTINEL_SUPERVISOR_TOKEN");
-  const modelToken = requireEnv("UOS_AI_TOKEN");
+  // The model token is the route's key when the route names a key environment
+  // (read through the existing --allow-env mechanism), else the existing
+  // gateway token.
+  const modelToken = modelRoute.apiKeyEnv === null
+    ? requireEnv("UOS_AI_TOKEN")
+    : requireEnv(modelRoute.apiKeyEnv);
   const trustedPath = requireEnv("PATH");
   // Every code-change write goes through the App token when the workflow
   // minted one; the native token keeps the state store and Actions metadata.
@@ -174,7 +205,7 @@ export async function runActionsRepairHost(): Promise<
     codexExecutable,
     denoExecutable,
     trustedPath,
-    baseUrl: ACTIONS_UOS_BASE_URL,
+    route: modelRoute,
   });
 
   const tracker = new LocalSessionTracker();
@@ -254,7 +285,8 @@ export async function runActionsRepairHost(): Promise<
     codexExecutable,
     tracker,
     ensureCandidateObjects: candidates.ensure,
-    modelBaseUrl: ACTIONS_UOS_BASE_URL,
+    modelBaseUrl: modelRoute.baseUrl,
+    route: modelRoute,
   }));
   const model = new LocalCheckoutModelPort({
     stateRoot,
@@ -266,7 +298,8 @@ export async function runActionsRepairHost(): Promise<
     modelToken,
     tracker,
     clock,
-    modelBaseUrl: ACTIONS_UOS_BASE_URL,
+    route: modelRoute,
+    modelId: modelRoute.model,
     localIteration: false,
     ensureCandidateObjects: candidates.ensure,
   });
@@ -286,7 +319,7 @@ export async function runActionsRepairHost(): Promise<
   // new model starts for this run.
   let startupReady = false;
   try {
-    await runActionsPreflight();
+    await runActionsPreflight(modelRoute);
     startupReady = true;
   } catch {
     startupReady = false;

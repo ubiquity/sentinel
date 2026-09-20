@@ -1,6 +1,6 @@
 /**
  * m04-repair: runtime ImplementationPort backed by a bounded Codex app-server
- * session (gpt-5.6-luna / max requested explicitly).
+ * session (route-selected model id / max requested explicitly).
  *
  * Fail-closed receipt policy (frozen ImplementationPort has no authoritative
  * observation method or pre-call provider id): the session host supplies an
@@ -11,8 +11,9 @@
  * session opens (including the custom-verifier path): a missing provider
  * stays unavailable and a callback never enables a missing provider. With a
  * selected provider the port binds the real request/runtime receipt producer
- * (`createRequestRuntimeReceiptVerifier(expectedProvider)`): the receipt then
- * proofs trusted submitted provider/model/effort configuration bound to the
+ * (`createRequestRuntimeReceiptVerifier(expectedProvider, expectedModel)`):
+ * the receipt then proofs trusted submitted provider/model/effort
+ * configuration bound to the
  * exact invocation/thread/turn and runtime routing/terminal events, labeled
  * request/runtime evidence — never backend provider attestation. A supplied
  * custom verifier remains only an ADDITIONAL restriction after the concrete
@@ -23,7 +24,7 @@
  *
  * Correlation, routing and model-policy validation are port duties and cannot
  * be bypassed by an injected verifier: the port binds the exact session
- * identity/thread/turn, rejects any matching reroute off the required Luna
+ * identity/thread/turn, rejects any matching reroute off the configured
  * runtime model (even when routed back later), never synthesizes an actual
  * identity or route fallback, and requires nonempty correlated output evidence
  * for a completed run. Protocol or routing uncertainty (malformed reroute/
@@ -115,10 +116,15 @@ const MAX_FILE_CHANGE_DIFF_CHARS = 256 * 1024;
 const MAX_CHANGES_PER_ITEM = 256;
 /** Private bound for one command item's best-effort parsed actions array. */
 const MAX_COMMAND_ACTIONS = 64;
-/** The frozen runtime model id; no fallback is ever synthesized. */
-const REQUIRED_MODEL_ID = "gpt-5.6-luna";
+/**
+ * The frozen default (gateway) runtime model id used only when the caller does
+ * not configure a route-selected id; no fallback is ever synthesized.
+ */
+const DEFAULT_MODEL_ID = "gpt-5.6-luna";
 /** The frozen runtime reasoning effort; no fallback is ever synthesized. */
 const REQUIRED_REASONING_EFFORT = "max";
+/** Private bound for a configured/requested runtime model id. */
+const MAX_MODEL_CHARS = 256;
 /**
  * Trusted named permission profile: a host-defined name only. Built-in
  * full-access mode identifiers are never accepted as a named profile binding.
@@ -273,6 +279,22 @@ function isValidCommandAction(raw: unknown): boolean {
 }
 
 /**
+ * A configured/requested runtime model id must be a nonempty bounded string
+ * with no control characters and no leading/trailing whitespace; anything else
+ * is rejected before any session or model work begins, so a malformed route
+ * selection can never reach a thread request or a receipt.
+ */
+function isValidModelId(value: string): boolean {
+  if (value.length === 0 || value.length > MAX_MODEL_CHARS) return false;
+  if (value.trim() !== value) return false;
+  for (let index = 0; index < value.length; index++) {
+    const code = value.charCodeAt(index);
+    if (code <= 0x1f || code === 0x7f) return false;
+  }
+  return true;
+}
+
+/**
  * The configured provider must be a nonempty finite string with no control
  * characters and no leading/trailing whitespace; anything else is rejected
  * before any session or model work begins.
@@ -322,7 +344,7 @@ export interface SessionResultItemV1 {
 export interface ActualSessionEvidenceV1 {
   /** Exact invocation identity carried top-level by the receipt. */
   invocationId: string;
-  /** Requested runtime model submitted with the run (frozen Luna policy). */
+  /** Requested runtime model submitted with the run (route-selected id). */
   requestedModel: string;
   /** Requested provider configuration; null when no provider is selected. */
   requestedProvider: string | null;
@@ -385,10 +407,13 @@ export type ReceiptVerifierV1 = (
 /**
  * The real request/runtime receipt producer. It certifies ONLY the acknowledged
  * submitted configuration bound to the exact invocation/thread/turn: expected
- * provider plus the frozen Luna/max model/effort policy, correlated terminal
- * status with its explicit origin and bounded complete routing. Exactly the
- * validated provider/model/effort values are returned; the expected provider is
- * the only trusted provider identity this function accepts. A completed run
+ * provider plus the exact expected runtime model and the frozen `max` effort
+ * policy, correlated terminal status with its explicit origin and bounded
+ * complete routing. Exactly the validated provider/model/effort values are
+ * returned; the expected provider and the expected model id are the only
+ * trusted identities this function accepts (the caller passes the model id the
+ * port was constructed with, so a receipt can never keep one model while
+ * another was requested). A completed run
  * needs nonempty correlated output items (a command/file-change/agent
  * deliverable — never the notification-byte total) UNLESS the host itself
  * stopped the run (explicit loopStopped disposition), in which case only
@@ -399,12 +424,14 @@ export type ReceiptVerifierV1 = (
  */
 export function createRequestRuntimeReceiptVerifier(
   expectedProvider: string,
+  expectedModel: string = DEFAULT_MODEL_ID,
 ): ReceiptVerifierV1 {
   return (evidence: ActualSessionEvidenceV1) => {
     if (!isValidProvider(expectedProvider)) return null;
+    if (!isValidModelId(expectedModel)) return null;
     // Request/thread/turn correlation: exact identities and requested policy.
     if (
-      evidence.requestedModel !== REQUIRED_MODEL_ID ||
+      evidence.requestedModel !== expectedModel ||
       evidence.requestedEffort !== REQUIRED_REASONING_EFFORT ||
       evidence.requestedProvider !== expectedProvider ||
       !isBoundedId(evidence.threadId) || !isBoundedId(evidence.turnId) ||
@@ -441,9 +468,10 @@ export function createRequestRuntimeReceiptVerifier(
     ) {
       return null;
     }
-    // Bounded complete routing: any matching reroute off required Luna fails
-    // even if the run was routed back later; well-formed unrelated events are
-    // ignored; over-bound or matching malformed events fail closed.
+    // Bounded complete routing: any matching reroute off the configured
+    // runtime model fails even if the run was routed back later; well-formed
+    // unrelated events are ignored; over-bound or matching malformed events
+    // fail closed.
     if (evidence.reroutes.length > MAX_REROUTES) return null;
     for (const reroute of evidence.reroutes) {
       if (
@@ -477,9 +505,9 @@ export const unavailableReceiptVerifier: ReceiptVerifierV1 = () => null;
 const UNAVAILABLE_RECEIPT_DETAIL =
   "model receipt unavailable: actual provider model/effort could not be verified at this boundary";
 
-/** Static fail-closed detail: requested runtime model/effort is not Luna/max. */
+/** Static fail-closed detail: requested model/effort is not the route model/max. */
 const MODEL_POLICY_DETAIL =
-  "model receipt unavailable: requested runtime model/effort is not the required Luna/max";
+  "model receipt unavailable: requested runtime model/effort is not the configured route model/max";
 
 /** Static fail-closed detail: configured provider is not a nonempty finite string. */
 const PROVIDER_POLICY_DETAIL =
@@ -732,6 +760,16 @@ export interface CodexImplementationPortOptionsV1 {
    */
   modelProvider?: string;
   /**
+   * Route-selected runtime model id this port is configured with. Callers that
+   * do not pass one keep the frozen gateway default (`gpt-5.6-luna`). The port
+   * validates the submitted request against EXACTLY this value (and the receipt
+   * verifier requires the requested model to equal it), so the id is never
+   * rewritten after construction and a receipt always records the model that
+   * was actually requested. An invalid value (empty, over bound, control
+   * characters or surrounding whitespace) fails closed with no model call.
+   */
+  modelId?: string;
+  /**
    * Optional trusted host-defined named permission profile. When present it
    * must match /^[A-Za-z][A-Za-z0-9_-]{0,63}$/ and is never a built-in
    * full-access id; an invalid value returns static unavailable before any
@@ -768,15 +806,25 @@ export class CodexImplementationPort implements ImplementationPort {
   private readonly permissionProfile: string | null;
   /** Whether this session is the explicitly paused owner-local iteration. */
   private readonly localIteration: boolean;
+  /**
+   * Exact route-selected runtime model id this port submits and certifies. An
+   * invalid configured value becomes the empty string, which no valid request
+   * can ever match: the port then fails closed before any session opens.
+   */
+  readonly modelId: string;
 
   constructor(options: CodexImplementationPortOptionsV1) {
     this.options = options;
+    const configuredModelId = options.modelId ?? DEFAULT_MODEL_ID;
+    this.modelId = isValidModelId(configuredModelId) ? configuredModelId : "";
     // The concrete request/runtime receipt producer for the exact selected
-    // provider is ALWAYS the core gate (an invalid/missing provider returns
-    // unavailable before any session opens, so an empty expected provider is
-    // just a never-satisfied gate). A custom verifier can only restrict.
+    // provider and model is ALWAYS the core gate (an invalid/missing provider
+    // or model returns unavailable before any session opens, so an invalid
+    // expected value is just a never-satisfied gate). A custom verifier can
+    // only restrict.
     this.coreVerifier = createRequestRuntimeReceiptVerifier(
       options.modelProvider ?? "",
+      this.modelId,
     );
     this.customVerifier = options.receiptVerifier ?? null;
     this.graceMs = options.interruptSettlementGraceMs ??
@@ -789,9 +837,11 @@ export class CodexImplementationPort implements ImplementationPort {
     request: ModelRunRequestV1,
   ): Promise<PortResultV1<ModelRunReceiptV1>> {
     // Fail-closed model policy validation BEFORE any session or model work:
-    // the requested runtime model/effort must be exactly Luna/max.
+    // the requested runtime model must be exactly the route-selected model this
+    // port was constructed with (never a literal) and the effort exactly `max`.
     if (
-      request.model !== REQUIRED_MODEL_ID ||
+      !isValidModelId(request.model) ||
+      request.model !== this.modelId ||
       request.reasoning !== REQUIRED_REASONING_EFFORT
     ) {
       return portError("unavailable", MODEL_POLICY_DETAIL);
@@ -962,7 +1012,7 @@ export class CodexImplementationPort implements ImplementationPort {
     const provider = typeof record.modelProvider === "string"
       ? record.modelProvider
       : null;
-    // The thread response MUST acknowledge the exact provider, Luna/max and a
+    // The thread response MUST acknowledge the exact route provider/model and a
     // nonempty bounded thread id BEFORE any turn starts: a mismatch never
     // spends a model turn.
     if (
@@ -1034,7 +1084,7 @@ export class CodexImplementationPort implements ImplementationPort {
     let outputChars = 0;
     // Bounded COMPLETE correlated routing events for this exact thread/turn
     // (well-formed events for other threads/turns are ignored at receipt);
-    // a malformed or matching off-Luna event fails closed immediately.
+    // a malformed or matching off-route-model event fails closed immediately.
     const reroutes: ModelRerouteV1[] = [];
     // Bounded correlated successful output items (command/file-change/agent
     // output) for this exact thread/turn; notification-byte totals are never
@@ -1191,9 +1241,9 @@ export class CodexImplementationPort implements ImplementationPort {
     /**
      * Correlated routing validation for the EXACT thread/turn. Well-formed
      * events for other threads/turns are ignored; a missing/malformed identity
-     * or a matching malformed/off-Luna event sets the sticky unavailable
+     * or a matching malformed/off-route-model event sets the sticky unavailable
      * disposition (this routing uncertainty is never certified as a failed
-     * runtime receipt). Any matching reroute off the required Luna model
+     * runtime receipt). Any matching reroute off the route-selected model
      * rejects the run even when it is routed back later; no route fallback or
      * synthesized identity exists. The bounded complete history is preserved
      * (the well-formed event is recorded) BEFORE the off-policy rejection.

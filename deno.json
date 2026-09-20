@@ -10,10 +10,10 @@
     "test:integration": "deno test --allow-read=. --allow-run=git --allow-write --allow-env=PATH tests/integration/",
     "test:local": "deno run --allow-env=PATH --allow-run=deno --allow-run=git --allow-write test-local.ts",
     "repair:run": "deno run --allow-read --allow-write --allow-run --allow-net=api.github.com,127.0.0.1:8000 --allow-env=HOME,PATH,GITHUB_TOKEN,SENTINEL_SUPERVISOR_TOKEN,UOS_AI_TOKEN,NODE_V8_COVERAGE src/main.ts",
-    "repair:actions": "deno run --allow-read --allow-write --allow-run --allow-net=\"api.github.com,*.blob.core.windows.net\" --allow-env=HOME,PATH,GITHUB_TOKEN,SENTINEL_SUPERVISOR_TOKEN,UOS_AI_TOKEN,NODE_V8_COVERAGE,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_REPOSITORY,GITHUB_REF,GITHUB_SHA,GITHUB_WORKFLOW_SHA,GITHUB_WORKFLOW_REF,GITHUB_JOB src/host/actions.ts",
+    "repair:actions": "deno run --allow-read --allow-write --allow-run --allow-net=\"api.github.com,*.blob.core.windows.net\" --allow-env=HOME,PATH,GITHUB_TOKEN,SENTINEL_SUPERVISOR_TOKEN,UOS_AI_TOKEN,SENTINEL_MODEL_BASE_URL,SENTINEL_MODEL_ID,SENTINEL_MODEL_FALLBACK,SENTINEL_DEEPSEEK_API_KEY,NODE_V8_COVERAGE,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_REPOSITORY,GITHUB_REF,GITHUB_SHA,GITHUB_WORKFLOW_SHA,GITHUB_WORKFLOW_REF,GITHUB_JOB src/host/actions.ts",
     "release:run": "deno run --allow-read --allow-write --allow-run=git --allow-env=PATH src/release-main.ts",
     "observe:run": "deno run --allow-read=. --allow-write=. --allow-net=ai.ubq.fi --allow-env=SENTINEL_GATEWAY_AUTH_JSON,SENTINEL_REPLAY_KEY_B64 src/observe-main.ts",
-    "supervisor:run": "deno run --allow-read --allow-write --allow-run --allow-net=\"api.github.com,*.blob.core.windows.net\" --allow-env=HOME,PATH,GITHUB_TOKEN,SENTINEL_SUPERVISOR_TOKEN,GITHUB_OUTPUT,NODE_V8_COVERAGE,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_REPOSITORY,GITHUB_REF,GITHUB_SHA,GITHUB_WORKFLOW_SHA,GITHUB_WORKFLOW_REF,GITHUB_JOB src/host/actions-supervisor.ts"
+    "supervisor:run": "deno run --allow-read --allow-write --allow-run --allow-net=\"api.github.com,*.blob.core.windows.net\" --allow-env=HOME,PATH,GITHUB_TOKEN,SENTINEL_SUPERVISOR_TOKEN,SENTINEL_MODEL_BASE_URL,SENTINEL_MODEL_ID,SENTINEL_MODEL_FALLBACK,SENTINEL_DEEPSEEK_API_KEY,GITHUB_OUTPUT,NODE_V8_COVERAGE,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_REPOSITORY,GITHUB_REF,GITHUB_SHA,GITHUB_WORKFLOW_SHA,GITHUB_WORKFLOW_REF,GITHUB_JOB src/host/actions-supervisor.ts"
   },
   "fmt": {
     "include": [

@@ -74,6 +74,10 @@ export const HOSTED_RUNTIME_CHILD_ENV_KEYS = [
   "PATH",
   "GITHUB_TOKEN",
   "SENTINEL_SUPERVISOR_TOKEN",
+  "SENTINEL_MODEL_BASE_URL",
+  "SENTINEL_MODEL_ID",
+  "SENTINEL_MODEL_FALLBACK",
+  "SENTINEL_DEEPSEEK_API_KEY",
   "UOS_AI_TOKEN",
   "GITHUB_RUN_ID",
   "GITHUB_RUN_ATTEMPT",
@@ -668,6 +672,20 @@ function buildChildEnvironment(
   // optional App token when it is non-empty text, the validated standard
   // identity, plus private HOME/cache/temp. No Actions output/env/path file and
   // no host variable crosses over.
+  // Optional route inputs: forwarded only when non-empty so an unset route
+  // keeps the primary gateway behavior exactly as before. The child's own
+  // trusted resolver decides the route; the launcher never selects one.
+  const routeKeys = [
+    "SENTINEL_MODEL_BASE_URL",
+    "SENTINEL_MODEL_ID",
+    "SENTINEL_MODEL_FALLBACK",
+    "SENTINEL_DEEPSEEK_API_KEY",
+  ] as const;
+  const routeEnv: Record<string, string> = {};
+  for (const key of routeKeys) {
+    const value = env[key];
+    if (isNonEmptyText(value)) routeEnv[key] = value;
+  }
   return {
     HOME: dirs.home,
     PATH: path,
@@ -675,6 +693,7 @@ function buildChildEnvironment(
     ...(isNonEmptyText(appToken)
       ? { SENTINEL_SUPERVISOR_TOKEN: appToken }
       : {}),
+    ...routeEnv,
     UOS_AI_TOKEN: modelToken,
     GITHUB_RUN_ID: String(identity.runId),
     GITHUB_RUN_ATTEMPT: String(identity.runAttempt),
@@ -836,6 +855,10 @@ export async function runHostedRuntimeMain(): Promise<
       PATH: Deno.env.get("PATH"),
       GITHUB_TOKEN: Deno.env.get("GITHUB_TOKEN"),
       SENTINEL_SUPERVISOR_TOKEN: Deno.env.get("SENTINEL_SUPERVISOR_TOKEN"),
+      SENTINEL_MODEL_BASE_URL: Deno.env.get("SENTINEL_MODEL_BASE_URL"),
+      SENTINEL_MODEL_ID: Deno.env.get("SENTINEL_MODEL_ID"),
+      SENTINEL_MODEL_FALLBACK: Deno.env.get("SENTINEL_MODEL_FALLBACK"),
+      SENTINEL_DEEPSEEK_API_KEY: Deno.env.get("SENTINEL_DEEPSEEK_API_KEY"),
       UOS_AI_TOKEN: Deno.env.get("UOS_AI_TOKEN"),
     };
     // Native identity is the first check: a malformed job identity fails

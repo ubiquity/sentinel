@@ -150,8 +150,42 @@ const MAX_IMPLEMENTATION_ATTEMPTS = 4;
  */
 const MAX_REVIEW_ROUNDS = 3;
 const MAX_OUTPUT_LIMIT_BYTES = 4096;
-const MODEL_ID = "gpt-5.6-luna" as const;
+/**
+ * Frozen gateway default model id. It is used ONLY when neither the trusted
+ * host input nor the injected implementation port selects a route model: no
+ * request ever keeps this literal while another id was actually requested.
+ */
+const DEFAULT_MODEL_ID = "gpt-5.6-luna" as const;
+/** Private bound for a selectable runtime model id (same rule as the port). */
+const MAX_MODEL_CHARS = 256;
 const REASONING = "max" as const;
+
+/** A nonempty, exactly-trimmed, bounded model id with no control characters. */
+function isSelectableModelId(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  if (value.length === 0 || value.length > MAX_MODEL_CHARS) return false;
+  if (value.trim() !== value) return false;
+  for (let index = 0; index < value.length; index++) {
+    const code = value.charCodeAt(index);
+    if (code <= 0x1f || code === 0x7f) return false;
+  }
+  return true;
+}
+
+/**
+ * The route-selected implementation model id this loop submits in its
+ * `ModelRunRequestV1`. Precedence: the trusted host input on the deps, then
+ * the injected implementation port's own configured route model, then the
+ * frozen gateway default. The port still validates that the submitted request
+ * equals its configured id, so a disagreement fails closed (unavailable)
+ * instead of silently swapping the model behind a receipt.
+ */
+function implementationModelId(deps: RepairCycleDepsV1): string {
+  if (isSelectableModelId(deps.modelId)) return deps.modelId;
+  const injected = deps.model.modelId;
+  if (isSelectableModelId(injected)) return injected;
+  return DEFAULT_MODEL_ID;
+}
 
 function isCausalReplayResult(
   result: ReplayResultV1,
@@ -245,6 +279,14 @@ export interface RepairCycleDepsV1 {
    */
   fixtureIdentities?: ReplayFixtureIdentitySourceV1;
   model: ImplementationPort;
+  /**
+   * Trusted route-selected implementation model id for every start this run
+   * admits. When omitted the injected implementation port's own configured
+   * model id is used, and when neither is available the frozen gateway default
+   * (`gpt-5.6-luna`) applies. The id is submitted verbatim and recorded in the
+   * receipt; it is never rewritten per request.
+   */
+  modelId?: string;
   /** The one production admission controller (RollingStartBudget). */
   budget: BudgetControllerV1;
 }
@@ -2665,7 +2707,7 @@ async function executeImplementationStep(
     issue,
     evidence: withIntent.evidence,
     ...(findings === null ? {} : { reviewFindings: findings }),
-    model: MODEL_ID,
+    model: implementationModelId(deps),
     reasoning: REASONING,
     maxDurationMs: bound.maxDurationMs,
     maxOutputChars: bound.maxOutputChars,

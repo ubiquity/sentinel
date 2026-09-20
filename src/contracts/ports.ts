@@ -653,7 +653,14 @@ export interface ReplayPort {
 // publishes it.
 // ---------------------------------------------------------------------------
 
-export type ModelIdV1 = "gpt-5.6-luna";
+/**
+ * Route-selected runtime model id. The implementation model is chosen by the
+ * trusted model route (`src/host/model-route.ts`) and MUST always be the id
+ * actually requested and acknowledged by the run — a receipt never keeps one
+ * model id while another was requested. `ReasoningEffortV1` remains frozen at
+ * `max` for every route.
+ */
+export type ModelIdV1 = string;
 export type ReasoningEffortV1 = "max";
 
 export interface ModelRunRequestV1 {
@@ -745,6 +752,15 @@ export interface ModelRunReceiptV1 {
 }
 
 export interface ImplementationPort {
+  /**
+   * Route-selected implementation model id this port is configured with. The
+   * repair loop submits EXACTLY this id as `ModelRunRequestV1.model` (and the
+   * port still validates that the submitted request equals it), so the receipt
+   * records the id actually requested. Absence means the caller keeps the
+   * frozen gateway default (`gpt-5.6-luna`); the value is never rewritten by
+   * the port after construction.
+   */
+  readonly modelId?: string;
   runModel(
     request: ModelRunRequestV1,
   ): Promise<PortResultV1<ModelRunReceiptV1>>;

@@ -66,6 +66,25 @@ const OBSERVED_BASE = "b".repeat(40) as GitSha;
 const NATIVE_LOGIN = "github-actions[bot]";
 const APP_LOGIN = "ubiquity-sentinel[bot]";
 const APP_TOKEN = "test-app-token";
+/**
+ * Every allow-listed key that is OPTIONAL: it crosses only when the run
+ * supplies non-empty text. The exact-key assertions subtract this set from
+ * the allow-list for a run that supplies none of them.
+ */
+const OPTIONAL_CHILD_ENV_KEYS = [
+  "SENTINEL_SUPERVISOR_TOKEN",
+  "SENTINEL_MODEL_BASE_URL",
+  "SENTINEL_MODEL_ID",
+  "SENTINEL_MODEL_FALLBACK",
+  "SENTINEL_DEEPSEEK_API_KEY",
+] as const;
+
+/** The exact child key set for a run that supplies no optional value. */
+function requiredChildEnvKeys(): string[] {
+  const optional = new Set<string>(OPTIONAL_CHILD_ENV_KEYS);
+  return HOSTED_RUNTIME_CHILD_ENV_KEYS.filter((key) => !optional.has(key))
+    .sort();
+}
 
 class FakeClock implements Clock {
   constructor(private t: number) {}
@@ -655,15 +674,14 @@ Deno.test("hosted runtime: exact identity and clean source settle one healthy te
     assert.equal(child.cwd, await Deno.realPath(rig.runtimeDir));
     assert.equal(child.maxDurationMs, HOSTED_RUNTIME_DEADLINE_MS);
     assert.equal(child.maxOutputBytes, HOSTED_RUNTIME_MAX_OUTPUT_BYTES);
-    // The allow-list is exact: every listed key crosses except the one
-    // optional credential this run did not supply.
+    // The allow-list is exact: every listed key crosses except the optional
+    // values this run did not supply.
     assert.deepEqual(
       Object.keys(child.env).sort(),
-      HOSTED_RUNTIME_CHILD_ENV_KEYS.filter((key) =>
-        key !== "SENTINEL_SUPERVISOR_TOKEN"
-      ).sort(),
+      requiredChildEnvKeys(),
     );
     assert.equal("SENTINEL_SUPERVISOR_TOKEN" in child.env, false);
+    assert.equal("SENTINEL_DEEPSEEK_API_KEY" in child.env, false);
     assert.equal("GITHUB_OUTPUT" in child.env, false);
     assert.equal("GITHUB_ENV" in child.env, false);
     assert.equal(child.env.GITHUB_JOB, "repair");
@@ -812,10 +830,41 @@ Deno.test("hosted runtime: the optional sentinel App token crosses only when it 
     assert.equal(child.env.SENTINEL_SUPERVISOR_TOKEN, APP_TOKEN);
     assert.deepEqual(
       Object.keys(child.env).sort(),
-      [...HOSTED_RUNTIME_CHILD_ENV_KEYS].sort(),
+      [
+        ...requiredChildEnvKeys(),
+        "SENTINEL_SUPERVISOR_TOKEN",
+      ].sort(),
       "a supplied App token completes the exact allow-list",
     );
     assert.equal(child.env.GITHUB_TOKEN, rig.env.GITHUB_TOKEN);
+
+    // The DeepSeek-direct fallback selection reaches the child exactly as the
+    // launcher received it; the launcher never selects or rewrites a route.
+    rig.process.child = exited(childLine(rig.execution));
+    const routed = await launch(rig, {
+      env: {
+        ...rig.env,
+        SENTINEL_MODEL_FALLBACK: "deepseek",
+        SENTINEL_DEEPSEEK_API_KEY: "test-deepseek-key",
+      },
+    });
+    assert.equal(routed.status, "healthy", JSON.stringify(routed));
+    const routedChild = rig.process.childCalls().at(-1);
+    assert.ok(routedChild !== undefined);
+    assert.equal(routedChild.env.SENTINEL_MODEL_FALLBACK, "deepseek");
+    assert.equal(
+      routedChild.env.SENTINEL_DEEPSEEK_API_KEY,
+      "test-deepseek-key",
+    );
+    assert.deepEqual(
+      Object.keys(routedChild.env).sort(),
+      [
+        ...requiredChildEnvKeys(),
+        "SENTINEL_MODEL_FALLBACK",
+        "SENTINEL_DEEPSEEK_API_KEY",
+      ].sort(),
+      "the selected route variables cross with the required keys only",
+    );
 
     rig.process.child = exited(childLine(rig.execution));
     const emptyToken = await launch(rig, {

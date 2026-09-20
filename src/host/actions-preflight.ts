@@ -2,20 +2,24 @@
  * Finite credential-free Codex startup diagnostic.
  *
  * Proves the installed app-server can be spawned, initialized and can
- * acknowledge a `thread/start` bound to the runtime model/provider/reasoning
- * and the sentinel-local permission profile WITHOUT any model operation: no
- * `turn/start`, no authoritative token, no host credentials. It runs before
- * budget admission so an actual GitHub-runner startup-boundary failure is
- * attributed exactly instead of being lost inside the first model reservation
- * (the observed hosted failure was a five-second `server_error` with no
- * detail). Passing this diagnostic is NOT repair-delivery success.
+ * acknowledge a `thread/start` bound to the ROUTE-SELECTED model/provider/
+ * reasoning and the sentinel-local permission profile WITHOUT any model
+ * operation: no `turn/start`, no authoritative token, no host credentials. It
+ * runs before budget admission so an actual GitHub-runner startup-boundary
+ * failure is attributed exactly instead of being lost inside the first model
+ * reservation (the observed hosted failure was a five-second `server_error`
+ * with no detail). Passing this diagnostic is NOT repair-delivery success.
+ *
+ * The provider/model come from the trusted resolved route so a fallback run
+ * acknowledges its own provider instead of failing startup on a gateway
+ * mismatch; no model call is ever made (the client's endpoint stays the
+ * non-routable dummy below and only `thread/start` is submitted).
  */
 import { CodexSubprocessSession } from "../repair/codex-transport.ts";
 import { ensurePrivateDir, ensureTaskClient, joinPath } from "./local.ts";
+import { type ModelRouteV1, resolveModelRoute } from "./model-route.ts";
 
-const MODEL = "gpt-5.6-luna";
 const REASONING = "max";
-const PROVIDER = "uos";
 const PROFILE = "sentinel-local";
 const BASE_URL = "http://127.0.0.1:1/v1";
 const TOKEN = "unused-no-model-call";
@@ -86,7 +90,11 @@ async function resolveCodex(path: string): Promise<string> {
   throw new Error("installed codex executable not found on PATH");
 }
 
-export async function runActionsPreflight(): Promise<void> {
+export async function runActionsPreflight(
+  route: ModelRouteV1 = resolveModelRoute(Deno.env.toObject()),
+): Promise<void> {
+  const MODEL = route.model;
+  const PROVIDER = route.provider;
   // The only host input read is PATH; no credential is ever resolved.
   const path = Deno.env.get("PATH");
   if (path === undefined || path.length === 0) {
@@ -125,6 +133,9 @@ export async function runActionsPreflight(): Promise<void> {
       codexExecutable,
       denoExecutable: Deno.execPath(),
       trustedPath: path,
+      // The route names the provider the thread acknowledgement must echo; the
+      // endpoint stays the non-routable dummy because no model call is made.
+      route,
       baseUrl: BASE_URL,
     });
     // Trusted-host fixture outside the checkout: the sandboxed session must
