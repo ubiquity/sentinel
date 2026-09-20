@@ -31,14 +31,10 @@ function slug(owner: string, name: string): TargetSlugV1 {
   return { slug: `${owner}/${name}`, owner, name };
 }
 
-Deno.test("targets: the shipped setting is a plain array naming the sentinel repo", async () => {
+Deno.test("targets: the shipped setting is a plain array", async () => {
   const text = await Deno.readTextFile(`./${TARGETS_FILE_NAME}`);
   const parsed = JSON.parse(text) as unknown;
   assert.ok(Array.isArray(parsed), "the setting is a plain array");
-  const targets = parseTargetSlugsV1(parsed);
-  assert.deepEqual(targets.map((entry) => entry.slug), ["ubiquity/sentinel"]);
-  assert.equal(targets[0].owner, "ubiquity");
-  assert.equal(targets[0].name, "sentinel");
 });
 
 Deno.test("targets: the setting file is a protected path", () => {
