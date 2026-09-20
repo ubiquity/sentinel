@@ -1175,6 +1175,44 @@ export class GitHubApiClient {
         step,
         observedAt,
       );
+      // A runtime step that STARTED and then concluded failure without
+      // publishing any terminal is an explicit, observable failure of that
+      // exact execution: the child ran and died before it could emit one.
+      // Returning unavailable here would strand the pointer's saved execution
+      // forever, because no later observation of that completed job can ever
+      // produce a terminal. Only the no-terminal case is rewritten, and only
+      // when the step itself concluded failure with coherent timestamps; every
+      // other metadata fault stays unavailable.
+      if (
+        !parsedTerminal.ok &&
+        parsedTerminal.error.detail === HOSTED_EXECUTION_TERMINAL &&
+        step.conclusion === "failure" &&
+        !HOSTED_EXECUTION_TERMINAL_LOOKING.test(log.value) &&
+        repair.startedAt !== null && step.startedAt !== null &&
+        step.completedAt !== null && repair.completedAt !== null &&
+        step.startedAt + tolerance >= repair.startedAt &&
+        step.completedAt <= repair.completedAt + tolerance &&
+        repair.completedAt <= observedAt + tolerance &&
+        step.completedAt <= observedAt + tolerance
+      ) {
+        return parseWith({
+          execution: saved,
+          workflowId: HOSTED_SUPERVISOR_WORKFLOW_ID,
+          workflowPath: HOSTED_SUPERVISOR_WORKFLOW_PATH,
+          repository: HOSTED_SUPERVISOR_REPOSITORY,
+          ref: HOSTED_SUPERVISOR_REF,
+          jobId: repair.id,
+          startedAt: repair.startedAt,
+          finishedAt: repair.completedAt,
+          observedAt,
+          outcome: "failed",
+          startupReady: false,
+          settled: true,
+          baseSha: null,
+          terminalAt: step.completedAt,
+          logDigest: await sha256Hex(log.value),
+        }, parseHostedRunProofV1);
+      }
       if (!parsedTerminal.ok) return parsedTerminal;
       const terminal = parsedTerminal.value.terminal;
       // A healthy terminal with a failed job or runtime step is contradictory:

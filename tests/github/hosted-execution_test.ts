@@ -461,6 +461,53 @@ Deno.test("hosted execution: an explicit failed terminal or failed job is a fail
   );
 });
 
+Deno.test("hosted execution: a started runtime step that concluded failure with no terminal settles as failed, never stranded", async () => {
+  // The real 2026-09-20 case: the gateway was unreachable, the child runtime
+  // step started and then exited non-zero BEFORE it could publish a
+  // `hosted_runtime_terminal` line. The attempt and job are completed, so no
+  // later observation can ever produce a terminal. Returning unavailable here
+  // strands the pointer's saved execution forever and the supervisor can never
+  // advance; the honest, observable settlement is an explicit failure.
+  const stranded = makeRig();
+  scriptAttemptAndJobs(
+    stranded,
+    attemptBody(),
+    jobsBody([
+      jobBody({
+        conclusion: "failure",
+        steps: [runtimeStep({ conclusion: "failure" })],
+      }),
+    ]),
+  );
+  scriptLog(
+    stranded,
+    "2026-09-20T10:23:05.4041704Z hosted runtime result is unavailable\n",
+  );
+  const proof = settlementProof(
+    await stranded.client.readHostedExecution(intent()),
+  );
+  assert.equal(proof.outcome, "failed");
+  assert.equal(proof.startupReady, false);
+  assert.equal(proof.baseSha, null);
+  assert.equal(proof.settled, true);
+  assert.equal(proof.jobId, JOB_ID);
+  assert.equal(proof.logDigest.length, 64);
+
+  // A successful runtime step with no terminal stays unavailable: nothing
+  // observable failed, so there is no honest failed settlement to publish.
+  const contradictory = makeRig();
+  scriptAttemptAndJobs(
+    contradictory,
+    attemptBody(),
+    jobsBody([jobBody({ steps: [runtimeStep()] })]),
+  );
+  scriptLog(contradictory, "2026-09-20T10:23:05.4041704Z nothing to see\n");
+  assert.equal(
+    (await contradictory.client.readHostedExecution(intent())).ok,
+    false,
+  );
+});
+
 Deno.test("hosted execution: skipped, cancelled, timed-out or absent completed repair jobs are explicit not_started", async () => {
   const skipped = makeRig();
   scriptAttemptAndJobs(
