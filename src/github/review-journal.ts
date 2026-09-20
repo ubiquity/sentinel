@@ -91,7 +91,7 @@ export const MAX_FINDINGS = MaxItems.findings;
 export const MAX_JOURNAL_BYTES = 60_000;
 
 /** Runtime implementation model (frozen; no fallback). */
-export const REVIEW_MODEL = "gpt-5.6-luna";
+export const REVIEW_MODEL = "gpt-reserve";
 /** Runtime reasoning effort (frozen). */
 export const REVIEW_REASONING = "max";
 

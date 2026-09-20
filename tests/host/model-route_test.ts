@@ -29,7 +29,7 @@ import type { ActualSessionEvidenceV1 } from "../../src/repair/model-port.ts";
 const GATEWAY = {
   provider: "uos",
   baseUrl: "https://ai.ubq.fi/v1",
-  model: "gpt-5.6-luna",
+  model: "gpt-reserve",
   reasoning: "max",
   apiKeyEnv: null,
 } as const;
@@ -297,25 +297,25 @@ Deno.test("model route: the receipt verifier certifies only the configured model
   assert.equal(
     verify(
       routeEvidence({
-        requestedModel: "gpt-5.6-luna",
-        threadModel: "gpt-5.6-luna",
+        requestedModel: "gpt-reserve",
+        threadModel: "gpt-reserve",
       }),
     ),
     null,
   );
   // The acknowledged thread model must equal the requested model exactly.
-  assert.equal(verify(routeEvidence({ threadModel: "gpt-5.6-luna" })), null);
+  assert.equal(verify(routeEvidence({ threadModel: "gpt-reserve" })), null);
   // Callers that pass no model keep the frozen gateway model id, and the
   // fallback id is never accepted through that default.
   const gateway = createRequestRuntimeReceiptVerifier("uos");
   assert.equal(
     gateway(routeEvidence({
-      requestedModel: "gpt-5.6-luna",
-      threadModel: "gpt-5.6-luna",
+      requestedModel: "gpt-reserve",
+      threadModel: "gpt-reserve",
       requestedProvider: "uos",
       threadModelProvider: "uos",
     }))?.observedModel,
-    "gpt-5.6-luna",
+    "gpt-reserve",
   );
   assert.equal(
     gateway(
@@ -339,7 +339,7 @@ Deno.test("model route: the port opens no session for an off-route model", async
   assert.equal(port.modelId, ROUTE_MODEL);
   // The gateway literal is refused BEFORE any session opens: the port can
   // never request one model while its receipt claims another.
-  const foreign = await port.runModel(routeRequest("gpt-5.6-luna"));
+  const foreign = await port.runModel(routeRequest("gpt-reserve"));
   assert.equal(foreign.ok, false);
   if (!foreign.ok) assert.equal(foreign.error.kind, "unavailable");
   assert.equal(opened, 0, "an off-route request never opens a session");
@@ -363,7 +363,7 @@ Deno.test("model route: the port opens no session for an off-route model", async
       throw new Error("no session may open past the policy gate");
     },
   });
-  assert.equal(defaultPort.modelId, "gpt-5.6-luna");
+  assert.equal(defaultPort.modelId, "gpt-reserve");
   const fallback = await defaultPort.runModel(routeRequest(ROUTE_MODEL));
   assert.equal(fallback.ok, false);
   assert.equal(defaultOpened, 0, "the frozen default refuses the fallback id");

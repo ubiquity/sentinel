@@ -982,7 +982,7 @@ export class FakeModel implements ImplementationPort {
           : this.options.outcome === "failed"
           ? "failed"
           : "completed",
-        observedModel: "gpt-5.6-luna",
+        observedModel: "gpt-reserve",
         observedReasoning: "max",
         durationMs: 100,
         outputChars: 500,

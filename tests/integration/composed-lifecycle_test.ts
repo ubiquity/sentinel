@@ -15,7 +15,7 @@
  * `deno task test` executions at exact revisions); the real
  * CodexImplementationPort with an injected in-process fake Codex session and
  * a trusted-host receipt verifier that certifies ONLY the app-server
- * evidence the session itself acknowledged (gpt-5.6-luna / max / completed);
+ * evidence the session itself acknowledged (gpt-reserve / max / completed);
  * the real GitStateStore (repair + release roles on one disposable bare
  * remote) with the real RollingStartBudget/DurableGitHubCooldownGate; and
  * the recording FakeGithub port (exact-head merge, per-head PR numbers) with
@@ -711,7 +711,7 @@ class FakeCodexSession implements CodexSessionV1 {
       case "thread/start":
         return Promise.resolve({
           thread: { id: "thread-1" },
-          model: "gpt-5.6-luna",
+          model: "gpt-reserve",
           reasoningEffort: "max",
           modelProvider: "sentinel-host",
         });
@@ -791,13 +791,13 @@ function sessionVerifier(
   | { provider: string; observedModel: string; observedReasoning: string }
   | null {
   if (
-    evidence.threadModel === "gpt-5.6-luna" &&
+    evidence.threadModel === "gpt-reserve" &&
     evidence.threadEffort === "max" &&
     evidence.terminal.status === "completed"
   ) {
     return {
       provider: evidence.threadModelProvider ?? "sentinel-host",
-      observedModel: "gpt-5.6-luna",
+      observedModel: "gpt-reserve",
       observedReasoning: "max",
     };
   }

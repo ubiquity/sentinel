@@ -155,7 +155,7 @@ const MAX_OUTPUT_LIMIT_BYTES = 4096;
  * host input nor the injected implementation port selects a route model: no
  * request ever keeps this literal while another id was actually requested.
  */
-const DEFAULT_MODEL_ID = "gpt-5.6-luna" as const;
+const DEFAULT_MODEL_ID = "gpt-reserve" as const;
 /** Private bound for a selectable runtime model id (same rule as the port). */
 const MAX_MODEL_CHARS = 256;
 const REASONING = "max" as const;
@@ -283,7 +283,7 @@ export interface RepairCycleDepsV1 {
    * Trusted route-selected implementation model id for every start this run
    * admits. When omitted the injected implementation port's own configured
    * model id is used, and when neither is available the frozen gateway default
-   * (`gpt-5.6-luna`) applies. The id is submitted verbatim and recorded in the
+   * (`gpt-reserve`) applies. The id is submitted verbatim and recorded in the
    * receipt; it is never rewritten per request.
    */
   modelId?: string;

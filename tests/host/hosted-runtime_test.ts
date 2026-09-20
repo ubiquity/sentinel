@@ -409,7 +409,7 @@ function hostedFixtureRequest(): ModelRunRequestV1 {
     base: OBSERVED_BASE,
     issue: { number: 53, title: "fixture", body: HOSTED_FIXTURE_ISSUE_BODY },
     evidence: [{ kind: "replay_result", ref: HOSTED_FIXTURE_EVIDENCE_REF }],
-    model: "gpt-5.6-luna",
+    model: "gpt-reserve",
     reasoning: "max",
     maxDurationMs: 1_200_000,
     maxOutputChars: 400_000,

@@ -18,7 +18,7 @@ import {
   sanitizeGatewayReplay,
 } from "../../../src/adapters/gateway/sanitize.ts";
 
-const PUBLIC_MODEL = "gpt-5.6-luna";
+const PUBLIC_MODEL = "gpt-reserve";
 const UNAVAILABLE_DETAIL = "Gateway replay cannot be sanitized";
 const INVALID_POLICY_DETAIL = "Invalid gateway sanitizer policy";
 
@@ -112,7 +112,7 @@ const CHAT_REQUEST: Record<string, unknown> = {
 function responsesSseText(): string {
   return [
     "event:response.created\r\n",
-    'data:{"type":"response.created","response":{"id":"resp_priv_001","object":"response","status":"in_progress","model":"gpt-5.6-luna"}}\r\n',
+    'data:{"type":"response.created","response":{"id":"resp_priv_001","object":"response","status":"in_progress","model":"gpt-reserve"}}\r\n',
     "\r\n",
     'data:{"type":"response.output_item.added","output_index":0,"item":{"id":"item_priv_001","type":"message","status":"in_progress","role":"assistant","content":[]}}\n',
     "\n",
@@ -122,7 +122,7 @@ function responsesSseText(): string {
     "\n",
     ":server note\n",
     "\n",
-    'data:{"type":"response.completed","response":{"id":"resp_priv_001","object":"response","status":"completed","model":"gpt-5.6-luna","output":[{"id":"item_priv_001","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"private final answer"}]}],"usage":{"input_tokens":12,"output_tokens":34,"total_tokens":46}}}\n',
+    'data:{"type":"response.completed","response":{"id":"resp_priv_001","object":"response","status":"completed","model":"gpt-reserve","output":[{"id":"item_priv_001","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"private final answer"}]}],"usage":{"input_tokens":12,"output_tokens":34,"total_tokens":46}}}\n',
     "\n",
     "data:[DONE]\n",
   ].join("");

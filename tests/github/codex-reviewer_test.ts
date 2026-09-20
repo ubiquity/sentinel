@@ -75,7 +75,7 @@ class ScriptedCodexSession implements CodexSessionV1 {
   failure: CodexProtocolError | null = null;
   threadAck: unknown = {
     thread: { id: "thread-1" },
-    model: "gpt-5.6-luna",
+    model: "gpt-reserve",
     modelProvider: PROVIDER,
     reasoningEffort: "max",
     activePermissionProfile: { id: REVIEW_PROFILE },
@@ -345,13 +345,13 @@ Deno.test(
     assert.equal(review.execution.invocationId, "invocation-1");
     assert.equal(review.execution.ownerRunId, "run-1");
     assert.equal(review.execution.submittedProvider, PROVIDER);
-    assert.equal(review.execution.model, "gpt-5.6-luna");
+    assert.equal(review.execution.model, "gpt-reserve");
     assert.equal(review.execution.reasoning, "max");
     assert.equal(review.execution.startMayOccur, true);
     assert.equal("turnId" in review.execution, false);
 
     const threadParams = session.params[1] as Record<string, unknown>;
-    assert.equal(threadParams.model, "gpt-5.6-luna");
+    assert.equal(threadParams.model, "gpt-reserve");
     assert.equal(threadParams.modelProvider, PROVIDER);
     assert.equal(threadParams.permissions, REVIEW_PROFILE);
     assert.equal(
@@ -362,7 +362,7 @@ Deno.test(
     assert.equal(threadParams.approvalPolicy, "never");
     assert.deepEqual(threadParams.config, {
       model_reasoning_effort: "max",
-      review_model: "gpt-5.6-luna",
+      review_model: "gpt-reserve",
       "features.shell_tool": true,
       "features.unified_exec": false,
       "features.multi_agent": false,
@@ -423,7 +423,7 @@ Deno.test(
       model: unknown;
       effort: unknown;
     };
-    assert.equal(turnParams.model, "gpt-5.6-luna");
+    assert.equal(turnParams.model, "gpt-reserve");
     assert.equal(turnParams.effort, "max");
     assert.equal(turnParams.permissions, REVIEW_PROFILE);
     assert.deepEqual(turnParams.outputSchema, REVIEW_RESULT_OUTPUT_SCHEMA);
@@ -478,7 +478,7 @@ Deno.test(
     const provider = new ScriptedCodexSession();
     provider.threadAck = {
       thread: { id: "thread-1" },
-      model: "gpt-5.6-luna",
+      model: "gpt-reserve",
       modelProvider: "other-provider",
       reasoningEffort: "max",
     };
@@ -497,7 +497,7 @@ Deno.test(
     const session = new ScriptedCodexSession();
     session.threadAck = {
       thread: { id: "thread-1" },
-      model: "gpt-5.6-luna",
+      model: "gpt-reserve",
       modelProvider: PROVIDER,
       reasoningEffort: "max",
       activePermissionProfile: { id: "sentinel-review" },
@@ -574,7 +574,7 @@ Deno.test(
         const session = new ScriptedCodexSession();
         session.threadAck = {
           thread: { id: "thread-1" },
-          model: "gpt-5.6-luna",
+          model: "gpt-reserve",
           modelProvider: PROVIDER,
           reasoningEffort: "max",
           ...(ack === undefined ? {} : { activePermissionProfile: ack }),
@@ -666,7 +666,7 @@ Deno.test(
     assert.equal(outcome.execution?.turnId, "turn-1");
     assert.equal(outcome.actual?.terminalOrigin, "runtime");
     assert.equal(outcome.actual?.observedTerminalStatus, "completed");
-    assert.equal(outcome.actual?.observedModel, "gpt-5.6-luna");
+    assert.equal(outcome.actual?.observedModel, "gpt-reserve");
     assert.equal(outcome.actual?.observedReasoning, "max");
     assert.equal(outcome.actual?.provider, PROVIDER);
     assert.equal(outcome.actual?.evidenceKind, "request-runtime");
@@ -914,7 +914,7 @@ Deno.test(
       scripted.emit("model/rerouted", {
         threadId: "thread-1",
         turnId: scripted.turnId,
-        fromModel: "gpt-5.6-luna",
+        fromModel: "gpt-reserve",
         toModel: "gpt-5.4",
         reason: "capacity",
       });
@@ -1967,7 +1967,7 @@ Deno.test(
           session.emit("model/rerouted", {
             threadId: "thread-1",
             turnId: session.turnId,
-            fromModel: "gpt-5.6-luna",
+            fromModel: "gpt-reserve",
             toModel: "gpt-5.4",
             reason: "capacity",
           });

@@ -172,8 +172,8 @@ jobs:
             if (status.kind !== "sentinel_local_status") reject("kind is not sentinel_local_status");
             if (status.version !== "v1") reject("version is not v1");
             if (status.reportVersion !== REPORT_VERSION) reject("reportVersion is not v2");
-            if (status.model !== "gpt-5.6-luna" || status.reasoning !== "max") {
-              reject("model policy is not gpt-5.6-luna with max reasoning");
+            if (status.model !== "gpt-reserve" || status.reasoning !== "max") {
+              reject("model policy is not gpt-reserve with max reasoning");
             }
             if (!isObject(status.limits) || status.limits.perHour !== LIMIT_PER_HOUR || status.limits.perSevenDays !== null) {
               reject("admission limits are not 120 per hour with no weekly cap");
@@ -445,7 +445,7 @@ jobs:
             details.push("- Dispatch age: " + elapsed(ageMs) + " (stale beyond 2 hours)");
             details.push("- Controller SHA: " + status.controllerSha);
             details.push("- Target base SHA: " + (isSha(status.targetBaseSha) ? status.targetBaseSha : "none recorded"));
-            details.push("- Implementation model: gpt-5.6-luna with max reasoning (matches the required runtime policy)");
+            details.push("- Implementation model: gpt-reserve with max reasoning (matches the required runtime policy)");
             details.push("- Admission limits: 120 starts per rolling hour, no weekly cap");
             details.push("- Outcome: " + outcomeStatus + (outcomeStatus === "step_limit" ? " after " + status.outcome.steps + " steps" : ""));
             details.push("- Work items: " + W.total + (W.omitted > 0 ? " (" + work.length + " in bounded detail, " + W.omitted + " omitted)" : ""));

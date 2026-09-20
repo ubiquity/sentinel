@@ -574,7 +574,7 @@ function modelRequest(): ModelRunRequestV1 {
     base: SHA1,
     issue: { number: 42, title: "receipt", body: DUMMY_ISSUE_BODY },
     evidence: [{ kind: "replay_result", ref: DUMMY_EVIDENCE_REF }],
-    model: "gpt-5.6-luna",
+    model: "gpt-reserve",
     reasoning: "max",
     maxDurationMs: 1_200_000,
     maxOutputChars: 400_000,
@@ -612,7 +612,7 @@ function receipt(
         observedTerminalStatus: overrides.observedTerminalStatus !== undefined
           ? overrides.observedTerminalStatus
           : "completed",
-        observedModel: overrides.observedModel ?? "gpt-5.6-luna",
+        observedModel: overrides.observedModel ?? "gpt-reserve",
         observedReasoning: overrides.observedReasoning ?? "max",
         durationMs: overrides.durationMs ?? 1_234,
         outputChars: overrides.outputChars ?? 100,
@@ -660,7 +660,7 @@ Deno.test(
       assert.equal(written.taskId, "issue-42");
       assert.equal(written.base, SHA1);
       assert.deepEqual(written.requested, {
-        model: "gpt-5.6-luna",
+        model: "gpt-reserve",
         reasoning: "max",
         maxDurationMs: 1_200_000,
         maxOutputChars: 400_000,
@@ -676,7 +676,7 @@ Deno.test(
           turnId: "turn-1",
           terminalOrigin: "runtime",
           observedTerminalStatus: "completed",
-          observedModel: "gpt-5.6-luna",
+          observedModel: "gpt-reserve",
           observedReasoning: "max",
           durationMs: 1_234,
           outputChars: 100,

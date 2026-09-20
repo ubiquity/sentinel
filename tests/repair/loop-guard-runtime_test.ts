@@ -59,7 +59,7 @@ class ScriptSession implements CodexSessionV1 {
     if (method === "thread/start") {
       return Promise.resolve({
         thread: { id: `t${this.number}` },
-        model: "gpt-5.6-luna",
+        model: "gpt-reserve",
         reasoningEffort: "max",
         modelProvider: "scripted",
       });
@@ -205,10 +205,10 @@ Deno.test("loop-guard runtime: real entrypoint stops first loop and admits secon
       // restriction after the concrete core request/runtime checks.
       modelProvider: "scripted",
       receiptVerifier: (e) =>
-        e.threadModel === "gpt-5.6-luna" && e.threadEffort === "max"
+        e.threadModel === "gpt-reserve" && e.threadEffort === "max"
           ? {
             provider: e.threadModelProvider ?? "scripted",
-            observedModel: "gpt-5.6-luna",
+            observedModel: "gpt-reserve",
             observedReasoning: "max",
           }
           : null,

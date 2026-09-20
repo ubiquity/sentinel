@@ -120,7 +120,7 @@ const MAX_COMMAND_ACTIONS = 64;
  * The frozen default (gateway) runtime model id used only when the caller does
  * not configure a route-selected id; no fallback is ever synthesized.
  */
-const DEFAULT_MODEL_ID = "gpt-5.6-luna";
+const DEFAULT_MODEL_ID = "gpt-reserve";
 /** The frozen runtime reasoning effort; no fallback is ever synthesized. */
 const REQUIRED_REASONING_EFFORT = "max";
 /** Private bound for a configured/requested runtime model id. */
@@ -761,7 +761,7 @@ export interface CodexImplementationPortOptionsV1 {
   modelProvider?: string;
   /**
    * Route-selected runtime model id this port is configured with. Callers that
-   * do not pass one keep the frozen gateway default (`gpt-5.6-luna`). The port
+   * do not pass one keep the frozen gateway default (`gpt-reserve`). The port
    * validates the submitted request against EXACTLY this value (and the receipt
    * verifier requires the requested model to equal it), so the id is never
    * rewritten after construction and a receipt always records the model that

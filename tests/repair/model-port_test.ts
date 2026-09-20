@@ -85,7 +85,7 @@ class FakeCodexSession implements CodexSessionV1 {
       case "thread/start": {
         const ack: Record<string, unknown> = {
           thread: { id: "thread-1" },
-          model: "gpt-5.6-luna",
+          model: "gpt-reserve",
           reasoningEffort: "max",
           modelProvider: "sentinel-host",
         };
@@ -173,12 +173,12 @@ Deno.test("model-port: thread starts with bounded isolated-checkout write capabi
     receiptVerifier: (evidence) => {
       verified.push(evidence);
       if (
-        evidence.threadModel === "gpt-5.6-luna" &&
+        evidence.threadModel === "gpt-reserve" &&
         evidence.terminal.status === "completed"
       ) {
         return {
           provider: evidence.threadModelProvider ?? "sentinel-host",
-          observedModel: "gpt-5.6-luna",
+          observedModel: "gpt-reserve",
           observedReasoning: "max",
         };
       }
@@ -192,7 +192,7 @@ Deno.test("model-port: thread starts with bounded isolated-checkout write capabi
     base: SHA1,
     issue: { number: 1, title: "title", body: "body" },
     evidence: [],
-    model: "gpt-5.6-luna",
+    model: "gpt-reserve",
     reasoning: "max",
     maxDurationMs: 5_000,
     maxOutputChars: 10_000,
@@ -232,7 +232,7 @@ Deno.test("model-port: thread starts with bounded isolated-checkout write capabi
   assert.equal(params.cwd, CHECKOUT, "write scope is the isolated checkout");
   assert.equal(params.approvalPolicy, "never");
   assert.equal(params.ephemeral, true);
-  assert.equal(params.model, "gpt-5.6-luna");
+  assert.equal(params.model, "gpt-reserve");
   assert.deepEqual(
     params.config,
     { model_reasoning_effort: "max" },
@@ -290,7 +290,7 @@ Deno.test(
         },
         { severity: "P1", path: null, message: "Second finding." },
       ],
-      model: "gpt-5.6-luna",
+      model: "gpt-reserve",
       reasoning: "max",
       maxDurationMs: 5_000,
       maxOutputChars: 12_345,
@@ -335,7 +335,7 @@ Deno.test(
       base: SHA1,
       issue: { number: 1, title: "title", body: "body" },
       evidence: [],
-      model: "gpt-5.6-luna",
+      model: "gpt-reserve",
       reasoning: "max",
       maxDurationMs: 5_000,
       maxOutputChars: 12_345,
@@ -376,7 +376,7 @@ Deno.test(
       base: SHA1,
       issue: { number: 1, title: "title", body: "body" },
       evidence: [],
-      model: "gpt-5.6-luna",
+      model: "gpt-reserve",
       reasoning: "max",
       maxDurationMs: 5_000,
       maxOutputChars: 12_345,
@@ -421,7 +421,7 @@ Deno.test(
         "protected paths",
         "credentials",
         "expected test assertions",
-        "gpt-5.6-luna",
+        "gpt-reserve",
         "max reasoning",
         "total event output allowance is 12345 characters",
         "every tool notification counts against it",
@@ -484,7 +484,7 @@ Deno.test(
       base: SHA1,
       issue: { number: 1, title: "title", body: "body" },
       evidence: [],
-      model: "gpt-5.6-luna",
+      model: "gpt-reserve",
       reasoning: "max",
       maxDurationMs: 5_000,
       maxOutputChars: 10_000,
@@ -562,7 +562,7 @@ Deno.test(
           base: SHA1,
           issue: { number: 1, title: "title", body: "body" },
           evidence: [],
-          model: "gpt-5.6-luna",
+          model: "gpt-reserve",
           reasoning: "max",
           maxDurationMs: 5_000,
           maxOutputChars: 10_000,
@@ -615,7 +615,7 @@ Deno.test(
           base: SHA1,
           issue: { number: 1, title: "title", body: "body" },
           evidence: [],
-          model: "gpt-5.6-luna",
+          model: "gpt-reserve",
           reasoning: "max",
           maxDurationMs: 5_000,
           maxOutputChars: 10_000,
@@ -655,7 +655,7 @@ Deno.test(
       modelProvider: "sentinel-host",
       receiptVerifier: () => ({
         provider: "sentinel-host",
-        observedModel: "gpt-5.6-luna",
+        observedModel: "gpt-reserve",
         observedReasoning: "max",
       }),
     });
@@ -665,7 +665,7 @@ Deno.test(
       base: SHA1,
       issue: null,
       evidence: [],
-      model: "gpt-5.6-luna",
+      model: "gpt-reserve",
       reasoning: "max",
       maxDurationMs: 5_000,
       maxOutputChars: 10_000,
@@ -686,7 +686,7 @@ Deno.test(
       modelProvider: "sentinel-host",
       receiptVerifier: () => ({
         provider: "sentinel-host",
-        observedModel: "gpt-5.6-luna",
+        observedModel: "gpt-reserve",
         observedReasoning: "max",
       }),
     });
@@ -697,7 +697,7 @@ Deno.test(
       base: SHA1,
       issue: null,
       evidence: [],
-      model: "gpt-5.6-luna",
+      model: "gpt-reserve",
       reasoning: "max",
       maxDurationMs: 2_000,
       maxOutputChars: 10_000,
@@ -728,7 +728,7 @@ Deno.test(
       base: SHA1,
       issue: null,
       evidence: [],
-      model: "gpt-5.6-luna",
+      model: "gpt-reserve",
       reasoning: "max",
       maxDurationMs: 5_000,
       maxOutputChars: 10_000,
@@ -783,7 +783,7 @@ Deno.test("model-port: a missing trusted receipt fails closed and still closes t
     base: SHA1,
     issue: null,
     evidence: [],
-    model: "gpt-5.6-luna",
+    model: "gpt-reserve",
     reasoning: "max",
     maxDurationMs: 5_000,
     maxOutputChars: 10_000,
@@ -815,7 +815,7 @@ Deno.test(
       modelProvider: "sentinel-host",
       receiptVerifier: () => ({
         provider: "sentinel-host",
-        observedModel: "gpt-5.6-luna",
+        observedModel: "gpt-reserve",
         observedReasoning: "max",
       }),
     });
@@ -825,7 +825,7 @@ Deno.test(
       base: SHA1,
       issue: null,
       evidence: [],
-      model: "gpt-5.6-luna",
+      model: "gpt-reserve",
       reasoning: "max",
       maxDurationMs: 5_000,
       maxOutputChars: 10_000,
@@ -1078,12 +1078,12 @@ function requestRuntimeEvidence(
 ): ActualSessionEvidenceV1 {
   return {
     invocationId: "invoke-1",
-    requestedModel: "gpt-5.6-luna",
+    requestedModel: "gpt-reserve",
     requestedProvider: "sentinel-host",
     requestedEffort: "max",
     threadId: "thread-1",
     turnId: "turn-1",
-    threadModel: "gpt-5.6-luna",
+    threadModel: "gpt-reserve",
     threadModelProvider: "sentinel-host",
     threadEffort: "max",
     reroutes: [],
@@ -1106,7 +1106,7 @@ function runtimeRequest(
     base: SHA1,
     issue: null,
     evidence: [],
-    model: "gpt-5.6-luna",
+    model: "gpt-reserve",
     reasoning: "max",
     maxDurationMs: 5_000,
     maxOutputChars: 10_000,
@@ -1122,7 +1122,7 @@ Deno.test(
     );
     assert.deepEqual(verified, {
       provider: "sentinel-host",
-      observedModel: "gpt-5.6-luna",
+      observedModel: "gpt-reserve",
       observedReasoning: "max",
     });
   },
@@ -1196,7 +1196,7 @@ Deno.test(
     const reroutes: ModelRerouteV1[] = [{
       threadId: "thread-9",
       turnId: "turn-9",
-      from: "gpt-5.6-luna",
+      from: "gpt-reserve",
       to: "gpt-5.4",
       reason: "capacity",
     }];
@@ -1217,7 +1217,7 @@ Deno.test(
       {
         threadId: "thread-1",
         turnId: "turn-1",
-        from: "gpt-5.6-luna",
+        from: "gpt-reserve",
         to: "gpt-5.4",
         reason: "off",
       },
@@ -1225,7 +1225,7 @@ Deno.test(
         threadId: "thread-1",
         turnId: "turn-1",
         from: "gpt-5.4",
-        to: "gpt-5.6-luna",
+        to: "gpt-reserve",
         reason: "back",
       },
     ];
@@ -1257,8 +1257,8 @@ Deno.test("request/runtime verifier: malformed matching reroute fails closed", (
       reroutes: [{
         threadId: "thread-1",
         turnId: "turn-1",
-        from: "gpt-5.6-luna",
-        to: "gpt-5.6-luna",
+        from: "gpt-reserve",
+        to: "gpt-reserve",
         reason: null,
       }],
     })),
@@ -1271,7 +1271,7 @@ Deno.test("request/runtime verifier: malformed matching reroute fails closed", (
         threadId: "thread-1",
         turnId: "turn-1",
         from: "gpt-5.4",
-        to: "gpt-5.6-luna",
+        to: "gpt-reserve",
         reason: null,
       }],
     })),
@@ -1283,7 +1283,7 @@ Deno.test("request/runtime verifier: malformed matching reroute fails closed", (
       reroutes: [{
         threadId: "thread-1",
         turnId: "turn-1",
-        from: "gpt-5.6-luna",
+        from: "gpt-reserve",
         to: "gpt-5.4",
         reason: "",
       }],
@@ -1327,7 +1327,7 @@ Deno.test(
       })),
       {
         provider: "sentinel-host",
-        observedModel: "gpt-5.6-luna",
+        observedModel: "gpt-reserve",
         observedReasoning: "max",
       },
       "host-timeout stays certifiable as failed accounting without an observed terminal",
@@ -1367,7 +1367,7 @@ Deno.test(
     const session = new ScriptedSession(
       {
         thread: { id: "thread-1" },
-        model: "gpt-5.6-luna",
+        model: "gpt-reserve",
         reasoningEffort: "max",
         modelProvider: "sentinel-host",
       },
@@ -1396,7 +1396,7 @@ Deno.test(
     assert.equal(result.value.actual.provider, "sentinel-host");
     assert.equal(result.value.actual.threadId, "thread-1");
     assert.equal(result.value.actual.turnId, "turn-1");
-    assert.equal(result.value.actual.observedModel, "gpt-5.6-luna");
+    assert.equal(result.value.actual.observedModel, "gpt-reserve");
     assert.equal(result.value.actual.observedReasoning, "max");
     assert.equal(result.value.actual.durationMs, 5);
     assert.equal(
@@ -1433,7 +1433,7 @@ Deno.test(
     const mismatches: Record<string, unknown>[] = [
       {
         thread: { id: "thread-1" },
-        model: "gpt-5.6-luna",
+        model: "gpt-reserve",
         reasoningEffort: "max",
         modelProvider: "other-provider",
       },
@@ -1445,7 +1445,7 @@ Deno.test(
       },
       {
         thread: { id: "thread-1" },
-        model: "gpt-5.6-luna",
+        model: "gpt-reserve",
         reasoningEffort: "medium",
         modelProvider: "sentinel-host",
       },
@@ -1488,7 +1488,7 @@ Deno.test(
       const session = new ScriptedSession(
         {
           thread: { id: threadId },
-          model: "gpt-5.6-luna",
+          model: "gpt-reserve",
           reasoningEffort: "max",
           modelProvider: "sentinel-host",
         },
@@ -1514,7 +1514,7 @@ Deno.test(
       const session = new ScriptedSession(
         {
           thread: { id: "thread-1" },
-          model: "gpt-5.6-luna",
+          model: "gpt-reserve",
           reasoningEffort: "max",
           modelProvider: "sentinel-host",
         },
@@ -1541,7 +1541,7 @@ Deno.test(
     const unrelated = new ScriptedSession(
       {
         thread: { id: "thread-1" },
-        model: "gpt-5.6-luna",
+        model: "gpt-reserve",
         reasoningEffort: "max",
         modelProvider: "sentinel-host",
       },
@@ -1552,7 +1552,7 @@ Deno.test(
           params: {
             threadId: "thread-other",
             turnId: "turn-other",
-            fromModel: "gpt-5.6-luna",
+            fromModel: "gpt-reserve",
             toModel: "gpt-5.4",
           },
         },
@@ -1585,7 +1585,7 @@ Deno.test(
     const offAndBack = new ScriptedSession(
       {
         thread: { id: "thread-1" },
-        model: "gpt-5.6-luna",
+        model: "gpt-reserve",
         reasoningEffort: "max",
         modelProvider: "sentinel-host",
       },
@@ -1596,7 +1596,7 @@ Deno.test(
           params: {
             threadId: "thread-1",
             turnId: "turn-1",
-            fromModel: "gpt-5.6-luna",
+            fromModel: "gpt-reserve",
             toModel: "gpt-5.4",
           },
         },
@@ -1606,7 +1606,7 @@ Deno.test(
             threadId: "thread-1",
             turnId: "turn-1",
             fromModel: "gpt-5.4",
-            toModel: "gpt-5.6-luna",
+            toModel: "gpt-reserve",
           },
         },
         SUCCESS_ITEM,
@@ -1635,7 +1635,7 @@ Deno.test(
     const missingTurnId = new ScriptedSession(
       {
         thread: { id: "thread-1" },
-        model: "gpt-5.6-luna",
+        model: "gpt-reserve",
         reasoningEffort: "max",
         modelProvider: "sentinel-host",
       },
@@ -1645,7 +1645,7 @@ Deno.test(
           method: "model/rerouted",
           params: {
             threadId: "thread-1",
-            fromModel: "gpt-5.6-luna",
+            fromModel: "gpt-reserve",
             toModel: "gpt-5.4",
           },
         },
@@ -1674,7 +1674,7 @@ Deno.test(
     const malformedModels = new ScriptedSession(
       {
         thread: { id: "thread-1" },
-        model: "gpt-5.6-luna",
+        model: "gpt-reserve",
         reasoningEffort: "max",
         modelProvider: "sentinel-host",
       },
@@ -1685,7 +1685,7 @@ Deno.test(
           params: {
             threadId: "thread-1",
             turnId: "turn-1",
-            fromModel: "gpt-5.6-luna",
+            fromModel: "gpt-reserve",
             toModel: 42,
           },
         },
@@ -1720,7 +1720,7 @@ Deno.test(
 
 const THREAD_ACK = {
   thread: { id: "thread-1" },
-  model: "gpt-5.6-luna",
+  model: "gpt-reserve",
   reasoningEffort: "max",
   modelProvider: "sentinel-host",
 };
@@ -1731,7 +1731,7 @@ const OFF_POLICY_LATE_REROUTE = {
   params: {
     threadId: "thread-1",
     turnId: "turn-1",
-    fromModel: "gpt-5.6-luna",
+    fromModel: "gpt-reserve",
     toModel: "gpt-5.4",
   },
 };
@@ -1740,7 +1740,7 @@ const MALFORMED_IDENTITY_LATE_REROUTE = {
   method: "model/rerouted",
   params: {
     threadId: "thread-1",
-    fromModel: "gpt-5.6-luna",
+    fromModel: "gpt-reserve",
     toModel: "gpt-5.4",
   },
 };
@@ -1750,7 +1750,7 @@ const MALFORMED_MODELS_LATE_REROUTE = {
   params: {
     threadId: "thread-1",
     turnId: "turn-1",
-    fromModel: "gpt-5.6-luna",
+    fromModel: "gpt-reserve",
     toModel: 42,
   },
 };
@@ -1908,7 +1908,7 @@ Deno.test(
         emit("model/rerouted", {
           threadId: "thread-other",
           turnId: "turn-other",
-          fromModel: "gpt-5.6-luna",
+          fromModel: "gpt-reserve",
           toModel: "gpt-5.4",
         });
         await Promise.resolve();
@@ -1974,7 +1974,7 @@ Deno.test(
           emit("model/rerouted", {
             threadId: `thread-other-${index}`,
             turnId: `turn-other-${index}`,
-            fromModel: "gpt-5.6-luna",
+            fromModel: "gpt-reserve",
             toModel: "gpt-5.4",
           });
         }
@@ -2004,7 +2004,7 @@ Deno.test(
     const session = new ScriptedSession(
       {
         thread: { id: "thread-1" },
-        model: "gpt-5.6-luna",
+        model: "gpt-reserve",
         reasoningEffort: "max",
         modelProvider: "sentinel-host",
       },
@@ -2055,7 +2055,7 @@ Deno.test(
       const session = new ScriptedSession(
         {
           thread: { id: "thread-1" },
-          model: "gpt-5.6-luna",
+          model: "gpt-reserve",
           reasoningEffort: "max",
           modelProvider: "sentinel-host",
         },
@@ -2108,7 +2108,7 @@ Deno.test(
     const session = new ScriptedSession(
       {
         thread: { id: "thread-1" },
-        model: "gpt-5.6-luna",
+        model: "gpt-reserve",
         reasoningEffort: "max",
         modelProvider: "sentinel-host",
       },
@@ -2119,7 +2119,7 @@ Deno.test(
           params: {
             threadId: "thread-1",
             turnId: "turn-1",
-            fromModel: "gpt-5.6-luna",
+            fromModel: "gpt-reserve",
             toModel: "gpt-5.4",
           },
         },
@@ -2133,7 +2133,7 @@ Deno.test(
       modelProvider: "sentinel-host",
       receiptVerifier: () => ({
         provider: "sentinel-host",
-        observedModel: "gpt-5.6-luna",
+        observedModel: "gpt-reserve",
         observedReasoning: "max",
       }),
     });
@@ -2283,7 +2283,7 @@ Deno.test(
       const session = new ScriptedSession(
         {
           thread: { id: "thread-1" },
-          model: "gpt-5.6-luna",
+          model: "gpt-reserve",
           reasoningEffort: "max",
           modelProvider: "sentinel-host",
         },
@@ -2304,7 +2304,7 @@ Deno.test(
         },
         receiptVerifier: () => ({
           provider: "sentinel-host",
-          observedModel: "gpt-5.6-luna",
+          observedModel: "gpt-reserve",
           observedReasoning: "max",
         }),
       });
@@ -2331,7 +2331,7 @@ Deno.test(
     const session = new ScriptedSession(
       {
         thread: { id: "thread-1" },
-        model: "gpt-5.6-luna",
+        model: "gpt-reserve",
         reasoningEffort: "max",
         modelProvider: "sentinel-host",
       },
@@ -2361,7 +2361,7 @@ Deno.test(
     assert.equal(result.value.actual.provider, "sentinel-host");
     assert.equal(result.value.actual.threadId, "thread-1");
     assert.equal(result.value.actual.turnId, "turn-1");
-    assert.equal(result.value.actual.observedModel, "gpt-5.6-luna");
+    assert.equal(result.value.actual.observedModel, "gpt-reserve");
     assert.equal(result.value.actual.observedReasoning, "max");
     assert.equal(
       result.value.actual.observedTerminalStatus,
@@ -2382,7 +2382,7 @@ Deno.test(
         undefined,
         () => ({
           provider: "sentinel-host",
-          observedModel: "gpt-5.6-luna",
+          observedModel: "gpt-reserve",
           observedReasoning: "max",
         }),
       ]
@@ -2471,7 +2471,7 @@ Deno.test(
       const session = new ScriptedSession(
         {
           thread: { id: "thread-1" },
-          model: "gpt-5.6-luna",
+          model: "gpt-reserve",
           reasoningEffort: "max",
           modelProvider: "sentinel-host",
         },
@@ -2631,7 +2631,7 @@ Deno.test(
       const session = new ScriptedSession(
         {
           thread: { id: "thread-1" },
-          model: "gpt-5.6-luna",
+          model: "gpt-reserve",
           reasoningEffort: "max",
           modelProvider: "sentinel-host",
         },
@@ -2651,7 +2651,7 @@ Deno.test(
         modelProvider: "sentinel-host",
         receiptVerifier: () => ({
           provider: "sentinel-host",
-          observedModel: "gpt-5.6-luna",
+          observedModel: "gpt-reserve",
           observedReasoning: "max",
         }),
       });
@@ -2706,7 +2706,7 @@ Deno.test(
     const session = new ScriptedSession(
       {
         thread: { id: "thread-1" },
-        model: "gpt-5.6-luna",
+        model: "gpt-reserve",
         reasoningEffort: "max",
         modelProvider: "sentinel-host",
       },
@@ -2725,7 +2725,7 @@ Deno.test(
     const emptyActionsSession = new ScriptedSession(
       {
         thread: { id: "thread-1" },
-        model: "gpt-5.6-luna",
+        model: "gpt-reserve",
         reasoningEffort: "max",
         modelProvider: "sentinel-host",
       },
@@ -2823,7 +2823,7 @@ Deno.test(
       const session = new ScriptedSession(
         {
           thread: { id: "thread-1" },
-          model: "gpt-5.6-luna",
+          model: "gpt-reserve",
           reasoningEffort: "max",
           modelProvider: "sentinel-host",
         },
@@ -2849,7 +2849,7 @@ Deno.test(
     const unrelated = new ScriptedSession(
       {
         thread: { id: "thread-1" },
-        model: "gpt-5.6-luna",
+        model: "gpt-reserve",
         reasoningEffort: "max",
         modelProvider: "sentinel-host",
       },
@@ -2927,7 +2927,7 @@ for await (const chunk of Deno.stdin.readable) {
       continue;
     }
     if (method === "thread/start") {
-      line(JSON.stringify({ jsonrpc: "2.0", id: frame.id, result: { thread: { id: "thread-1" }, model: "gpt-5.6-luna", reasoningEffort: "max", modelProvider: "sentinel-host" } }));
+      line(JSON.stringify({ jsonrpc: "2.0", id: frame.id, result: { thread: { id: "thread-1" }, model: "gpt-reserve", reasoningEffort: "max", modelProvider: "sentinel-host" } }));
       continue;
     }
     if (method === "turn/start") {

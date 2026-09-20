@@ -152,7 +152,7 @@ async function makeRepairRunnerFixture(
       store: gatewayStore,
       keyBytes: new Uint8Array(32),
       policy: {
-        publicModels: ["gpt-5.6-luna"],
+        publicModels: ["gpt-reserve"],
         publicHeaders: { authorization: ["Bearer synthetic-token"] },
       },
       commandId: GATEWAY_COMMAND,

@@ -1,7 +1,7 @@
 /**
  * Trusted model-route resolver (gateway PRIMARY, DeepSeek-direct FALLBACK).
  *
- * The hosted UOS gateway (`https://ai.ubq.fi/v1`, `gpt-5.6-luna`, `max`
+ * The hosted UOS gateway (`https://ai.ubq.fi/v1`, `gpt-reserve`, `max`
  * reasoning) stays the primary route. Exactly one explicit, deterministic
  * selection decides which endpoint and model id a run requests, and the
  * selected model id is the id the runtime actually submits and records — a
@@ -16,7 +16,7 @@
  *   2. Fallback: `SENTINEL_MODEL_FALLBACK === "deepseek"` together with a
  *      non-empty `SENTINEL_DEEPSEEK_API_KEY` selects the DeepSeek-direct
  *      endpoint (`https://api.deepseek.com/v1`) and `deepseek-flash`.
- *   3. Gateway: the existing primary route (`uos`, `gpt-5.6-luna`, no key
+ *   3. Gateway: the existing primary route (`uos`, `gpt-reserve`, no key
  *      environment; the caller keeps its existing `UOS_AI_TOKEN` input).
  *
  * An unknown, malformed or incomplete value never fabricates a route: every
@@ -42,7 +42,7 @@ export const MODEL_ROUTE_INVALID =
 /** The existing primary gateway route. */
 const GATEWAY_PROVIDER = "uos";
 const GATEWAY_BASE_URL = "https://ai.ubq.fi/v1";
-const GATEWAY_MODEL_ID = "gpt-5.6-luna";
+const GATEWAY_MODEL_ID = "gpt-reserve";
 /** The DeepSeek-direct fallback route. */
 const DEEPSEEK_PROVIDER = "deepseek";
 const DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1";

@@ -117,7 +117,7 @@ const SESSION_DEADLINE_MS = 1_500_000;
 const REVIEW_SESSION_DEADLINE_MS = 1_200_000;
 
 /** Applied runtime implementation model identity (route-selected default). */
-const DEFAULT_IMPLEMENTATION_MODEL = "gpt-5.6-luna";
+const DEFAULT_IMPLEMENTATION_MODEL = "gpt-reserve";
 /** Default isolated client provider name (the primary gateway provider). */
 const DEFAULT_PROVIDER_NAME = "uos";
 const IMPLEMENTATION_REASONING = "max";
@@ -171,7 +171,7 @@ export interface LocalRepairHostOptionsV1 {
   trustedPath: string;
   /**
    * Route-selected implementation model id for this run. Omitted callers keep
-   * the frozen gateway default (`gpt-5.6-luna`); the exact configured value is
+   * the frozen gateway default (`gpt-reserve`); the exact configured value is
    * what the implementation port submits and what the status envelope reports.
    */
   modelId?: string;
@@ -1622,13 +1622,13 @@ export interface LocalModelInputV1 {
    * Trusted route selection for the implementation client: the endpoint, the
    * route model id and the provider name are taken from it. Omitted callers
    * keep the frozen gateway defaults (`uos` over the loopback endpoint with
-   * `gpt-5.6-luna`).
+   * `gpt-reserve`).
    */
   route?: ModelRouteV1;
   /**
    * Route-selected implementation model id this port submits and records.
    * Defaults to the route's model and then to the frozen gateway model
-   * (`gpt-5.6-luna`) for callers that pass neither; the id is never rewritten.
+   * (`gpt-reserve`) for callers that pass neither; the id is never rewritten.
    */
   modelId?: string;
   /** Provider endpoint used by the isolated implementation client. */

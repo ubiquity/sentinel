@@ -757,7 +757,7 @@ export interface ImplementationPort {
    * repair loop submits EXACTLY this id as `ModelRunRequestV1.model` (and the
    * port still validates that the submitted request equals it), so the receipt
    * records the id actually requested. Absence means the caller keeps the
-   * frozen gateway default (`gpt-5.6-luna`); the value is never rewritten by
+   * frozen gateway default (`gpt-reserve`); the value is never rewritten by
    * the port after construction.
    */
   readonly modelId?: string;

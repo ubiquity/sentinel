@@ -193,7 +193,7 @@ async function makeHostFixture(
       store: gatewayStore,
       keyBytes: new Uint8Array(32),
       policy: {
-        publicModels: ["gpt-5.6-luna"],
+        publicModels: ["gpt-reserve"],
         publicHeaders: { authorization: ["Bearer synthetic-token"] },
       },
       commandId: GATEWAY_COMMAND,
@@ -272,7 +272,7 @@ class HostAckSession implements CodexSessionV1 {
       case "thread/start":
         return Promise.resolve({
           thread: { id: "thread-1" },
-          model: "gpt-5.6-luna",
+          model: "gpt-reserve",
           reasoningEffort: "max",
           modelProvider: "sentinel-host",
         });
@@ -598,7 +598,7 @@ Deno.test(
         base: SHA1,
         issue: null,
         evidence: [],
-        model: "gpt-5.6-luna",
+        model: "gpt-reserve",
         reasoning: "max",
         maxDurationMs: 5_000,
         maxOutputChars: 1_000,
@@ -631,7 +631,7 @@ Deno.test(
           // modelProvider the port stays unavailable BEFORE any session opens.
           receiptVerifier: () => ({
             provider: "sentinel-host",
-            observedModel: "gpt-5.6-luna",
+            observedModel: "gpt-reserve",
             observedReasoning: "max",
           }),
         },
@@ -642,7 +642,7 @@ Deno.test(
         base: SHA1,
         issue: null,
         evidence: [],
-        model: "gpt-5.6-luna",
+        model: "gpt-reserve",
         reasoning: "max",
         maxDurationMs: 5_000,
         maxOutputChars: 1_000,
@@ -696,7 +696,7 @@ Deno.test(
         base: SHA1,
         issue: null,
         evidence: [],
-        model: "gpt-5.6-luna",
+        model: "gpt-reserve",
         reasoning: "max",
         maxDurationMs: 5_000,
         maxOutputChars: 10_000,
@@ -711,7 +711,7 @@ Deno.test(
       assert.equal(result.value.actual.turnId, "turn-1");
       assert.equal(result.value.actual.terminalOrigin, "runtime");
       assert.equal(result.value.actual.observedTerminalStatus, "completed");
-      assert.equal(result.value.actual.observedModel, "gpt-5.6-luna");
+      assert.equal(result.value.actual.observedModel, "gpt-reserve");
       assert.equal(result.value.actual.observedReasoning, "max");
       assert.equal(session.closeCalls, 1);
       const threadStart = session.sent.find(

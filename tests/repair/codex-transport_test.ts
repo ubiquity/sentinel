@@ -76,7 +76,7 @@ const BURST_SERVER_CODE = `
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const write = (frame) => Deno.stdout.writeSync(encoder.encode(JSON.stringify(frame) + "\\n"));
-write({ method: "model/rerouted", params: { fromModel: "gpt-5.6", toModel: "gpt-5.6-luna" } });
+write({ method: "model/rerouted", params: { fromModel: "gpt-5.6", toModel: "gpt-reserve" } });
 write({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed", durationMs: 7 } } });
 write({ method: "turn/progress", params: { idx: 1 } });
 let buffer = "";

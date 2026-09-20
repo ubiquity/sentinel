@@ -194,7 +194,7 @@ async function makeWiringRig(prefix: string): Promise<WiringRigV1> {
         store: new CountingStore(),
         keyBytes: new Uint8Array(32),
         policy: {
-          publicModels: ["gpt-5.6-luna"],
+          publicModels: ["gpt-reserve"],
           publicHeaders: { authorization: ["Bearer synthetic-token"] },
         },
         commandId: GATEWAY_COMMAND,

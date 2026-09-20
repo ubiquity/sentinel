@@ -124,7 +124,7 @@ async function probe(mode: Mode, fault: Fault | null = null) {
       if (method === "thread/start") {
         return Promise.resolve({
           thread: { id: "t" },
-          model: "gpt-5.6-luna",
+          model: "gpt-reserve",
           reasoningEffort: "max",
           modelProvider: "fixture",
         });
@@ -333,7 +333,7 @@ async function probe(mode: Mode, fault: Fault | null = null) {
       base: SHA1,
       issue: null,
       evidence: [],
-      model: "gpt-5.6-luna",
+      model: "gpt-reserve",
       reasoning: "max",
       maxDurationMs: 120000,
       maxOutputChars: mode === "output" || mode === "wrong-terminal"
