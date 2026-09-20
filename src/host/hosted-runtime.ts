@@ -69,6 +69,10 @@ export const HOSTED_RUNTIME_CHILD_ENV_KEYS = [
   "PATH",
   "GITHUB_TOKEN",
   "SENTINEL_SUPERVISOR_TOKEN",
+  "SENTINEL_MODEL_BASE_URL",
+  "SENTINEL_MODEL_ID",
+  "SENTINEL_MODEL_FALLBACK",
+  "SENTINEL_DEEPSEEK_API_KEY",
   "UOS_AI_TOKEN",
   "GITHUB_RUN_ID",
   "GITHUB_RUN_ATTEMPT",
@@ -688,6 +692,21 @@ function buildChildEnvironment(
   if (isNonEmptyText(appToken)) {
     child.SENTINEL_SUPERVISOR_TOKEN = appToken;
   }
+  // Optional model-route inputs, forwarded only when non-empty so an unset
+  // route keeps the primary gateway behaviour exactly as before. The child's
+  // own trusted resolver decides the route; the launcher never selects one and
+  // the DeepSeek key is only ever a forwarded value, never logged.
+  for (
+    const key of [
+      "SENTINEL_MODEL_BASE_URL",
+      "SENTINEL_MODEL_ID",
+      "SENTINEL_MODEL_FALLBACK",
+      "SENTINEL_DEEPSEEK_API_KEY",
+    ] as const
+  ) {
+    const value = env[key];
+    if (isNonEmptyText(value)) child[key] = value;
+  }
   return child;
 }
 
@@ -835,6 +854,10 @@ export async function runHostedRuntimeMain(): Promise<
       PATH: Deno.env.get("PATH"),
       GITHUB_TOKEN: Deno.env.get("GITHUB_TOKEN"),
       SENTINEL_SUPERVISOR_TOKEN: Deno.env.get("SENTINEL_SUPERVISOR_TOKEN"),
+      SENTINEL_MODEL_BASE_URL: Deno.env.get("SENTINEL_MODEL_BASE_URL"),
+      SENTINEL_MODEL_ID: Deno.env.get("SENTINEL_MODEL_ID"),
+      SENTINEL_MODEL_FALLBACK: Deno.env.get("SENTINEL_MODEL_FALLBACK"),
+      SENTINEL_DEEPSEEK_API_KEY: Deno.env.get("SENTINEL_DEEPSEEK_API_KEY"),
       UOS_AI_TOKEN: Deno.env.get("UOS_AI_TOKEN"),
     };
     // Native identity is the first check: a malformed job identity fails

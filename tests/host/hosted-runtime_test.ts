@@ -113,6 +113,26 @@ class BorderRuntime implements ReplayRuntimeV1 {
   }
 }
 
+/**
+ * Every allow-listed key that is OPTIONAL: it crosses only when the run
+ * supplies non-empty text. Exact-key assertions subtract this set for a run
+ * that supplies none of the optional values.
+ */
+const OPTIONAL_CHILD_ENV_KEYS = [
+  "SENTINEL_SUPERVISOR_TOKEN",
+  "SENTINEL_MODEL_BASE_URL",
+  "SENTINEL_MODEL_ID",
+  "SENTINEL_MODEL_FALLBACK",
+  "SENTINEL_DEEPSEEK_API_KEY",
+] as const;
+
+/** The exact child key set for a run that supplies no optional value. */
+function requiredChildEnvKeys(): string[] {
+  const optional = new Set<string>(OPTIONAL_CHILD_ENV_KEYS);
+  return HOSTED_RUNTIME_CHILD_ENV_KEYS.filter((key) => !optional.has(key))
+    .sort();
+}
+
 function hostedEnv(launcherSha: GitSha): Record<string, string> {
   return {
     GITHUB_RUN_ID: String(RUN_ID),
@@ -653,11 +673,12 @@ Deno.test("hosted runtime: exact identity and clean source settle one healthy te
     assert.equal(child.cwd, await Deno.realPath(rig.runtimeDir));
     assert.equal(child.maxDurationMs, HOSTED_RUNTIME_DEADLINE_MS);
     assert.equal(child.maxOutputBytes, HOSTED_RUNTIME_MAX_OUTPUT_BYTES);
+    assert.equal(child.env.SENTINEL_SUPERVISOR_TOKEN, "test-app-token");
     assert.deepEqual(
       Object.keys(child.env).sort(),
-      [...HOSTED_RUNTIME_CHILD_ENV_KEYS].sort(),
+      [...requiredChildEnvKeys(), "SENTINEL_SUPERVISOR_TOKEN"].sort(),
+      "a supplied App token completes the exact allow-list",
     );
-    assert.equal(child.env.SENTINEL_SUPERVISOR_TOKEN, "test-app-token");
     assert.equal("GITHUB_OUTPUT" in child.env, false);
     assert.equal("GITHUB_ENV" in child.env, false);
     assert.equal(child.env.GITHUB_JOB, "repair");
@@ -771,9 +792,7 @@ Deno.test("hosted runtime: the sentinel App bot login is accepted and an absent 
     assert.equal("SENTINEL_SUPERVISOR_TOKEN" in child.env, false);
     assert.deepEqual(
       Object.keys(child.env).sort(),
-      [...HOSTED_RUNTIME_CHILD_ENV_KEYS].filter((key) =>
-        key !== "SENTINEL_SUPERVISOR_TOKEN"
-      ).sort(),
+      requiredChildEnvKeys(),
     );
   } finally {
     await noAppRig.cleanup();
