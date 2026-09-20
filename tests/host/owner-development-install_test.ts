@@ -34,7 +34,9 @@ import {
   OWNER_DEVELOPMENT_INSTALL_ADVANCE_REVISION,
   OWNER_DEVELOPMENT_INSTALL_AGGREGATE_GENERATION,
   OWNER_DEVELOPMENT_INSTALL_AGGREGATE_REVISION,
+  OWNER_DEVELOPMENT_INSTALL_APP_IDENTITY_REVISION,
   OWNER_DEVELOPMENT_INSTALL_CADENCE_REVISION,
+  OWNER_DEVELOPMENT_INSTALL_DELIVERED_ROUND2_REVISION,
   OWNER_DEVELOPMENT_INSTALL_EXIT_CONTRACT_REVISION,
   OWNER_DEVELOPMENT_INSTALL_FINDINGS_REVISION,
   OWNER_DEVELOPMENT_INSTALL_GUARD_REVISION,
@@ -85,6 +87,8 @@ const ADVANCE = OWNER_DEVELOPMENT_INSTALL_ADVANCE_REVISION;
 const CADENCE = OWNER_DEVELOPMENT_INSTALL_CADENCE_REVISION;
 const GUARD = OWNER_DEVELOPMENT_INSTALL_GUARD_REVISION;
 const RETIRE = OWNER_DEVELOPMENT_INSTALL_RETIRE_REVISION;
+const DELIVERED_ROUND2 = OWNER_DEVELOPMENT_INSTALL_DELIVERED_ROUND2_REVISION;
+const APP_IDENTITY = OWNER_DEVELOPMENT_INSTALL_APP_IDENTITY_REVISION;
 
 function hostedProof(input: {
   runId: number;
@@ -899,7 +903,7 @@ Deno.test(
     if (retirePlan.status !== "install") throw new Error("expected install");
     assert.equal(retirePlan.move.nextRevision, RETIRE);
     assert.equal(retirePlan.move.nextGeneration, 23);
-    // The retirement generation is the fixed end of the chain.
+    // The retirement generation itself is a no-op (its install already ran).
     assert.equal(
       planOwnerDevelopmentInstall(
         releaseSnapshot({
@@ -907,6 +911,36 @@ Deno.test(
             revision: RETIRE,
             generation: 23,
             healthyProof: healthyProof(RETIRE, 23, 94),
+          }),
+        }),
+        NOW,
+      ).status,
+      "no_change",
+    );
+    // The delivered round-2 revision past the retirement link authorizes the
+    // App identity install; its own healthy proof is the authority.
+    const appPlan = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: DELIVERED_ROUND2,
+          generation: 24,
+          healthyProof: healthyProof(DELIVERED_ROUND2, 24, 95),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(appPlan.status, "install");
+    if (appPlan.status !== "install") throw new Error("expected install");
+    assert.equal(appPlan.move.nextRevision, APP_IDENTITY);
+    assert.equal(appPlan.move.nextGeneration, 25);
+    // The App identity generation is the fixed end of the chain.
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: APP_IDENTITY,
+            generation: 25,
+            healthyProof: healthyProof(APP_IDENTITY, 25, 96),
           }),
         }),
         NOW,

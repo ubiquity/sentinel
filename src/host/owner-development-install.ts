@@ -204,6 +204,24 @@ export const OWNER_DEVELOPMENT_INSTALL_GUARD_GENERATION = 22;
 export const OWNER_DEVELOPMENT_INSTALL_RETIRE_REVISION =
   "cf8e6610b206f80b976785d12eef9d8fa1706311" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_RETIRE_GENERATION = 23;
+/**
+ * Exact revision and generation the live pointer may carry when the App
+ * identity install is authorized: the delivered self-repair merge advanced
+ * the pointer one generation past the retirement link through an ordinary
+ * correction round. Its own healthy proof authorizes the next install.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_DELIVERED_ROUND2_REVISION =
+  "38c70a5bf3e58ff3fb1c7cfeb7a91e98105c3d1a" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_DELIVERED_ROUND2_GENERATION = 24;
+/**
+ * Exact revision carrying the single ubiquity-sentinel App identity. Installed
+ * only after the retirement revision's own healthy proof, so every
+ * repository-visible code change the runtime publishes is attributed to
+ * `ubiquity-sentinel[bot]` instead of the native Actions bot.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_APP_IDENTITY_REVISION =
+  "c07fc944759a3fb1eaddfc4d180a17b9ac15136d" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_APP_IDENTITY_GENERATION = 25;
 
 const API_BASE = "https://api.github.com";
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -976,6 +994,38 @@ export function planOwnerDevelopmentInstall(
     }
     return waiting(
       "the retirement generation 23 healthy proof is not recorded",
+    );
+  }
+
+  // The live pointer sits one generation past the retirement link (the
+  // delivered self-repair merge advanced it through an ordinary correction
+  // round). That exact revision still carries its own healthy proof, which
+  // authorizes the App identity install; any other pointer stays a no-op.
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_DELIVERED_ROUND2_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_DELIVERED_ROUND2_GENERATION &&
+    failed === null &&
+    healthy !== null
+  ) {
+    return movePlan(
+      "install",
+      runtime,
+      OWNER_DEVELOPMENT_INSTALL_APP_IDENTITY_REVISION,
+      OWNER_DEVELOPMENT_INSTALL_APP_IDENTITY_GENERATION,
+      healthy,
+      "install the ubiquity-sentinel App identity revision after the delivered round-2 healthy proof",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_APP_IDENTITY_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_APP_IDENTITY_GENERATION
+  ) {
+    if (healthy !== null) {
+      return noChange("the owner development installation is complete");
+    }
+    return waiting(
+      "the App identity generation 25 healthy proof is not recorded",
     );
   }
 
