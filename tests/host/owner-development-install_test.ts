@@ -42,6 +42,7 @@ import {
   OWNER_DEVELOPMENT_INSTALL_GUARD_REVISION,
   OWNER_DEVELOPMENT_INSTALL_HISTORY_REVISION,
   OWNER_DEVELOPMENT_INSTALL_LEDGER_REVISION,
+  OWNER_DEVELOPMENT_INSTALL_MODEL_ROUTE_REVISION,
   OWNER_DEVELOPMENT_INSTALL_ORIGINAL_GENERATION,
   OWNER_DEVELOPMENT_INSTALL_ORIGINAL_REVISION,
   OWNER_DEVELOPMENT_INSTALL_READER_GENERATION,
@@ -89,6 +90,7 @@ const GUARD = OWNER_DEVELOPMENT_INSTALL_GUARD_REVISION;
 const RETIRE = OWNER_DEVELOPMENT_INSTALL_RETIRE_REVISION;
 const DELIVERED_ROUND2 = OWNER_DEVELOPMENT_INSTALL_DELIVERED_ROUND2_REVISION;
 const APP_IDENTITY = OWNER_DEVELOPMENT_INSTALL_APP_IDENTITY_REVISION;
+const MODEL_ROUTE = OWNER_DEVELOPMENT_INSTALL_MODEL_ROUTE_REVISION;
 
 function hostedProof(input: {
   runId: number;
@@ -933,14 +935,29 @@ Deno.test(
     if (appPlan.status !== "install") throw new Error("expected install");
     assert.equal(appPlan.move.nextRevision, APP_IDENTITY);
     assert.equal(appPlan.move.nextGeneration, 25);
-    // The App identity generation is the fixed end of the chain.
+    // The App identity healthy proof authorizes the model-route install.
+    const routePlan = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: APP_IDENTITY,
+          generation: 25,
+          healthyProof: healthyProof(APP_IDENTITY, 25, 96),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(routePlan.status, "install");
+    if (routePlan.status !== "install") throw new Error("expected install");
+    assert.equal(routePlan.move.nextRevision, MODEL_ROUTE);
+    assert.equal(routePlan.move.nextGeneration, 26);
+    // The model-route generation is the fixed end of the chain.
     assert.equal(
       planOwnerDevelopmentInstall(
         releaseSnapshot({
           runtime: runtimeRecord({
-            revision: APP_IDENTITY,
-            generation: 25,
-            healthyProof: healthyProof(APP_IDENTITY, 25, 96),
+            revision: MODEL_ROUTE,
+            generation: 26,
+            healthyProof: healthyProof(MODEL_ROUTE, 26, 97),
           }),
         }),
         NOW,

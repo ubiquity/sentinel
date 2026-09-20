@@ -222,6 +222,14 @@ export const OWNER_DEVELOPMENT_INSTALL_DELIVERED_ROUND2_GENERATION = 24;
 export const OWNER_DEVELOPMENT_INSTALL_APP_IDENTITY_REVISION =
   "c07fc944759a3fb1eaddfc4d180a17b9ac15136d" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_APP_IDENTITY_GENERATION = 25;
+/**
+ * Exact revision carrying the DeepSeek-direct fallback model route together
+ * with the launcher pass-through that lets the child actually receive it.
+ * Installed only after the App identity revision's own healthy proof.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_MODEL_ROUTE_REVISION =
+  "c09c9fd84614298a6b3fd6eeabd42e9a6b4d6eb8" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_MODEL_ROUTE_GENERATION = 26;
 
 const API_BASE = "https://api.github.com";
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -1022,10 +1030,29 @@ export function planOwnerDevelopmentInstall(
     generation === OWNER_DEVELOPMENT_INSTALL_APP_IDENTITY_GENERATION
   ) {
     if (healthy !== null) {
-      return noChange("the owner development installation is complete");
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_MODEL_ROUTE_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_MODEL_ROUTE_GENERATION,
+        healthy,
+        "install the DeepSeek fallback model-route revision after the App identity healthy proof",
+      );
     }
     return waiting(
       "the App identity generation 25 healthy proof is not recorded",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_MODEL_ROUTE_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_MODEL_ROUTE_GENERATION
+  ) {
+    if (healthy !== null) {
+      return noChange("the owner development installation is complete");
+    }
+    return waiting(
+      "the model-route generation 26 healthy proof is not recorded",
     );
   }
 
