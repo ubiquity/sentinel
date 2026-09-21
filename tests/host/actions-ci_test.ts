@@ -1192,12 +1192,14 @@ Deno.test(
     // A failed target is neither addressed nor skipped: the two lists stay
     // disjoint so the diagnostic can never read as a success claim.
     for (const entry of result.failed) {
-      assert.equal(result.addressed.some((slug) => entry.startsWith(slug)), false);
+      assert.equal(
+        result.addressed.some((slug) => entry.startsWith(slug)),
+        false,
+      );
       assert.equal(result.skipped.length, 0);
     }
   },
 );
-
 
 Deno.test(
   "actions host: a foreign target's own mirror resolves its base commit while the sentinel mirror cannot",
@@ -1230,7 +1232,11 @@ Deno.test(
         return rev.stdout.trim() as GitSha;
       };
 
-      const sentinelBase = await commit(sentinel.work, "a.txt", "sentinel base");
+      const sentinelBase = await commit(
+        sentinel.work,
+        "a.txt",
+        "sentinel base",
+      );
       assert.ok(
         (await gitRun(
           sentinel.work,
@@ -1263,7 +1269,11 @@ Deno.test(
         ["cat-file", "-e", `${foreignBase}^{commit}`],
         env,
       );
-      assert.equal(absent.ok, false, "the sentinel mirror lacks foreign objects");
+      assert.equal(
+        absent.ok,
+        false,
+        "the sentinel mirror lacks foreign objects",
+      );
 
       // The foreign target's OWN mirror, seeded from its own remote, resolves
       // that target's base commit and nothing of sentinel's.

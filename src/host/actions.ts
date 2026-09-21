@@ -611,7 +611,10 @@ export async function runActionsRepairHost(): Promise<
       if (config === undefined) {
         return Promise.resolve(portError("invalid", STATIC_TARGET_UNKNOWN));
       }
-      return candidatesFor(config).ensure({ base: input.base, head: input.head });
+      return candidatesFor(config).ensure({
+        base: input.base,
+        head: input.head,
+      });
     },
     resolveSourcePath: (repository) =>
       sourcePathBySlug.get(`${repository.owner}/${repository.name}`) ??
