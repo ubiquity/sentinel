@@ -73,6 +73,7 @@ export const HOSTED_RUNTIME_CHILD_ENV_KEYS = [
   "SENTINEL_MODEL_ID",
   "SENTINEL_MODEL_FALLBACK",
   "SENTINEL_DEEPSEEK_API_KEY",
+  "SENTINEL_APP_INSTALLATION_ID",
   "UOS_AI_TOKEN",
   "GITHUB_RUN_ID",
   "GITHUB_RUN_ATTEMPT",
@@ -702,6 +703,7 @@ function buildChildEnvironment(
       "SENTINEL_MODEL_ID",
       "SENTINEL_MODEL_FALLBACK",
       "SENTINEL_DEEPSEEK_API_KEY",
+      "SENTINEL_APP_INSTALLATION_ID",
     ] as const
   ) {
     const value = env[key];
@@ -858,6 +860,7 @@ export async function runHostedRuntimeMain(): Promise<
       SENTINEL_MODEL_ID: Deno.env.get("SENTINEL_MODEL_ID"),
       SENTINEL_MODEL_FALLBACK: Deno.env.get("SENTINEL_MODEL_FALLBACK"),
       SENTINEL_DEEPSEEK_API_KEY: Deno.env.get("SENTINEL_DEEPSEEK_API_KEY"),
+      SENTINEL_APP_INSTALLATION_ID: Deno.env.get("SENTINEL_APP_INSTALLATION_ID"),
       UOS_AI_TOKEN: Deno.env.get("UOS_AI_TOKEN"),
     };
     // Native identity is the first check: a malformed job identity fails

@@ -238,6 +238,17 @@ export const OWNER_DEVELOPMENT_INSTALL_MODEL_ROUTE_GENERATION = 26;
 export const OWNER_DEVELOPMENT_INSTALL_RESERVE_MODEL_REVISION =
   "cbfa39cb8fc35630ea01281bcc5bdf9075d89d1a" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_RESERVE_MODEL_GENERATION = 27;
+/**
+ * Exact revision addressing EVERY committed target. It gives each target its
+ * own private source mirror seeded from that target's authenticated remote,
+ * so a foreign target's base commit can actually be resolved, and it restores
+ * each target's candidate objects from that target's own remote under the
+ * `ubiquity-sentinel` App installation scope. Installed only after the
+ * reserve-model revision's own healthy proof.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_MULTI_TARGET_REVISION =
+  "794bfb6e08c4c1781b597878d067b1f2405e0da8" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_MULTI_TARGET_GENERATION = 28;
 
 const API_BASE = "https://api.github.com";
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -1076,10 +1087,29 @@ export function planOwnerDevelopmentInstall(
     generation === OWNER_DEVELOPMENT_INSTALL_RESERVE_MODEL_GENERATION
   ) {
     if (healthy !== null) {
-      return noChange("the owner development installation is complete");
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_MULTI_TARGET_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_MULTI_TARGET_GENERATION,
+        healthy,
+        "install the multi-target revision after the reserve-model healthy proof",
+      );
     }
     return waiting(
       "the reserve-model generation 27 healthy proof is not recorded",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_MULTI_TARGET_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_MULTI_TARGET_GENERATION
+  ) {
+    if (healthy !== null) {
+      return noChange("the owner development installation is complete");
+    }
+    return waiting(
+      "the multi-target generation 28 healthy proof is not recorded",
     );
   }
 

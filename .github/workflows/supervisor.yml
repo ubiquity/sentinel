@@ -84,7 +84,13 @@ jobs:
           client-id: Iv23liHUJNXds9mU3j7Q
           private-key: ${{ secrets.SENTINEL_SUPERVISOR_APP_PRIVATE_KEY }}
           owner: ubiquity
-          repositories: sentinel
+          # Every committed target repository the App installation covers. The
+          # installation is `repository_selection: all`, but this action still
+          # narrows the minted token to the listed names, and a narrowed token
+          # is refused with 403 on any repository it does not list. Listing only
+          # `sentinel` made every ai.ubq.fi write impossible, which is why no
+          # ai.ubq.fi issue could ever be repaired or closed.
+          repositories: sentinel,ai.ubq.fi
       - name: Run hosted autonomy (retry transient failures, deliver reviewed heads)
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -132,7 +138,13 @@ jobs:
           client-id: Iv23liHUJNXds9mU3j7Q
           private-key: ${{ secrets.SENTINEL_SUPERVISOR_APP_PRIVATE_KEY }}
           owner: ubiquity
-          repositories: sentinel
+          # Every committed target repository the App installation covers. The
+          # installation is `repository_selection: all`, but this action still
+          # narrows the minted token to the listed names, and a narrowed token
+          # is refused with 403 on any repository it does not list. Listing only
+          # `sentinel` made every ai.ubq.fi write impossible, which is why no
+          # ai.ubq.fi issue could ever be repaired or closed.
+          repositories: sentinel,ai.ubq.fi
           permission-contents: write
       # One-shot fixed owner-authorized development installation. It reads and
       # validates the complete release state with the App token, verifies the
@@ -224,20 +236,31 @@ jobs:
           client-id: Iv23liHUJNXds9mU3j7Q
           private-key: ${{ secrets.SENTINEL_SUPERVISOR_APP_PRIVATE_KEY }}
           owner: ubiquity
-          repositories: sentinel
+          # Every committed target repository the App installation covers. The
+          # installation is `repository_selection: all`, but this action still
+          # narrows the minted token to the listed names, and a narrowed token
+          # is refused with 403 on any repository it does not list. Listing only
+          # `sentinel` made every ai.ubq.fi write impossible, which is why no
+          # ai.ubq.fi issue could ever be repaired or closed.
+          repositories: sentinel,ai.ubq.fi
       - name: Run selected Sentinel runtime
         working-directory: launcher
         env:
           GITHUB_TOKEN: ${{ github.token }}
           SENTINEL_SUPERVISOR_TOKEN: ${{ steps.app-token.outputs.token }}
           UOS_AI_TOKEN: ${{ secrets.UOS_AI_TOKEN }}
+          # Installation scope of the `ubiquity-sentinel` App. A scope key, not
+          # a secret: every committed target except the sentinel self-repository
+          # is repaired under this one App installation, while the sentinel
+          # self-target keeps the reserved no-App scope 0.
+          SENTINEL_APP_INSTALLATION_ID: "155687488"
         run: >-
           deno run
           --allow-read
           --allow-write
           --allow-run
           --allow-net="api.github.com,*.blob.core.windows.net"
-          --allow-env=HOME,PATH,GITHUB_TOKEN,SENTINEL_SUPERVISOR_TOKEN,SENTINEL_MODEL_BASE_URL,SENTINEL_MODEL_ID,SENTINEL_MODEL_FALLBACK,SENTINEL_DEEPSEEK_API_KEY,UOS_AI_TOKEN,NODE_V8_COVERAGE,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_REPOSITORY,GITHUB_REF,GITHUB_SHA,GITHUB_WORKFLOW_SHA,GITHUB_WORKFLOW_REF,GITHUB_JOB
+          --allow-env=HOME,PATH,GITHUB_TOKEN,SENTINEL_SUPERVISOR_TOKEN,SENTINEL_MODEL_BASE_URL,SENTINEL_MODEL_ID,SENTINEL_MODEL_FALLBACK,SENTINEL_DEEPSEEK_API_KEY,SENTINEL_APP_INSTALLATION_ID,UOS_AI_TOKEN,NODE_V8_COVERAGE,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_REPOSITORY,GITHUB_REF,GITHUB_SHA,GITHUB_WORKFLOW_SHA,GITHUB_WORKFLOW_REF,GITHUB_JOB
           src/host/hosted-runtime.ts
 
   finalize:
@@ -264,7 +287,13 @@ jobs:
           client-id: Iv23liHUJNXds9mU3j7Q
           private-key: ${{ secrets.SENTINEL_SUPERVISOR_APP_PRIVATE_KEY }}
           owner: ubiquity
-          repositories: sentinel
+          # Every committed target repository the App installation covers. The
+          # installation is `repository_selection: all`, but this action still
+          # narrows the minted token to the listed names, and a narrowed token
+          # is refused with 403 on any repository it does not list. Listing only
+          # `sentinel` made every ai.ubq.fi write impossible, which is why no
+          # ai.ubq.fi issue could ever be repaired or closed.
+          repositories: sentinel,ai.ubq.fi
           permission-contents: write
       - name: Finalize hosted supervisor run
         env:
