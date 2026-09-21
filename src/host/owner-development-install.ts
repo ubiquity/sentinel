@@ -247,8 +247,18 @@ export const OWNER_DEVELOPMENT_INSTALL_RESERVE_MODEL_GENERATION = 27;
  * reserve-model revision's own healthy proof.
  */
 export const OWNER_DEVELOPMENT_INSTALL_MULTI_TARGET_REVISION =
-  "dbae19f218141a44becd7d1fffc22d792913b4f0" as GitSha;
+  "dfd283e83e634dad4473c612bb3ee1aefe25f6b8" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_MULTI_TARGET_GENERATION = 28;
+/**
+ * Exact revision whose repair cooldown gate admits each target's own
+ * installation scope. Generation 28 still latched the shared gate on the first
+ * foreign-scope request, which faulted the ONE gate every target shares, so
+ * generation 29 is what actually lets a foreign target run. Installed only
+ * after the multi-target revision's own healthy proof.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_SCOPE_GATE_REVISION =
+  "dbae19f218141a44becd7d1fffc22d792913b4f0" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_SCOPE_GATE_GENERATION = 29;
 
 const API_BASE = "https://api.github.com";
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -1106,10 +1116,29 @@ export function planOwnerDevelopmentInstall(
     generation === OWNER_DEVELOPMENT_INSTALL_MULTI_TARGET_GENERATION
   ) {
     if (healthy !== null) {
-      return noChange("the owner development installation is complete");
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_SCOPE_GATE_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_SCOPE_GATE_GENERATION,
+        healthy,
+        "install the scope-admitting revision after the multi-target healthy proof",
+      );
     }
     return waiting(
       "the multi-target generation 28 healthy proof is not recorded",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_SCOPE_GATE_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_SCOPE_GATE_GENERATION
+  ) {
+    if (healthy !== null) {
+      return noChange("the owner development installation is complete");
+    }
+    return waiting(
+      "the scope-gate generation 29 healthy proof is not recorded",
     );
   }
 

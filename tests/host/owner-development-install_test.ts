@@ -56,6 +56,7 @@ import {
   OWNER_DEVELOPMENT_INSTALL_REVIEW_STEP_REVISION,
   OWNER_DEVELOPMENT_INSTALL_REVIEWER_REVISION,
   OWNER_DEVELOPMENT_INSTALL_ROUND8_REVISION,
+  OWNER_DEVELOPMENT_INSTALL_SCOPE_GATE_REVISION,
   OWNER_DEVELOPMENT_INSTALL_SETTLEMENT_REVISION,
   OWNER_DEVELOPMENT_INSTALL_TRIGGER_REVISION,
   ownerDevelopmentInstallCommitMessage,
@@ -95,6 +96,7 @@ const APP_IDENTITY = OWNER_DEVELOPMENT_INSTALL_APP_IDENTITY_REVISION;
 const MODEL_ROUTE = OWNER_DEVELOPMENT_INSTALL_MODEL_ROUTE_REVISION;
 const RESERVE_MODEL = OWNER_DEVELOPMENT_INSTALL_RESERVE_MODEL_REVISION;
 const MULTI_TARGET = OWNER_DEVELOPMENT_INSTALL_MULTI_TARGET_REVISION;
+const SCOPE_GATE = OWNER_DEVELOPMENT_INSTALL_SCOPE_GATE_REVISION;
 
 function hostedProof(input: {
   runId: number;
@@ -986,14 +988,31 @@ Deno.test(
     }
     assert.equal(multiTargetPlan.move.nextRevision, MULTI_TARGET);
     assert.equal(multiTargetPlan.move.nextGeneration, 28);
-    // The multi-target generation is the fixed end of the chain.
+    // The multi-target healthy proof authorizes the scope-gate install.
+    const scopeGatePlan = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: MULTI_TARGET,
+          generation: 28,
+          healthyProof: healthyProof(MULTI_TARGET, 28, 99),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(scopeGatePlan.status, "install");
+    if (scopeGatePlan.status !== "install") {
+      throw new Error("expected install");
+    }
+    assert.equal(scopeGatePlan.move.nextRevision, SCOPE_GATE);
+    assert.equal(scopeGatePlan.move.nextGeneration, 29);
+    // The scope-gate generation is the fixed end of the chain.
     assert.equal(
       planOwnerDevelopmentInstall(
         releaseSnapshot({
           runtime: runtimeRecord({
-            revision: MULTI_TARGET,
-            generation: 28,
-            healthyProof: healthyProof(MULTI_TARGET, 28, 99),
+            revision: SCOPE_GATE,
+            generation: 29,
+            healthyProof: healthyProof(SCOPE_GATE, 29, 100),
           }),
         }),
         NOW,
