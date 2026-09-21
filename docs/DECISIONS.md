@@ -49,3 +49,32 @@ Request the gateway model `gpt-reserve` with max reasoning, replacing the `gpt-5
 The same investigation found the earlier root cause of "no model works": the gateway's provider selection omitted `codex`, so every request was routed to exhausted paid providers while both Codex subscriptions sat healthy at 0% used. The selection was restored to `["codex","surplus","openlux","deepseek","cerebras"]` on 2026-09-20; the prior value was `["surplus","openlux","deepseek","cerebras"]` and is the reversal target if that tier must be switched off again. Keep `codex` selected: it is the only tier that serves the reserve id, and the paid tiers report a negative balance and refuse with `403 insufficient_quota`.
 
 Verified live after both changes: `gpt-5.6-luna` and `gpt-reserve` each return HTTP 200 with real output through `https://ai.ubq.fi/v1/responses`, and the installed Sentinel runtime revision `cbfa39c` (generation 27) settled healthy with `startupReady: true` while requesting `gpt-reserve`.
+
+## Multi-target repair identity and state - 2026-09-21
+
+Repair every repository in `sentinel.targets.json` under the one
+`ubiquity-sentinel` App. Three findings from live evidence shape the rule:
+
+1. Installation 155687488 is `repository_selection: all`, but every
+   `actions/create-github-app-token` step still passed `repositories: sentinel`.
+   That narrows the minted token to the listed names, so the same blob, ref and
+   pull-request writes that succeed with `repositories: sentinel,ai.ubq.fi` were
+   refused with `403 Resource not accessible by integration`. Every mint step
+   now lists every committed target. Credentials were never the missing piece.
+2. A target needs its OWN private source mirror. The sentinel mirror is seeded
+   from this run's checkout and provably cannot resolve another repository's
+   base commit (`git checkout --detach <ai.ubq.fi head>` fails with
+   `unable to read tree`), so each non-sentinel target clones its own mirror
+   from its own authenticated remote and fetches its own configured base branch
+   through the same shared cooldown gate. Candidate restoration, preservation,
+   the loss prover and the base-refresh adapter are all scoped to the target
+   that owns the objects, each target's review checkout is independent, and the
+   sentinel self-target keeps its original single mirror and reserved no-App
+   installation scope 0.
+3. One admission budget (120 starts/hour) and one absolute deadline span every
+   target; a target whose own preparation fails is recorded in the
+   `sentinel_targets_diagnostic` `failed` list and is never reported as
+   addressed. The gateway release receipt stays sentinel-self-only and refuses a
+   foreign request explicitly.
+
+Keep targets sequential, not concurrent: the design is one production writer.
