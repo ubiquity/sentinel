@@ -36,6 +36,25 @@
  *     it can no longer review is delivered from the same receipt: the review
  *     budget is spent, so no further verdict is reachable.
  *
+ *  3. CLOSURE PASS — a SELF record whose exact pull request and reviewed head
+ *     are delivered by an ACCEPTED hosted release is closed, exactly as before.
+ *     A FOREIGN record is closed from its OWN merged pull request instead: the
+ *     trusted release path is bound to the self scope by design, so sentinel
+ *     holds no release authority for another repository and never fabricates a
+ *     hosted release for one. Its closure requires the pull merged under a
+ *     named merge commit with exactly two parents equal to the recorded base
+ *     and head, the revision integrated into that repository's recorded base
+ *     branch, and a completed authorizing receipt for the exact
+ *     repository/PR/head/base.
+ *
+ * Every surface, base branch, deterministic check, issue identity and delivery
+ * decision is resolved PER REPOSITORY: a record is read and written only under
+ * its own repository identity, its own repository default branch supplies its
+ * base branch, and one repository's issue number can never be confused with
+ * another's. An unreadable surface, a missing default branch, a missing
+ * check-run, an unreadable pull or any mismatched head/base/author fails
+ * closed with an explicit bounded action and changes nothing.
+ *
  * It writes no review, receipt, proof, promotion or acceptance, and it never
  * merges without a completed current-head receipt, a green deterministic check
  * and an unchanged recorded base.
@@ -53,6 +72,7 @@ import type { ReleaseRequestV1 } from "../src/contracts/release.ts";
 import { parseReleaseRequestV1 } from "../src/contracts/release.ts";
 import type { ReviewReceiptV1 } from "../src/contracts/review-receipt.ts";
 import type { GitSha } from "../src/contracts/brands.ts";
+import type { RepositoryIdentityV1 } from "../src/contracts/shared.ts";
 import { canonicalStringify } from "../src/contracts/canonical.ts";
 import { releaseRequestId } from "../src/repair/keys.ts";
 import { githubGitAuthEnv } from "../src/host/local.ts";
@@ -64,12 +84,69 @@ import type {
 } from "../src/contracts/ports.ts";
 import {
   ISSUE48_QUOTA_REMOTE_URL,
-  ISSUE48_QUOTA_REPOSITORY,
   validateIssue48QuotaHostedIdentity,
 } from "./issue48-review-quota-recovery.ts";
 
 /** Snapshot work record, as read from the durable repair state. */
 type HostedAutonomyRecordV1 = RepairStateSnapshotV1["work"][number];
+
+/**
+ * The one hosted self scope: the no-App owner credential identity that owns
+ * this repository, its `development` base branch, its named deterministic
+ * check and the trusted release path. Every other identity is a foreign target
+ * and is handled entirely under its OWN repository surface.
+ */
+const HOSTED_AUTONOMY_SELF_SCOPE: RepositoryIdentityV1 = {
+  owner: "ubiquity",
+  name: "sentinel",
+  installationId: 0,
+};
+
+/** True only for the sentinel self scope, the one identity with named checks. */
+function isHostedSelf(repository: RepositoryIdentityV1): boolean {
+  return repository.installationId ===
+      HOSTED_AUTONOMY_SELF_SCOPE.installationId &&
+    repository.owner === HOSTED_AUTONOMY_SELF_SCOPE.owner &&
+    repository.name === HOSTED_AUTONOMY_SELF_SCOPE.name;
+}
+
+/** Exact repository identity equality, installation scope included. */
+function sameRepository(
+  left: RepositoryIdentityV1,
+  right: RepositoryIdentityV1,
+): boolean {
+  return left.installationId === right.installationId &&
+    left.owner === right.owner && left.name === right.name;
+}
+
+/**
+ * Stable repository scope key. This is the separator that makes every planning
+ * identity repository-scoped: two repositories may both have an issue 120 and
+ * they must never be confused.
+ */
+export function hostedRepositoryKey(
+  repository: RepositoryIdentityV1,
+): string {
+  return `${repository.installationId}:${repository.owner}/${repository.name}`;
+}
+
+/** One issue identity: the pair (repository, issue number), never a number. */
+export function hostedIssueKey(
+  repository: RepositoryIdentityV1,
+  issueNumber: number,
+): string {
+  return `${hostedRepositoryKey(repository)}#${issueNumber}`;
+}
+
+/** One delivery identity: repository, pull request, head and base. */
+export function hostedDeliveryKey(
+  repository: RepositoryIdentityV1,
+  pullRequest: number,
+  head: string,
+  base: string,
+): string {
+  return `${hostedRepositoryKey(repository)}:${pullRequest}:${head}:${base}`;
+}
 
 /**
  * Delivery eligibility. The ordinary path is the runtime's own `review` and
@@ -228,11 +305,33 @@ export interface HostedAutonomyPullV1 {
 }
 
 export interface HostedAutonomyGitHubV1 {
-  /** Current base-branch tip, or null when it cannot be read. */
-  readBaseTip(): Promise<string | null>;
-  /** True when the exact head carries a successful deterministic check. */
+  /**
+   * The repository's own default branch, or null when it cannot be read. Only
+   * a foreign repository consults this; the self scope keeps its recorded
+   * `development` constant.
+   */
+  readDefaultBranch(): Promise<string | null>;
+  /** Current tip of one base branch, or null when it cannot be read. */
+  readBaseTip(branch: string): Promise<string | null>;
+  /**
+   * Self gate: true when the exact head carries a completed successful
+   * check-run named `test-local`.
+   */
   hasSuccessfulCheck(head: string): Promise<boolean>;
-  readPull(number: number): Promise<HostedAutonomyPullV1 | null>;
+  /**
+   * Foreign gate: true when the exact head carries at least one check-run and
+   * every one of them is completed with conclusion `success`. Zero check-runs
+   * is not green, and no run may still be pending or queued on that head.
+   */
+  hasAllChecksGreen(head: string): Promise<boolean>;
+  /**
+   * `baseBranch` is the branch the merge must be integrated into; a merged
+   * pull whose integration cannot be verified without it reads as null.
+   */
+  readPull(
+    number: number,
+    baseBranch: string | null,
+  ): Promise<HostedAutonomyPullV1 | null>;
   /**
    * True when the source issue is open, false when it is closed or missing,
    * null when that cannot be read. Only a definitive false stops a retry.
@@ -253,7 +352,13 @@ export interface HostedAutonomyGitHubV1 {
 
 export interface HostedAutonomyDepsV1 {
   state: StateReadView & RepairStateWriter;
-  github: HostedAutonomyGitHubV1;
+  /**
+   * Resolve the GitHub surface for one exact repository identity. A null (or
+   * throwing) resolver is an unreadable surface: the affected record is
+   * skipped with an explicit action and nothing changes. No repository ever
+   * borrows another repository's surface.
+   */
+  githubFor(repository: RepositoryIdentityV1): HostedAutonomyGitHubV1 | null;
   clock: { now(): number };
 }
 
@@ -381,6 +486,8 @@ function intentClosable(
 
 export interface RetryPlanV1 {
   id: string;
+  /** The exact repository scope this plan belongs to. */
+  repository: RepositoryIdentityV1;
   grant: number;
   nextStep: "work" | "review";
   resetReviewRounds: boolean;
@@ -401,21 +508,30 @@ export interface RetryPlanV1 {
  * Bounded, closed retry planning for one snapshot. Every returned plan has an
  * unused next-attempt identity, respects every attempt ceiling and stays inside
  * the per-task automatic-retry budget.
+ *
+ * `baseTips` is keyed by `hostedRepositoryKey`: each record is planned against
+ * its OWN repository's base tip, so a foreign repository can never advance a
+ * sentinel record's base or vice versa. `closedIssues` holds
+ * `hostedIssueKey` values, so two repositories may both carry issue 120.
  */
 export function planHostedRetries(
   snapshot: RepairStateSnapshotV1,
   now: number,
-  baseTip: string | null = null,
-  closedIssues: ReadonlySet<number> = new Set(),
+  baseTips: ReadonlyMap<string, string | null> = new Map(),
+  closedIssues: ReadonlySet<string> = new Set(),
 ): RetryPlanV1[] {
   const plans: RetryPlanV1[] = [];
   for (const record of snapshot.work) {
     if (record.nextStep !== "blocked") continue;
     // A task whose source issue is closed or gone is not repairable: retrying
-    // it can only spend a model session on work that no longer exists.
+    // it can only spend a model session on work that no longer exists. The
+    // identity is the pair (repository, issue number): a closed issue in
+    // another repository never stops this record's retry.
     if (
       record.related.issueNumber !== null &&
-      closedIssues.has(record.related.issueNumber)
+      closedIssues.has(
+        hostedIssueKey(record.repository, record.related.issueNumber),
+      )
     ) {
       continue;
     }
@@ -445,6 +561,8 @@ export function planHostedRetries(
     }
     const base = record.target.base;
     if (base === null) continue;
+    const baseTip = baseTips.get(hostedRepositoryKey(record.repository)) ??
+      null;
     const attempts = record.counters.attempts;
     let grant: number | null = null;
     for (
@@ -509,6 +627,7 @@ export function planHostedRetries(
       if (record.counters.retries > attempts - ceilingGrant) continue;
       plans.push({
         id: record.id,
+        repository: record.repository,
         grant: ceilingGrant,
         nextStep: rule.nextStep,
         resetReviewRounds: false,
@@ -520,6 +639,7 @@ export function planHostedRetries(
     }
     plans.push({
       id: record.id,
+      repository: record.repository,
       grant,
       nextStep: rule.nextStep,
       resetReviewRounds: rule.nextStep === "review",
@@ -616,6 +736,46 @@ function authorizingReceipt(
   return found ?? null;
 }
 
+/** Verified merge facts: the exact revision a foreign record delivered. */
+interface HostedMergedDeliveryV1 {
+  readonly revision: string;
+}
+
+/**
+ * The exact merged-delivery evidence a FOREIGN record's closure requires: the
+ * pull is merged under a named merge commit, it is authored by a trusted
+ * identity, it targets the record's own base branch, that commit has exactly
+ * two parents equal to the recorded base and head, and the revision is
+ * integrated into the recorded base branch. Any missing, unreadable or
+ * mismatched fact yields null: an ambiguous merge is never evidence.
+ */
+function verifiedMergedDelivery(
+  record: HostedAutonomyRecordV1,
+  pull: HostedAutonomyPullV1,
+  baseBranch: string | null,
+): HostedMergedDeliveryV1 | null {
+  const head = record.target.head;
+  const base = record.target.base;
+  if (head === null || base === null || baseBranch === null) return null;
+  if (pull.merged !== true || pull.mergeCommitSha === null) return null;
+  if (pull.headSha !== head) return null;
+  if (
+    typeof pull.author !== "string" ||
+    !HOSTED_AUTONOMY_TRUSTED_AUTHORS.includes(pull.author)
+  ) {
+    return null;
+  }
+  if (pull.baseRef !== baseBranch) return null;
+  if (
+    pull.parents.length !== 2 ||
+    !pull.parents.includes(base) || !pull.parents.includes(head)
+  ) {
+    return null;
+  }
+  if (!pull.revisionOnBaseBranch) return null;
+  return { revision: pull.mergeCommitSha };
+}
+
 /** The exact request the loop's delivery step would have written. */
 export async function buildHostedReleaseRequest(
   repository: ReleaseRequestV1["target"]["repository"],
@@ -649,7 +809,12 @@ export async function buildHostedReleaseRequest(
   }
 }
 
-/** Hosted releases that are accepted, keyed by the exact source they delivered. */
+/**
+ * Hosted releases that are accepted, keyed by the exact repository, pull
+ * request, head and base they delivered. The repository scope is part of the
+ * key, so an accepted release for one repository can never retire another
+ * repository's record.
+ */
 function acceptedReleases(
   releases: readonly {
     readonly phase: string;
@@ -662,35 +827,65 @@ function acceptedReleases(
     if (release.phase !== "accepted") continue;
     if (release.candidateProof === null) continue;
     accepted.set(
-      `${release.request.source.pullRequest}:${release.request.source.head}`,
+      hostedDeliveryKey(
+        release.request.target.repository,
+        release.request.source.pullRequest,
+        release.request.source.head,
+        release.request.source.base,
+      ),
       release,
     );
   }
   return accepted;
 }
 
+/** One closure candidate: the record and its exact repository-scoped issue. */
+export interface HostedClosurePlanV1 {
+  id: string;
+  issueNumber: number;
+  repository: RepositoryIdentityV1;
+}
+
 /**
- * Records whose exact pull request and reviewed head are delivered by an
- * ACCEPTED hosted release, whose issue is still open and whose implementation
- * intent (when present) is provably settled. These are the tasks the runtime's
- * own closure step would finish; marking them done here is the same conclusion
- * from the same evidence, never an earlier one.
+ * Records whose exact pull request and reviewed head are delivered, whose issue
+ * is still open and whose implementation intent (when present) is provably
+ * settled. These are the tasks the runtime's own closure step would finish;
+ * marking them done here is the same conclusion from the same evidence, never
+ * an earlier one.
+ *
+ * The two delivery authorities are deliberately separate and repository-bound.
+ * A SELF record is closed only by an ACCEPTED hosted release: the trusted
+ * release path is bound to the self scope by design, and no other evidence may
+ * stand in for it. A FOREIGN record is closed only by `foreignMerged`, the
+ * verified merge evidence its own repository surface produced, because the
+ * sentinel release authority can never authorize a foreign repository.
  */
 export function planHostedClosures(
   snapshot: RepairStateSnapshotV1,
   released: ReadonlyMap<string, unknown>,
-): { id: string; issueNumber: number }[] {
-  const plans: { id: string; issueNumber: number }[] = [];
+  foreignMerged: ReadonlyMap<string, unknown> = new Map(),
+): HostedClosurePlanV1[] {
+  const plans: HostedClosurePlanV1[] = [];
   for (const record of snapshot.work) {
     if (record.nextStep === "done") continue;
     const issueNumber = record.related.issueNumber;
     if (issueNumber === null) continue;
     const pullRequest = record.target.pr;
     const head = record.target.head;
-    if (pullRequest === null || head === null) continue;
-    if (!released.has(`${pullRequest}:${head}`)) continue;
+    const base = record.target.base;
+    if (pullRequest === null || head === null || base === null) continue;
+    const key = hostedDeliveryKey(
+      record.repository,
+      pullRequest,
+      head,
+      base,
+    );
+    const delivered = isHostedSelf(record.repository)
+      ? released.has(key)
+      : foreignMerged.has(key);
+    if (!delivered) continue;
     if (!intentClosable(record, snapshot.reservations)) continue;
-    plans.push({ id: record.id, issueNumber });
+    plans.push({ id: record.id, issueNumber, repository: record.repository });
   }
   return plans;
 }
@@ -714,19 +909,24 @@ export function planHostedClosures(
  */
 export function planHostedRetirements(
   snapshot: RepairStateSnapshotV1,
-  closedIssues: ReadonlySet<number>,
+  closedIssues: ReadonlySet<string>,
   closedUnmerged: ReadonlySet<string> = new Set(),
-): { id: string; issueNumber: number }[] {
-  const plans: { id: string; issueNumber: number }[] = [];
+): HostedClosurePlanV1[] {
+  const plans: HostedClosurePlanV1[] = [];
   for (const record of snapshot.work) {
     if (record.nextStep === "done") continue;
     const issueNumber = record.related.issueNumber;
-    if (issueNumber === null || !closedIssues.has(issueNumber)) continue;
+    if (
+      issueNumber === null ||
+      !closedIssues.has(hostedIssueKey(record.repository, issueNumber))
+    ) {
+      continue;
+    }
     if (record.target.pr === null) {
       // Existing behavior: only a non-blocked record that produced nothing is
       // parked; an already blocked record keeps its own blocker.
       if (record.nextStep === "blocked") continue;
-      plans.push({ id: record.id, issueNumber });
+      plans.push({ id: record.id, issueNumber, repository: record.repository });
       continue;
     }
     // Only a definitively closed-unmerged pull proves the task can never
@@ -741,7 +941,7 @@ export function planHostedRetirements(
       record.intent !== null && record.intent.kind === "implementation" &&
       !intentClosable(record, snapshot.reservations)
     ) continue;
-    plans.push({ id: record.id, issueNumber });
+    plans.push({ id: record.id, issueNumber, repository: record.repository });
   }
   return plans;
 }
@@ -840,55 +1040,141 @@ export async function runHostedAutonomy(
     return skipped("release_not_terminal", observedHead, actions);
   }
 
+  // ---- per-repository surfaces -------------------------------------------
+  // Every fact below is read from the surface of the record's OWN repository.
+  // The sentinel scope keeps its recorded `development` base branch, its named
+  // `test-local` check and its trusted release path; every other identity is a
+  // foreign target whose default branch, checks, pulls and issues are read and
+  // written under its own repository only. An unreadable surface or an
+  // unreadable default branch is never guessed around: the affected record is
+  // skipped with an explicit action and nothing changes.
+  interface HostedAutonomyScopeV1 {
+    readonly repository: RepositoryIdentityV1;
+    readonly key: string;
+    readonly surface: HostedAutonomyGitHubV1 | null;
+    readonly baseBranch: string | null;
+  }
+  const scopes = new Map<string, Promise<HostedAutonomyScopeV1>>();
+  const scopeFor = (
+    repository: RepositoryIdentityV1,
+  ): Promise<HostedAutonomyScopeV1> => {
+    const key = hostedRepositoryKey(repository);
+    const cached = scopes.get(key);
+    if (cached !== undefined) return cached;
+    const resolved = (async (): Promise<HostedAutonomyScopeV1> => {
+      let surface: HostedAutonomyGitHubV1 | null = null;
+      try {
+        surface = deps.githubFor(repository);
+      } catch {
+        surface = null;
+      }
+      if (surface === null) {
+        return { repository, key, surface: null, baseBranch: null };
+      }
+      if (isHostedSelf(repository)) {
+        return {
+          repository,
+          key,
+          surface,
+          baseBranch: HOSTED_AUTONOMY_BASE_BRANCH,
+        };
+      }
+      let baseBranch: string | null = null;
+      try {
+        baseBranch = await surface.readDefaultBranch();
+      } catch {
+        baseBranch = null;
+      }
+      return { repository, key, surface, baseBranch };
+    })();
+    scopes.set(key, resolved);
+    return resolved;
+  };
+  const readTip = async (
+    scope: HostedAutonomyScopeV1,
+  ): Promise<string | null> => {
+    const surface = scope.surface;
+    const branch = scope.baseBranch;
+    if (surface === null || branch === null) return null;
+    try {
+      return await surface.readBaseTip(branch);
+    } catch {
+      return null;
+    }
+  };
+  const readPull = async (
+    scope: HostedAutonomyScopeV1,
+    number: number,
+  ): Promise<HostedAutonomyPullV1 | null> => {
+    const surface = scope.surface;
+    if (surface === null) return null;
+    try {
+      return await surface.readPull(number, scope.baseBranch);
+    } catch {
+      return null;
+    }
+  };
+
   // ---- retry pass ---------------------------------------------------------
   // A task whose pull request is already merged or closed is delivered or
   // abandoned: retrying it would only spend model starts on a branch that can
   // no longer be published, so those plans are dropped before any write. A
   // pull that cannot be read is also not retried, but it is recorded as a read
   // failure rather than as the definitive not-open verdict it never was.
-  let tip: string | null = null;
-  try {
-    tip = await deps.github.readBaseTip();
-  } catch {
-    tip = null;
+  const retryTips = new Map<string, string | null>();
+  for (const record of snapshot.work) {
+    if (record.nextStep === "done") continue;
+    const scope = await scopeFor(record.repository);
+    if (retryTips.has(scope.key)) continue;
+    retryTips.set(scope.key, await readTip(scope));
   }
   // The closed-issue fact is collected for every record that is not done, not
   // only for blocked ones: the retirement pass needs it for a live record whose
   // source issue is already gone. The retry pass keeps consuming it for blocked
-  // records exactly as before.
-  const closedIssues = new Set<number>();
+  // records exactly as before, and the identity is always the pair
+  // (repository, issue number).
+  const closedIssues = new Set<string>();
   for (const record of snapshot.work) {
     if (record.nextStep === "done") continue;
     const issueNumber = record.related.issueNumber;
     if (issueNumber === null) continue;
+    const scope = await scopeFor(record.repository);
+    if (scope.surface === null) {
+      actions.push(`record:${record.id}:surface_unreadable`);
+      continue;
+    }
     let open: boolean | null = null;
     try {
-      open = await deps.github.readIssueOpen(issueNumber);
+      open = await scope.surface.readIssueOpen(issueNumber);
     } catch {
       open = null;
     }
-    if (open === false) closedIssues.add(issueNumber);
+    if (open === false) {
+      closedIssues.add(hostedIssueKey(record.repository, issueNumber));
+    }
   }
   const planned = planHostedRetries(
     snapshot,
     deps.clock.now(),
-    tip,
+    retryTips,
     closedIssues,
   );
   const plans: RetryPlanV1[] = [];
   for (const plan of planned) {
-    const record = snapshot.work.find((item) => item.id === plan.id);
+    const record = snapshot.work.find((item) =>
+      item.id === plan.id && sameRepository(item.repository, plan.repository)
+    );
     const pullRequest = record?.target.pr ?? null;
-    if (pullRequest === null) {
+    if (record === undefined || pullRequest === null) {
       plans.push(plan);
       continue;
     }
-    let pull: HostedAutonomyPullV1 | null;
-    try {
-      pull = await deps.github.readPull(pullRequest);
-    } catch {
-      pull = null;
+    const scope = await scopeFor(record.repository);
+    if (scope.surface === null) {
+      actions.push(`retry:${plan.id}:skipped:surface_unreadable`);
+      continue;
     }
+    const pull = await readPull(scope, pullRequest);
     if (pull === null) {
       // A read that threw or returned nothing is transient: it is no evidence
       // that the pull is closed, so it must not be reported as not open.
@@ -954,23 +1240,29 @@ export async function runHostedAutonomy(
   // A candidate pushed to a pull request by the bot produces a CI run that
   // GitHub parks for approval, so the deterministic check the merge requires
   // can never complete on its own. The job approves exactly those runs for the
-  // exact reviewed head; the check itself stays credential-free and unchanged.
+  // exact reviewed head, on the record's OWN repository surface; the check
+  // itself stays credential-free and unchanged.
   for (const record of snapshot.work) {
     if (!deliveryEligible(record)) {
       continue;
     }
     const head = record.target.head;
     if (head === null || record.target.pr === null) continue;
+    const scope = await scopeFor(record.repository);
+    if (scope.surface === null) {
+      actions.push(`approve:${record.id}:surface_unreadable`);
+      continue;
+    }
     let parked: number[] = [];
     try {
-      parked = await deps.github.listParkedRuns(head);
+      parked = await scope.surface.listParkedRuns(head);
     } catch {
       parked = [];
     }
     for (const id of parked.slice(0, 3)) {
       let approved = false;
       try {
-        approved = await deps.github.approveRun(id);
+        approved = await scope.surface.approveRun(id);
       } catch {
         approved = false;
       }
@@ -981,16 +1273,41 @@ export async function runHostedAutonomy(
   }
 
   // ---- delivery pass ------------------------------------------------------
-  let baseTip: string | null;
-  try {
-    baseTip = await deps.github.readBaseTip();
-  } catch {
-    baseTip = null;
-  }
-  if (baseTip === null) {
-    return actions.length > 0
-      ? skipped("retried", observedHead, actions)
-      : skipped("base_moved", observedHead, actions);
+  // Each repository's base tip is read once in this pass from that repository's
+  // OWN surface. A missing tip or a missing default branch is an explicit skip,
+  // never a guessed base, and never another repository's branch.
+  const deliveryTips = new Map<string, string | null>();
+  const deliveryTip = async (
+    scope: HostedAutonomyScopeV1,
+  ): Promise<string | null> => {
+    const cached = deliveryTips.get(scope.key);
+    if (cached !== undefined) return cached;
+    const tip = await readTip(scope);
+    deliveryTips.set(scope.key, tip);
+    return tip;
+  };
+  // Verified merge facts for FOREIGN records delivered in this pass, keyed by
+  // exact repository/pull/head/base. The closure pass owns the actual closure
+  // and consumes these only as the evidence it re-checks below.
+  const foreignMerged = new Map<string, unknown>();
+
+  // The self scope keeps its exact pre-existing refusal: once sentinel has a
+  // record to deliver, an unreadable `development` tip stops the pass before
+  // any delivery, exactly as it always did. A foreign-only snapshot never
+  // reads the self scope at all.
+  if (
+    snapshot.work.some((record) =>
+      deliveryEligible(record) && isHostedSelf(record.repository)
+    )
+  ) {
+    const selfTip = await deliveryTip(
+      await scopeFor(HOSTED_AUTONOMY_SELF_SCOPE),
+    );
+    if (selfTip === null) {
+      return actions.length > 0
+        ? skipped("retried", observedHead, actions)
+        : skipped("base_moved", observedHead, actions);
+    }
   }
 
   for (const record of snapshot.work) {
@@ -1009,8 +1326,11 @@ export async function runHostedAutonomy(
       base,
     );
     if (receipt === null) continue;
+    const self = isHostedSelf(record.repository);
     if (
+      self &&
       snapshot.releaseRequests.some((request) =>
+        sameRepository(request.target.repository, record.repository) &&
         request.source.pullRequest === pullRequest &&
         request.source.head === head && request.source.base === base &&
         request.target.environment === "production"
@@ -1019,12 +1339,16 @@ export async function runHostedAutonomy(
       actions.push(`delivery:${record.id}:already_recorded`);
       continue;
     }
-    let pull: HostedAutonomyPullV1 | null;
-    try {
-      pull = await deps.github.readPull(pullRequest);
-    } catch {
-      pull = null;
+    const scope = await scopeFor(record.repository);
+    if (scope.surface === null) {
+      actions.push(`delivery:${record.id}:surface_unreadable`);
+      continue;
     }
+    if (scope.baseBranch === null) {
+      actions.push(`delivery:${record.id}:default_branch_unreadable`);
+      continue;
+    }
+    let pull = await readPull(scope, pullRequest);
     if (pull === null || pull.headSha !== head) continue;
     if (
       typeof pull.author !== "string" ||
@@ -1036,15 +1360,28 @@ export async function runHostedAutonomy(
 
     let revision: string | null = null;
     if (pull.state === "open" && pull.merged === false) {
-      // The base must be exactly the reviewed base, and the deterministic check
-      // must already have succeeded on the exact head.
+      // The base must be exactly the reviewed base, and the repository's own
+      // deterministic check must already have succeeded on the exact head.
+      const baseTip = await deliveryTip(scope);
+      if (baseTip === null) {
+        actions.push(`delivery:${record.id}:base_unreadable`);
+        continue;
+      }
       if (baseTip !== base) {
         actions.push(`delivery:${record.id}:base_moved`);
         continue;
       }
+      // A foreign pull must target the exact branch its repository declares as
+      // the delivered base; a mismatched base ref is never merged.
+      if (!self && pull.baseRef !== scope.baseBranch) {
+        actions.push(`delivery:${record.id}:base_mismatch`);
+        continue;
+      }
       let green: boolean;
       try {
-        green = await deps.github.hasSuccessfulCheck(head);
+        green = self
+          ? await scope.surface.hasSuccessfulCheck(head)
+          : await scope.surface.hasAllChecksGreen(head);
       } catch {
         green = false;
       }
@@ -1054,7 +1391,7 @@ export async function runHostedAutonomy(
       }
       let merged: { merged: boolean; sha: string | null } | null;
       try {
-        merged = await deps.github.merge(pullRequest, head);
+        merged = await scope.surface.merge(pullRequest, head);
       } catch {
         merged = null;
       }
@@ -1068,12 +1405,7 @@ export async function runHostedAutonomy(
       }
       revision = merged.sha;
       actions.push(`merge:${record.id}:pr=${pullRequest}:sha=${revision}`);
-      let after: HostedAutonomyPullV1 | null;
-      try {
-        after = await deps.github.readPull(pullRequest);
-      } catch {
-        after = null;
-      }
+      const after = await readPull(scope, pullRequest);
       if (after === null) continue;
       pull = after;
     }
@@ -1087,6 +1419,25 @@ export async function runHostedAutonomy(
     ) {
       actions.push(`delivery:${record.id}:merge_not_observed`);
       continue;
+    }
+
+    if (!self) {
+      // A foreign repository has no sentinel release authority: nothing is
+      // recorded and no release is invented. The verified merge facts are
+      // handed to the closure pass, which closes the record's OWN issue from
+      // exactly this evidence.
+      const evidence = verifiedMergedDelivery(record, pull, scope.baseBranch);
+      if (evidence === null) {
+        actions.push(`delivery:${record.id}:merge_not_observed`);
+        continue;
+      }
+      foreignMerged.set(
+        hostedDeliveryKey(record.repository, pullRequest, head, base),
+        evidence,
+      );
+      actions.push(`delivery:${record.id}:foreign_merged`);
+      revisions.push(revision);
+      break;
     }
 
     const now = deps.clock.now();
@@ -1167,15 +1518,16 @@ export async function runHostedAutonomy(
   for (const record of snapshot.work) {
     if (record.nextStep === "done") continue;
     const issueNumber = record.related.issueNumber;
-    if (issueNumber === null || !closedIssues.has(issueNumber)) continue;
+    if (
+      issueNumber === null ||
+      !closedIssues.has(hostedIssueKey(record.repository, issueNumber))
+    ) {
+      continue;
+    }
     const pullRequest = record.target.pr;
     if (pullRequest === null) continue;
-    let pull: HostedAutonomyPullV1 | null;
-    try {
-      pull = await deps.github.readPull(pullRequest);
-    } catch {
-      pull = null;
-    }
+    const scope = await scopeFor(record.repository);
+    const pull = await readPull(scope, pullRequest);
     if (pull === null) continue;
     if (pull.merged !== true && pull.state !== "open") {
       closedUnmerged.add(record.id);
@@ -1239,14 +1591,60 @@ export async function runHostedAutonomy(
       revisions,
     };
   }
-  const closures = planHostedClosures(snapshot, released).slice(0, 5);
+  // A foreign record's delivery evidence is its OWN merged pull request: the
+  // trusted release path is bound to the self scope by design and can never
+  // authorize a foreign repository, so no release is ever fabricated for one.
+  // The exact facts are re-read here for every foreign record with an
+  // authorizing receipt; the ones the delivery pass verified in this same run
+  // are already present and are not read twice.
+  for (const record of snapshot.work) {
+    if (record.nextStep === "done") continue;
+    if (isHostedSelf(record.repository)) continue;
+    const issueNumber = record.related.issueNumber;
+    const pullRequest = record.target.pr;
+    const head = record.target.head;
+    const base = record.target.base;
+    if (
+      issueNumber === null || pullRequest === null || head === null ||
+      base === null
+    ) {
+      continue;
+    }
+    const key = hostedDeliveryKey(record.repository, pullRequest, head, base);
+    if (foreignMerged.has(key)) continue;
+    if (
+      authorizingReceipt(
+        snapshot,
+        record.repository,
+        pullRequest,
+        head,
+        base,
+      ) ===
+        null
+    ) {
+      continue;
+    }
+    const scope = await scopeFor(record.repository);
+    const pull = await readPull(scope, pullRequest);
+    if (pull === null) continue;
+    const evidence = verifiedMergedDelivery(record, pull, scope.baseBranch);
+    if (evidence === null) continue;
+    foreignMerged.set(key, evidence);
+  }
+  const closures = planHostedClosures(snapshot, released, foreignMerged).slice(
+    0,
+    5,
+  );
   if (closures.length > 0) {
     for (const plan of closures) {
+      const scope = await scopeFor(plan.repository);
       let closed = false;
-      try {
-        closed = await deps.github.closeIssue(plan.issueNumber);
-      } catch {
-        closed = false;
+      if (scope.surface !== null) {
+        try {
+          closed = await scope.surface.closeIssue(plan.issueNumber);
+        } catch {
+          closed = false;
+        }
       }
       if (!closed) {
         actions.push(`close:${plan.id}:issue=${plan.issueNumber}:refused`);
@@ -1372,10 +1770,18 @@ export function parseHostedAutonomyPull(
   };
 }
 
-/** Live GitHub surface this helper needs, over one repository token. */
+/**
+ * Live GitHub surface this helper needs, over one repository token. The
+ * factory takes the target repository identity and builds EVERY REST path for
+ * THAT repository: the sentinel self repository's paths are never reused as a
+ * fallback for a foreign target, and no other repository name is hard-coded.
+ */
 export function createHostedAutonomyGitHub(
   token: string,
+  repository: RepositoryIdentityV1,
 ): HostedAutonomyGitHubV1 {
+  const scope = `${repository.owner}/${repository.name}`;
+
   async function request(
     method: string,
     path: string,
@@ -1408,20 +1814,21 @@ export function createHostedAutonomyGitHub(
 
   async function readPull(
     number: number,
+    baseBranch: string | null,
   ): Promise<HostedAutonomyPullV1 | null> {
-    const pull = await request(
-      "GET",
-      `/repos/${ISSUE48_QUOTA_REPOSITORY}/pulls/${number}`,
-    );
+    const pull = await request("GET", `/repos/${scope}/pulls/${number}`);
     const parsed = parseHostedAutonomyPull(pull);
     if (parsed === null || parsed.merged !== true) return parsed;
     const mergeCommitSha = parsed.mergeCommitSha;
     if (mergeCommitSha === null) return null;
+    // A merged pull whose integration point is unknown cannot be verified: it
+    // reads as null rather than as an unproven merge.
+    if (baseBranch === null) return null;
     let parents: string[] = [];
     let revisionOnBaseBranch = false;
     const commit = await request(
       "GET",
-      `/repos/${ISSUE48_QUOTA_REPOSITORY}/commits/${mergeCommitSha}`,
+      `/repos/${scope}/commits/${mergeCommitSha}`,
     );
     const parentList = commit !== null && typeof commit === "object"
       ? (commit as Record<string, unknown>)["parents"]
@@ -1434,7 +1841,7 @@ export function createHostedAutonomyGitHub(
     );
     const compare = await request(
       "GET",
-      `/repos/${ISSUE48_QUOTA_REPOSITORY}/compare/${mergeCommitSha}...${HOSTED_AUTONOMY_BASE_BRANCH}`,
+      `/repos/${scope}/compare/${mergeCommitSha}...${baseBranch}`,
     );
     revisionOnBaseBranch = revisionIntegratedIntoBase(
       compare,
@@ -1444,10 +1851,16 @@ export function createHostedAutonomyGitHub(
   }
 
   return {
-    async readBaseTip() {
+    async readDefaultBranch() {
+      const repo = await request("GET", `/repos/${scope}`);
+      if (repo === null || typeof repo !== "object") return null;
+      const branch = (repo as Record<string, unknown>)["default_branch"];
+      return typeof branch === "string" && branch.length > 0 ? branch : null;
+    },
+    async readBaseTip(branch: string) {
       const ref = await request(
         "GET",
-        `/repos/${ISSUE48_QUOTA_REPOSITORY}/git/ref/heads/${HOSTED_AUTONOMY_BASE_BRANCH}`,
+        `/repos/${scope}/git/ref/heads/${branch}`,
       );
       if (ref === null || typeof ref !== "object") return null;
       const object = (ref as Record<string, unknown>)["object"];
@@ -1458,7 +1871,7 @@ export function createHostedAutonomyGitHub(
     async hasSuccessfulCheck(head: string) {
       const runs = await request(
         "GET",
-        `/repos/${ISSUE48_QUOTA_REPOSITORY}/commits/${head}/check-runs?per_page=100`,
+        `/repos/${scope}/commits/${head}/check-runs?per_page=100`,
       );
       const list = runs !== null && typeof runs === "object"
         ? (runs as Record<string, unknown>)["check_runs"]
@@ -1473,11 +1886,35 @@ export function createHostedAutonomyGitHub(
         (item as Record<string, unknown>)["conclusion"] === "success"
       );
     },
+    async hasAllChecksGreen(head: string) {
+      const runs = await request(
+        "GET",
+        `/repos/${scope}/commits/${head}/check-runs?per_page=100`,
+      );
+      const list = runs !== null && typeof runs === "object"
+        ? (runs as Record<string, unknown>)["check_runs"]
+        : null;
+      if (!Array.isArray(list)) return false;
+      // Only the runs reported on the exact head count. Zero runs is not
+      // green: a foreign repository's own completed CI is the only
+      // deterministic signal it can supply, so a head with no CI at all is
+      // never delivered. Every run on that head must be completed and
+      // successful, which also excludes anything pending, queued or failed.
+      const onHead = list.filter((item) =>
+        typeof item === "object" && item !== null &&
+        (item as Record<string, unknown>)["head_sha"] === head
+      );
+      if (onHead.length === 0) return false;
+      return onHead.every((item) =>
+        (item as Record<string, unknown>)["status"] === "completed" &&
+        (item as Record<string, unknown>)["conclusion"] === "success"
+      );
+    },
     readPull,
     async listParkedRuns(head: string) {
       const runs = await request(
         "GET",
-        `/repos/${ISSUE48_QUOTA_REPOSITORY}/actions/runs?head_sha=${head}&per_page=50`,
+        `/repos/${scope}/actions/runs?head_sha=${head}&per_page=50`,
       );
       const list = runs !== null && typeof runs === "object"
         ? (runs as Record<string, unknown>)["workflow_runs"]
@@ -1495,15 +1932,12 @@ export function createHostedAutonomyGitHub(
     async approveRun(id: number) {
       const approved = await request(
         "POST",
-        `/repos/${ISSUE48_QUOTA_REPOSITORY}/actions/runs/${id}/approve`,
+        `/repos/${scope}/actions/runs/${id}/approve`,
       );
       return approved !== null;
     },
     async readIssueOpen(number: number) {
-      const issue = await request(
-        "GET",
-        `/repos/${ISSUE48_QUOTA_REPOSITORY}/issues/${number}`,
-      );
+      const issue = await request("GET", `/repos/${scope}/issues/${number}`);
       if (issue === null || typeof issue !== "object") return null;
       const state = (issue as Record<string, unknown>)["state"];
       if (state === "open") return true;
@@ -1513,7 +1947,7 @@ export function createHostedAutonomyGitHub(
     async closeIssue(number: number) {
       const closed = await request(
         "PATCH",
-        `/repos/${ISSUE48_QUOTA_REPOSITORY}/issues/${number}`,
+        `/repos/${scope}/issues/${number}`,
         { state: "closed" },
       );
       if (closed === null || typeof closed !== "object") return false;
@@ -1522,7 +1956,7 @@ export function createHostedAutonomyGitHub(
     async merge(number: number, head: string) {
       const response = await request(
         "PUT",
-        `/repos/${ISSUE48_QUOTA_REPOSITORY}/pulls/${number}/merge`,
+        `/repos/${scope}/pulls/${number}/merge`,
         { sha: head, merge_method: "merge" },
       );
       if (response === null || typeof response !== "object") return null;
@@ -1607,9 +2041,23 @@ export async function runHostedAutonomyMain(): Promise<number> {
       remoteUrl: ISSUE48_QUOTA_REMOTE_URL,
       runner,
     });
+    // One surface per exact repository identity: the durable snapshot may
+    // carry work for several repositories, and each record is delivered under
+    // its OWN repository, never under the self repository.
+    const surfaces = new Map<string, HostedAutonomyGitHubV1>();
+    const githubFor = (
+      repository: RepositoryIdentityV1,
+    ): HostedAutonomyGitHubV1 => {
+      const key = hostedRepositoryKey(repository);
+      const cached = surfaces.get(key);
+      if (cached !== undefined) return cached;
+      const created = createHostedAutonomyGitHub(apiToken, repository);
+      surfaces.set(key, created);
+      return created;
+    };
     result = await runHostedAutonomy({
       state,
-      github: createHostedAutonomyGitHub(apiToken),
+      githubFor,
       clock: { now: () => Date.now() },
     });
   } catch {

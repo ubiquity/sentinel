@@ -39,6 +39,9 @@ import {
   createHostedAutonomyGitHub,
   HOSTED_AUTONOMY_MAX_RETRIES,
   HOSTED_AUTONOMY_RETIRED,
+  hostedDeliveryKey,
+  hostedIssueKey,
+  hostedRepositoryKey,
   isHardAutonomyFailure,
   parseHostedAutonomyPull,
   planHostedClosures,
@@ -52,6 +55,7 @@ import type {
   HostedAutonomyPullV1,
   HostedAutonomyResultV1,
 } from "../../ops/hosted-autonomy.ts";
+import type { RepositoryIdentityV1 } from "../../src/contracts/shared.ts";
 import {
   makeRemoteCtx,
   reservation,
@@ -70,6 +74,19 @@ const SELF_REPO = {
   name: "sentinel",
   installationId: 0,
 } as const;
+/** The foreign target the durable snapshot also carries work for. */
+const FOREIGN_REPO = {
+  owner: "ubiquity",
+  name: "ai.ubq.fi",
+  installationId: 7,
+} as const;
+/** The foreign repository's own default branch, never sentinel's. */
+const FOREIGN_BRANCH = "main";
+const FOREIGN_TARGET = "issue-ubiquity-ai.ubq.fi-120" as WorkItemId;
+const FOREIGN_PR = 375;
+const FOREIGN_RECEIPT_ID = `review-receipt:${"b".repeat(64)}`;
+/** The same issue number in both repositories: the collision under test. */
+const SHARED_ISSUE_NUMBER = 120;
 
 const ENV: Record<string, string> = {
   PATH: Deno.env.get("PATH") ?? "/usr/bin:/bin",
@@ -246,6 +263,97 @@ function authorizingReceipt(overrides: Record<string, unknown> = {}) {
   });
 }
 
+/** A foreign record for its OWN repository, carrying the shared issue number. */
+function foreignRecord(overrides: Record<string, unknown> = {}): WorkRecordV1 {
+  return deliveryRecord({
+    repository: FOREIGN_REPO,
+    id: FOREIGN_TARGET,
+    source: {
+      kind: "issue",
+      id: String(SHARED_ISSUE_NUMBER),
+      revision: SHA1,
+    },
+    related: { incidentId: null, issueNumber: SHARED_ISSUE_NUMBER },
+    target: {
+      base: BASE,
+      branch: `sentinel/repair/${FOREIGN_TARGET}`,
+      checkpoint: null,
+      head: HEAD,
+      pr: FOREIGN_PR,
+    },
+    ...overrides,
+  });
+}
+
+/** The completed receipt bound to the foreign repository/PR/head/base. */
+function foreignReceipt(overrides: Record<string, unknown> = {}) {
+  return reviewReceipt(FOREIGN_RECEIPT_ID, {
+    repository: FOREIGN_REPO,
+    expectedReviewer: "github-actions[bot]",
+    observedReviewer: "github-actions[bot]",
+    pullRequest: { number: FOREIGN_PR, head: HEAD, base: BASE },
+    outcome: "completed",
+    resultId: "msg_0123456789abcdef",
+    completedAt: T0 + 3000,
+    unresolvedSeverities: [],
+    observedAt: T0 + 4000,
+    ...overrides,
+  });
+}
+
+/** A foreign pull: its OWN repository's base ref, trusted author. */
+function foreignPullFacts(
+  overrides: Partial<HostedAutonomyPullV1> = {},
+): HostedAutonomyPullV1 {
+  return pullFacts({
+    number: FOREIGN_PR,
+    baseRef: FOREIGN_BRANCH,
+    ...overrides,
+  });
+}
+
+/** Base tips keyed by the self repository scope, as the planner consumes them. */
+function selfTips(value: string | null): ReadonlyMap<string, string | null> {
+  return new Map([[hostedRepositoryKey(SELF_REPO), value]]);
+}
+
+/** Closed-issue identities scoped to the self repository. */
+function selfClosed(...numbers: number[]): ReadonlySet<string> {
+  return new Set(numbers.map((number) => hostedIssueKey(SELF_REPO, number)));
+}
+
+/** One check-run payload as the GitHub check-runs endpoint reports it. */
+function checkRun(name: string, overrides: Record<string, unknown> = {}) {
+  return {
+    name,
+    head_sha: HEAD,
+    status: "completed",
+    conclusion: "success",
+    ...overrides,
+  };
+}
+
+function jsonResponse(payload: unknown): Response {
+  return new Response(JSON.stringify(payload), { status: 200 });
+}
+
+/** True when a request URL addresses the foreign fixture repository. */
+function isForeignPath(url: string): boolean {
+  return url.includes("/repos/ubiquity/ai.ubq.fi");
+}
+
+/** True when a request URL addresses the sentinel self repository. */
+function isSelfPath(url: string): boolean {
+  return url.includes("/repos/ubiquity/sentinel");
+}
+
+/** True for the sentinel self repository identity. */
+function isSelfRepository(repository: RepositoryIdentityV1): boolean {
+  return repository.installationId === SELF_REPO.installationId &&
+    repository.owner === SELF_REPO.owner &&
+    repository.name === SELF_REPO.name;
+}
+
 function repairSnapshot(
   records: WorkRecordV1[] = [deliveryRecord()],
   reviews: unknown[] = [authorizingReceipt()],
@@ -305,6 +413,13 @@ function pullFacts(
 interface RigV1 {
   readonly tmp: string;
   readonly state: StateReadView & RepairStateWriter;
+  /**
+   * Per-repository surface resolver. The default returns the one fake surface
+   * for every identity; a test that exercises routing replaces it.
+   */
+  githubFor: (
+    repository: RepositoryIdentityV1,
+  ) => HostedAutonomyGitHubV1 | null;
   writes: number;
   merges: number;
   closed: number[];
@@ -354,8 +469,14 @@ async function makeRig(
     pull?: HostedAutonomyPullV1 | null;
     baseTip?: string | null;
     checkGreen?: boolean;
+    foreignCheckGreen?: boolean;
+    defaultBranch?: string | null;
+    issueOpen?: boolean | null;
     mergeResult?: { merged: boolean; sha: string | null } | null;
     afterMerge?: HostedAutonomyPullV1 | null;
+    resolver?: (
+      repository: RepositoryIdentityV1,
+    ) => HostedAutonomyGitHubV1 | null;
   } = {},
 ): Promise<{ rig: RigV1; github: HostedAutonomyGitHubV1 }> {
   const tmp = await Deno.makeTempDir({ prefix: `sentinel-${prefix}-` });
@@ -399,15 +520,21 @@ async function makeRig(
         return repair.writeRepair(next, expectedHead);
       },
     } as unknown as StateReadView & RepairStateWriter,
+    githubFor: () => github,
     writes: 0,
     merges: 0,
     closed: [],
   };
   let mergedNow = false;
   const github: HostedAutonomyGitHubV1 = {
+    readDefaultBranch: () =>
+      Promise.resolve(
+        options.defaultBranch === undefined ? "main" : options.defaultBranch,
+      ),
     readBaseTip: () =>
       Promise.resolve(options.baseTip === undefined ? BASE : options.baseTip),
     hasSuccessfulCheck: () => Promise.resolve(options.checkGreen ?? true),
+    hasAllChecksGreen: () => Promise.resolve(options.foreignCheckGreen ?? true),
     readPull: () =>
       Promise.resolve(
         mergedNow && options.afterMerge !== undefined
@@ -420,7 +547,10 @@ async function makeRig(
       rig.closed.push(number);
       return Promise.resolve(true);
     },
-    readIssueOpen: () => Promise.resolve(true),
+    readIssueOpen: () =>
+      Promise.resolve(
+        options.issueOpen === undefined ? true : options.issueOpen,
+      ),
     listParkedRuns: () => Promise.resolve([]),
     approveRun: () => Promise.resolve(true),
     merge: () => {
@@ -432,16 +562,17 @@ async function makeRig(
       return Promise.resolve(result);
     },
   };
+  if (options.resolver !== undefined) rig.githubFor = options.resolver;
   return { rig, github };
 }
 
 async function run(
   rig: RigV1,
-  github: HostedAutonomyGitHubV1,
+  github?: HostedAutonomyGitHubV1,
 ): Promise<HostedAutonomyResultV1> {
   return await runHostedAutonomy({
     state: rig.state,
-    github,
+    githubFor: github === undefined ? rig.githubFor : () => github,
     clock: { now: () => T0 + 5_000_000 },
   });
 }
@@ -815,10 +946,10 @@ Deno.test(
     );
     const now = T0 + 5000;
     // With no newer base the task stays put: nothing may invent an identity.
-    assert.equal(planHostedRetries(snapshot, now, BASE).length, 0);
+    assert.equal(planHostedRetries(snapshot, now, selfTips(BASE)).length, 0);
     // With a newer base the runtime's own refresh gives fresh identities.
     const newerBase = SHA1;
-    const plans = planHostedRetries(snapshot, now, newerBase);
+    const plans = planHostedRetries(snapshot, now, selfTips(newerBase));
     assert.equal(plans.length, 1);
     assert.equal(plans[0].advanceBase, true);
     assert.equal(plans[0].grant, 1);
@@ -880,7 +1011,10 @@ Deno.test(
     // land at 3 is representable here: the plan refuses instead of writing an
     // invalid snapshot, even with a newer base available.
     assert.equal(planHostedRetries(snapshot, T0 + 5000).length, 0);
-    assert.equal(planHostedRetries(snapshot, T0 + 5000, SHA1).length, 0);
+    assert.equal(
+      planHostedRetries(snapshot, T0 + 5000, selfTips(SHA1)).length,
+      0,
+    );
     const next = applyHostedRetries(snapshot, SHA1, [], T0 + 5000);
     assert.equal(next.work[0].counters.attempts, 4);
     assert.equal(next.work[0].counters.retries, 4);
@@ -896,8 +1030,23 @@ Deno.test(
     const snapshot = repairSnapshot([record], [authorizingReceipt()]);
     assert.equal(planHostedRetries(snapshot, T0 + 5000).length, 1);
     assert.equal(
-      planHostedRetries(snapshot, T0 + 5000, null, new Set([48])).length,
+      planHostedRetries(
+        snapshot,
+        T0 + 5000,
+        selfTips(null),
+        new Set([hostedIssueKey(SELF_REPO, 48)]),
+      ).length,
       0,
+    );
+    // The same number scoped to ANOTHER repository never stops this retry.
+    assert.equal(
+      planHostedRetries(
+        snapshot,
+        T0 + 5000,
+        selfTips(null),
+        new Set([hostedIssueKey(FOREIGN_REPO, 48)]),
+      ).length,
+      1,
     );
   },
 );
@@ -917,8 +1066,8 @@ Deno.test(
     });
     const snapshot = repairSnapshot([record], [authorizingReceipt()]);
     assert.deepEqual(
-      planHostedRetirements(snapshot, new Set([48])),
-      [{ id: TARGET, issueNumber: 48 }],
+      planHostedRetirements(snapshot, selfClosed(48)),
+      [{ id: TARGET, issueNumber: 48, repository: SELF_REPO }],
     );
     // A record with an open pull request still has a delivery path.
     assert.deepEqual(planHostedRetirements(snapshot, new Set()), []);
@@ -941,10 +1090,10 @@ Deno.test(
   () => {
     const snapshot = repairSnapshot([zombieRecord()]);
     // The pull's own state is the new evidence: a closed issue alone is not.
-    assert.deepEqual(planHostedRetirements(snapshot, new Set([61])), []);
+    assert.deepEqual(planHostedRetirements(snapshot, selfClosed(61)), []);
     assert.deepEqual(
-      planHostedRetirements(snapshot, new Set([61]), new Set([ZOMBIE])),
-      [{ id: ZOMBIE, issueNumber: 61 }],
+      planHostedRetirements(snapshot, selfClosed(61), new Set([ZOMBIE])),
+      [{ id: ZOMBIE, issueNumber: 61, repository: SELF_REPO }],
     );
     // A record that produced nothing keeps the existing skip while it is
     // already parked, whatever the closed-unmerged set says.
@@ -968,7 +1117,7 @@ Deno.test(
     assert.deepEqual(
       planHostedRetirements(
         parked,
-        new Set([61]),
+        selfClosed(61),
         new Set([ZOMBIE]),
       ),
       [],
@@ -988,8 +1137,8 @@ Deno.test(
       zombieCharges(),
     );
     assert.deepEqual(
-      planHostedRetirements(snapshot, new Set([61]), new Set([ZOMBIE])),
-      [{ id: ZOMBIE, issueNumber: 61 }],
+      planHostedRetirements(snapshot, selfClosed(61), new Set([ZOMBIE])),
+      [{ id: ZOMBIE, issueNumber: 61, repository: SELF_REPO }],
     );
   },
 );
@@ -1006,8 +1155,8 @@ Deno.test(
       zombieCharges(),
     );
     assert.deepEqual(
-      planHostedRetirements(settled, new Set([61]), new Set([ZOMBIE])),
-      [{ id: ZOMBIE, issueNumber: 61 }],
+      planHostedRetirements(settled, selfClosed(61), new Set([ZOMBIE])),
+      [{ id: ZOMBIE, issueNumber: 61, repository: SELF_REPO }],
     );
 
     // A matching reservation that is still `reserved` is not settled.
@@ -1026,14 +1175,14 @@ Deno.test(
       ],
     );
     assert.deepEqual(
-      planHostedRetirements(reserved, new Set([61]), new Set([ZOMBIE])),
+      planHostedRetirements(reserved, selfClosed(61), new Set([ZOMBIE])),
       [],
     );
 
     // No matching reservation at all is not settled either.
     const missing = repairSnapshot([zombieRecord({ intent: zombieIntent() })]);
     assert.deepEqual(
-      planHostedRetirements(missing, new Set([61]), new Set([ZOMBIE])),
+      planHostedRetirements(missing, selfClosed(61), new Set([ZOMBIE])),
       [],
     );
 
@@ -1055,8 +1204,8 @@ Deno.test(
       }),
     ]);
     assert.deepEqual(
-      planHostedRetirements(refreshing, new Set([61]), new Set([ZOMBIE])),
-      [{ id: ZOMBIE, issueNumber: 61 }],
+      planHostedRetirements(refreshing, selfClosed(61), new Set([ZOMBIE])),
+      [{ id: ZOMBIE, issueNumber: 61, repository: SELF_REPO }],
     );
   },
 );
@@ -1246,8 +1395,8 @@ Deno.test(
       );
     }) as typeof fetch;
     try {
-      const github = createHostedAutonomyGitHub("fixture-token");
-      const unmerged = await github.readPull(63);
+      const github = createHostedAutonomyGitHub("fixture-token", SELF_REPO);
+      const unmerged = await github.readPull(63, "development");
       assert.equal(unmerged?.state, "open");
       assert.equal(unmerged?.merged, false);
       assert.equal(unmerged?.mergeCommitSha, null);
@@ -1255,14 +1404,16 @@ Deno.test(
       assert.equal(unmerged?.baseRef, "development");
       assert.equal(unmerged?.author, "github-actions[bot]");
       assert.equal(requests.length, 1);
+      assert.ok(requests[0].includes("/repos/ubiquity/sentinel/pulls/63"));
 
-      const afterMerge = await github.readPull(51);
+      const afterMerge = await github.readPull(51, "development");
       if (afterMerge === null) throw new Error("merged pull unreadable");
       assert.equal(afterMerge.merged, true);
       assert.equal(afterMerge.mergeCommitSha, MERGE);
       assert.deepEqual([...afterMerge.parents], [BASE, HEAD]);
       assert.equal(afterMerge.revisionOnBaseBranch, true);
       assert.equal(requests.length, 4);
+      assert.ok(requests[3].includes("/repos/ubiquity/sentinel/compare/"));
     } finally {
       globalThis.fetch = original;
     }
@@ -1574,9 +1725,13 @@ Deno.test(
     const snapshot = repairSnapshot([blockedRecord()], [authorizingReceipt()], [
       request,
     ]);
-    const released = new Map([[`51:${HEAD}`, accepted]]);
+    const released = new Map([
+      [hostedDeliveryKey(SELF_REPO, 51, HEAD, BASE), accepted],
+    ]);
     const plans = planHostedClosures(snapshot, released);
-    assert.deepEqual(plans, [{ id: TARGET, issueNumber: 48 }]);
+    assert.deepEqual(plans, [
+      { id: TARGET, issueNumber: 48, repository: SELF_REPO },
+    ]);
     const next = applyHostedClosures(snapshot, SHA1, plans, T0 + 5000);
     assert.equal(next.work[0].nextStep, "done");
     assert.equal(next.work[0].blocker, null);
@@ -1584,7 +1739,10 @@ Deno.test(
     assert.equal(next.sequence, snapshot.sequence + 1);
     // An accepted release that delivered another head closes nothing.
     assert.deepEqual(
-      planHostedClosures(snapshot, new Map([[`51:${SHA1}`, accepted]])),
+      planHostedClosures(
+        snapshot,
+        new Map([[hostedDeliveryKey(SELF_REPO, 51, SHA1, BASE), accepted]]),
+      ),
       [],
     );
   },
@@ -1833,7 +1991,7 @@ Deno.test(
       chargedAttempts(),
     );
     const newerBase = SHA1;
-    const plans = planHostedRetries(snapshot, T0 + 5000, newerBase);
+    const plans = planHostedRetries(snapshot, T0 + 5000, selfTips(newerBase));
     assert.equal(plans.length, 1);
     // A grant of 0 would leave attempts at 4, exactly where the runtime refuses
     // admission: the grant must land below the ceiling through the runtime's
@@ -1872,7 +2030,10 @@ Deno.test(
       [],
       chargedAttempts(),
     );
-    assert.equal(planHostedRetries(earlier, T0 + 5000, SHA1).length, 1);
+    assert.equal(
+      planHostedRetries(earlier, T0 + 5000, selfTips(SHA1)).length,
+      1,
+    );
     // ...but once every review round is spent another implementation run can
     // never become a reviewed verdict: no grant, base advance included.
     const spent = repairSnapshot(
@@ -1884,8 +2045,8 @@ Deno.test(
       [],
       chargedAttempts(),
     );
-    assert.equal(planHostedRetries(spent, T0 + 5000, SHA1).length, 0);
-    assert.equal(planHostedRetries(spent, T0 + 5000, BASE).length, 0);
+    assert.equal(planHostedRetries(spent, T0 + 5000, selfTips(SHA1)).length, 0);
+    assert.equal(planHostedRetries(spent, T0 + 5000, selfTips(BASE)).length, 0);
   },
 );
 
@@ -1962,5 +2123,514 @@ Deno.test(
     assert.equal(reviewNext.counters.reviewRounds, 0);
     assert.equal(reviewNext.counters.attempts, 1);
     assert.equal(reviewNext.counters.retries, 0);
+  },
+);
+
+Deno.test(
+  "hosted autonomy: a foreign record is routed to its own repository surface",
+  async () => {
+    // The runner resolves the record's OWN identity: the sentinel scope is
+    // never even resolved for a foreign record.
+    const resolved: string[] = [];
+    const { rig, github } = await makeRig("autonomy-foreign-routing", {
+      repair: repairSnapshot([foreignRecord()], [foreignReceipt()]),
+      pull: foreignPullFacts({
+        state: "open",
+        merged: false,
+        mergeCommitSha: null,
+      }),
+      afterMerge: foreignPullFacts(),
+      resolver: (repository) => {
+        resolved.push(hostedRepositoryKey(repository));
+        return github;
+      },
+    });
+    const result = await run(rig);
+    assert.equal(result.status, "applied", JSON.stringify(result));
+    assert.equal(rig.merges, 1);
+    assert.ok(resolved.length > 0);
+    assert.deepEqual([...new Set(resolved)], [
+      hostedRepositoryKey(FOREIGN_REPO),
+    ]);
+    assert.ok(!resolved.includes(hostedRepositoryKey(SELF_REPO)));
+    await Deno.remove(rig.tmp, { recursive: true });
+
+    // The real factory builds EVERY REST path for the identity it was given.
+    // A sentinel path is not served at all here, so any sentinel read would
+    // make this case fail instead of silently succeeding.
+    const requests: string[] = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = ((input: string | URL | Request) => {
+      const url = String(input);
+      requests.push(url);
+      if (!isForeignPath(url)) {
+        return Promise.resolve(new Response("{}", { status: 404 }));
+      }
+      const payload = url.includes("/pulls/")
+        ? {
+          state: "open",
+          merged: false,
+          merge_commit_sha: null,
+          head: { sha: HEAD },
+          base: { ref: FOREIGN_BRANCH },
+          user: { login: "github-actions[bot]" },
+          number: FOREIGN_PR,
+        }
+        : url.includes("/check-runs")
+        ? { check_runs: [checkRun("validate"), checkRun("verify-artifact")] }
+        : url.includes("/git/ref/")
+        ? { object: { sha: BASE } }
+        : url.includes("/issues/")
+        ? { state: "open" }
+        : { default_branch: FOREIGN_BRANCH };
+      return Promise.resolve(jsonResponse(payload));
+    }) as typeof fetch;
+    try {
+      const surface = createHostedAutonomyGitHub("fixture-token", FOREIGN_REPO);
+      assert.equal(await surface.readDefaultBranch(), FOREIGN_BRANCH);
+      assert.equal(await surface.readBaseTip(FOREIGN_BRANCH), BASE);
+      assert.equal(await surface.hasAllChecksGreen(HEAD), true);
+      assert.equal(await surface.readIssueOpen(SHARED_ISSUE_NUMBER), true);
+      const pull = await surface.readPull(FOREIGN_PR, FOREIGN_BRANCH);
+      assert.equal(pull?.number, FOREIGN_PR);
+      assert.equal(pull?.baseRef, FOREIGN_BRANCH);
+      assert.ok(requests.length >= 5);
+      assert.ok(requests.every(isForeignPath));
+      assert.ok(!requests.some(isSelfPath));
+    } finally {
+      globalThis.fetch = original;
+    }
+  },
+);
+
+Deno.test(
+  "hosted autonomy: a green foreign head merges and closes its own issue without a release",
+  async () => {
+    const requests: { method: string; url: string }[] = [];
+    const original = globalThis.fetch;
+    let mergedNow = false;
+    globalThis.fetch = ((
+      input: string | URL | Request,
+      init?: RequestInit,
+    ) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      requests.push({ method, url });
+      if (!isForeignPath(url)) {
+        return Promise.resolve(new Response("{}", { status: 404 }));
+      }
+      if (method === "PUT" && url.endsWith(`/pulls/${FOREIGN_PR}/merge`)) {
+        mergedNow = true;
+        return Promise.resolve(jsonResponse({ merged: true, sha: MERGE }));
+      }
+      if (
+        method === "PATCH" && url.endsWith(`/issues/${SHARED_ISSUE_NUMBER}`)
+      ) {
+        return Promise.resolve(
+          jsonResponse({ state: "closed", number: SHARED_ISSUE_NUMBER }),
+        );
+      }
+      if (url.includes(`/pulls/${FOREIGN_PR}`)) {
+        return Promise.resolve(jsonResponse(
+          mergedNow
+            ? {
+              state: "closed",
+              merged: true,
+              merge_commit_sha: MERGE,
+              head: { sha: HEAD },
+              base: { ref: FOREIGN_BRANCH },
+              user: { login: "ubiquity-sentinel[bot]" },
+              number: FOREIGN_PR,
+            }
+            : {
+              state: "open",
+              merged: false,
+              merge_commit_sha: null,
+              head: { sha: HEAD },
+              base: { ref: FOREIGN_BRANCH },
+              user: { login: "ubiquity-sentinel[bot]" },
+              number: FOREIGN_PR,
+            },
+        ));
+      }
+      const payload = url.includes("/check-runs")
+        ? { check_runs: [checkRun("validate"), checkRun("verify-artifact")] }
+        : url.includes("/commits/")
+        ? { parents: [{ sha: BASE }, { sha: HEAD }] }
+        : url.includes("/compare/")
+        ? {
+          status: "ahead",
+          base_commit: { sha: MERGE },
+          merge_base_commit: { sha: MERGE },
+        }
+        : url.includes("/git/ref/")
+        ? { object: { sha: BASE } }
+        : url.includes("/actions/runs")
+        ? { workflow_runs: [] }
+        : url.includes("/issues/")
+        ? { state: "open" }
+        : { default_branch: FOREIGN_BRANCH };
+      return Promise.resolve(jsonResponse(payload));
+    }) as typeof fetch;
+    try {
+      const { rig } = await makeRig("autonomy-foreign-green", {
+        repair: repairSnapshot([foreignRecord()], [foreignReceipt()]),
+        resolver: (repository) =>
+          createHostedAutonomyGitHub("fixture-token", repository),
+      });
+      const result = await run(rig);
+      assert.equal(result.status, "applied", JSON.stringify(result));
+      assert.equal(result.reason, "closed_issues");
+      assert.equal(rig.writes, 1);
+      assert.deepEqual([...result.revisions], [MERGE]);
+      assert.ok(
+        result.actions.includes(`delivery:${FOREIGN_TARGET}:foreign_merged`),
+      );
+      assert.ok(result.actions.includes(`close:${FOREIGN_TARGET}:issue=120`));
+      // Both the merge and the closure went to the record's OWN repository.
+      assert.ok(requests.some((entry) =>
+        entry.method === "PUT" &&
+        entry.url.endsWith(
+          `/repos/ubiquity/ai.ubq.fi/pulls/${FOREIGN_PR}/merge`,
+        )
+      ));
+      assert.ok(requests.some((entry) =>
+        entry.method === "PATCH" &&
+        entry.url.endsWith(`/repos/ubiquity/ai.ubq.fi/issues/120`)
+      ));
+      assert.ok(!requests.some((entry) => isSelfPath(entry.url)));
+      // No release request is ever fabricated for a foreign repository.
+      assert.deepEqual(await readRequests(rig), []);
+      const read = await rig.state.readRepair();
+      if (!read.ok || read.value.status !== "found") {
+        throw new Error("unreadable");
+      }
+      const record = read.value.snapshot.work[0];
+      assert.equal(record.nextStep, "done");
+      assert.equal(record.blocker, null);
+      await Deno.remove(rig.tmp, { recursive: true });
+    } finally {
+      globalThis.fetch = original;
+    }
+  },
+);
+
+Deno.test(
+  "hosted autonomy: a foreign head is green only when every check-run on it succeeded",
+  async () => {
+    const gate = async (checkRuns: unknown[]): Promise<boolean> => {
+      const original = globalThis.fetch;
+      globalThis.fetch = (() =>
+        Promise.resolve(
+          jsonResponse({ check_runs: checkRuns }),
+        )) as typeof fetch;
+      try {
+        return await createHostedAutonomyGitHub("fixture-token", FOREIGN_REPO)
+          .hasAllChecksGreen(HEAD);
+      } finally {
+        globalThis.fetch = original;
+      }
+    };
+    // Zero check-runs is not green: a foreign repository has no other
+    // deterministic signal, so an unverified head is never delivered.
+    assert.equal(await gate([]), false);
+    assert.equal(
+      await gate([checkRun("validate", {
+        status: "in_progress",
+        conclusion: null,
+      })]),
+      false,
+    );
+    assert.equal(
+      await gate([
+        checkRun("validate", { status: "queued", conclusion: null }),
+      ]),
+      false,
+    );
+    assert.equal(
+      await gate([
+        checkRun("validate"),
+        checkRun("verify-artifact", { conclusion: "failure" }),
+      ]),
+      false,
+    );
+    // A run reported on a different head is not a run on this one.
+    assert.equal(await gate([checkRun("validate", { head_sha: SHA1 })]), false);
+    // The foreign repository's own names are the gate: both green delivers.
+    assert.equal(
+      await gate([checkRun("validate"), checkRun("verify-artifact")]),
+      true,
+    );
+
+    // The pass itself refuses a red or pending foreign head.
+    const { rig } = await makeRig("autonomy-foreign-red", {
+      repair: repairSnapshot([foreignRecord()], [foreignReceipt()]),
+      pull: foreignPullFacts({
+        state: "open",
+        merged: false,
+        mergeCommitSha: null,
+      }),
+      foreignCheckGreen: false,
+    });
+    const result = await run(rig);
+    assert.equal(result.reason, "checks_pending");
+    assert.equal(rig.merges, 0);
+    assert.equal(rig.writes, 0);
+    assert.equal(rig.closed.length, 0);
+    assert.ok(
+      result.actions.some((action) => action.endsWith("checks_pending")),
+    );
+    await Deno.remove(rig.tmp, { recursive: true });
+  },
+);
+
+Deno.test(
+  "hosted autonomy: issue 120 in two repositories never collides",
+  async () => {
+    const selfRecord120 = deliveryRecord({
+      id: "issue-ubiquity-sentinel-120" as WorkItemId,
+      source: {
+        kind: "issue",
+        id: String(SHARED_ISSUE_NUMBER),
+        revision: SHA1,
+      },
+      related: { incidentId: null, issueNumber: SHARED_ISSUE_NUMBER },
+      nextStep: "work",
+      target: {
+        base: BASE,
+        branch: "sentinel/repair/issue-ubiquity-sentinel-120",
+        checkpoint: null,
+        head: null,
+        pr: null,
+      },
+    });
+    const foreignRecord120 = foreignRecord({
+      nextStep: "work",
+      target: {
+        base: BASE,
+        branch: `sentinel/repair/${FOREIGN_TARGET}`,
+        checkpoint: null,
+        head: null,
+        pr: null,
+      },
+    });
+    const snapshot = repairSnapshot(
+      [selfRecord120, foreignRecord120],
+      [authorizingReceipt(), foreignReceipt()],
+    );
+    // Only the FOREIGN issue 120 is closed: sentinel's own 120 is untouched.
+    assert.deepEqual(
+      planHostedRetirements(
+        snapshot,
+        new Set([hostedIssueKey(FOREIGN_REPO, SHARED_ISSUE_NUMBER)]),
+      ),
+      [{
+        id: FOREIGN_TARGET,
+        issueNumber: SHARED_ISSUE_NUMBER,
+        repository: FOREIGN_REPO,
+      }],
+    );
+    // ...and the reverse: the foreign record survives sentinel's closure.
+    assert.deepEqual(
+      planHostedRetirements(
+        snapshot,
+        new Set([hostedIssueKey(SELF_REPO, SHARED_ISSUE_NUMBER)]),
+      ),
+      [{
+        id: "issue-ubiquity-sentinel-120",
+        issueNumber: SHARED_ISSUE_NUMBER,
+        repository: SELF_REPO,
+      }],
+    );
+
+    // Closure evidence is scoped the same way: an accepted self release and a
+    // foreign merge are each only valid for their OWN repository's record.
+    const closable = repairSnapshot(
+      [
+        deliveryRecord({
+          id: "issue-ubiquity-sentinel-120" as WorkItemId,
+          source: {
+            kind: "issue",
+            id: String(SHARED_ISSUE_NUMBER),
+            revision: SHA1,
+          },
+          related: { incidentId: null, issueNumber: SHARED_ISSUE_NUMBER },
+          target: {
+            base: BASE,
+            branch: "sentinel/repair/issue-ubiquity-sentinel-120",
+            checkpoint: null,
+            head: HEAD,
+            pr: 51,
+          },
+        }),
+        foreignRecord(),
+      ],
+      [authorizingReceipt(), foreignReceipt()],
+    );
+    const released = new Map([
+      [hostedDeliveryKey(SELF_REPO, 51, HEAD, BASE), {}],
+    ]);
+    const foreignMerged = new Map([
+      [hostedDeliveryKey(FOREIGN_REPO, FOREIGN_PR, HEAD, BASE), {}],
+    ]);
+    assert.deepEqual(planHostedClosures(closable, released), [{
+      id: "issue-ubiquity-sentinel-120",
+      issueNumber: SHARED_ISSUE_NUMBER,
+      repository: SELF_REPO,
+    }]);
+    assert.deepEqual(planHostedClosures(closable, new Map(), foreignMerged), [{
+      id: FOREIGN_TARGET,
+      issueNumber: SHARED_ISSUE_NUMBER,
+      repository: FOREIGN_REPO,
+    }]);
+
+    // Runner level: closing the foreign issue 120 must not touch sentinel's
+    // record for its own issue 120, and vice versa.
+    const selfClosedIssues: number[] = [];
+    const foreignClosedIssues: number[] = [];
+    const { rig, github } = await makeRig("autonomy-issue-collision", {
+      repair: repairSnapshot(
+        [
+          deliveryRecord({
+            id: "issue-ubiquity-sentinel-120" as WorkItemId,
+            source: {
+              kind: "issue",
+              id: String(SHARED_ISSUE_NUMBER),
+              revision: SHA1,
+            },
+            related: { incidentId: null, issueNumber: SHARED_ISSUE_NUMBER },
+            target: {
+              base: BASE,
+              branch: "sentinel/repair/issue-ubiquity-sentinel-120",
+              checkpoint: null,
+              head: HEAD,
+              pr: 51,
+            },
+          }),
+          foreignRecord(),
+        ],
+        // The self record carries no authorizing receipt at all; only the
+        // foreign record has the evidence its own repository can supply.
+        [foreignReceipt()],
+      ),
+      pull: foreignPullFacts(),
+    });
+    rig.githubFor = (repository) =>
+      isSelfRepository(repository)
+        ? {
+          ...github,
+          readPull: (number: number) =>
+            Promise.resolve(number === 51 ? pullFacts() : null),
+          closeIssue: (number: number) => {
+            selfClosedIssues.push(number);
+            return Promise.resolve(true);
+          },
+        }
+        : {
+          ...github,
+          readDefaultBranch: () => Promise.resolve(FOREIGN_BRANCH),
+          readPull: (number: number) =>
+            Promise.resolve(number === FOREIGN_PR ? foreignPullFacts() : null),
+          closeIssue: (number: number) => {
+            foreignClosedIssues.push(number);
+            return Promise.resolve(true);
+          },
+        };
+    const result = await run(rig);
+    assert.equal(result.status, "applied", JSON.stringify(result));
+    assert.equal(result.reason, "closed_issues");
+    assert.deepEqual(foreignClosedIssues, [SHARED_ISSUE_NUMBER]);
+    assert.deepEqual(selfClosedIssues, []);
+    const read = await rig.state.readRepair();
+    if (!read.ok || read.value.status !== "found") {
+      throw new Error("unreadable");
+    }
+    const foreign = read.value.snapshot.work.find((record) =>
+      record.id === FOREIGN_TARGET
+    );
+    const self = read.value.snapshot.work.find((record) =>
+      record.id === "issue-ubiquity-sentinel-120"
+    );
+    assert.equal(foreign?.nextStep, "done");
+    assert.equal(self?.nextStep, "delivery");
+    await Deno.remove(rig.tmp, { recursive: true });
+  },
+);
+
+Deno.test(
+  "hosted autonomy: the self target still requires its named check and an accepted release",
+  async () => {
+    // The self deterministic gate is the named `test-local` check-run: a head
+    // that only carries other green checks is not green, and every read stays
+    // on the sentinel scope.
+    const requests: string[] = [];
+    const gate = async (checkRuns: unknown[]): Promise<boolean> => {
+      const original = globalThis.fetch;
+      globalThis.fetch = ((input: string | URL | Request) => {
+        const url = String(input);
+        requests.push(url);
+        if (!isSelfPath(url)) {
+          return Promise.resolve(new Response("{}", { status: 404 }));
+        }
+        return Promise.resolve(jsonResponse({ check_runs: checkRuns }));
+      }) as typeof fetch;
+      try {
+        return await createHostedAutonomyGitHub("fixture-token", SELF_REPO)
+          .hasSuccessfulCheck(HEAD);
+      } finally {
+        globalThis.fetch = original;
+      }
+    };
+    assert.equal(
+      await gate([checkRun("validate"), checkRun("verify-artifact")]),
+      false,
+    );
+    assert.equal(await gate([checkRun("test-local")]), true);
+    assert.equal(
+      await gate([checkRun("test-local", {
+        status: "in_progress",
+        conclusion: null,
+      })]),
+      false,
+    );
+    assert.equal(
+      await gate([checkRun("test-local", { conclusion: "failure" })]),
+      false,
+    );
+    assert.ok(requests.length >= 4);
+    assert.ok(requests.every(isSelfPath));
+
+    // A self head with a red deterministic check is never merged.
+    const red = await makeRig("autonomy-self-red", {
+      repair: repairSnapshot([deliveryRecord()], [authorizingReceipt()]),
+      pull: pullFacts({ state: "open", merged: false, mergeCommitSha: null }),
+      checkGreen: false,
+    });
+    const redResult = await run(red.rig, red.github);
+    assert.equal(red.rig.merges, 0);
+    assert.equal(redResult.reason, "checks_pending");
+
+    // A merged self head with a completed receipt but NO accepted hosted
+    // release still writes the exact release request and closes nothing: the
+    // trusted release path stays the only closure authority for self.
+    const merged = await makeRig("autonomy-self-release-gate", {
+      repair: repairSnapshot([deliveryRecord()], [authorizingReceipt()]),
+      pull: pullFacts(),
+    });
+    const mergedResult = await run(merged.rig, merged.github);
+    assert.equal(mergedResult.reason, "applied");
+    assert.equal((await readRequests(merged.rig)).length, 1);
+    assert.equal(merged.rig.closed.length, 0);
+    const read = await merged.rig.state.readRepair();
+    if (!read.ok || read.value.status !== "found") {
+      throw new Error("unreadable");
+    }
+    assert.equal(read.value.snapshot.work[0].nextStep, "delivery");
+
+    await Promise.all(
+      [red, merged].map((entry) =>
+        Deno.remove(entry.rig.tmp, { recursive: true })
+      ),
+    );
   },
 );
