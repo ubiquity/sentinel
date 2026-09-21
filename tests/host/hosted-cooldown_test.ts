@@ -645,3 +645,70 @@ Deno.test("hosted cooldown: release state rejects dropping or weakening a cooldo
     await manual.cleanup();
   }
 });
+
+Deno.test(
+  "hosted cooldown: a foreign target's App scope is admitted and isolated from the self scope",
+  async () => {
+    const rig = await makeRig();
+    try {
+      // The repair gate reads BOTH refs: the release ref supplies the
+      // deployment-wide scope-0 hold, the repair ref the per-scope records.
+      await rig.seedRelease([], [releaseRecord("rel-1")]);
+      await rig.seedRepair([]);
+      const gate = rig.repairGate();
+      const appScope = 155_687_488;
+
+      // A committed foreign target is gated under its own App installation
+      // scope. Admitting it must NOT latch the deployment-wide gate, because a
+      // latch would stop every other target — the self-repair lane included.
+      assert.deepEqual(await gate.beforeRequest(appScope), portOk(undefined));
+      assert.deepEqual(await gate.beforeRequest(0), portOk(undefined));
+
+      // A hold recorded for the foreign scope blocks only that scope; the self
+      // scope stays admitted.
+      const limited = rig.repairGate();
+      assert.deepEqual(
+        await limited.recordRateLimit(
+          appScope,
+          rate({
+            retryNotBefore: T0 + 120_000,
+          }),
+        ),
+        portOk(undefined),
+      );
+      const blocked = await limited.beforeRequest(appScope);
+      assert.equal(blocked.ok, false);
+      if (blocked.ok) throw new Error("expected a denial");
+      assert.equal(blocked.error.kind, "rate_limited");
+      assert.deepEqual(await limited.beforeRequest(0), portOk(undefined));
+
+      // A hold on the self scope is a deployment-wide hold: it still blocks the
+      // foreign scope, so a self-path incident can never be routed around.
+      const selfHeld = rig.repairGate();
+      assert.deepEqual(
+        await selfHeld.recordRateLimit(
+          0,
+          rate({
+            retryNotBefore: T0 + 120_000,
+          }),
+        ),
+        portOk(undefined),
+      );
+      const heldSelf = await selfHeld.beforeRequest(0);
+      assert.equal(heldSelf.ok, false);
+      const heldForeign = await selfHeld.beforeRequest(appScope);
+      assert.equal(heldForeign.ok, false);
+      if (heldForeign.ok) throw new Error("expected a denial");
+      assert.equal(heldForeign.error.kind, "rate_limited");
+
+      // A malformed scope is still a refusal that never writes.
+      const malformed = rig.repairGate();
+      const refused = await malformed.beforeRequest(-1);
+      assert.equal(refused.ok, false);
+      if (refused.ok) throw new Error("expected a refusal");
+      assert.equal(refused.error.kind, "unavailable");
+    } finally {
+      await rig.cleanup();
+    }
+  },
+);

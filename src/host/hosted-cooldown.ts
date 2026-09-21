@@ -170,10 +170,22 @@ export class HostedRepairCooldownGate implements GitHubCooldownGateV1 {
     this.inner = new DurableGitHubCooldownGate(deps);
   }
 
+  /**
+   * Every committed target is gated under its own scope: the sentinel
+   * self-target uses the reserved no-App scope 0 and a foreign target uses the
+   * App installation scope that can actually write to it. Any valid
+   * non-negative integer is therefore accepted and passed through to the
+   * durable per-scope gate; only a malformed value is a refusal.
+   *
+   * The release ref's scope-0 hold is a DEPLOYMENT-wide hold, so it still
+   * blocks every scope: a hold recorded against the self scope stops the whole
+   * run, foreign targets included. A hold for one foreign target does not block
+   * another target, because the inner gate keeps one record per scope.
+   */
   async beforeRequest(installationId: number): Promise<PortResultV1<void>> {
     if (this.faulted) return faultResult();
     try {
-      if (installationId !== HOSTED_SCOPE) return this.latch();
+      if (!isNonNegativeSafeInteger(installationId)) return this.latch();
       const now = this.clock.now();
       if (!isNonNegativeSafeInteger(now)) return this.latch();
 
@@ -197,8 +209,10 @@ export class HostedRepairCooldownGate implements GitHubCooldownGateV1 {
   ): Promise<PortResultV1<void>> {
     if (this.faulted) return faultResult();
     try {
-      if (installationId !== HOSTED_SCOPE) return this.latch();
+      if (!isNonNegativeSafeInteger(installationId)) return this.latch();
       // Repair-owned recording only; the release ref is never written here.
+      // The record is written for the scope that actually hit the limit, so a
+      // foreign target's rate limit never masks or blocks the self scope.
       return await this.delegate(
         this.inner.recordRateLimit(installationId, rateLimit),
       );
