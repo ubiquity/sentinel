@@ -204,6 +204,7 @@ function diagnosticLine(overrides: Record<string, unknown> = {}): string {
     durationMs: 1_234,
     outputChars: 100,
     candidatePresent: true,
+    reasonCode: null,
     ...overrides,
   });
 }
@@ -223,6 +224,7 @@ const SAFE_DIAGNOSTIC = {
   durationMs: 1_234,
   outputChars: 100,
   candidatePresent: true,
+  reasonCode: null,
 } as const;
 
 async function makeCheckout(
@@ -1178,6 +1180,12 @@ Deno.test("hosted runtime: malformed, oversized, unknown-field or forged advisor
         diagnosticLine({ outcome: "port_error" }),
         diagnosticLine({ errorKind: "unavailable" }),
         diagnosticLine({ reason: "made_up" }),
+        // reasonCode must be one of the runtime's own fixed literals, or null.
+        // Arbitrary text, an unknown literal, a non-string, or a code on a
+        // settled record are all refused, so no raw text can ever be echoed.
+        diagnosticLine({ reasonCode: "raw-error-marker" }),
+        diagnosticLine({ reasonCode: "made-up-code" }),
+        diagnosticLine({ reasonCode: 7 }),
         oversized,
         forgedWrapper,
       ]
@@ -1377,6 +1385,7 @@ Deno.test("hosted runtime: a real owned-group child cannot forge the wrapper ter
       durationMs: 4_321,
       outputChars: 99,
       candidatePresent: false,
+      reasonCode: null,
     });
     assert.deepEqual(portAdvisory.diagnostic, {
       version: "v1",
@@ -1392,6 +1401,7 @@ Deno.test("hosted runtime: a real owned-group child cannot forge the wrapper ter
       durationMs: null,
       outputChars: null,
       candidatePresent: false,
+      reasonCode: null,
     });
     const serialized = JSON.stringify(result.diagnostics);
     for (

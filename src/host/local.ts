@@ -571,6 +571,39 @@ function localModelResultReason(
  * reach this shape. `taskKey` is the stable SHA-256 of the task id and `base`
  * is the exact validated request base.
  */
+/**
+ * Fixed code table for this module's own static failure strings. It exists so a
+ * failed model run names the exact seam it failed at instead of reporting only
+ * `unavailable`. Every code is a literal defined HERE; text that is not in this
+ * table maps to null, so no server output, probe output, path, or payload can
+ * ever reach the advisory line.
+ */
+const HOST_REASON_CODES: readonly (readonly [string, string])[] = [
+  [STATIC_MODEL_INPUT, "model_request_invalid"],
+  [STATIC_CHECKOUT, "model_checkout_unavailable"],
+  [STATIC_IMPORT, "candidate_import_failed"],
+  [STATIC_MODEL_RESULT, "model_result_unpersisted"],
+  [STATIC_GIT_FAILED, "git_command_failed"],
+  [STATIC_GIT_BOUND, "git_output_over_bound"],
+  [STATIC_LOCAL_CANDIDATE, "local_candidate_unavailable"],
+  [STATIC_GITHUB_LOGIN, "authenticated_login_unavailable"],
+];
+
+/** Exact code for one of this module's own static strings, else null. */
+function hostReasonCode(detail: unknown): string | null {
+  if (typeof detail !== "string") return null;
+  for (const [text, code] of HOST_REASON_CODES) {
+    if (detail === text) return code;
+  }
+  return null;
+}
+
+/** True only for one of this module's own reason-code literals. */
+function isHostReasonCode(value: unknown): value is string {
+  return typeof value === "string" &&
+    HOST_REASON_CODES.some(([, code]) => code === value);
+}
+
 export interface LocalModelDiagnosticV1 {
   version: "v1";
   kind: "sentinel_model_diagnostic";
@@ -585,6 +618,12 @@ export interface LocalModelDiagnosticV1 {
   durationMs: number | null;
   outputChars: number | null;
   candidatePresent: boolean;
+  /**
+   * Exact seam code for a `port_error`, from {@link HOST_REASON_CODES}, else
+   * null. It can only ever be one of those literals, which is what makes a
+   * failed hosted run diagnosable without exposing raw text.
+   */
+  reasonCode: string | null;
 }
 
 const LOCAL_DIAGNOSTIC_KEYS = [
@@ -601,6 +640,7 @@ const LOCAL_DIAGNOSTIC_KEYS = [
   "durationMs",
   "outputChars",
   "candidatePresent",
+  "reasonCode",
 ] as const;
 
 const PORT_ERROR_KINDS: readonly PortErrorKindV1[] = [
@@ -679,6 +719,8 @@ export function parseLocalModelDiagnosticV1(
     if (terminalOrigin !== null || observedTerminalStatus !== null) return null;
     if (durationMs !== null || outputChars !== null) return null;
     if (candidatePresent !== false) return null;
+    const reasonCode = record.reasonCode;
+    if (reasonCode !== null && !isHostReasonCode(reasonCode)) return null;
     return {
       version: "v1",
       kind: "sentinel_model_diagnostic",
@@ -693,6 +735,7 @@ export function parseLocalModelDiagnosticV1(
       durationMs: null,
       outputChars: null,
       candidatePresent: false,
+      reasonCode,
     };
   }
 
@@ -717,6 +760,8 @@ export function parseLocalModelDiagnosticV1(
     return null;
   }
   if (typeof candidatePresent !== "boolean") return null;
+  // A settled session carries no seam failure, so its code is exactly null.
+  if (record.reasonCode !== null) return null;
   return {
     version: "v1",
     kind: "sentinel_model_diagnostic",
@@ -731,6 +776,7 @@ export function parseLocalModelDiagnosticV1(
     durationMs,
     outputChars,
     candidatePresent,
+    reasonCode: null,
   };
 }
 
@@ -760,6 +806,8 @@ function projectLocalModelDiagnostic(
       durationMs: null,
       outputChars: null,
       candidatePresent: false,
+      // Exactly one code from our own fixed table, never the raw detail.
+      reasonCode: hostReasonCode(result.error.detail),
     };
   }
   const receipt = result.value;
@@ -777,6 +825,7 @@ function projectLocalModelDiagnostic(
     durationMs: receipt.actual.durationMs,
     outputChars: receipt.actual.outputChars,
     candidatePresent: receipt.candidate !== null,
+    reasonCode: null,
   };
 }
 

@@ -821,6 +821,7 @@ const SAFE_DIAGNOSTIC_KEYS = [
   "outcome",
   "outputChars",
   "reason",
+  "reasonCode",
   "taskKey",
   "terminalOrigin",
   "version",
@@ -868,6 +869,7 @@ Deno.test(
         durationMs: 1_234,
         outputChars: 100,
         candidatePresent: true,
+        reasonCode: null,
       });
       const failedPrivate = await Deno.readTextFile(failedPath);
       assert.equal(
@@ -922,6 +924,7 @@ Deno.test(
         durationMs: 1_234,
         outputChars: 100,
         candidatePresent: false,
+        reasonCode: null,
       });
 
       // Arbitrary private receipt content (provider, thread/turn identity,
@@ -1012,6 +1015,9 @@ Deno.test(
         durationMs: null,
         outputChars: null,
         candidatePresent: false,
+        // DUMMY_RAW_ERROR is not one of our own static strings, so the raw text
+        // must map to null rather than becoming a code.
+        reasonCode: null,
       });
       assert.equal(
         (await Deno.readTextFile(portPath)).includes(DUMMY_RAW_ERROR),
