@@ -247,7 +247,7 @@ export const OWNER_DEVELOPMENT_INSTALL_RESERVE_MODEL_GENERATION = 27;
  * reserve-model revision's own healthy proof.
  */
 export const OWNER_DEVELOPMENT_INSTALL_MULTI_TARGET_REVISION =
-  "794bfb6e08c4c1781b597878d067b1f2405e0da8" as GitSha;
+  "7308cbd448ad49b59fe6c991f11eb90bd873bde4" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_MULTI_TARGET_GENERATION = 28;
 
 const API_BASE = "https://api.github.com";
