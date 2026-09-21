@@ -270,7 +270,14 @@ export function createLocalRepositoryConfig(): RepositoryConfigV1 {
     build: { projectId: null, acceptance: null },
     secretRef: "secret://host/injected/sentinel-local-owner",
     liveStartLimits: { perHour: 120, perSevenDays: null },
-    sessionBound: { maxDurationMs: 1_200_000, maxOutputChars: 4_000_000 },
+    // 30 minutes, matching this same template's own `test_ci` command
+    // allowance (1_800_000). A 20-minute bound cut three of four ai.ubq.fi
+    // sessions off at exactly 1_200_000 ms while a larger codebase's session
+    // needs longer; the completion that DID finish used 1_187_000 ms, which is
+    // 13 s of headroom and therefore not a real bound but a coin flip. The
+    // 110-minute run deadline still fits two such sessions plus the reserved
+    // validation and publication margin.
+    sessionBound: { maxDurationMs: 1_800_000, maxOutputChars: 4_000_000 },
     retention: null,
     stabilityPolicy: null,
   });
@@ -1539,6 +1546,10 @@ export function composeLocalGitHub(input: LocalGitHubInputV1): GitHubPort {
     trustedPath: input.trustedPath,
     gitExecutable: trustedGitPath(input.trustedPath),
     remoteUrl,
+    // The durable record, the gate scope and the remote must all name THIS
+    // port's repository: defaulting to the sentinel self-identity would make a
+    // foreign target's own record unfindable and its push unauthenticated.
+    repository,
     port: host.port,
     protectedPaths: createLocalRepositoryConfig().protectedPaths,
     ensureLocalCandidate: createLocalCandidateLoader({
@@ -1561,6 +1572,7 @@ export function composeLocalGitHub(input: LocalGitHubInputV1): GitHubPort {
     trustedPath: input.trustedPath,
     gitExecutable: trustedGitPath(input.trustedPath),
     remoteUrl,
+    repository,
     baseBranch,
     trustedPrAuthor: input.login,
     ensureLocalCandidate: createLocalCandidateLoader({
