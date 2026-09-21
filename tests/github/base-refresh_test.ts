@@ -8,6 +8,7 @@
 import assert from "node:assert/strict";
 
 import type { GitSha } from "../../src/contracts/brands.ts";
+import type { RepositoryIdentityV1 } from "../../src/contracts/shared.ts";
 import { BASE_REFRESH_CONFLICT_DETAIL } from "../../src/contracts/ports.ts";
 import type {
   GitHubPullRequestV1,
@@ -207,6 +208,7 @@ function adapter(
   ensureCandidateObjects?: (input: {
     base: GitSha;
     head: GitSha;
+    repository: RepositoryIdentityV1;
   }) => Promise<PortResultV1<void>>,
 ) {
   return createPrepareBaseRefresh({
@@ -349,7 +351,11 @@ Deno.test(
     const ctx = await makeRefreshCtx();
     try {
       const observer = new ObserverStub(pullRequest(ctx), ctx.newBase);
-      const ensured: { base: GitSha; head: GitSha }[] = [];
+      const ensured: {
+        base: GitSha;
+        head: GitSha;
+        repository: RepositoryIdentityV1;
+      }[] = [];
       const prepare = adapter(ctx, observer, (value) => {
         ensured.push(value);
         return Promise.resolve(portOk(undefined));
@@ -368,7 +374,14 @@ Deno.test(
       );
       assert.ok(direct.ok);
       assert.equal(result.value, direct.value);
-      assert.deepEqual(ensured, [{ base: ctx.oldBase, head: ctx.candidate }]);
+      // The adapter binds the exact repository it restores objects for, so a
+      // multi-target host can never restore a foreign target's objects into
+      // the sentinel scope.
+      assert.deepEqual(ensured, [{
+        base: ctx.oldBase,
+        head: ctx.candidate,
+        repository: { owner: "ubiquity", name: "sentinel", installationId: 0 },
+      }]);
       assert.deepEqual(observer.refReads, [`refs/heads/${BASE_BRANCH}`]);
       // Recovery: the PR head may already be the exact persisted prepared
       // commit; the regenerated commit must be identical to it.
