@@ -1160,14 +1160,15 @@ Deno.test(
     const prepared: string[] = [];
     const addressed: string[][] = [];
     const result = await runActionsTargetCycles(targetCycleInput(rig, {
-      prepareTarget: async (config) => {
+      prepareTarget: (config) => {
         const slug = `${config.repository.owner}/${config.repository.name}`;
         prepared.push(slug);
         // The foreign target's own remote is unreachable for this run: only
         // THAT target fails, and the self-target must still be repaired.
         if (slug.endsWith(FOREIGN_REPO)) {
-          throw new Error("target mirror fetch failed");
+          return Promise.reject(new Error("target mirror fetch failed"));
         }
+        return Promise.resolve();
       },
       runCycle: async (deps, options) => {
         addressed.push(
