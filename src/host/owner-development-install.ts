@@ -259,6 +259,16 @@ export const OWNER_DEVELOPMENT_INSTALL_MULTI_TARGET_GENERATION = 28;
 export const OWNER_DEVELOPMENT_INSTALL_SCOPE_GATE_REVISION =
   "dbae19f218141a44becd7d1fffc22d792913b4f0" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_SCOPE_GATE_GENERATION = 29;
+/**
+ * Exact revision scoping the candidate Git auth header to the target's own
+ * remote. Generation 29 ran a full multi-target cycle and produced a genuine
+ * ai.ubq.fi candidate, but every candidate push was anonymous because the
+ * header named the sentinel URL, so nothing landed on the foreign remote.
+ * Installed only after the scope-gate revision's own healthy proof.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_CANDIDATE_AUTH_REVISION =
+  "4da7f5a87a159d36aad1e20d8698d41e777c52fe" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_CANDIDATE_AUTH_GENERATION = 30;
 
 const API_BASE = "https://api.github.com";
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -1135,10 +1145,29 @@ export function planOwnerDevelopmentInstall(
     generation === OWNER_DEVELOPMENT_INSTALL_SCOPE_GATE_GENERATION
   ) {
     if (healthy !== null) {
-      return noChange("the owner development installation is complete");
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_CANDIDATE_AUTH_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_CANDIDATE_AUTH_GENERATION,
+        healthy,
+        "install the target-scoped candidate auth revision after the scope-gate healthy proof",
+      );
     }
     return waiting(
       "the scope-gate generation 29 healthy proof is not recorded",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_CANDIDATE_AUTH_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_CANDIDATE_AUTH_GENERATION
+  ) {
+    if (healthy !== null) {
+      return noChange("the owner development installation is complete");
+    }
+    return waiting(
+      "the candidate-auth generation 30 healthy proof is not recorded",
     );
   }
 

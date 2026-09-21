@@ -36,6 +36,7 @@ import {
   OWNER_DEVELOPMENT_INSTALL_AGGREGATE_REVISION,
   OWNER_DEVELOPMENT_INSTALL_APP_IDENTITY_REVISION,
   OWNER_DEVELOPMENT_INSTALL_CADENCE_REVISION,
+  OWNER_DEVELOPMENT_INSTALL_CANDIDATE_AUTH_REVISION,
   OWNER_DEVELOPMENT_INSTALL_DELIVERED_ROUND2_REVISION,
   OWNER_DEVELOPMENT_INSTALL_EXIT_CONTRACT_REVISION,
   OWNER_DEVELOPMENT_INSTALL_FINDINGS_REVISION,
@@ -97,6 +98,7 @@ const MODEL_ROUTE = OWNER_DEVELOPMENT_INSTALL_MODEL_ROUTE_REVISION;
 const RESERVE_MODEL = OWNER_DEVELOPMENT_INSTALL_RESERVE_MODEL_REVISION;
 const MULTI_TARGET = OWNER_DEVELOPMENT_INSTALL_MULTI_TARGET_REVISION;
 const SCOPE_GATE = OWNER_DEVELOPMENT_INSTALL_SCOPE_GATE_REVISION;
+const CANDIDATE_AUTH = OWNER_DEVELOPMENT_INSTALL_CANDIDATE_AUTH_REVISION;
 
 function hostedProof(input: {
   runId: number;
@@ -1005,14 +1007,29 @@ Deno.test(
     }
     assert.equal(scopeGatePlan.move.nextRevision, SCOPE_GATE);
     assert.equal(scopeGatePlan.move.nextGeneration, 29);
-    // The scope-gate generation is the fixed end of the chain.
+    // The scope-gate healthy proof authorizes the target-scoped auth install.
+    const authPlan = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: SCOPE_GATE,
+          generation: 29,
+          healthyProof: healthyProof(SCOPE_GATE, 29, 100),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(authPlan.status, "install");
+    if (authPlan.status !== "install") throw new Error("expected install");
+    assert.equal(authPlan.move.nextRevision, CANDIDATE_AUTH);
+    assert.equal(authPlan.move.nextGeneration, 30);
+    // The candidate-auth generation is the fixed end of the chain.
     assert.equal(
       planOwnerDevelopmentInstall(
         releaseSnapshot({
           runtime: runtimeRecord({
-            revision: SCOPE_GATE,
-            generation: 29,
-            healthyProof: healthyProof(SCOPE_GATE, 29, 100),
+            revision: CANDIDATE_AUTH,
+            generation: 30,
+            healthyProof: healthyProof(CANDIDATE_AUTH, 30, 101),
           }),
         }),
         NOW,
