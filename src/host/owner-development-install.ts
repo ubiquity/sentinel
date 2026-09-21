@@ -279,6 +279,16 @@ export const OWNER_DEVELOPMENT_INSTALL_CANDIDATE_AUTH_GENERATION = 30;
 export const OWNER_DEVELOPMENT_INSTALL_PRESERVE_SCOPE_REVISION =
   "fa419afb2a2b4960c95daeb9041fd86ddc2c3a7a" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_PRESERVE_SCOPE_GENERATION = 31;
+/**
+ * Exact revision authenticating a foreign target's mirror with the App token.
+ * Generation 31 could not clone or fetch a foreign repository at all: the
+ * mirror inherited the sentinel-scoped native token, so Git sent a credential
+ * the server rejected and never fell back to anonymous access. Installed only
+ * after the preserve-scope generation 31 healthy proof.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_FOREIGN_AUTH_REVISION =
+  "30803374b8eb9bd6e3c2636096493b3371a4f543" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_FOREIGN_AUTH_GENERATION = 32;
 
 const API_BASE = "https://api.github.com";
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -1193,10 +1203,29 @@ export function planOwnerDevelopmentInstall(
     generation === OWNER_DEVELOPMENT_INSTALL_PRESERVE_SCOPE_GENERATION
   ) {
     if (healthy !== null) {
-      return noChange("the owner development installation is complete");
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_FOREIGN_AUTH_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_FOREIGN_AUTH_GENERATION,
+        healthy,
+        "install the foreign-auth revision after the preserve-scope healthy proof",
+      );
     }
     return waiting(
       "the preserve-scope generation 31 healthy proof is not recorded",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_FOREIGN_AUTH_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_FOREIGN_AUTH_GENERATION
+  ) {
+    if (healthy !== null) {
+      return noChange("the owner development installation is complete");
+    }
+    return waiting(
+      "the foreign-auth generation 32 healthy proof is not recorded",
     );
   }
 

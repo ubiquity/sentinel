@@ -40,6 +40,7 @@ import {
   OWNER_DEVELOPMENT_INSTALL_DELIVERED_ROUND2_REVISION,
   OWNER_DEVELOPMENT_INSTALL_EXIT_CONTRACT_REVISION,
   OWNER_DEVELOPMENT_INSTALL_FINDINGS_REVISION,
+  OWNER_DEVELOPMENT_INSTALL_FOREIGN_AUTH_REVISION,
   OWNER_DEVELOPMENT_INSTALL_GUARD_REVISION,
   OWNER_DEVELOPMENT_INSTALL_HISTORY_REVISION,
   OWNER_DEVELOPMENT_INSTALL_LEDGER_REVISION,
@@ -101,6 +102,7 @@ const MULTI_TARGET = OWNER_DEVELOPMENT_INSTALL_MULTI_TARGET_REVISION;
 const SCOPE_GATE = OWNER_DEVELOPMENT_INSTALL_SCOPE_GATE_REVISION;
 const CANDIDATE_AUTH = OWNER_DEVELOPMENT_INSTALL_CANDIDATE_AUTH_REVISION;
 const PRESERVE_SCOPE = OWNER_DEVELOPMENT_INSTALL_PRESERVE_SCOPE_REVISION;
+const FOREIGN_AUTH = OWNER_DEVELOPMENT_INSTALL_FOREIGN_AUTH_REVISION;
 
 function hostedProof(input: {
   runId: number;
@@ -1040,14 +1042,29 @@ Deno.test(
     if (preservePlan.status !== "install") throw new Error("expected install");
     assert.equal(preservePlan.move.nextRevision, PRESERVE_SCOPE);
     assert.equal(preservePlan.move.nextGeneration, 31);
-    // The preserve-scope generation is the fixed end of the chain.
+    // The preserve-scope healthy proof authorizes the foreign-auth install.
+    const auth2Plan = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: PRESERVE_SCOPE,
+          generation: 31,
+          healthyProof: healthyProof(PRESERVE_SCOPE, 31, 102),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(auth2Plan.status, "install");
+    if (auth2Plan.status !== "install") throw new Error("expected install");
+    assert.equal(auth2Plan.move.nextRevision, FOREIGN_AUTH);
+    assert.equal(auth2Plan.move.nextGeneration, 32);
+    // The foreign-auth generation is the fixed end of the chain.
     assert.equal(
       planOwnerDevelopmentInstall(
         releaseSnapshot({
           runtime: runtimeRecord({
-            revision: PRESERVE_SCOPE,
-            generation: 31,
-            healthyProof: healthyProof(PRESERVE_SCOPE, 31, 102),
+            revision: FOREIGN_AUTH,
+            generation: 32,
+            healthyProof: healthyProof(FOREIGN_AUTH, 32, 103),
           }),
         }),
         NOW,
