@@ -98,6 +98,17 @@ command or drop a protection. An absent, empty or malformed setting leaves the
 deployment with NO targets and the run refuses instead of falling back to any
 built-in repository; the shared 120-starts-per-hour admission cap still applies
 across all targets.
+Owner update, 2026-09-21: the hosted repair host now ADDRESSES every committed
+target instead of only the sentinel self-repository. Each target gets ONE
+separately targeted cycle — its own GitHub port, review service and trusted git
+remote, so issue rows are never guessed across repositories — and the cycles
+run sequentially over the existing state store, cooldown gate, model port and
+ONE shared admission budget and absolute run deadline. The sentinel
+self-target keeps installation scope 0; every other target runs under the
+`ubiquity-sentinel` App installation scope (`SENTINEL_APP_INSTALLATION_ID`,
+default 155687488). The advisory `sentinel_targets_diagnostic` line now reports
+the targets addressed and the ones skipped for an unavailable default branch or
+an exhausted deadline. The loop, contracts and `GitHubIssueV1` are unchanged.
 
 
 ## 2. Canonical goal identity

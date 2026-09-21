@@ -1,20 +1,30 @@
 /**
- * Deterministic self-target CI approval boundaries.
+ * Deterministic self-target CI approval boundaries and multi-target host
+ * cycles.
  *
  * These tests drive the REAL `runActionsCiApproval` helper and the REAL
  * `GitHubApiClient` over a scripted in-memory HTTP transport with small
  * cooldown-gate and repair-state fixtures. No network, no model, no real
  * token: approval is only ever submitted for the exact run and PR identity,
  * and any mismatch, ambiguity, truncation or cooldown denial submits nothing.
+ *
+ * The multi-target section drives the REAL `runActionsTargetCycles` host loop
+ * and the REAL `runRepairEntrypoint` over REAL per-repository
+ * `composeLocalGitHub` ports with a scripted transport: every committed target
+ * is read through its own port under its own installation scope, on one shared
+ * budget, model port and absolute deadline.
  */
 import assert from "node:assert/strict";
 
+import { RollingStartBudget } from "../../src/budget/mod.ts";
 import { portError, portOk } from "../../src/contracts/ports.ts";
 import type {
   GitHubCooldownGateV1,
+  GitHubPort,
   PortResultV1,
 } from "../../src/contracts/ports.ts";
 import type { GitHubRateLimitV1 } from "../../src/contracts/github-cooldown.ts";
+import type { RepositoryConfigV1 } from "../../src/contracts/repository-config.ts";
 import { parseRepairStateSnapshotV1 } from "../../src/contracts/state-snapshots.ts";
 import type { RepairStateSnapshotV1 } from "../../src/contracts/state-snapshots.ts";
 import type { WorkRecordV1 } from "../../src/contracts/work-record.ts";
@@ -23,8 +33,24 @@ import type {
   HttpResponseV1,
   HttpTransportV1,
 } from "../../src/github/http.ts";
+import {
+  parseAppInstallationId,
+  runActionsTargetCycles,
+  scopeTargetConfigV1,
+  targetsDiagnosticV1,
+} from "../../src/host/actions.ts";
+import type { ActionsTargetCyclesResultV1 } from "../../src/host/actions.ts";
 import { runActionsCiApproval } from "../../src/host/actions-ci.ts";
-import { FakeClock, MemoryState } from "../repair/helpers.ts";
+import {
+  composeLocalGitHub,
+  createLocalRepositoryConfig,
+  LocalSessionTracker,
+  unavailableIncidents,
+  unavailableReplay,
+} from "../../src/host/local.ts";
+import { createTargetConfigV1 } from "../../src/host/targets.ts";
+import { runRepairEntrypoint } from "../../src/main.ts";
+import { FakeClock, FakeModel, MemoryState } from "../repair/helpers.ts";
 import { SHA1, SHA2, SHA3, T0, workRecord } from "../state/helpers.ts";
 
 const SELF_REPO = {
@@ -786,5 +812,331 @@ Deno.test(
       ],
       "exactly the valid fourth record is read and approved",
     );
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Multi-target host: one separately targeted cycle per committed repository,
+// sharing the state store, cooldown gate, admission budget, model port and one
+// absolute run deadline.
+// ---------------------------------------------------------------------------
+
+/** A second committed target, distinct from the sentinel self-repository. */
+const FOREIGN_REPO = "ai.ubq.fi";
+/** A third committed target that the deadline test never starts. */
+const THIRD_REPO = "web";
+/** The one fixed App installation scope every non-sentinel target uses. */
+const APP_INSTALLATION = parseAppInstallationId(undefined);
+
+function unique(values: readonly number[]): number[] {
+  return [...new Set(values)];
+}
+
+function issueReadPaths(http: ScriptedHttp): string[] {
+  return http.calls
+    .filter((call) =>
+      call.method === "GET" && new URL(call.url).pathname.endsWith("/issues")
+    )
+    .map((call) => new URL(call.url).pathname);
+}
+
+interface TargetHostRigV1 {
+  configs: RepositoryConfigV1[];
+  clock: FakeClock;
+  state: MemoryState;
+  gate: FakeGate;
+  http: ScriptedHttp;
+  budget: RollingStartBudget;
+  /** The exact production port composition, targeted at one config. */
+  compose(config: RepositoryConfigV1): GitHubPort;
+}
+
+/**
+ * The committed configurations exactly as the host scopes them: the sentinel
+ * self-target keeps the reserved no-App scope 0 and every foreign target is
+ * addressed under the App installation scope. Ports are the REAL
+ * `composeLocalGitHub` composition over the scripted transport.
+ */
+function makeTargetHostRig(names: readonly string[]): TargetHostRigV1 {
+  const self = createLocalRepositoryConfig();
+  const configs = names.map((name) => {
+    const config = createTargetConfigV1(
+      self,
+      { slug: `ubiquity/${name}`, owner: "ubiquity", name },
+      name === "sentinel" ? self.baseBranch : "main",
+    );
+    return scopeTargetConfigV1(config, self.repository, APP_INSTALLATION);
+  });
+  const clock = new FakeClock(T0);
+  const state = new MemoryState();
+  const gate = new FakeGate();
+  const http = new ScriptedHttp();
+  for (const name of names) {
+    http.on("GET", `/repos/ubiquity/${name}/issues`, () => response(200, []));
+  }
+  const tracker = new LocalSessionTracker();
+  const budget = new RollingStartBudget({ clock, state, configs });
+  return {
+    configs,
+    clock,
+    state,
+    gate,
+    http,
+    budget,
+    compose: (config) =>
+      composeLocalGitHub({
+        clock,
+        state,
+        gate,
+        http: http.transport,
+        token: "dummy-token",
+        login: APP_PUBLISHER,
+        invocationId: `test-${config.repository.name}`,
+        stateRoot: "/tmp/sentinel-multi-target-state",
+        sourcePath: "/tmp/sentinel-multi-target-source",
+        scratch: "/tmp/sentinel-multi-target-scratch",
+        reviewCheckout: "/tmp/sentinel-multi-target-review",
+        reviewClientHome: "/tmp/sentinel-multi-target-clients",
+        reviewTmpDir: "/tmp/sentinel-multi-target-tmp",
+        reviewDenoDir: "/tmp/sentinel-multi-target-deno",
+        trustedPath: Deno.env.get("PATH") ?? "/usr/bin:/bin",
+        codexExecutable: "/usr/bin/false",
+        tracker,
+        repository: config.repository,
+      }),
+  };
+}
+
+/** The one shared capability set, with explicit test overrides. */
+function targetCycleInput(
+  rig: TargetHostRigV1,
+  overrides: Partial<Parameters<typeof runActionsTargetCycles>[0]> = {},
+): Parameters<typeof runActionsTargetCycles>[0] {
+  return {
+    clock: rig.clock,
+    state: rig.state,
+    configs: rig.configs,
+    controllerSha: SHA1,
+    githubCooldown: rig.gate,
+    incidents: unavailableIncidents,
+    replay: unavailableReplay,
+    model: new FakeModel(),
+    budget: rig.budget,
+    deadline: rig.clock.now() + 60 * 60_000,
+    stepLimit: 16,
+    modelStartsEnabled: false,
+    composeGithub: rig.compose,
+    ...overrides,
+  };
+}
+
+Deno.test(
+  "actions host: two committed targets produce two targeted cycles that read every target's issues",
+  async () => {
+    const rig = makeTargetHostRig(["sentinel", FOREIGN_REPO]);
+    const configsPerCycle: string[][] = [];
+    const admissionsPerCycle: number[][] = [];
+    const outcomes: unknown[] = [];
+    const reported: ActionsTargetCyclesResultV1[] = [];
+    let boundary = 0;
+    const result = await runActionsTargetCycles(targetCycleInput(rig, {
+      report: (value) => {
+        reported.push(value);
+      },
+      runCycle: async (deps, options) => {
+        boundary = rig.gate.admissions.length;
+        configsPerCycle.push(
+          deps.configs.map((config) =>
+            `${config.repository.owner}/${config.repository.name}`
+          ),
+        );
+        const outcome = await runRepairEntrypoint(deps, options);
+        admissionsPerCycle.push(rig.gate.admissions.slice(boundary));
+        outcomes.push(outcome);
+        return outcome;
+      },
+    }));
+
+    // EVERY committed target is addressed exactly once, and each cycle is
+    // injected the SOLE configuration its port was composed for.
+    assert.deepEqual(result.addressed, [
+      "ubiquity/sentinel",
+      `ubiquity/${FOREIGN_REPO}`,
+    ]);
+    assert.deepEqual(result.skipped, []);
+    assert.deepEqual(configsPerCycle, [
+      ["ubiquity/sentinel"],
+      [`ubiquity/${FOREIGN_REPO}`],
+    ]);
+    // The REAL entrypoint read one issue list per target, in setting order,
+    // through the port the host composed for that exact repository.
+    assert.deepEqual(issueReadPaths(rig.http), [
+      "/repos/ubiquity/sentinel/issues",
+      `/repos/ubiquity/${FOREIGN_REPO}/issues`,
+    ]);
+    // The sentinel self-target keeps the reserved no-App scope 0; the foreign
+    // target is gated under the one App installation scope.
+    assert.deepEqual(
+      admissionsPerCycle.map(unique),
+      [[0], [APP_INSTALLATION]],
+      "each cycle is gated under its own target's installation scope",
+    );
+    // The aggregate uses the LAST addressed cycle's outcome.
+    assert.equal(outcomes.length, 2);
+    assert.equal(result.outcome, outcomes[1]);
+    // One advisory report of the same pass, and the diagnostic line is never a
+    // child status record.
+    assert.equal(reported.length, 1);
+    assert.equal(reported[0]!.outcome, result.outcome);
+    assert.deepEqual(reported[0]!.addressed, result.addressed);
+    assert.deepEqual(reported[0]!.skipped, []);
+    const line = targetsDiagnosticV1({
+      addressed: result.addressed,
+      skipped: result.skipped,
+    });
+    assert.equal(Object.hasOwn(line, "status"), false);
+    assert.deepEqual(line, {
+      version: "v1",
+      kind: "sentinel_targets_diagnostic",
+      addressed: ["ubiquity/sentinel", `ubiquity/${FOREIGN_REPO}`],
+      skipped: [],
+    });
+  },
+);
+
+Deno.test(
+  "actions host: a non-sentinel target uses the App installation scope while sentinel keeps 0",
+  () => {
+    assert.equal(APP_INSTALLATION, 155_687_488);
+    assert.equal(parseAppInstallationId("4242"), 4242);
+    assert.throws(() => parseAppInstallationId("0"));
+    assert.throws(() => parseAppInstallationId("-1"));
+    assert.throws(() => parseAppInstallationId("155687488x"));
+
+    const self = createLocalRepositoryConfig();
+    const sentinel = createTargetConfigV1(self, {
+      slug: "ubiquity/sentinel",
+      owner: "ubiquity",
+      name: "sentinel",
+    }, "development");
+    const foreign = createTargetConfigV1(self, {
+      slug: `ubiquity/${FOREIGN_REPO}`,
+      owner: "ubiquity",
+      name: FOREIGN_REPO,
+    }, "main");
+    const scopedSelf = scopeTargetConfigV1(sentinel, self.repository, 970_001);
+    const scopedForeign = scopeTargetConfigV1(
+      foreign,
+      self.repository,
+      970_001,
+    );
+    assert.equal(scopedSelf.repository.installationId, 0);
+    assert.equal(scopedForeign.repository.installationId, 970_001);
+    // Nothing except the identity changes: the trusted template still owns
+    // every command, limit and protected path.
+    assert.deepEqual(
+      { ...scopedForeign, repository: null },
+      { ...foreign, repository: null },
+    );
+  },
+);
+
+Deno.test(
+  "actions host: an exhausted shared deadline stops before the next target cycle",
+  async () => {
+    const rig = makeTargetHostRig(["sentinel", FOREIGN_REPO, THIRD_REPO]);
+    const composed: string[] = [];
+    let cycles = 0;
+    const result = await runActionsTargetCycles(targetCycleInput(rig, {
+      deadline: rig.clock.now() + 10 * 60_000,
+      composeGithub: (config) => {
+        composed.push(`${config.repository.owner}/${config.repository.name}`);
+        return rig.compose(config);
+      },
+      runCycle: async (deps, options) => {
+        cycles++;
+        const outcome = await runRepairEntrypoint(deps, options);
+        // The one absolute deadline is now exhausted; the next check must stop
+        // the run instead of restarting the clock for the next cycle.
+        rig.clock.advance(11 * 60_000);
+        return outcome;
+      },
+    }));
+
+    assert.equal(cycles, 1, "only the first target was attempted");
+    assert.deepEqual(result.addressed, ["ubiquity/sentinel"]);
+    assert.deepEqual(result.skipped, [
+      `ubiquity/${FOREIGN_REPO}`,
+      `ubiquity/${THIRD_REPO}`,
+    ]);
+    assert.deepEqual(composed, ["ubiquity/sentinel"]);
+    assert.deepEqual(issueReadPaths(rig.http), [
+      "/repos/ubiquity/sentinel/issues",
+    ]);
+    assert.ok(result.outcome !== null);
+  },
+);
+
+Deno.test(
+  "actions host: a composed port reads the supplied repository under the supplied installation scope",
+  async () => {
+    const rig = makeTargetHostRig([FOREIGN_REPO]);
+    const port = composeLocalGitHub({
+      clock: rig.clock,
+      state: rig.state,
+      gate: rig.gate,
+      http: rig.http.transport,
+      token: "dummy-token",
+      login: APP_PUBLISHER,
+      invocationId: "test-override",
+      stateRoot: "/tmp/sentinel-multi-target-state",
+      sourcePath: "/tmp/sentinel-multi-target-source",
+      scratch: "/tmp/sentinel-multi-target-scratch",
+      reviewCheckout: "/tmp/sentinel-multi-target-review",
+      reviewClientHome: "/tmp/sentinel-multi-target-clients",
+      reviewTmpDir: "/tmp/sentinel-multi-target-tmp",
+      reviewDenoDir: "/tmp/sentinel-multi-target-deno",
+      trustedPath: Deno.env.get("PATH") ?? "/usr/bin:/bin",
+      codexExecutable: "/usr/bin/false",
+      tracker: new LocalSessionTracker(),
+      // The owner/name identity and the gate scope are supplied separately;
+      // the explicit scope wins for every cooldown-gated request.
+      repository: { owner: "ubiquity", name: FOREIGN_REPO, installationId: 0 },
+      installationId: 970_001,
+    });
+    const listed = await port.listOpenIssues();
+    assert.ok(listed.ok);
+    assert.deepEqual(issueReadPaths(rig.http), [
+      `/repos/ubiquity/${FOREIGN_REPO}/issues`,
+    ]);
+    assert.ok(rig.gate.admissions.length > 0);
+    assert.deepEqual(unique(rig.gate.admissions), [970_001]);
+  },
+);
+
+Deno.test(
+  "actions host: the App installation scope is allowlisted in the workflow and both tasks",
+  async () => {
+    const workflow = await Deno.readTextFile(
+      new URL("../../.github/workflows/supervisor.yml", import.meta.url),
+    );
+    const repairJob = workflow.split("Run selected Sentinel runtime")[1] ?? "";
+    assert.ok(
+      repairJob.includes('SENTINEL_APP_INSTALLATION_ID: "155687488"'),
+      "the repair job passes the fixed App installation scope",
+    );
+    assert.ok(
+      /--allow-env=\S*SENTINEL_APP_INSTALLATION_ID/.test(repairJob),
+      "the repair launcher may read the App installation scope",
+    );
+    const manifest = JSON.parse(
+      await Deno.readTextFile(new URL("../../deno.json", import.meta.url)),
+    ) as { tasks: Record<string, string> };
+    for (const task of ["repair:actions", "supervisor:run"]) {
+      assert.ok(
+        manifest.tasks[task].includes("SENTINEL_APP_INSTALLATION_ID"),
+        `${task} may read the App installation scope`,
+      );
+    }
   },
 );

@@ -51,6 +51,7 @@ import {
   STATIC_TARGETS_EMPTY,
   STATIC_TARGETS_UNSUPPORTED,
 } from "./targets.ts";
+import { parseRepositoryIdentity } from "../contracts/shared.ts";
 import type { RepositoryIdentityV1 } from "../contracts/shared.ts";
 import type { RepairStateSnapshotV1 } from "../contracts/state-snapshots.ts";
 import { MaxText } from "../contracts/validation.ts";
@@ -158,6 +159,8 @@ const STATIC_MARKER =
   "local repair host failed: the session marker could not be cleared";
 const STATIC_LOCAL_PROVIDER =
   "local Codex client rejected: the route provider name is not a valid bare provider name";
+const STATIC_GITHUB_REPOSITORY =
+  "GitHub port rejected: the composed repository identity is invalid";
 
 /** Caller-supplied trusted inputs for one bounded local run. */
 export interface LocalRepairHostOptionsV1 {
@@ -1155,6 +1158,22 @@ export interface LocalGitHubInputV1 {
    * Omitted callers keep the primary gateway provider.
    */
   route?: ModelRouteV1;
+  /**
+   * Optional exact repository identity this port is composed for. Omitted
+   * callers keep the frozen sentinel identity, so every existing call site is
+   * unchanged. A multi-target host supplies the committed target's own
+   * identity: the REST client, the review service, the trusted git remote and
+   * the cooldown scope then all address exactly this repository and no other.
+   * The remote URL is derived from the validated owner/name.
+   */
+  repository?: RepositoryIdentityV1;
+  /**
+   * Optional GitHub installation scope for every gated request this port
+   * makes. Defaults to the composed repository's own installation id, which is
+   * `LOCAL_REPOSITORY.installationId` (0, the reserved no-App owner scope)
+   * when no repository is supplied.
+   */
+  installationId?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -1319,7 +1338,34 @@ export function createPrepareBaseRefresh(
 
 /** Compose the one authenticated GitHub port over the shared cooldown gate. */
 export function composeLocalGitHub(input: LocalGitHubInputV1): GitHubPort {
-  const repository = { ...LOCAL_REPOSITORY };
+  // The port is composed for exactly ONE repository. Omitted callers keep the
+  // frozen sentinel identity (installation scope 0); a multi-target host
+  // supplies the committed target's own identity, including its App
+  // installation scope, so the REST client, the review service, the trusted
+  // git remote and every gate admission agree on that repository.
+  let repository: RepositoryIdentityV1;
+  try {
+    repository = parseRepositoryIdentity(
+      input.repository ?? LOCAL_REPOSITORY,
+      "$.repository",
+    );
+  } catch {
+    throw new TypeError(STATIC_GITHUB_REPOSITORY);
+  }
+  if (input.installationId !== undefined) {
+    if (
+      !Number.isSafeInteger(input.installationId) ||
+      input.installationId < 0
+    ) {
+      throw new TypeError(STATIC_GITHUB_REPOSITORY);
+    }
+    repository = { ...repository, installationId: input.installationId };
+  }
+  // The trusted git transport addresses the same repository as the REST
+  // client: an unpublished candidate is pushed to (and read from) the exact
+  // target remote, never to a built-in one.
+  const remoteUrl =
+    `https://github.com/${repository.owner}/${repository.name}.git`;
   const auth: GitHubAuthProviderV1 = {
     authorizationHeader: () => Promise.resolve(portOk(`Bearer ${input.token}`)),
   };
@@ -1403,9 +1449,9 @@ export function composeLocalGitHub(input: LocalGitHubInputV1): GitHubPort {
     trustedResolutionAuthors: [input.login],
     git: {
       localDir: input.sourcePath,
-      remoteUrl: REMOTE_URL,
+      remoteUrl,
       gitHome: input.scratch,
-      extraEnv: githubGitAuthEnv(input.token),
+      extraEnv: githubGitAuthEnv(input.token, remoteUrl),
       gitPath: trustedGitPath(input.trustedPath),
       timeoutMs: GIT_TIMEOUT_MS,
       maxOutputBytes: GIT_MAX_OUTPUT_BYTES,
@@ -1450,6 +1496,7 @@ export function composeLocalGitHub(input: LocalGitHubInputV1): GitHubPort {
     scratch: input.scratch,
     trustedPath: input.trustedPath,
     gitExecutable: trustedGitPath(input.trustedPath),
+    remoteUrl,
     port: host.port,
     protectedPaths: createLocalRepositoryConfig().protectedPaths,
     ensureLocalCandidate: createLocalCandidateLoader({
@@ -1471,6 +1518,7 @@ export function composeLocalGitHub(input: LocalGitHubInputV1): GitHubPort {
     scratch: input.scratch,
     trustedPath: input.trustedPath,
     gitExecutable: trustedGitPath(input.trustedPath),
+    remoteUrl,
     baseBranch: LOCAL_BASE_BRANCH,
     trustedPrAuthor: input.login,
     ensureLocalCandidate: createLocalCandidateLoader({
@@ -1542,11 +1590,14 @@ function isLocalRepairIssue(issue: GitHubIssueV1): boolean {
 }
 
 /** Scoped Basic auth for trusted git only; never in a URL or config file. */
-export function githubGitAuthEnv(token: string): Record<string, string> {
+export function githubGitAuthEnv(
+  token: string,
+  remoteUrl: string = REMOTE_URL,
+): Record<string, string> {
   const basic = btoa(`x-access-token:${token}`);
   return {
     GIT_CONFIG_COUNT: "1",
-    GIT_CONFIG_KEY_0: `http.${REMOTE_URL}.extraheader`,
+    GIT_CONFIG_KEY_0: `http.${remoteUrl}.extraheader`,
     GIT_CONFIG_VALUE_0: `Authorization: Basic ${basic}`,
   };
 }
@@ -1557,8 +1608,9 @@ export async function readAuthenticatedLogin(
   http: HttpTransportV1,
   gate: GitHubCooldownGateV1,
   clock: Clock,
+  installationId: number = LOCAL_REPOSITORY.installationId,
 ): Promise<string> {
-  const admission = await gate.beforeRequest(LOCAL_REPOSITORY.installationId);
+  const admission = await gate.beforeRequest(installationId);
   if (!admission.ok) throw new Error(STATIC_GITHUB_LOGIN);
   const response = await http({
     method: "GET",
@@ -1581,7 +1633,7 @@ export async function readAuthenticatedLogin(
     const observation = await classifyGitHubRateLimit(response, clock.now());
     if (observation !== null) {
       const persisted = await gate.recordRateLimit(
-        LOCAL_REPOSITORY.installationId,
+        installationId,
         observation,
       );
       if (!persisted.ok) throw new Error(STATIC_GITHUB_LOGIN);
@@ -2945,11 +2997,12 @@ export async function refreshDevelopment(
   input: LocalRepairHostOptionsV1,
   scratch: string,
   gate: GitHubCooldownGateV1,
+  installationId: number = LOCAL_REPOSITORY.installationId,
 ): Promise<string> {
   // Durable admission is the FIRST operation: a refused or faulted gate stops
   // here, before any Git command or external fetch runs. There is no
   // success-empty fallback.
-  const admission = await gate.beforeRequest(LOCAL_REPOSITORY.installationId);
+  const admission = await gate.beforeRequest(installationId);
   if (!admission.ok) throw new Error(STATIC_GIT_FAILED);
   const fetched = await runTrustedGitResult({
     args: [

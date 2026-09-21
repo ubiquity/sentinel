@@ -296,13 +296,18 @@ jobs:
           # environment secret). It is only ever read by name into the model
           # client's private token file and is never logged or echoed.
           SENTINEL_DEEPSEEK_API_KEY: ${{ secrets.SENTINEL_DEEPSEEK_API_KEY }}
+          # Installation scope of the `ubiquity-sentinel` App. It is a scope
+          # key, not a secret: every committed target except the sentinel
+          # self-repository is repaired under this one App installation, while
+          # the sentinel self-target keeps the reserved no-App scope 0.
+          SENTINEL_APP_INSTALLATION_ID: "155687488"
         run: >-
           deno run
           --allow-read
           --allow-write
           --allow-run
           --allow-net="api.github.com,*.blob.core.windows.net"
-          --allow-env=HOME,PATH,GITHUB_TOKEN,UOS_AI_TOKEN,SENTINEL_MODEL_BASE_URL,SENTINEL_MODEL_ID,SENTINEL_MODEL_FALLBACK,SENTINEL_DEEPSEEK_API_KEY,NODE_V8_COVERAGE,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_REPOSITORY,GITHUB_REF,GITHUB_SHA,GITHUB_WORKFLOW_SHA,GITHUB_WORKFLOW_REF,GITHUB_JOB,SENTINEL_SUPERVISOR_TOKEN
+          --allow-env=HOME,PATH,GITHUB_TOKEN,UOS_AI_TOKEN,SENTINEL_MODEL_BASE_URL,SENTINEL_MODEL_ID,SENTINEL_MODEL_FALLBACK,SENTINEL_DEEPSEEK_API_KEY,SENTINEL_APP_INSTALLATION_ID,NODE_V8_COVERAGE,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_REPOSITORY,GITHUB_REF,GITHUB_SHA,GITHUB_WORKFLOW_SHA,GITHUB_WORKFLOW_REF,GITHUB_JOB,SENTINEL_SUPERVISOR_TOKEN
           src/host/hosted-runtime.ts
 
   finalize:

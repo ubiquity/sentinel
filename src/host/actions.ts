@@ -21,9 +21,22 @@
 import { isGitSha } from "../contracts/brands.ts";
 import type { GitSha } from "../contracts/brands.ts";
 import { SystemClock } from "../contracts/ports.ts";
+import type {
+  Clock,
+  GitHubCooldownGateV1,
+  GitHubPort,
+  ImplementationPort,
+  IncidentAdapter,
+  RepairStateWriter,
+  ReplayPort,
+  StateReadView,
+} from "../contracts/ports.ts";
+import type { RepositoryConfigV1 } from "../contracts/repository-config.ts";
+import type { RepositoryIdentityV1 } from "../contracts/shared.ts";
 import type { RepairCycleOutcomeV1 } from "../repair/loop.ts";
 import { parseRepairStateSnapshotV1 } from "../contracts/state-snapshots.ts";
 import { RollingStartBudget } from "../budget/mod.ts";
+import type { BudgetControllerV1 } from "../budget/mod.ts";
 import { HostedRepairCooldownGate } from "./hosted-cooldown.ts";
 import {
   parseHostedEnvironment,
@@ -45,7 +58,6 @@ import {
   createDefaultBranchResolver,
   loadTargetConfigsV1,
   STATIC_TARGETS_EMPTY,
-  STATIC_TARGETS_UNSUPPORTED,
 } from "./targets.ts";
 import { createRepairStateStore, DenoGitRunner } from "../state/mod.ts";
 import { resolveModelRoute } from "./model-route.ts";
@@ -85,6 +97,78 @@ const STATIC_EXECUTABLE = "hosted repair host could not resolve Codex";
 const STATIC_RUNNER = "hosted repair host sessions did not settle";
 const STATIC_PREFLIGHT =
   "hosted Codex startup unavailable; deterministic repair pass completed";
+const STATIC_APP_INSTALLATION =
+  "hosted repair host rejected: SENTINEL_APP_INSTALLATION_ID is not a positive safe integer";
+const STATIC_DEADLINE =
+  "hosted repair host reached its run deadline before addressing any target";
+
+/**
+ * The App installation scope of `ubiquity-sentinel`. Every committed target
+ * that is not the sentinel self-repository is addressed under this one scope
+ * (`SENTINEL_APP_INSTALLATION_ID` overrides it); the sentinel self-target
+ * keeps installation scope 0, the reserved no-App owner scope, exactly as the
+ * trusted template defines it. This is a scope key, never a credential: the
+ * App token itself still arrives through `SENTINEL_SUPERVISOR_TOKEN`.
+ */
+const DEFAULT_APP_INSTALLATION_ID = 155_687_488;
+/** The one allowlisted environment entry that may override that scope. */
+const APP_INSTALLATION_ENV = "SENTINEL_APP_INSTALLATION_ID";
+
+/**
+ * Read the App installation scope for non-sentinel targets. An absent value
+ * keeps the one fixed default; anything that is not a positive safe integer
+ * is refused instead of guessed.
+ */
+export function parseAppInstallationId(value: string | undefined): number {
+  if (value === undefined) return DEFAULT_APP_INSTALLATION_ID;
+  if (!/^[1-9][0-9]*$/.test(value)) throw new Error(STATIC_APP_INSTALLATION);
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) {
+    throw new Error(STATIC_APP_INSTALLATION);
+  }
+  return parsed;
+}
+
+/**
+ * Apply the per-target installation scope. The sentinel self-repository keeps
+ * the reserved no-App owner scope from the trusted template; every other
+ * committed target is addressed under the App installation scope that can
+ * actually write to it. Nothing except the identity changes, so a slug can
+ * still never introduce a command, limit or protection of its own.
+ */
+export function scopeTargetConfigV1(
+  config: RepositoryConfigV1,
+  selfRepository: RepositoryIdentityV1,
+  appInstallationId: number,
+): RepositoryConfigV1 {
+  const installationId = config.repository.owner === selfRepository.owner &&
+      config.repository.name === selfRepository.name
+    ? selfRepository.installationId
+    : appInstallationId;
+  if (config.repository.installationId === installationId) return config;
+  return {
+    ...config,
+    repository: { ...config.repository, installationId },
+  };
+}
+
+/**
+ * The one advisory multi-target diagnostic line. It reports the targets that
+ * were addressed and the ones that were skipped (an unavailable default
+ * branch, or the absolute run deadline). It carries no `status` property, so
+ * the launcher's child-status scan can never read it as a child result.
+ */
+export function targetsDiagnosticV1(input: {
+  readonly addressed: readonly string[];
+  readonly skipped: readonly string[];
+}): Record<string, unknown> {
+  return {
+    version: "v1",
+    kind: "sentinel_targets_diagnostic",
+    addressed: [...input.addressed],
+    skipped: [...input.skipped],
+  };
+}
 
 export interface ActionsRepairHostResultV1 {
   status: "ran";
@@ -98,6 +182,105 @@ export interface ActionsRepairHostResultV1 {
   ciApproval: ActionsCiApprovalSummaryV1;
   /** The exact saved supervisor execution this run settles. */
   execution: HostedExecutionIntentV1;
+}
+
+/** The exact capability set one multi-target host pass runs on. */
+export interface ActionsTargetCyclesInputV1 {
+  clock: Clock;
+  state: StateReadView & RepairStateWriter;
+  /** Every committed, usable target configuration, in setting order. */
+  configs: readonly RepositoryConfigV1[];
+  controllerSha: GitSha;
+  /** THE one durable gate shared by every cycle and every composed port. */
+  githubCooldown: GitHubCooldownGateV1;
+  incidents: IncidentAdapter;
+  replay: ReplayPort;
+  /** THE one model port shared by every cycle. */
+  model: ImplementationPort;
+  /** THE one admission controller, constructed over every target config. */
+  budget: BudgetControllerV1;
+  /** ONE absolute run deadline shared by every cycle; never restarted. */
+  deadline: number;
+  stepLimit: number;
+  modelStartsEnabled: boolean;
+  /** Compose the exact port for one target repository. */
+  composeGithub: (config: RepositoryConfigV1) => GitHubPort;
+  /** The production entrypoint; injectable for deterministic tests only. */
+  runCycle?: typeof runRepairEntrypoint;
+  /** One bounded advisory report of the targets addressed and skipped. */
+  report?: (result: ActionsTargetCyclesResultV1) => void;
+}
+
+/** The per-target outcome of one host pass. */
+export interface ActionsTargetCyclesResultV1 {
+  /** The LAST addressed cycle's outcome, or null when none was addressed. */
+  readonly outcome: RepairCycleOutcomeV1 | null;
+  /** `owner/name` of every target whose cycle was started, in setting order. */
+  readonly addressed: readonly string[];
+  /** `owner/name` of every target not attempted because time ran out. */
+  readonly skipped: readonly string[];
+}
+
+/**
+ * Run ONE separately targeted repair cycle per committed target repository,
+ * sequentially, over the shared state store, cooldown gate, admission budget,
+ * model port and absolute run deadline.
+ *
+ * The injected GitHub port targets one repository. The frozen
+ * `GitHubIssueV1` carries no repository field, so each cycle associates its
+ * rows with its SOLE configuration instead of guessing: the host injects a
+ * separately targeted cycle rather than one port for several repositories.
+ * The absolute deadline is re-checked before every cycle and never restarted;
+ * once it has passed, the remaining targets are reported as skipped and no
+ * further port, cycle or model start is composed.
+ */
+export async function runActionsTargetCycles(
+  input: ActionsTargetCyclesInputV1,
+): Promise<ActionsTargetCyclesResultV1> {
+  const runCycle = input.runCycle ?? runRepairEntrypoint;
+  const addressed: string[] = [];
+  const skipped: string[] = [];
+  let outcome: RepairCycleOutcomeV1 | null = null;
+  try {
+    for (const [index, config] of input.configs.entries()) {
+      if (!(input.clock.now() < input.deadline)) {
+        // The deadline is absolute and the clock only moves forward: every
+        // remaining target is reported as not attempted, and none is started.
+        for (const remaining of input.configs.slice(index)) {
+          skipped.push(
+            `${remaining.repository.owner}/${remaining.repository.name}`,
+          );
+        }
+        break;
+      }
+      addressed.push(`${config.repository.owner}/${config.repository.name}`);
+      outcome = await runCycle({
+        clock: input.clock,
+        state: input.state,
+        configs: [config],
+        controllerSha: input.controllerSha,
+        github: input.composeGithub(config),
+        githubCooldown: input.githubCooldown,
+        incidents: input.incidents,
+        replay: input.replay,
+        model: input.model,
+        budget: input.budget,
+      }, {
+        deadline: input.deadline,
+        stepLimit: input.stepLimit,
+        modelStartsEnabled: input.modelStartsEnabled,
+      });
+    }
+  } finally {
+    // The advisory report is emitted even when a cycle threw, so the targets
+    // actually addressed are never silently lost.
+    input.report?.({
+      outcome,
+      addressed: [...addressed],
+      skipped: [...skipped],
+    });
+  }
+  return { outcome, addressed, skipped };
 }
 
 /** Run one hosted repair pass through the actual production entrypoint. */
@@ -231,8 +414,8 @@ export async function runActionsRepairHost(): Promise<
   // It is read before any port is composed, so an unusable setting refuses the
   // run instead of quietly repairing nothing and instead of falling back to a
   // built-in repository. `createLocalRepositoryConfig()` is the trusted
-  // per-repository template (commands, protected paths, limits) and the
-  // identity this host addresses; it is no longer a target list.
+  // per-repository template (commands, protected paths, limits) and names the
+  // sentinel self-identity; it is not a target list.
   const templateConfig = createLocalRepositoryConfig();
   const targets = await loadTargetConfigsV1({
     template: templateConfig,
@@ -242,52 +425,58 @@ export async function runActionsRepairHost(): Promise<
     }),
   });
   if (targets.configs.length === 0) throw new Error(STATIC_TARGETS_EMPTY);
-  const config = targets.configs.find((candidate) =>
-    candidate.repository.owner === templateConfig.repository.owner &&
-    candidate.repository.name === templateConfig.repository.name &&
-    candidate.repository.installationId ===
-      templateConfig.repository.installationId
+  // EVERY usable target is addressed, one separately targeted cycle each. The
+  // sentinel self-repository keeps the reserved no-App owner scope; every other
+  // committed target runs under the App installation scope that can write to
+  // it, read once from the one allowlisted environment entry.
+  const selfRepository = templateConfig.repository;
+  const needsAppScope = targets.configs.some((candidate) =>
+    candidate.repository.owner !== selfRepository.owner ||
+    candidate.repository.name !== selfRepository.name
   );
-  if (config === undefined) throw new Error(STATIC_TARGETS_UNSUPPORTED);
-  // Targets this host cannot address yet are reported, never silently dropped
-  // and never acted on through another repository's port. The diagnostic line
-  // carries no `status` property, so it can never be read as a child status
-  // record by the launcher.
-  if (targets.configs.length > 1) {
-    console.log(JSON.stringify({
-      version: "v1",
-      kind: "sentinel_targets_diagnostic",
-      addressed: `${config.repository.owner}/${config.repository.name}`,
-      unaddressable: targets.configs
-        .filter((candidate) => candidate !== config)
-        .map((candidate) =>
-          `${candidate.repository.owner}/${candidate.repository.name}`
-        ),
-      skipped: [...targets.skipped],
-    }));
-  }
-  const github = scopeLocalRepairIssues(composeLocalGitHub({
+  const appInstallationId = needsAppScope
+    ? parseAppInstallationId(optionalEnv(APP_INSTALLATION_ENV))
+    : DEFAULT_APP_INSTALLATION_ID;
+  const targetConfigs = targets.configs.map((candidate) =>
+    scopeTargetConfigV1(candidate, selfRepository, appInstallationId)
+  );
+  // ONE admission budget for the whole run: it is constructed over every
+  // target config, so a reservation for any target resolves its policy against
+  // the shared 120-starts-per-hour cap instead of a per-target one.
+  const budget = new RollingStartBudget({
     clock,
     state,
-    gate,
-    http,
-    token: writeToken,
-    login,
-    invocationId: crypto.randomUUID(),
-    stateRoot,
-    sourcePath,
-    scratch,
-    reviewCheckout,
-    reviewClientHome,
-    reviewTmpDir,
-    reviewDenoDir,
-    trustedPath,
-    codexExecutable,
-    tracker,
-    ensureCandidateObjects: candidates.ensure,
-    modelBaseUrl: modelRoute.baseUrl,
-    route: modelRoute,
-  }));
+    configs: targetConfigs,
+  });
+  // ONE absolute run deadline for the whole run: it is computed once here and
+  // never restarted between target cycles.
+  const deadline = clock.now() + RUN_DEADLINE_MS;
+  // The port is composed per target: the REST client, review service, trusted
+  // git remote and cooldown scope all address exactly that repository.
+  const composeTargetGithub = (config: RepositoryConfigV1): GitHubPort =>
+    scopeLocalRepairIssues(composeLocalGitHub({
+      clock,
+      state,
+      gate,
+      http,
+      token: writeToken,
+      login,
+      invocationId: crypto.randomUUID(),
+      stateRoot,
+      sourcePath,
+      scratch,
+      reviewCheckout,
+      reviewClientHome,
+      reviewTmpDir,
+      reviewDenoDir,
+      trustedPath,
+      codexExecutable,
+      tracker,
+      ensureCandidateObjects: candidates.ensure,
+      modelBaseUrl: modelRoute.baseUrl,
+      route: modelRoute,
+      repository: config.repository,
+    }));
   const model = new LocalCheckoutModelPort({
     stateRoot,
     sourcePath,
@@ -328,33 +517,40 @@ export async function runActionsRepairHost(): Promise<
   let outcome: RepairCycleOutcomeV1 | null = null;
   let failure: unknown = null;
   try {
-    outcome = await runRepairEntrypoint({
+    const cycles = await runActionsTargetCycles({
       clock,
       state,
-      configs: [config],
+      configs: targetConfigs,
       controllerSha,
-      github,
       githubCooldown: gate,
-      // The hosted GitHub adapter is intentionally issue-only for this
-      // target. Incident/replay capabilities remain unavailable until their
+      // The hosted GitHub adapter is intentionally issue-only for each target.
+      // Incident/replay capabilities remain unavailable until their
       // authenticated producer is configured; unavailable is never an empty
       // success and therefore cannot create a fabricated fixture.
       incidents: unavailableIncidents,
       replay: unavailableReplay,
       model,
-      budget: new RollingStartBudget({
-        clock,
-        state,
-        configs: [config],
-      }),
-    }, {
-      deadline: clock.now() + RUN_DEADLINE_MS,
+      budget,
+      deadline,
       stepLimit: STEP_LIMIT,
       // Only an ordinary hosted execution may start a model. Bootstrap, prior,
       // candidate and rollback runs execute the deterministic entrypoint with
       // no model starts while keeping every budget, limit and source behavior.
       modelStartsEnabled: startupReady && execution.purpose === "ordinary",
+      composeGithub: composeTargetGithub,
+      // The one advisory line reports every committed target as addressed or
+      // skipped (an unavailable default branch, or out of time). It carries no
+      // `status` property, so the launcher can never read it as a child record.
+      report: (result) => {
+        if (targets.targets.length > 1) {
+          console.log(JSON.stringify(targetsDiagnosticV1({
+            addressed: result.addressed,
+            skipped: [...targets.skipped, ...result.skipped],
+          })));
+        }
+      },
     });
+    outcome = cycles.outcome;
   } catch (error) {
     failure = error;
   } finally {
@@ -363,7 +559,7 @@ export async function runActionsRepairHost(): Promise<
     }
   }
   if (failure !== null) throw failure;
-  if (outcome === null) throw new Error(STATIC_RUNNER);
+  if (outcome === null) throw new Error(STATIC_DEADLINE);
 
   // Deterministic CI approval for durable self-target candidates runs after
   // the loop and the tracker drain, even when model startup was unavailable.
