@@ -277,7 +277,7 @@ export const OWNER_DEVELOPMENT_INSTALL_CANDIDATE_AUTH_GENERATION = 30;
  * sentinel self-identity. Installed only after the generation 30 healthy proof.
  */
 export const OWNER_DEVELOPMENT_INSTALL_PRESERVE_SCOPE_REVISION =
-  "30ace960c565c249e52e31d0bef8c99edf78bf8f" as GitSha;
+  "fa419afb2a2b4960c95daeb9041fd86ddc2c3a7a" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_PRESERVE_SCOPE_GENERATION = 31;
 
 const API_BASE = "https://api.github.com";
