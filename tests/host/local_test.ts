@@ -53,7 +53,9 @@ Deno.test("local repository config parses with fixed local scope", () => {
   });
   assert.equal(config.liveStartLimits?.perHour, 120);
   assert.equal(config.liveStartLimits?.perSevenDays, null);
-  assert.equal(config.sessionBound?.maxDurationMs, 1_200_000);
+  // 30 minutes: a larger target's session must be able to finish. The bound
+  // matches this same template's own `test_ci` command allowance.
+  assert.equal(config.sessionBound?.maxDurationMs, 1_800_000);
   assert.equal(config.sessionBound?.maxOutputChars, 4_000_000);
   assert.equal(config.retention, null);
   assert.equal(config.stabilityPolicy, null);
