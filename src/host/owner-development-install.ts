@@ -269,6 +269,16 @@ export const OWNER_DEVELOPMENT_INSTALL_SCOPE_GATE_GENERATION = 29;
 export const OWNER_DEVELOPMENT_INSTALL_CANDIDATE_AUTH_REVISION =
   "4da7f5a87a159d36aad1e20d8698d41e777c52fe" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_CANDIDATE_AUTH_GENERATION = 30;
+/**
+ * Exact revision binding candidate preservation to the target repository and
+ * widening the session bound so a larger codebase's session can finish.
+ * Generation 30 produced genuine ai.ubq.fi candidates but could never publish
+ * them: the preserver and loss prover still filtered durable records by the
+ * sentinel self-identity. Installed only after the generation 30 healthy proof.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_PRESERVE_SCOPE_REVISION =
+  "30ace960c565c249e52e31d0bef8c99edf78bf8f" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_PRESERVE_SCOPE_GENERATION = 31;
 
 const API_BASE = "https://api.github.com";
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -1164,10 +1174,29 @@ export function planOwnerDevelopmentInstall(
     generation === OWNER_DEVELOPMENT_INSTALL_CANDIDATE_AUTH_GENERATION
   ) {
     if (healthy !== null) {
-      return noChange("the owner development installation is complete");
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_PRESERVE_SCOPE_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_PRESERVE_SCOPE_GENERATION,
+        healthy,
+        "install the target-bound preservation revision after the candidate-auth healthy proof",
+      );
     }
     return waiting(
       "the candidate-auth generation 30 healthy proof is not recorded",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_PRESERVE_SCOPE_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_PRESERVE_SCOPE_GENERATION
+  ) {
+    if (healthy !== null) {
+      return noChange("the owner development installation is complete");
+    }
+    return waiting(
+      "the preserve-scope generation 31 healthy proof is not recorded",
     );
   }
 

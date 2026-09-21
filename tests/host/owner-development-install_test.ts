@@ -47,6 +47,7 @@ import {
   OWNER_DEVELOPMENT_INSTALL_MULTI_TARGET_REVISION,
   OWNER_DEVELOPMENT_INSTALL_ORIGINAL_GENERATION,
   OWNER_DEVELOPMENT_INSTALL_ORIGINAL_REVISION,
+  OWNER_DEVELOPMENT_INSTALL_PRESERVE_SCOPE_REVISION,
   OWNER_DEVELOPMENT_INSTALL_READER_GENERATION,
   OWNER_DEVELOPMENT_INSTALL_READER_REVISION,
   OWNER_DEVELOPMENT_INSTALL_RECEIPT_REVISION,
@@ -99,6 +100,7 @@ const RESERVE_MODEL = OWNER_DEVELOPMENT_INSTALL_RESERVE_MODEL_REVISION;
 const MULTI_TARGET = OWNER_DEVELOPMENT_INSTALL_MULTI_TARGET_REVISION;
 const SCOPE_GATE = OWNER_DEVELOPMENT_INSTALL_SCOPE_GATE_REVISION;
 const CANDIDATE_AUTH = OWNER_DEVELOPMENT_INSTALL_CANDIDATE_AUTH_REVISION;
+const PRESERVE_SCOPE = OWNER_DEVELOPMENT_INSTALL_PRESERVE_SCOPE_REVISION;
 
 function hostedProof(input: {
   runId: number;
@@ -1022,14 +1024,30 @@ Deno.test(
     if (authPlan.status !== "install") throw new Error("expected install");
     assert.equal(authPlan.move.nextRevision, CANDIDATE_AUTH);
     assert.equal(authPlan.move.nextGeneration, 30);
-    // The candidate-auth generation is the fixed end of the chain.
+    // The candidate-auth healthy proof authorizes the preservation-scope
+    // install.
+    const preservePlan = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: CANDIDATE_AUTH,
+          generation: 30,
+          healthyProof: healthyProof(CANDIDATE_AUTH, 30, 101),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(preservePlan.status, "install");
+    if (preservePlan.status !== "install") throw new Error("expected install");
+    assert.equal(preservePlan.move.nextRevision, PRESERVE_SCOPE);
+    assert.equal(preservePlan.move.nextGeneration, 31);
+    // The preserve-scope generation is the fixed end of the chain.
     assert.equal(
       planOwnerDevelopmentInstall(
         releaseSnapshot({
           runtime: runtimeRecord({
-            revision: CANDIDATE_AUTH,
-            generation: 30,
-            healthyProof: healthyProof(CANDIDATE_AUTH, 30, 101),
+            revision: PRESERVE_SCOPE,
+            generation: 31,
+            healthyProof: healthyProof(PRESERVE_SCOPE, 31, 102),
           }),
         }),
         NOW,
