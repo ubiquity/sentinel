@@ -289,6 +289,15 @@ export const OWNER_DEVELOPMENT_INSTALL_PRESERVE_SCOPE_GENERATION = 31;
 export const OWNER_DEVELOPMENT_INSTALL_FOREIGN_AUTH_REVISION =
   "30803374b8eb9bd6e3c2636096493b3371a4f543" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_FOREIGN_AUTH_GENERATION = 32;
+/**
+ * Exact revision whose advisory diagnostic names the seam a failed model run
+ * died at. Without it a failure reports only `unavailable`, so the failing
+ * check is unknowable without another full hourly cycle. Installed only after
+ * the foreign-auth generation 32 healthy proof.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_REASON_CODE_REVISION =
+  "5b42603a28e04abed407cb850e3e7025d02b658e" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_REASON_CODE_GENERATION = 33;
 
 const API_BASE = "https://api.github.com";
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -1222,10 +1231,29 @@ export function planOwnerDevelopmentInstall(
     generation === OWNER_DEVELOPMENT_INSTALL_FOREIGN_AUTH_GENERATION
   ) {
     if (healthy !== null) {
-      return noChange("the owner development installation is complete");
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_REASON_CODE_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_REASON_CODE_GENERATION,
+        healthy,
+        "install the reason-code revision after the foreign-auth healthy proof",
+      );
     }
     return waiting(
       "the foreign-auth generation 32 healthy proof is not recorded",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_REASON_CODE_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_REASON_CODE_GENERATION
+  ) {
+    if (healthy !== null) {
+      return noChange("the owner development installation is complete");
+    }
+    return waiting(
+      "the reason-code generation 33 healthy proof is not recorded",
     );
   }
 

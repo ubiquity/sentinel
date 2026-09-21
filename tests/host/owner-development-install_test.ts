@@ -51,6 +51,7 @@ import {
   OWNER_DEVELOPMENT_INSTALL_PRESERVE_SCOPE_REVISION,
   OWNER_DEVELOPMENT_INSTALL_READER_GENERATION,
   OWNER_DEVELOPMENT_INSTALL_READER_REVISION,
+  OWNER_DEVELOPMENT_INSTALL_REASON_CODE_REVISION,
   OWNER_DEVELOPMENT_INSTALL_RECEIPT_REVISION,
   OWNER_DEVELOPMENT_INSTALL_RECOVERY_REVISION,
   OWNER_DEVELOPMENT_INSTALL_RELEASED_REVISION,
@@ -103,6 +104,7 @@ const SCOPE_GATE = OWNER_DEVELOPMENT_INSTALL_SCOPE_GATE_REVISION;
 const CANDIDATE_AUTH = OWNER_DEVELOPMENT_INSTALL_CANDIDATE_AUTH_REVISION;
 const PRESERVE_SCOPE = OWNER_DEVELOPMENT_INSTALL_PRESERVE_SCOPE_REVISION;
 const FOREIGN_AUTH = OWNER_DEVELOPMENT_INSTALL_FOREIGN_AUTH_REVISION;
+const REASON_CODE = OWNER_DEVELOPMENT_INSTALL_REASON_CODE_REVISION;
 
 function hostedProof(input: {
   runId: number;
@@ -1057,14 +1059,29 @@ Deno.test(
     if (auth2Plan.status !== "install") throw new Error("expected install");
     assert.equal(auth2Plan.move.nextRevision, FOREIGN_AUTH);
     assert.equal(auth2Plan.move.nextGeneration, 32);
-    // The foreign-auth generation is the fixed end of the chain.
+    // The foreign-auth healthy proof authorizes the reason-code install.
+    const reasonPlan = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: FOREIGN_AUTH,
+          generation: 32,
+          healthyProof: healthyProof(FOREIGN_AUTH, 32, 103),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(reasonPlan.status, "install");
+    if (reasonPlan.status !== "install") throw new Error("expected install");
+    assert.equal(reasonPlan.move.nextRevision, REASON_CODE);
+    assert.equal(reasonPlan.move.nextGeneration, 33);
+    // The reason-code generation is the fixed end of the chain.
     assert.equal(
       planOwnerDevelopmentInstall(
         releaseSnapshot({
           runtime: runtimeRecord({
-            revision: FOREIGN_AUTH,
-            generation: 32,
-            healthyProof: healthyProof(FOREIGN_AUTH, 32, 103),
+            revision: REASON_CODE,
+            generation: 33,
+            healthyProof: healthyProof(REASON_CODE, 33, 104),
           }),
         }),
         NOW,
