@@ -1147,7 +1147,16 @@ export interface LocalGitHubInputV1 {
    * an ancestry check. Ordinary local callers omit it (behavior unchanged).
    */
   ensureCandidateObjects?: (
-    input: { base: GitSha; head: GitSha },
+    input: {
+      base: GitSha;
+      head: GitSha;
+      /**
+       * Exact repository the objects belong to. A multi-target host owns one
+       * source mirror and one authenticated remote per target, and the objects
+       * of a foreign target exist only in that target's mirror and remote.
+       */
+      repository: RepositoryIdentityV1;
+    },
   ) => Promise<PortResultV1<void>>;
   /** Provider endpoint used by the isolated reviewer client. */
   modelBaseUrl?: string;
@@ -1174,6 +1183,14 @@ export interface LocalGitHubInputV1 {
    * when no repository is supplied.
    */
   installationId?: number;
+  /**
+   * Exact base branch this port's reconciliation and proofs must target. A
+   * multi-target host supplies the target's own default branch (the same value
+   * the cycle reads from its configuration), so a target whose default branch
+   * is not `development` is never judged against `development`. Omitted
+   * callers keep the frozen sentinel base branch.
+   */
+  baseBranch?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -1191,6 +1208,12 @@ export interface BaseRefreshObserverV1 {
 export interface PrepareBaseRefreshAdapterInputV1 {
   /** THE same trusted executor instance the port publishes through. */
   git: GitExecutorV1;
+  /**
+   * Exact repository this adapter restores candidate objects for. Omitted
+   * callers keep the frozen sentinel self-identity, so every existing call
+   * site is unchanged.
+   */
+  repository?: RepositoryIdentityV1;
   /** The exact port instance (or any exact observer over it). */
   observer: BaseRefreshObserverV1;
   /** Exact configured base branch the PR must target. */
@@ -1203,7 +1226,16 @@ export interface PrepareBaseRefreshAdapterInputV1 {
    * candidate objects.
    */
   ensureCandidateObjects?: (
-    input: { base: GitSha; head: GitSha },
+    input: {
+      base: GitSha;
+      head: GitSha;
+      /**
+       * Exact repository the objects belong to. A multi-target host owns one
+       * source mirror and one authenticated remote per target, and the objects
+       * of a foreign target exist only in that target's mirror and remote.
+       */
+      repository: RepositoryIdentityV1;
+    },
   ) => Promise<PortResultV1<void>>;
 }
 
@@ -1308,6 +1340,7 @@ export function createPrepareBaseRefresh(
         ensured = await input.ensureCandidateObjects({
           base: request.previousBase,
           head: request.expectedHead,
+          repository: input.repository ?? LOCAL_REPOSITORY,
         });
       } catch {
         return portError("unavailable", STATIC_BASE_REFRESH_RESTORE);
@@ -1366,6 +1399,10 @@ export function composeLocalGitHub(input: LocalGitHubInputV1): GitHubPort {
   // target remote, never to a built-in one.
   const remoteUrl =
     `https://github.com/${repository.owner}/${repository.name}.git`;
+  // The configured base branch and the repository are decided together: the
+  // base-refresh adapter and the loss prover must judge EXACTLY the branch the
+  // cycle's own configuration uses.
+  const baseBranch = input.baseBranch ?? LOCAL_BASE_BRANCH;
   const auth: GitHubAuthProviderV1 = {
     authorizationHeader: () => Promise.resolve(portOk(`Bearer ${input.token}`)),
   };
@@ -1393,7 +1430,10 @@ export function composeLocalGitHub(input: LocalGitHubInputV1): GitHubPort {
   const snapshotSource = {
     capture: async (value: { base: GitSha; head: GitSha }) => {
       if (ensureCandidateObjects !== undefined) {
-        const ensured = await ensureCandidateObjects(value);
+        const ensured = await ensureCandidateObjects({
+          ...value,
+          repository,
+        });
         if (!ensured.ok) return ensured;
       }
       const prepared = await prepareReviewCheckout({
@@ -1466,6 +1506,7 @@ export function composeLocalGitHub(input: LocalGitHubInputV1): GitHubPort {
       const ensured = await ensureCandidateObjects({
         base: ancestor,
         head: descendant,
+        repository,
       });
       if (!ensured.ok) return ensured;
       return await originalIsAncestor(ancestor, descendant);
@@ -1477,8 +1518,9 @@ export function composeLocalGitHub(input: LocalGitHubInputV1): GitHubPort {
   // publication can never drift to a parallel instance.
   host.port.prepareBaseRefresh = createPrepareBaseRefresh({
     git: host.git,
+    repository,
     observer: host.port,
-    baseBranch: LOCAL_BASE_BRANCH,
+    baseBranch,
     trustedPrAuthor: input.login,
     ensureCandidateObjects,
   });
@@ -1519,7 +1561,7 @@ export function composeLocalGitHub(input: LocalGitHubInputV1): GitHubPort {
     trustedPath: input.trustedPath,
     gitExecutable: trustedGitPath(input.trustedPath),
     remoteUrl,
-    baseBranch: LOCAL_BASE_BRANCH,
+    baseBranch,
     trustedPrAuthor: input.login,
     ensureLocalCandidate: createLocalCandidateLoader({
       stateRoot: input.stateRoot,
@@ -1695,8 +1737,25 @@ export interface LocalModelInputV1 {
    * persistent source object repository already imports candidates.
    */
   ensureCandidateObjects?: (
-    input: { base: GitSha; head: GitSha },
+    input: {
+      base: GitSha;
+      head: GitSha;
+      /**
+       * Exact repository the objects belong to. A multi-target host owns one
+       * source mirror and one authenticated remote per target, and the objects
+       * of a foreign target exist only in that target's mirror and remote.
+       */
+      repository: RepositoryIdentityV1;
+    },
   ) => Promise<PortResultV1<void>>;
+  /**
+   * Exact private source object repository for one requested repository.
+   * A multi-target host owns one mirror per target, so a task's checkout and
+   * candidate import must use ITS target's mirror; a mirror seeded from
+   * another repository cannot resolve that target's base commit at all.
+   * Omitted callers keep the single `sourcePath` mirror.
+   */
+  resolveSourcePath?: (repository: RepositoryIdentityV1) => string;
 }
 
 /**
@@ -1750,6 +1809,7 @@ export class LocalCheckoutModelPort implements ImplementationPort {
         restored = await this.input.ensureCandidateObjects({
           base: request.base,
           head: checkoutBase,
+          repository: request.repository,
         });
       } catch {
         return portError("unavailable", STATIC_CHECKOUT);
@@ -1757,12 +1817,16 @@ export class LocalCheckoutModelPort implements ImplementationPort {
       if (!restored.ok) return portError("unavailable", STATIC_CHECKOUT);
     }
     const key = await localCheckoutKey(request.taskId);
+    // This request's OWN target mirror: the base commit of a foreign target
+    // does not exist in the sentinel mirror.
+    const sourcePath = this.input.resolveSourcePath?.(request.repository) ??
+      this.input.sourcePath;
     const prepared = await ensureTaskCheckout({
       taskId: request.taskId,
       base: checkoutBase,
       key,
       stateRoot: this.input.stateRoot,
-      sourcePath: this.input.sourcePath,
+      sourcePath,
       scratch: this.input.scratch,
       trustedPath: this.input.trustedPath,
     });
@@ -1830,7 +1894,7 @@ export class LocalCheckoutModelPort implements ImplementationPort {
       observedAt: this.input.clock.now(),
       importCandidate: (head) =>
         importCandidate({
-          sourcePath: this.input.sourcePath,
+          sourcePath,
           checkout: prepared.checkout,
           head,
           key,
@@ -2546,15 +2610,26 @@ export async function prepareSourceRepository(
   sourcePath: string,
   input: LocalRepairHostOptionsV1,
   scratch: string,
+  /** Authenticated remote to seed from; omitted means the local checkout. */
+  remoteUrl?: string,
 ): Promise<void> {
   const existing = await durableGitPathState(sourcePath);
   if (existing === "symlink") throw new Error(STATIC_GIT_FAILED);
   if (existing === "present") return;
+  // The sentinel self-mirror is seeded from this run's own checkout, which is
+  // the exact runtime revision. A foreign target cannot be seeded that way:
+  // its objects exist only on its own remote, so it is cloned from that
+  // authenticated remote with no checkout.
   const result = await runTrustedGitResult({
-    args: ["clone", "--no-hardlinks", input.sourceDir, sourcePath],
+    args: remoteUrl === undefined
+      ? ["clone", "--no-hardlinks", input.sourceDir, sourcePath]
+      : ["clone", "--no-hardlinks", "--no-checkout", remoteUrl, sourcePath],
     cwd: input.stateRoot,
     trustedPath: input.trustedPath,
     scratch,
+    ...(remoteUrl === undefined
+      ? {}
+      : { extraEnv: githubGitAuthEnv(input.githubToken, remoteUrl) }),
   });
   if (result.code !== 0) throw new Error(STATIC_GIT_FAILED);
 }
@@ -2998,6 +3073,11 @@ export async function refreshDevelopment(
   scratch: string,
   gate: GitHubCooldownGateV1,
   installationId: number = LOCAL_REPOSITORY.installationId,
+  /** Exact target remote and its own base branch; omitted means sentinel. */
+  target: { remoteUrl: string; baseBranch: string } = {
+    remoteUrl: REMOTE_URL,
+    baseBranch: LOCAL_BASE_BRANCH,
+  },
 ): Promise<string> {
   // Durable admission is the FIRST operation: a refused or faulted gate stops
   // here, before any Git command or external fetch runs. There is no
@@ -3010,17 +3090,22 @@ export async function refreshDevelopment(
       sourcePath,
       "fetch",
       "--no-tags",
-      REMOTE_URL,
-      "+refs/heads/development:refs/remotes/origin/development",
+      target.remoteUrl,
+      `+refs/heads/${target.baseBranch}:refs/remotes/origin/${target.baseBranch}`,
     ],
     cwd: input.stateRoot,
     trustedPath: input.trustedPath,
     scratch,
-    extraEnv: githubGitAuthEnv(input.githubToken),
+    extraEnv: githubGitAuthEnv(input.githubToken, target.remoteUrl),
   });
   if (fetched.code !== 0) throw new Error(STATIC_GIT_FAILED);
   const head = await runTrustedGitResult({
-    args: ["-C", sourcePath, "rev-parse", "refs/remotes/origin/development"],
+    args: [
+      "-C",
+      sourcePath,
+      "rev-parse",
+      `refs/remotes/origin/${target.baseBranch}`,
+    ],
     cwd: input.stateRoot,
     trustedPath: input.trustedPath,
     scratch,

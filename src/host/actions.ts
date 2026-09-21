@@ -34,6 +34,7 @@ import type {
 import type { RepositoryConfigV1 } from "../contracts/repository-config.ts";
 import type { RepositoryIdentityV1 } from "../contracts/shared.ts";
 import type { RepairCycleOutcomeV1 } from "../repair/loop.ts";
+import { portError } from "../contracts/ports.ts";
 import { parseRepairStateSnapshotV1 } from "../contracts/state-snapshots.ts";
 import { RollingStartBudget } from "../budget/mod.ts";
 import type { BudgetControllerV1 } from "../budget/mod.ts";
@@ -53,6 +54,7 @@ import {
 } from "./actions-ci.ts";
 import { readHostedReleaseReceipt } from "./actions-release.ts";
 import { createActionsCandidateRestorer } from "./actions-candidates.ts";
+import type { ActionsCandidateRestorerV1 } from "./actions-candidates.ts";
 import type { ReleaseRequestV1 } from "../contracts/release.ts";
 import {
   createDefaultBranchResolver,
@@ -101,6 +103,8 @@ const STATIC_APP_INSTALLATION =
   "hosted repair host rejected: SENTINEL_APP_INSTALLATION_ID is not a positive safe integer";
 const STATIC_DEADLINE =
   "hosted repair host reached its run deadline before addressing any target";
+const STATIC_TARGET_UNKNOWN =
+  "hosted repair host rejected: the requested repository is not a committed target";
 
 /**
  * The App installation scope of `ubiquity-sentinel`. Every committed target
@@ -161,12 +165,14 @@ export function scopeTargetConfigV1(
 export function targetsDiagnosticV1(input: {
   readonly addressed: readonly string[];
   readonly skipped: readonly string[];
+  readonly failed: readonly string[];
 }): Record<string, unknown> {
   return {
     version: "v1",
     kind: "sentinel_targets_diagnostic",
     addressed: [...input.addressed],
     skipped: [...input.skipped],
+    failed: [...input.failed],
   };
 }
 
@@ -203,6 +209,14 @@ export interface ActionsTargetCyclesInputV1 {
   deadline: number;
   stepLimit: number;
   modelStartsEnabled: boolean;
+  /**
+   * Prepare one target's own private state before its port is composed: its
+   * source mirror and that mirror's base fetch. A target whose preparation
+   * fails is recorded and skipped instead of stopping every other target,
+   * because a foreign remote is a failure mode the self-target must not
+   * inherit. Omitted callers need no preparation.
+   */
+  prepareTarget?: (config: RepositoryConfigV1) => Promise<void>;
   /** Compose the exact port for one target repository. */
   composeGithub: (config: RepositoryConfigV1) => GitHubPort;
   /** The production entrypoint; injectable for deterministic tests only. */
@@ -219,6 +233,11 @@ export interface ActionsTargetCyclesResultV1 {
   readonly addressed: readonly string[];
   /** `owner/name` of every target not attempted because time ran out. */
   readonly skipped: readonly string[];
+  /**
+   * `owner/name: reason` of every target whose own preparation failed. It is
+   * disjoint from `addressed` and `skipped` and is never a success claim.
+   */
+  readonly failed: readonly string[];
 }
 
 /**
@@ -240,6 +259,7 @@ export async function runActionsTargetCycles(
   const runCycle = input.runCycle ?? runRepairEntrypoint;
   const addressed: string[] = [];
   const skipped: string[] = [];
+  const failed: string[] = [];
   let outcome: RepairCycleOutcomeV1 | null = null;
   try {
     for (const [index, config] of input.configs.entries()) {
@@ -253,7 +273,23 @@ export async function runActionsTargetCycles(
         }
         break;
       }
-      addressed.push(`${config.repository.owner}/${config.repository.name}`);
+      const slug = `${config.repository.owner}/${config.repository.name}`;
+      if (input.prepareTarget !== undefined) {
+        try {
+          await input.prepareTarget(config);
+        } catch (error) {
+          // This target's own private state could not be prepared. Record the
+          // exact reason and leave every other target untouched: a target that
+          // cannot be prepared was never addressed, so it is not reported as
+          // one.
+          const reason = error instanceof Error
+            ? error.message
+            : "target preparation failed";
+          failed.push(`${slug}: ${reason}`);
+          continue;
+        }
+      }
+      addressed.push(slug);
       outcome = await runCycle({
         clock: input.clock,
         state: input.state,
@@ -278,9 +314,10 @@ export async function runActionsTargetCycles(
       outcome,
       addressed: [...addressed],
       skipped: [...skipped],
+      failed: [...failed],
     });
   }
-  return { outcome, addressed, skipped };
+  return { outcome, addressed, skipped, failed };
 }
 
 /** Run one hosted repair pass through the actual production entrypoint. */
@@ -369,8 +406,13 @@ export async function runActionsRepairHost(): Promise<
     trustedPath,
   };
 
-  // The source mirror is private to this run. It is refreshed through the
-  // shared cooldown gate before any GitHub/API work can use it.
+  // The source mirror is private to this run. The SENTINEL mirror is seeded
+  // from this run's own checkout (the exact runtime revision) and refreshed
+  // here; a FOREIGN target cannot be served by it, because that mirror holds
+  // no object from the other repository at all. Each foreign target therefore
+  // gets its own mirror below, seeded from its own authenticated remote and
+  // fetched at its own base branch. The shared cooldown gate still governs
+  // every fetch.
   await prepareSourceRepository(sourcePath, hostInput, scratch);
   const baseSha = await refreshDevelopment(
     sourcePath,
@@ -378,6 +420,37 @@ export async function runActionsRepairHost(): Promise<
     scratch,
     gate,
   );
+  /**
+   * Exact private mirror directory for one committed target. The sentinel
+   * self-target keeps the original single `source` mirror so every existing
+   * path, checkpoint and candidate object of the self-repair lane is
+   * unchanged; every other target gets its own directory derived from its
+   * validated owner/name.
+   */
+  /**
+   * Exact independent review checkout for one target. It is a real clone of
+   * THAT target's mirror, created and detached inside the review snapshot
+   * capture, so a review can never read another repository's objects or carry
+   * a previous target's checkout state into this target's snapshot.
+   */
+  const reviewCheckoutFor = (config: RepositoryConfigV1): string =>
+    config.repository.owner === templateConfig.repository.owner &&
+      config.repository.name === templateConfig.repository.name
+      ? reviewCheckout
+      : joinPath(
+        stateRoot,
+        "review-checkouts",
+        `${config.repository.owner}-${config.repository.name}`,
+      );
+  const mirrorPathFor = (config: RepositoryConfigV1): string =>
+    config.repository.owner === templateConfig.repository.owner &&
+      config.repository.name === templateConfig.repository.name
+      ? sourcePath
+      : joinPath(
+        stateRoot,
+        "sources",
+        `${config.repository.owner}-${config.repository.name}`,
+      );
 
   await ensureReviewClient({
     reviewCheckout,
@@ -393,22 +466,7 @@ export async function runActionsRepairHost(): Promise<
 
   const tracker = new LocalSessionTracker();
   const http = fetchHttpTransport();
-  // Lazy candidate restoration for a fresh Actions clone: the exact durable
-  // candidate objects are fetched only when a review snapshot, an ancestry
-  // check, or a correction checkout actually needs them (never before the
-  // repair loop).
   const gitExecutable = await resolveExecutable("git", trustedPath);
-  const candidates = createActionsCandidateRestorer({
-    state,
-    gate,
-    token: writeToken,
-    http,
-    clock,
-    sourcePath,
-    scratch,
-    trustedPath,
-    gitExecutable,
-  });
 
   // The committed target setting is the ONLY source of target repositories.
   // It is read before any port is composed, so an unusable setting refuses the
@@ -440,6 +498,47 @@ export async function runActionsRepairHost(): Promise<
   const targetConfigs = targets.configs.map((candidate) =>
     scopeTargetConfigV1(candidate, selfRepository, appInstallationId)
   );
+  /**
+   * ONE lazy candidate restorer per target, each bound to that target's own
+   * mirror, remote and repository identity. Candidate objects live in the
+   * remote of the repository that owns them, so a shared restorer pointed at
+   * the sentinel remote could never restore a foreign target's candidate, and
+   * a shared mirror could never hold it either. Restoration stays lazy: the
+   * exact durable objects are fetched only when a review snapshot, an ancestry
+   * check or a correction checkout actually needs them, never before the loop.
+   */
+  const candidatesBySlug = new Map<string, ActionsCandidateRestorerV1>();
+  const candidatesFor = (
+    config: RepositoryConfigV1,
+  ): ActionsCandidateRestorerV1 => {
+    const slug = `${config.repository.owner}/${config.repository.name}`;
+    let restorer = candidatesBySlug.get(slug);
+    if (restorer === undefined) {
+      restorer = createActionsCandidateRestorer({
+        state,
+        gate,
+        token: writeToken,
+        http,
+        clock,
+        sourcePath: mirrorPathFor(config),
+        scratch,
+        trustedPath,
+        gitExecutable,
+        repository: config.repository,
+      });
+      candidatesBySlug.set(slug, restorer);
+    }
+    return restorer;
+  };
+  /** The exact mirror each requested repository must be served from. */
+  const sourcePathBySlug = new Map<string, string>();
+  for (const config of targetConfigs) {
+    sourcePathBySlug.set(
+      `${config.repository.owner}/${config.repository.name}`,
+      mirrorPathFor(config),
+    );
+  }
+
   // ONE admission budget for the whole run: it is constructed over every
   // target config, so a reservation for any target resolves its policy against
   // the shared 120-starts-per-hour cap instead of a per-target one.
@@ -463,19 +562,20 @@ export async function runActionsRepairHost(): Promise<
       login,
       invocationId: crypto.randomUUID(),
       stateRoot,
-      sourcePath,
+      sourcePath: mirrorPathFor(config),
       scratch,
-      reviewCheckout,
+      reviewCheckout: reviewCheckoutFor(config),
       reviewClientHome,
       reviewTmpDir,
       reviewDenoDir,
       trustedPath,
       codexExecutable,
       tracker,
-      ensureCandidateObjects: candidates.ensure,
+      ensureCandidateObjects: candidatesFor(config).ensure,
       modelBaseUrl: modelRoute.baseUrl,
       route: modelRoute,
       repository: config.repository,
+      baseBranch: config.baseBranch,
     }));
   const model = new LocalCheckoutModelPort({
     stateRoot,
@@ -490,7 +590,32 @@ export async function runActionsRepairHost(): Promise<
     route: modelRoute,
     modelId: modelRoute.model,
     localIteration: false,
-    ensureCandidateObjects: candidates.ensure,
+    // Both capabilities resolve from the REQUESTED repository, not from the
+    // sentinel self-identity: the checkout and the candidate import must use
+    // the target's own mirror, and candidate restoration must read the
+    // target's own remote. A request for a repository the run did not commit
+    // as a target refuses instead of silently using sentinel's mirror.
+    ensureCandidateObjects: (input) => {
+      const slug = `${input.repository.owner}/${input.repository.name}`;
+      const mirror = sourcePathBySlug.get(slug);
+      if (mirror === undefined) {
+        return Promise.resolve(portError(
+          "invalid",
+          STATIC_TARGET_UNKNOWN,
+        ));
+      }
+      const config = targetConfigs.find((candidate) =>
+        candidate.repository.owner === input.repository.owner &&
+        candidate.repository.name === input.repository.name
+      );
+      if (config === undefined) {
+        return Promise.resolve(portError("invalid", STATIC_TARGET_UNKNOWN));
+      }
+      return candidatesFor(config).ensure({ base: input.base, head: input.head });
+    },
+    resolveSourcePath: (repository) =>
+      sourcePathBySlug.get(`${repository.owner}/${repository.name}`) ??
+        sourcePath,
   });
 
   // The hosted self release path reads the protected supervisor's persisted
@@ -513,6 +638,35 @@ export async function runActionsRepairHost(): Promise<
   } catch {
     startupReady = false;
   }
+
+  /**
+   * Prepare ONE target's own private state immediately before its cycle: its
+   * mirror seeded from its own authenticated remote, fetched at its own base
+   * branch through the shared cooldown gate. The sentinel self-target is
+   * already prepared above from this run's own checkout, so it needs nothing
+   * here and its existing path is unchanged. A foreign target's preparation
+   * failure is contained to that target by the loop, which records it as
+   * failed rather than treating it as addressed.
+   */
+  const prepareTarget = async (config: RepositoryConfigV1): Promise<void> => {
+    if (mirrorPathFor(config) === sourcePath) return;
+    const remoteUrl =
+      `https://github.com/${config.repository.owner}/${config.repository.name}.git`;
+    await prepareSourceRepository(
+      mirrorPathFor(config),
+      hostInput,
+      scratch,
+      remoteUrl,
+    );
+    await refreshDevelopment(
+      mirrorPathFor(config),
+      hostInput,
+      scratch,
+      gate,
+      config.repository.installationId,
+      { remoteUrl, baseBranch: config.baseBranch },
+    );
+  };
 
   let outcome: RepairCycleOutcomeV1 | null = null;
   let failure: unknown = null;
@@ -537,6 +691,7 @@ export async function runActionsRepairHost(): Promise<
       // candidate and rollback runs execute the deterministic entrypoint with
       // no model starts while keeping every budget, limit and source behavior.
       modelStartsEnabled: startupReady && execution.purpose === "ordinary",
+      prepareTarget,
       composeGithub: composeTargetGithub,
       // The one advisory line reports every committed target as addressed or
       // skipped (an unavailable default branch, or out of time). It carries no
@@ -546,6 +701,7 @@ export async function runActionsRepairHost(): Promise<
           console.log(JSON.stringify(targetsDiagnosticV1({
             addressed: result.addressed,
             skipped: [...targets.skipped, ...result.skipped],
+            failed: result.failed,
           })));
         }
       },

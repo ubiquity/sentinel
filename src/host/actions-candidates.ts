@@ -61,7 +61,11 @@ import { DenoReplayRuntime } from "../replay/runtime.ts";
 import type { ReplayRuntimeV1 } from "../replay/runtime.ts";
 import { githubGitAuthEnv } from "./local.ts";
 
-/** Fixed self remote; the trusted fetch target unless a test injects one. */
+/**
+ * The sentinel self remote. It is the default only for callers that supply
+ * neither `repository` nor `remoteUrl`; the hosted multi-target host names each
+ * target's own repository, so its remote is derived from that identity instead.
+ */
 export const ACTIONS_CANDIDATES_REMOTE_URL =
   "https://github.com/ubiquity/sentinel.git";
 
@@ -113,6 +117,13 @@ export interface ActionsCandidateRestorerInputV1 {
   clock: Clock;
   /** Private trusted source object repository (never a worktree write). */
   sourcePath: string;
+  /**
+   * Exact target repository these objects belong to. Omitted callers keep the
+   * sentinel self-identity. A multi-target host supplies the committed
+   * target's own identity so the ref namespace, the authenticated remote and
+   * the durable record filter all address exactly that repository.
+   */
+  repository?: RepositoryIdentityV1;
   /** Private git home for the credential child environment. */
   scratch: string;
   trustedPath: string;
@@ -141,6 +152,12 @@ export interface ActionsCandidatePreserverInputV1 {
   clock: Clock;
   /** Private trusted source object repository (validated, never a model cwd). */
   sourcePath: string;
+  /**
+   * Exact target repository these objects belong to. Omitted callers keep the
+   * sentinel self-identity, so the authenticated remote and every gate
+   * admission still scope to the repository that actually owns the objects.
+   */
+  repository?: RepositoryIdentityV1;
   /** Private owned scratch root for the fresh empty object store. */
   scratch: string;
   trustedPath: string;
@@ -191,13 +208,6 @@ function isDurableCandidateBranch(branch: unknown): branch is string {
 /** Exact shape of one operation-bound preservation ref. */
 function isPreservationRef(ref: unknown): ref is string {
   return typeof ref === "string" && PRESERVATION_REF_PATTERN.test(ref);
-}
-
-/** Exact self-scope repository identity shared by both hosted helpers. */
-function isSelfRepository(repository: RepositoryIdentityV1): boolean {
-  return repository.installationId === SELF_REPOSITORY.installationId &&
-    repository.owner === SELF_REPOSITORY.owner &&
-    repository.name === SELF_REPOSITORY.name;
 }
 
 /** Exact repository identity equality (owner/name/installation). */
@@ -345,7 +355,9 @@ async function restorableTargets(
 export function createActionsCandidateRestorer(
   input: ActionsCandidateRestorerInputV1,
 ): ActionsCandidateRestorerV1 {
-  const remoteUrl = input.remoteUrl ?? ACTIONS_CANDIDATES_REMOTE_URL;
+  const repository = input.repository ?? SELF_REPOSITORY;
+  const remoteUrl = input.remoteUrl ??
+    `https://github.com/${repository.owner}/${repository.name}.git`;
   const runtime = input.runtime ?? new DenoReplayRuntime(input.trustedPath);
   const auth = {
     authorizationHeader: () => Promise.resolve(portOk(`Bearer ${input.token}`)),
@@ -353,7 +365,7 @@ export function createActionsCandidateRestorer(
   let client: GitHubApiClient | null = null;
   const github = (): GitHubApiClient => {
     client ??= new GitHubApiClient({
-      repository: { ...SELF_REPOSITORY },
+      repository: { ...repository },
       apiBaseUrl: input.apiBaseUrl ?? "https://api.github.com",
       http: input.http,
       auth,
@@ -426,7 +438,8 @@ export function createActionsCandidateRestorer(
         }
         for (const work of read.value.snapshot.work) {
           if (
-            !isSelfRepository(work.repository) || work.nextStep === "done"
+            !sameRepository(work.repository, repository) ||
+            work.nextStep === "done"
           ) {
             continue;
           }
@@ -456,9 +469,7 @@ export function createActionsCandidateRestorer(
       // Durable cooldown immediately before the one authenticated fetch.
       let cooled: PortResultV1<void>;
       try {
-        cooled = await input.gate.beforeRequest(
-          SELF_REPOSITORY.installationId,
-        );
+        cooled = await input.gate.beforeRequest(repository.installationId);
       } catch {
         return portError("unavailable", STATIC_FETCH);
       }
@@ -584,7 +595,9 @@ async function pathPresent(path: string): Promise<boolean | null> {
 export function createCandidatePreserver(
   input: ActionsCandidatePreserverInputV1,
 ): GitHubPort["preserveCandidate"] {
-  const remoteUrl = input.remoteUrl ?? ACTIONS_CANDIDATES_REMOTE_URL;
+  const repository = input.repository ?? SELF_REPOSITORY;
+  const remoteUrl = input.remoteUrl ??
+    `https://github.com/${repository.owner}/${repository.name}.git`;
   const runtime = input.runtime ?? new DenoReplayRuntime(input.trustedPath);
   const runGit: PreserverGitRunV1 = async (cwd, args, credentials) => {
     let result;
@@ -811,7 +824,7 @@ export function createCandidatePreserver(
         return portError("unavailable", STATIC_PRESERVE_BINDING);
       }
       const matches = read.value.snapshot.work.filter((work) =>
-        isSelfRepository(work.repository) && work.id === taskId &&
+        sameRepository(work.repository, repository) && work.id === taskId &&
         work.nextStep !== "done"
       );
       if (matches.length !== 1) {
@@ -879,6 +892,7 @@ export function createCandidatePreserver(
     const proved = await freshStoreProof({
       runGit,
       gate: input.gate,
+      installationId: repository.installationId,
       remoteUrl,
       ref,
       candidate,
@@ -915,6 +929,8 @@ export function createCandidatePreserver(
 async function freshStoreProof(input: {
   runGit: PreserverGitRunV1;
   gate: GitHubCooldownGateV1;
+  /** Exact installation scope every gate admission is charged to. */
+  installationId: number;
   remoteUrl: string;
   ref: string;
   candidate: CandidatePreservationV1;
@@ -927,6 +943,7 @@ async function freshStoreProof(input: {
   const {
     runGit,
     gate,
+    installationId,
     remoteUrl,
     ref,
     candidate,
@@ -971,7 +988,7 @@ async function freshStoreProof(input: {
     // Durable cooldown immediately before the one credential-scoped fetch.
     let cooled: PortResultV1<void>;
     try {
-      cooled = await gate.beforeRequest(SELF_REPOSITORY.installationId);
+      cooled = await gate.beforeRequest(installationId);
     } catch {
       return portError("unavailable", STATIC_PRESERVE_PROOF);
     }
@@ -1040,9 +1057,7 @@ async function freshStoreProof(input: {
         // immediately before it; a refused or throwing gate performs no fetch.
         let secondCooled: PortResultV1<void>;
         try {
-          secondCooled = await gate.beforeRequest(
-            SELF_REPOSITORY.installationId,
-          );
+          secondCooled = await gate.beforeRequest(installationId);
         } catch {
           return portError("unavailable", STATIC_PRESERVE_PROOF);
         }
@@ -1151,6 +1166,11 @@ export interface ActionsLegacyLossProverInputV1 {
   >;
   gate: GitHubCooldownGateV1;
   token: string;
+  /**
+   * Exact target repository this prover is scoped to. Omitted callers keep the
+   * sentinel self-identity.
+   */
+  repository?: RepositoryIdentityV1;
   /** Private owned scratch root for the one fresh empty object store. */
   scratch: string;
   trustedPath: string;
@@ -1297,6 +1317,8 @@ async function provedAbsentObject(
 async function legacyLossAbsenceProof(input: {
   runGit: PreserverGitRunV1;
   gate: GitHubCooldownGateV1;
+  /** Exact installation scope every gate admission is charged to. */
+  installationId: number;
   remoteUrl: string;
   branch: string;
   base: GitSha;
@@ -1304,7 +1326,16 @@ async function legacyLossAbsenceProof(input: {
   predecessor: GitSha;
   scratch: string;
 }): Promise<PortResultV1<void>> {
-  const { gate, remoteUrl, branch, base, lost, predecessor, scratch } = input;
+  const {
+    gate,
+    installationId,
+    remoteUrl,
+    branch,
+    base,
+    lost,
+    predecessor,
+    scratch,
+  } = input;
   let store: string;
   try {
     store = await Deno.makeTempDir({
@@ -1334,7 +1365,7 @@ async function legacyLossAbsenceProof(input: {
     // Durable cooldown immediately before the one credential-scoped fetch.
     let cooled: PortResultV1<void>;
     try {
-      cooled = await gate.beforeRequest(SELF_REPOSITORY.installationId);
+      cooled = await gate.beforeRequest(installationId);
     } catch {
       return portError("unavailable", STATIC_LOSS_PROOF);
     }
@@ -1431,7 +1462,9 @@ async function legacyLossAbsenceProof(input: {
 export function createLegacyBaseRefreshLossProver(
   input: ActionsLegacyLossProverInputV1,
 ): LegacyBaseRefreshLossProverV1 {
-  const remoteUrl = input.remoteUrl ?? ACTIONS_CANDIDATES_REMOTE_URL;
+  const repository = input.repository ?? SELF_REPOSITORY;
+  const remoteUrl = input.remoteUrl ??
+    `https://github.com/${repository.owner}/${repository.name}.git`;
   const runtime = input.runtime ?? new DenoReplayRuntime(input.trustedPath);
   const runGit: PreserverGitRunV1 = async (cwd, args, credentials) => {
     let result;
@@ -1492,7 +1525,7 @@ export function createLegacyBaseRefreshLossProver(
     // 2. Exactly one self-scope record for this task; absence is not a loss
     //    case and is never inferred from an error.
     const matches = snapshot.work.filter((work) =>
-      isSelfRepository(work.repository) && work.id === taskId
+      sameRepository(work.repository, repository) && work.id === taskId
     );
     if (matches.length === 0) return portOk(null);
     if (matches.length !== 1) {
@@ -1629,6 +1662,7 @@ export function createLegacyBaseRefreshLossProver(
     const proved = await legacyLossAbsenceProof({
       runGit,
       gate: input.gate,
+      installationId: repository.installationId,
       remoteUrl,
       branch,
       base,

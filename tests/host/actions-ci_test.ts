@@ -17,6 +17,7 @@
 import assert from "node:assert/strict";
 
 import { RollingStartBudget } from "../../src/budget/mod.ts";
+import type { GitSha } from "../../src/contracts/brands.ts";
 import { portError, portOk } from "../../src/contracts/ports.ts";
 import type {
   GitHubCooldownGateV1,
@@ -51,7 +52,16 @@ import {
 import { createTargetConfigV1 } from "../../src/host/targets.ts";
 import { runRepairEntrypoint } from "../../src/main.ts";
 import { FakeClock, FakeModel, MemoryState } from "../repair/helpers.ts";
-import { SHA1, SHA2, SHA3, T0, workRecord } from "../state/helpers.ts";
+import {
+  gitRun,
+  makeRemoteCtx,
+  SHA1,
+  SHA2,
+  SHA3,
+  T0,
+  testGitEnv,
+  workRecord,
+} from "../state/helpers.ts";
 
 const SELF_REPO = {
   owner: "ubiquity",
@@ -993,6 +1003,7 @@ Deno.test(
     const line = targetsDiagnosticV1({
       addressed: result.addressed,
       skipped: result.skipped,
+      failed: result.failed,
     });
     assert.equal(Object.hasOwn(line, "status"), false);
     assert.deepEqual(line, {
@@ -1000,6 +1011,7 @@ Deno.test(
       kind: "sentinel_targets_diagnostic",
       addressed: ["ubiquity/sentinel", `ubiquity/${FOREIGN_REPO}`],
       skipped: [],
+      failed: [],
     });
   },
 );
@@ -1137,6 +1149,175 @@ Deno.test(
         manifest.tasks[task].includes("SENTINEL_APP_INSTALLATION_ID"),
         `${task} may read the App installation scope`,
       );
+    }
+  },
+);
+
+Deno.test(
+  "actions host: a target whose own preparation fails is recorded and never reported as addressed",
+  async () => {
+    const rig = makeTargetHostRig(["sentinel", FOREIGN_REPO]);
+    const prepared: string[] = [];
+    const addressed: string[][] = [];
+    const result = await runActionsTargetCycles(targetCycleInput(rig, {
+      prepareTarget: async (config) => {
+        const slug = `${config.repository.owner}/${config.repository.name}`;
+        prepared.push(slug);
+        // The foreign target's own remote is unreachable for this run: only
+        // THAT target fails, and the self-target must still be repaired.
+        if (slug.endsWith(FOREIGN_REPO)) {
+          throw new Error("target mirror fetch failed");
+        }
+      },
+      runCycle: async (deps, options) => {
+        addressed.push(
+          deps.configs.map((config) =>
+            `${config.repository.owner}/${config.repository.name}`
+          ),
+        );
+        return await runRepairEntrypoint(deps, options);
+      },
+    }));
+
+    assert.deepEqual(prepared, [
+      "ubiquity/sentinel",
+      `ubiquity/${FOREIGN_REPO}`,
+    ]);
+    assert.deepEqual(addressed, [["ubiquity/sentinel"]]);
+    assert.deepEqual(result.addressed, ["ubiquity/sentinel"]);
+    assert.deepEqual(result.skipped, []);
+    assert.deepEqual(result.failed, [
+      `ubiquity/${FOREIGN_REPO}: target mirror fetch failed`,
+    ]);
+    // A failed target is neither addressed nor skipped: the two lists stay
+    // disjoint so the diagnostic can never read as a success claim.
+    for (const entry of result.failed) {
+      assert.equal(result.addressed.some((slug) => entry.startsWith(slug)), false);
+      assert.equal(result.skipped.length, 0);
+    }
+  },
+);
+
+
+Deno.test(
+  "actions host: a foreign target's own mirror resolves its base commit while the sentinel mirror cannot",
+  async () => {
+    // Real offline git: two independent repositories. The sentinel mirror is
+    // seeded from the sentinel checkout only, exactly as the hosted host does,
+    // so it provably cannot resolve a foreign repository's commit; that is the
+    // defect this test pins.
+    const root = await Deno.makeTempDir({ prefix: "sentinel-target-mirror-" });
+    // A private credential-free git home: no user/system config, no hooks and
+    // no credential helper can leak in from this host.
+    const home = `${root}/git-home`;
+    await Deno.mkdir(home, { recursive: true });
+    const env = testGitEnv(home);
+    try {
+      const sentinel = await makeRemoteCtx(`${root}/sentinel`, env);
+      const foreign = await makeRemoteCtx(`${root}/foreign`, env);
+      const commit = async (
+        work: string,
+        file: string,
+        message: string,
+      ): Promise<GitSha> => {
+        await Deno.writeTextFile(`${work}/${file}`, `${message}\n`);
+        assert.ok((await gitRun(work, ["add", "-A"], env)).ok);
+        assert.ok(
+          (await gitRun(work, ["commit", "-q", "-m", message], env)).ok,
+        );
+        const rev = await gitRun(work, ["rev-parse", "HEAD"], env);
+        assert.ok(rev.ok);
+        return rev.stdout.trim() as GitSha;
+      };
+
+      const sentinelBase = await commit(sentinel.work, "a.txt", "sentinel base");
+      assert.ok(
+        (await gitRun(
+          sentinel.work,
+          ["push", "-q", "origin", "HEAD:refs/heads/development"],
+          env,
+        )).ok,
+      );
+      const foreignBase = await commit(foreign.work, "b.txt", "foreign base");
+      assert.ok(
+        (await gitRun(
+          foreign.work,
+          ["push", "-q", "origin", "HEAD:refs/heads/main"],
+          env,
+        )).ok,
+      );
+
+      // The sentinel mirror is seeded from the sentinel checkout. The foreign
+      // commit object is NOT in it, which is exactly why a shared mirror
+      // cannot serve a foreign target.
+      const sentinelMirror = `${root}/mirror-sentinel`;
+      assert.ok(
+        (await gitRun(
+          root,
+          ["clone", "-q", "--no-hardlinks", sentinel.work, sentinelMirror],
+          env,
+        )).ok,
+      );
+      const absent = await gitRun(
+        sentinelMirror,
+        ["cat-file", "-e", `${foreignBase}^{commit}`],
+        env,
+      );
+      assert.equal(absent.ok, false, "the sentinel mirror lacks foreign objects");
+
+      // The foreign target's OWN mirror, seeded from its own remote, resolves
+      // that target's base commit and nothing of sentinel's.
+      const foreignMirror = `${root}/mirror-foreign`;
+      assert.ok(
+        (await gitRun(
+          root,
+          [
+            "clone",
+            "-q",
+            "--no-hardlinks",
+            "--no-checkout",
+            foreign.remoteUrl,
+            foreignMirror,
+          ],
+          env,
+        )).ok,
+      );
+      assert.ok(
+        (await gitRun(
+          foreignMirror,
+          [
+            "fetch",
+            "-q",
+            "--no-tags",
+            foreign.remoteUrl,
+            "+refs/heads/main:refs/remotes/origin/main",
+          ],
+          env,
+        )).ok,
+      );
+      const resolved = await gitRun(
+        foreignMirror,
+        ["rev-parse", "refs/remotes/origin/main"],
+        env,
+      );
+      assert.ok(resolved.ok);
+      assert.equal(resolved.stdout.trim(), foreignBase);
+      const detached = await gitRun(
+        foreignMirror,
+        ["checkout", "-q", "--detach", foreignBase],
+        env,
+      );
+      assert.ok(detached.ok, "the foreign mirror can check out its own base");
+      // Sentinel's object is genuinely absent from the foreign mirror, so the
+      // two mirrors are disjoint and neither can silently serve the other.
+      const sentinelAbsent = await gitRun(
+        foreignMirror,
+        ["cat-file", "-e", `${sentinelBase}^{commit}`],
+        env,
+      );
+      assert.equal(sentinelAbsent.ok, false);
+    } finally {
+      await Deno.remove(root, { recursive: true });
     }
   },
 );
