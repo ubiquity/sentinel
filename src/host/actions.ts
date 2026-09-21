@@ -655,15 +655,23 @@ export async function runActionsRepairHost(): Promise<
     if (mirrorPathFor(config) === sourcePath) return;
     const remoteUrl =
       `https://github.com/${config.repository.owner}/${config.repository.name}.git`;
+    // A foreign target's mirror MUST authenticate with the App token, never the
+    // native Actions token. The native token is scoped to the sentinel
+    // repository, and Git applies an `http.<url>.extraheader` to that url: the
+    // header is then SENT, the server rejects the credential, and Git fails
+    // with "could not read Username" instead of falling back to anonymous
+    // access. That is why a public foreign repository still could not be
+    // cloned or fetched while the same operation succeeds with the App token.
+    const targetInput = { ...hostInput, githubToken: writeToken };
     await prepareSourceRepository(
       mirrorPathFor(config),
-      hostInput,
+      targetInput,
       scratch,
       remoteUrl,
     );
     await refreshDevelopment(
       mirrorPathFor(config),
-      hostInput,
+      targetInput,
       scratch,
       gate,
       config.repository.installationId,
