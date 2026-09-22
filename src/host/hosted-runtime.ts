@@ -58,8 +58,14 @@ export const HOSTED_RUNTIME_WORKFLOW_REF =
   `${HOSTED_SUPERVISOR_REPOSITORY}/${HOSTED_SUPERVISOR_WORKFLOW_PATH}@${HOSTED_SUPERVISOR_REF}`;
 /** Fixed child entrypoint inside the verified runtime checkout. */
 export const HOSTED_RUNTIME_CHILD_ENTRYPOINT = "src/host/actions.ts";
-/** 112 minutes, inside the workflow's 120-minute bound. */
-export const HOSTED_RUNTIME_DEADLINE_MS = 112 * 60 * 1000;
+/**
+ * 50 minutes: the launcher child deadline. The protected repair job is bounded
+ * at 55 minutes and starts before the scoped App installation token is minted,
+ * so this bound covers checkout, setup and preparation plus the child and still
+ * ends inside the token's 60-minute lifetime. The App token is used as minted:
+ * there is no renewal step and no second credential.
+ */
+export const HOSTED_RUNTIME_DEADLINE_MS = 50 * 60 * 1000;
 /** Combined retained child stdout+stderr bound (4 MiB). */
 export const HOSTED_RUNTIME_MAX_OUTPUT_BYTES = 4 * 1024 * 1024;
 

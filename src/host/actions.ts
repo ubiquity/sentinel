@@ -17,6 +17,7 @@ import { parseRepairStateSnapshotV1 } from "../contracts/state-snapshots.ts";
 import { RollingStartBudget } from "../budget/mod.ts";
 import { HostedRepairCooldownGate } from "./hosted-cooldown.ts";
 import {
+  HOSTED_RUNTIME_DEADLINE_MS,
   parseHostedEnvironment,
   readHostedIdentityEnv,
   readHostedRuntimeExecution,
@@ -53,8 +54,17 @@ const REMOTE_URL = "https://github.com/ubiquity/sentinel.git";
 /** Public UOS gateway used by hosted Codex app-server sessions. */
 export const ACTIONS_UOS_BASE_URL = "https://ai.ubq.fi/v1";
 
-// Leave the workflow's final ten minutes for bounded drain and runner exit.
-const RUN_DEADLINE_MS = 110 * 60 * 1000;
+/**
+ * Leave the launcher bound's final five minutes for bounded drain and runner
+ * exit.
+ *
+ * The launcher terminates this child at `HOSTED_RUNTIME_DEADLINE_MS`, so the
+ * child's own budget has to end first: the loop's fit guard then refuses work
+ * that cannot finish, and every started session still settles before the
+ * launcher's signal lands. A kill during a model session would leave a durable
+ * implementation intent that the next run parks for manual disposition.
+ */
+export const RUN_DEADLINE_MS = HOSTED_RUNTIME_DEADLINE_MS - 5 * 60 * 1000;
 const STEP_LIMIT = 64;
 const ACTIONS_LOGIN = "github-actions[bot]";
 const STATIC_ENV = "hosted repair host requires its configured credentials";

@@ -31,6 +31,7 @@ import {
   createReleaseStateStore,
   createRepairStateStore,
 } from "../../src/state/mod.ts";
+import type { ReleaseGitStateStore } from "../../src/state/mod.ts";
 import {
   applyHostedClosures,
   applyHostedRetirements,
@@ -63,6 +64,8 @@ import {
   SHA1,
   T0,
 } from "../state/helpers.ts";
+import { persistHostedReceipt } from "./hosted-receipt-fixture.ts";
+import type { HostedReceiptClockV1 } from "./hosted-receipt-fixture.ts";
 
 const HEAD = "ae6ff044280a04803958fcd1f6f9304bb894249e" as GitSha;
 const BASE = "f1b5a86b80ca4759ab37307484b223907bd1b1d6" as GitSha;
@@ -461,11 +464,34 @@ function healthyProof(
   };
 }
 
+/**
+ * Mutable monotonic clock for the shared legal-lifecycle receipt fixture. The
+ * fixture advances it between supervisor steps so every persisted transition
+ * carries an ordered instant.
+ */
+class ReceiptClock implements HostedReceiptClockV1 {
+  constructor(private t: number) {}
+  now(): number {
+    return this.t;
+  }
+  advance(ms: number): void {
+    this.t += ms;
+  }
+}
+
 async function makeRig(
   prefix: string,
   options: {
     repair?: RepairStateSnapshotV1;
     release?: ReleaseStateSnapshotV1;
+    /**
+     * Legal release-state seeding hook. When present the caller advances the
+     * REAL release store itself (the shared lifecycle fixture drives the
+     * actual supervisor core), because a hand-written snapshot is only
+     * accepted when every phase change is a legal transition of the state
+     * already persisted in the store.
+     */
+    seedRelease?: (release: ReleaseGitStateStore) => Promise<void>;
     pull?: HostedAutonomyPullV1 | null;
     baseTip?: string | null;
     checkGreen?: boolean;
@@ -498,14 +524,22 @@ async function makeRig(
       `repair fixture seed failed: ${JSON.stringify(repairSeed)}`,
     );
   }
-  const releaseSeed = await release.writeRelease(
-    options.release ?? releaseSnapshot(),
-    null,
-  );
-  if (!releaseSeed.ok || releaseSeed.value.status !== "applied") {
-    throw new Error(
-      `release fixture seed failed: ${JSON.stringify(releaseSeed)}`,
+  if (options.seedRelease === undefined) {
+    const releaseSeed = await release.writeRelease(
+      options.release ?? releaseSnapshot(),
+      null,
     );
+    if (!releaseSeed.ok || releaseSeed.value.status !== "applied") {
+      throw new Error(
+        `release fixture seed failed: ${JSON.stringify(releaseSeed)}`,
+      );
+    }
+  } else {
+    await options.seedRelease(release);
+    const seeded = await release.readRelease();
+    if (!seeded.ok || seeded.value.status !== "found") {
+      throw new Error(`release fixture seed failed: ${JSON.stringify(seeded)}`);
+    }
   }
   const rig: RigV1 = {
     tmp,
@@ -1144,6 +1178,45 @@ Deno.test(
 );
 
 Deno.test(
+  "hosted autonomy: an already retired record is never planned again",
+  () => {
+    // A first pass retires the closed-unmerged zombie through the production
+    // apply function; the resulting snapshot is exactly what the next pass
+    // reads back from state.
+    const parked = applyHostedRetirements(
+      repairSnapshot(
+        [zombieRecord({ intent: zombieIntent() })],
+        [authorizingReceipt()],
+        [],
+        zombieCharges(),
+      ),
+      SHA1,
+      [{ id: ZOMBIE, issueNumber: 61 }],
+      T0 + 5000,
+    );
+    assert.equal(parked.work[0].blocker?.message, HOSTED_AUTONOMY_RETIRED);
+    // The exact marker is terminal even though the closed issue and the
+    // closed-unmerged pull are both still observed.
+    assert.deepEqual(
+      planHostedRetirements(parked, selfClosed(61), new Set([ZOMBIE])),
+      [],
+    );
+    // The skip is exact-marker only: a record parked on another blocker still
+    // goes through the same intent/ownership guards and is retired.
+    const other = repairSnapshot(
+      [blockedZombie()],
+      [authorizingReceipt()],
+      [],
+      zombieCharges(),
+    );
+    assert.deepEqual(
+      planHostedRetirements(other, selfClosed(61), new Set([ZOMBIE])),
+      [{ id: ZOMBIE, issueNumber: 61, repository: SELF_REPO }],
+    );
+  },
+);
+
+Deno.test(
   "hosted autonomy: an unsettled implementation intent is never retired",
   () => {
     // The companion baseline: the same closed-unmerged record with a SETTLED
@@ -1573,6 +1646,107 @@ Deno.test(
     assert.equal(record.nextStep, "blocked");
     assert.equal(record.blocker?.message, HOSTED_AUTONOMY_RETIRED);
     assert.equal(record.intent, null);
+    await Deno.remove(rig.tmp, { recursive: true });
+  },
+);
+
+Deno.test(
+  "hosted autonomy: a repeated pass never re-retires a record and still closes eligible work",
+  async () => {
+    // The delivered sibling: its exact reviewed head already carries an
+    // accepted hosted release, so it is closure-eligible on every pass.
+    const request = await buildHostedReleaseRequest(
+      SELF_REPO,
+      MERGE,
+      HEAD,
+      BASE,
+      51,
+      authorizingReceipt(),
+      T0 + 2000,
+    );
+    if (request === null) throw new Error("fixture request invalid");
+    const { rig, github } = await makeRig("autonomy-retire-repeat", {
+      repair: repairSnapshot(
+        [blockedZombie(), deliveryRecord()],
+        [authorizingReceipt()],
+        [request],
+        zombieCharges(),
+      ),
+      // The delivered sibling's exact reviewed head carries an ACCEPTED
+      // release. That phase can never be hand-written into a fresh store: the
+      // store accepts only legal transitions of the state it has already
+      // persisted, so the shared lifecycle fixture drives the ACTUAL supervisor
+      // core to persist the exact request through requested -> promoting ->
+      // verifying -> accepted.
+      seedRelease: async (release) => {
+        const accepted = await persistHostedReceipt({
+          release,
+          clock: new ReceiptClock(T0),
+          request,
+          priorRevision: BASE,
+          phase: "accepted",
+        });
+        assert.equal(accepted.phase, "accepted");
+        assert.equal(accepted.id, request.id);
+        assert.ok(accepted.candidateProof !== null);
+      },
+      pull: pullFacts({
+        number: 63,
+        state: "closed",
+        merged: false,
+        mergeCommitSha: null,
+      }),
+    });
+    github.readIssueOpen = (number: number) => Promise.resolve(number !== 61);
+
+    // Pass 1: the zombie is retired, and that retirement takes the pass's one
+    // write, so the eligible closure is deferred to the next pass.
+    const first = await run(rig, github);
+    assert.equal(first.status, "applied");
+    assert.equal(first.reason, "retired_records");
+    assert.equal(rig.writes, 1);
+    assert.deepEqual(rig.closed, []);
+    assert.ok(first.actions.includes(`retire:${ZOMBIE}:issue=61`));
+    const afterFirst = await rig.state.readRepair();
+    if (!afterFirst.ok || afterFirst.value.status !== "found") {
+      throw new Error("unreadable");
+    }
+    const retired = afterFirst.value.snapshot.work.find((item) =>
+      item.id === ZOMBIE
+    );
+    assert.equal(retired?.nextStep, "blocked");
+    assert.equal(retired?.blocker?.message, HOSTED_AUTONOMY_RETIRED);
+
+    // Pass 2: the retired record is skipped instead of being retired again, so
+    // the pass reaches the closure of the delivered record.
+    const second = await run(rig, github);
+    assert.equal(second.status, "applied");
+    assert.equal(second.reason, "closed_issues");
+    assert.equal(rig.writes, 2);
+    assert.deepEqual(rig.closed, [48]);
+    assert.ok(!second.actions.some((action) => action.startsWith("retire:")));
+    assert.ok(second.actions.includes(`close:${TARGET}:issue=48`));
+    const afterSecond = await rig.state.readRepair();
+    if (!afterSecond.ok || afterSecond.value.status !== "found") {
+      throw new Error("unreadable");
+    }
+    const stillRetired = afterSecond.value.snapshot.work.find((item) =>
+      item.id === ZOMBIE
+    );
+    // The terminal retirement is byte-for-byte unchanged: no sequence churn
+    // beyond the closure write and no re-stamped blocker instant.
+    assert.equal(stillRetired?.nextStep, "blocked");
+    assert.equal(stillRetired?.blocker?.message, HOSTED_AUTONOMY_RETIRED);
+    assert.equal(stillRetired?.blocker?.since, retired?.blocker?.since);
+    assert.equal(stillRetired?.updatedAt, retired?.updatedAt);
+    assert.equal(
+      afterSecond.value.snapshot.sequence,
+      afterFirst.value.snapshot.sequence + 1,
+    );
+    const closed = afterSecond.value.snapshot.work.find((item) =>
+      item.id === TARGET
+    );
+    assert.equal(closed?.nextStep, "done");
     await Deno.remove(rig.tmp, { recursive: true });
   },
 );

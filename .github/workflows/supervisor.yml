@@ -174,7 +174,11 @@ jobs:
     needs: prepare
     if: ${{ !cancelled() && needs.prepare.result == 'success' && github.ref == 'refs/heads/sentinel-supervisor' && needs.prepare.outputs.run == 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    # 55 minutes. The job starts before the scoped App installation token is
+    # minted below, so this bound covers checkout, setup and preparation plus
+    # the launcher child (50-minute deadline) and still ends inside the token's
+    # 60-minute lifetime. The token is used exactly as minted: no renewal.
+    timeout-minutes: 55
     environment:
       name: sentinel-supervisor
     permissions:
