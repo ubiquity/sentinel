@@ -2,6 +2,18 @@
 
 Read before changing Sentinel runtime or delivery. These are scoped user exceptions; they do not broadly override higher authority.
 
+## Owner-directed completion authority - 2026-09-22
+
+For the current standalone Sentinel foreign-target completion task only, the owner explicitly directed: "just get the job done however you see fit stop asking me questions and finish" after being asked to publish/install runtime83a7cd8 and verify it. This authorizes the integration owner to finish in-scope publication, guarded installation, necessary hosted verification and bounded intervention without repeated per-attempt questions. It is not a general waiver for future development tasks. Keep local fast module/seam checks as the debugging loop, preserve the existing review/merge/promotion checks, durable120-start rolling-hour admission, charged history, runtime model policy and one production implementation writer. Do not fabricate receipts, reset budgets, weaken gates, or broaden credentials. Existing source and runtime ownership remain protected; report genuine external blockers without claiming delivery.
+
+The owner subsequently explicitly authorized concurrent independent GitHub Actions validations and GPT plus DeepSeek workers; preserve one production implementation writer. On 2026-09-22 the owner ordered immediate VPS continuation in `/home/codex/repos/ubiquity/sentinel/.codex-worktrees/multi-target-repair` on `codex/multi-target-repair`, confirmed the Mac turn and descendants settled, and prohibited restarting Mac work or a standalone Codex process/shared service. Preserve Astra/ultra for this session and unrelated VPS root/historical lanes. This is the active task lane, not a replacement for the historical master-plan identity.
+
+## Local development feedback and hosted approval - 2026-09-21
+
+The owner requires coding agents to develop and debug through fast local module checks, then directly affected integration checks, before one final local end-to-end run. Hosted CI and live Sentinel operation must never serve as the edit/test loop. The detailed policy is `AGENTS.md`, sections "Fast local development" and "Hosted end-to-end approval boundary": each development-triggered hosted end-to-end/runtime dispatch or rerun needs explicit user approval for that attempt after local preparation. Prior activation, queue and broad delivery instructions do not grant that approval. Preserve autonomous production target PR CI/review/merge gates and scheduled operation; do not weaken them or claim local evidence proves live delivery.
+
+Correction, 2026-09-22 UTC: the earlier instruction to use `test:local` for final acceptance recreated the waiting problem locally, with one full sweep exceeding an hour. "Final local end-to-end" means one named scenario for the changed target lifecycle, reusing current evidence when it already covers that path; it does not authorize the entire repository harness. Every local validation command gets an enforced 300-second deadline and bounded teardown, observation intervals stay at most 30 seconds, and a minute without concrete test output requires diagnosis. Whole-repository sweeps are separate work requiring the user's explicit request. This changes development validation scope, not production safeguards or runtime release gates.
+
 ## Runtime and self-repair - 2026-09-14
 
 Keep Sentinel a cron-triggered GitHub Actions job using the existing hosted supervisor, runtime model admission, and protected authority boundaries. The immediate repair target is ubiquity/sentinel, not ai.ubq.fi; gateway release choices do not block self-repair. Keep gateway acceptance separate from hosted self-repair claims. Preserve runtime receipts, admission contracts, and the historical max-reasoning requirement.
