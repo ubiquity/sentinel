@@ -117,28 +117,98 @@ export interface ReviewResultV1 {
   findings: ReviewFindingV1[];
 }
 
+/**
+ * Fixed single-field patterns bound to the strict parsers below.
+ *
+ * `pattern` is the only supported keyword for the single-field text rules the
+ * parser enforces (control characters and relative-path syntax); the
+ * cross-field rules have no supported keyword and are pinned by the schema
+ * descriptions and the reviewer's submitted instructions instead. Only
+ * ordinary regular-expression constructs are used (anchors, classes, groups,
+ * alternation and `*`): the official structured-output subset rejects
+ * lookaround, and the parser rules need none.
+ */
+const MULTILINE_TEXT_PATTERN = "^[^\\x00-\\x08\\x0B-\\x1F\\x7F]*$";
+const SINGLE_LINE_TEXT_PATTERN = "^[^\\x00-\\x1F\\x7F]*$";
+/** One allowed path character: no control character, DEL, backslash or slash. */
+const PATH_CHAR = "[^\\x00-\\x1F\\x7F\\\\/]";
+/** One allowed path character that is not a dot. */
+const PATH_NON_DOT_CHAR = "[^.\\x00-\\x1F\\x7F\\\\/]";
+/** One nonempty path segment that is neither `.` nor `..`. */
+const PATH_SEGMENT =
+  `(?:${PATH_CHAR}*${PATH_NON_DOT_CHAR}${PATH_CHAR}*|\\.\\.\\.${PATH_CHAR}*)`;
+/**
+ * First path segment when at least one `/` follows: any segment except the
+ * `[A-Za-z]:` drive form `parseReviewPath` refuses.
+ */
+const PATH_FIRST_SEGMENT_NON_DRIVE =
+  `(?:${PATH_NON_DOT_CHAR}|[A-Za-z][^:\\x00-\\x1F\\x7F\\\\/]|[^A-Za-z.\\x00-\\x1F\\x7F\\\\/]${PATH_CHAR}|\\.${PATH_NON_DOT_CHAR}|${PATH_CHAR}${PATH_CHAR}${PATH_CHAR}${PATH_CHAR}*)`;
+/**
+ * Producer-side `pattern` for the relative-path language `parseReviewPath`
+ * accepts. The schema narrows what a conforming producer emits; it is not a
+ * second authority on the parser contract. Provider regex semantics may differ
+ * from the declared ECMAScript pattern language around anchors (a trailing LF
+ * is one known divergence: an engine can let `$` match before a final LF even
+ * though `PATH_CHAR` excludes LF), and provider support for this pattern
+ * (including a DeepSeek-direct route) remains unverified. The strict parser
+ * stays authoritative: it still rejects a title or path ending in LF and
+ * enforces the cross-field bounds this pattern cannot express.
+ */
+const RELATIVE_PATH_PATTERN =
+  `^(?:${PATH_SEGMENT}|${PATH_FIRST_SEGMENT_NON_DRIVE}(?:/${PATH_SEGMENT})*)$`;
+
 /** The exact output schema bound to the structured result parsers. */
 export const REVIEW_RESULT_OUTPUT_SCHEMA = {
   type: "object",
   additionalProperties: false,
   required: ["verdict", "summary", "findings"],
   properties: {
-    verdict: { type: "string", enum: ["clean", "findings", "unavailable"] },
-    summary: { type: "string", minLength: 1, maxLength: MAX_RESULT_SUMMARY },
+    verdict: {
+      type: "string",
+      enum: ["clean", "findings", "unavailable"],
+      description:
+        "clean and unavailable require an empty findings array; findings requires at least one finding.",
+    },
+    summary: {
+      type: "string",
+      minLength: 1,
+      maxLength: MAX_RESULT_SUMMARY,
+      pattern: MULTILINE_TEXT_PATTERN,
+    },
     findings: {
       type: "array",
       maxItems: MAX_FINDINGS,
+      description:
+        "Every finding must be distinct, lineStart must be at most lineEnd, and lineEnd must be at most the candidate file line count.",
       items: {
         type: "object",
         additionalProperties: false,
         required: ["priority", "title", "body", "path", "lineStart", "lineEnd"],
         properties: {
           priority: { type: "integer", enum: [0, 1, 2, 3] },
-          title: { type: "string", minLength: 1, maxLength: MAX_FINDING_TITLE },
-          body: { type: "string", maxLength: MAX_FINDING_BODY },
-          path: { type: "string", minLength: 1, maxLength: MAX_FINDING_PATH },
+          title: {
+            type: "string",
+            minLength: 1,
+            maxLength: MAX_FINDING_TITLE,
+            pattern: SINGLE_LINE_TEXT_PATTERN,
+          },
+          body: {
+            type: "string",
+            maxLength: MAX_FINDING_BODY,
+            pattern: MULTILINE_TEXT_PATTERN,
+          },
+          path: {
+            type: "string",
+            minLength: 1,
+            maxLength: MAX_FINDING_PATH,
+            pattern: RELATIVE_PATH_PATTERN,
+          },
           lineStart: { type: "integer", minimum: 1 },
-          lineEnd: { type: "integer", minimum: 1 },
+          lineEnd: {
+            type: "integer",
+            minimum: 1,
+            description: "Must be at least lineStart.",
+          },
         },
       },
     },
@@ -154,6 +224,19 @@ const FINDING_KEYS = [
   "lineStart",
   "lineEnd",
 ] as const;
+
+/**
+ * Exact static parser messages the rejection classifier distinguishes below.
+ * The fail sites use these same constants, so the taxonomy cannot drift from
+ * the messages actually thrown.
+ */
+const STRICT_JSON_ISSUE_MESSAGE = "expected complete strict JSON";
+const FINDING_RANGE_ISSUE_MESSAGE = "line end precedes line start";
+const FINDINGS_DUPLICATE_ISSUE_MESSAGE = "duplicate findings are rejected";
+const CLEAN_FINDINGS_ISSUE_MESSAGE = "clean verdict carries findings";
+const FINDINGS_EMPTY_ISSUE_MESSAGE = "findings verdict carries no findings";
+const UNAVAILABLE_FINDINGS_ISSUE_MESSAGE =
+  "unavailable verdict carries findings";
 
 /**
  * Narrow exact-key guard used at every journal/result boundary. The global
@@ -211,19 +294,19 @@ export function parseReviewResultV1(input: unknown): ReviewResultV1 {
     parseFinding,
   );
   if (verdict === "clean" && findings.length !== 0) {
-    fail("$", "invalid_value", "clean verdict carries findings");
+    fail("$", "invalid_value", CLEAN_FINDINGS_ISSUE_MESSAGE);
   }
   if (verdict === "findings" && findings.length === 0) {
-    fail("$", "invalid_value", "findings verdict carries no findings");
+    fail("$", "invalid_value", FINDINGS_EMPTY_ISSUE_MESSAGE);
   }
   if (verdict === "unavailable" && findings.length !== 0) {
-    fail("$", "invalid_value", "unavailable verdict carries findings");
+    fail("$", "invalid_value", UNAVAILABLE_FINDINGS_ISSUE_MESSAGE);
   }
   const seen = new Set<string>();
   for (const finding of findings) {
     const key = findingKey(finding);
     if (seen.has(key)) {
-      fail("$.findings", "invalid_array", "duplicate findings are rejected");
+      fail("$.findings", "invalid_array", FINDINGS_DUPLICATE_ISSUE_MESSAGE);
     }
     seen.add(key);
   }
@@ -247,7 +330,11 @@ function parseFinding(input: unknown, path: string): ReviewFindingV1 {
   const lineStart = expectPositiveInt(obj.lineStart, `${path}.lineStart`);
   const lineEnd = expectPositiveInt(obj.lineEnd, `${path}.lineEnd`);
   if (lineEnd < lineStart) {
-    fail(`${path}.lineEnd`, "invalid_value", "line end precedes line start");
+    fail(
+      `${path}.lineEnd`,
+      "invalid_value",
+      FINDING_RANGE_ISSUE_MESSAGE,
+    );
   }
   const finding: ReviewFindingV1 = {
     priority,
@@ -308,6 +395,113 @@ export function parseReviewResultJson(text: string): ReviewResultV1 {
 /** Canonical SHA-256 digest over the structured result. */
 export function reviewResultDigest(result: ReviewResultV1): Promise<string> {
   return canonicalStringifySha256(result);
+}
+
+/**
+ * Fixed sanitized rejection categories for a structured result the strict
+ * parser refused. A category is derived ONLY from the first existing
+ * `RecordParseError` issue: its existing `ParseIssueCode`, its fixed parser
+ * path and its existing static message are matched against closed literals.
+ * A fixed path pattern may recognize a numeric finding index internally, but
+ * only the constant category literal leaves this function. No parser message,
+ * path, index, model text or stack is ever surfaced, and an unrecognized
+ * failure stays the generic `unknown` category.
+ */
+export type ReviewResultRejectionCategoryV1 =
+  | "bound_exceeded"
+  | "json_syntax"
+  | "result_keys"
+  | "root_shape"
+  | "summary"
+  | "verdict"
+  | "findings_shape"
+  | "findings_cardinality"
+  | "findings_duplicate"
+  | "finding_priority"
+  | "finding_title"
+  | "finding_body"
+  | "finding_path"
+  | "finding_range"
+  | "unknown";
+
+/** Fixed parser paths of one finding field; the index is never returned. */
+const FINDING_FIELD_ISSUE_PATH =
+  /^\$\.findings\[\d+\]\.(priority|title|body|path|lineStart|lineEnd)$/;
+/** Fixed parser path of one finding record; the index is never returned. */
+const FINDING_RECORD_ISSUE_PATH = /^\$\.findings\[\d+\]$/;
+/** Fixed parser path of the top-level findings array. */
+const FINDINGS_ISSUE_PATH = "$.findings";
+/** Fixed top-level result field paths and their constant categories. */
+const RESULT_FIELD_CATEGORIES = new Map<
+  string,
+  ReviewResultRejectionCategoryV1
+>(
+  [
+    ["$.summary", "summary"],
+    ["$.verdict", "verdict"],
+  ],
+);
+/** Exact verdict/findings cardinality messages the parser throws. */
+const CARDINALITY_ISSUE_MESSAGES: readonly string[] = [
+  CLEAN_FINDINGS_ISSUE_MESSAGE,
+  FINDINGS_EMPTY_ISSUE_MESSAGE,
+  UNAVAILABLE_FINDINGS_ISSUE_MESSAGE,
+];
+
+/**
+ * Classify one rejected structured result. `bound_exceeded` keeps its own
+ * category so the producer retains its existing bound disposition, and
+ * `json_syntax` separates a strict-JSON failure from a field-shape failure.
+ * The remaining categories name the first rejected location: the result key
+ * set or root shape, the summary or verdict field, the findings array shape,
+ * cardinality or duplicates, or one finding field (priority, title, body,
+ * path or line range). An unrecognized issue stays `unknown`.
+ */
+export function classifyReviewResultRejection(
+  error: unknown,
+): ReviewResultRejectionCategoryV1 {
+  if (!(error instanceof RecordParseError)) return "unknown";
+  const issue = error.issues[0];
+  if (issue === undefined) return "unknown";
+  if (issue.code === "bound_exceeded") return "bound_exceeded";
+  if (issue.path === "$") {
+    if (issue.code === "invalid_value") {
+      if (issue.message === STRICT_JSON_ISSUE_MESSAGE) return "json_syntax";
+      if (CARDINALITY_ISSUE_MESSAGES.includes(issue.message)) {
+        return "findings_cardinality";
+      }
+      return "unknown";
+    }
+    if (issue.code === "unknown_key") return "result_keys";
+    if (issue.code === "wrong_type") return "root_shape";
+    return "unknown";
+  }
+  const resultField = RESULT_FIELD_CATEGORIES.get(issue.path);
+  if (resultField !== undefined) return resultField;
+  if (issue.path === FINDINGS_ISSUE_PATH) {
+    return issue.code === "invalid_array" &&
+        issue.message === FINDINGS_DUPLICATE_ISSUE_MESSAGE
+      ? "findings_duplicate"
+      : "findings_shape";
+  }
+  const findingField = FINDING_FIELD_ISSUE_PATH.exec(issue.path);
+  if (findingField !== null) {
+    switch (findingField[1]) {
+      case "priority":
+        return "finding_priority";
+      case "title":
+        return "finding_title";
+      case "body":
+        return "finding_body";
+      case "path":
+        return "finding_path";
+      case "lineStart":
+      case "lineEnd":
+        return "finding_range";
+    }
+  }
+  if (FINDING_RECORD_ISSUE_PATH.test(issue.path)) return "findings_shape";
+  return "unknown";
 }
 
 // ---------------------------------------------------------------------------
@@ -1022,7 +1216,7 @@ function expectStrictJson(text: string, path: string): unknown {
     return parseJsonStrict(text);
   } catch {
     // Static sanitized failure; the input is never echoed.
-    fail(path, "invalid_value", "expected complete strict JSON");
+    fail(path, "invalid_value", STRICT_JSON_ISSUE_MESSAGE);
   }
 }
 

@@ -7,14 +7,19 @@ import { RecordParseError, tryParse } from "../../src/contracts/validation.ts";
 import {
   findingMessage,
   isJournalBoundExceeded,
+  MAX_FINDING_BODY,
   MAX_FINDING_MESSAGE,
+  MAX_FINDING_PATH,
+  MAX_FINDING_TITLE,
   MAX_FINDINGS,
   MAX_JOURNAL_BYTES,
+  MAX_RESULT_SUMMARY,
   parseReviewJournalBody,
   parseReviewJournalMetadata,
   parseReviewResultJson,
   parseReviewResultV1,
   renderReviewJournalBody,
+  REVIEW_RESULT_OUTPUT_SCHEMA,
   reviewResultDigest,
 } from "../../src/github/review-journal.ts";
 import type {
@@ -363,8 +368,12 @@ Deno.test("strict result: unknown priority, invalid lines and bad paths are reje
     "path backslash": { path: "src\\x.ts" },
     "path drive": { path: "C:/src/x.ts" },
     "path newline": { path: "src\nx.ts" },
+    // Trailing-line endings are parser-authoritative: the schema pattern is
+    // only a producer-side narrowing and anchor semantics may differ.
+    "path trailing newline": { path: "src/x.ts\n" },
     "title empty": { title: "" },
     "title newline": { title: "a\nb" },
+    "title trailing newline": { title: "a\n" },
     "body return": { body: "a\r\nb" },
     "body control": { body: "a\u0000b" },
   };
@@ -913,3 +922,201 @@ function countOccurrences(text: string, needle: string): number {
     at = found + needle.length;
   }
 }
+
+// ---------------------------------------------------------------------------
+// Structured review contract: the producer output schema must bind the
+// single-field text rules the strict parser enforces (control characters and
+// relative-path syntax) through the supported `pattern` keyword. Cross-field
+// constraints (verdict/findings cardinality, line ordering, duplicate
+// findings) have no supported keyword and are pinned by the reviewer's
+// submitted instructions instead.
+// ---------------------------------------------------------------------------
+
+function schemaNode(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function requiredSchemaNode(
+  value: unknown,
+  label: string,
+): Record<string, unknown> {
+  const node = schemaNode(value);
+  if (node === null) assert.fail(`${label} must be an object`);
+  return node;
+}
+
+Deno.test(
+  "structured review contract: producer schema binds every single-field parser bound and pattern with supported keywords",
+  () => {
+    const root = requiredSchemaNode(REVIEW_RESULT_OUTPUT_SCHEMA, "schema root");
+    const props = requiredSchemaNode(root.properties, "schema properties");
+    const verdict = requiredSchemaNode(props.verdict, "verdict schema");
+    const summary = requiredSchemaNode(props.summary, "summary schema");
+    const findings = requiredSchemaNode(props.findings, "findings schema");
+    const items = requiredSchemaNode(findings.items, "findings items schema");
+    const itemProps = requiredSchemaNode(
+      items.properties,
+      "finding properties",
+    );
+    const priority = requiredSchemaNode(itemProps.priority, "priority schema");
+    const title = requiredSchemaNode(itemProps.title, "title schema");
+    const body = requiredSchemaNode(itemProps.body, "body schema");
+    const path = requiredSchemaNode(itemProps.path, "path schema");
+    const lineStart = requiredSchemaNode(
+      itemProps.lineStart,
+      "lineStart schema",
+    );
+    const lineEnd = requiredSchemaNode(itemProps.lineEnd, "lineEnd schema");
+
+    /** The actual schema pattern, compiled exactly as a validator would. */
+    const patternOf = (
+      label: string,
+      schema: Record<string, unknown>,
+    ): RegExp => {
+      const pattern = schema.pattern;
+      assert.equal(typeof pattern, "string", `${label} must carry a pattern`);
+      assert.notEqual(pattern, "", `${label} pattern must not be empty`);
+      return new RegExp(pattern as string);
+    };
+    const summaryPattern = patternOf("summary", summary);
+    const titlePattern = patternOf("title", title);
+    const bodyPattern = patternOf("body", body);
+    const pathPattern = patternOf("path", path);
+
+    // A strict-valid result must still be accepted by the parser.
+    for (const valid of [cleanResult(), findingsResult()]) {
+      assert.doesNotThrow(() => parseReviewResultV1(valid));
+    }
+
+    const baseFinding = {
+      priority: 1,
+      title: "plain title",
+      body: "plain body",
+      path: "src/github/client.ts",
+      lineStart: 1,
+      lineEnd: 1,
+    };
+    const summaryResult = (value: string): unknown => ({
+      verdict: "clean",
+      summary: value,
+      findings: [],
+    });
+    const findingResult = (
+      field: "title" | "body" | "path",
+      value: string,
+    ): unknown => ({
+      verdict: "findings",
+      summary: "ok",
+      findings: [{ ...baseFinding, [field]: value }],
+    });
+
+    // Representative control-character and path-syntax values: for these
+    // listed cases the producer schema pattern and the strict parser agree.
+    // The schema only narrows producer output; the strict parser remains
+    // authoritative, including for trailing-line endings and cross-field
+    // bounds the pattern cannot express.
+    type FieldCase = {
+      field: "summary" | "title" | "body" | "path";
+      value: string;
+      accepted: boolean;
+    };
+    const patterns: Record<FieldCase["field"], RegExp> = {
+      summary: summaryPattern,
+      title: titlePattern,
+      body: bodyPattern,
+      path: pathPattern,
+    };
+    const cases: FieldCase[] = [
+      { field: "summary", value: "plain summary", accepted: true },
+      {
+        field: "summary",
+        value: "line one\nline two\twith tab",
+        accepted: true,
+      },
+      { field: "summary", value: "a\u0001b", accepted: false },
+      { field: "summary", value: "a\rb", accepted: false },
+      { field: "body", value: "", accepted: true },
+      { field: "body", value: "body\nline\twith tab", accepted: true },
+      { field: "body", value: "a\u0000b", accepted: false },
+      { field: "body", value: "a\rb", accepted: false },
+      { field: "title", value: "plain title", accepted: true },
+      { field: "title", value: "a\nb", accepted: false },
+      { field: "title", value: "a\tb", accepted: false },
+      { field: "title", value: "a\u0001b", accepted: false },
+      { field: "path", value: "src/github/review-journal.ts", accepted: true },
+      { field: "path", value: ".hidden/x.ts", accepted: true },
+      { field: "path", value: "C:", accepted: true },
+      { field: "path", value: "/etc/passwd", accepted: false },
+      { field: "path", value: "C:/src/x.ts", accepted: false },
+      { field: "path", value: "src\\x.ts", accepted: false },
+      { field: "path", value: "src/../x.ts", accepted: false },
+      { field: "path", value: "./x.ts", accepted: false },
+      { field: "path", value: "src//x.ts", accepted: false },
+      { field: "path", value: "src/", accepted: false },
+      { field: "path", value: "src\nx.ts", accepted: false },
+    ];
+    for (const item of cases) {
+      const label = `${item.field} ${JSON.stringify(item.value)}`;
+      assert.equal(
+        patterns[item.field].test(item.value),
+        item.accepted,
+        `${label}: the producer schema pattern must decide it`,
+      );
+      const result = item.field === "summary"
+        ? summaryResult(item.value)
+        : findingResult(item.field, item.value);
+      assert.equal(
+        tryParse(parseReviewResultV1, result).ok,
+        item.accepted,
+        `${label}: the strict parser must decide it identically`,
+      );
+    }
+
+    assert.equal(root.type, "object");
+    assert.equal(root.additionalProperties, false);
+    assert.deepEqual(root.required, ["verdict", "summary", "findings"]);
+    assert.deepEqual(verdict.enum, ["clean", "findings", "unavailable"]);
+    assert.equal(summary.minLength, 1);
+    assert.equal(summary.maxLength, MAX_RESULT_SUMMARY);
+    assert.equal(findings.maxItems, MAX_FINDINGS);
+    assert.equal(items.additionalProperties, false);
+    assert.deepEqual(items.required, [
+      "priority",
+      "title",
+      "body",
+      "path",
+      "lineStart",
+      "lineEnd",
+    ]);
+    assert.equal(title.minLength, 1);
+    assert.equal(title.maxLength, MAX_FINDING_TITLE);
+    assert.equal(body.maxLength, MAX_FINDING_BODY);
+    assert.equal(path.minLength, 1);
+    assert.equal(path.maxLength, MAX_FINDING_PATH);
+    assert.deepEqual(priority.enum, [0, 1, 2, 3]);
+    assert.equal(lineStart.minimum, 1);
+    assert.equal(lineEnd.minimum, 1);
+
+    // Only ordinary supported keywords may appear at the root, and the
+    // unsupported keywords are never used anywhere in the schema.
+    for (
+      const keyword of ["allOf", "if", "then", "else", "anyOf", "oneOf"]
+    ) {
+      assert.equal(
+        keyword in root,
+        false,
+        `root keyword ${keyword} is not allowed`,
+      );
+    }
+    const serialized = JSON.stringify(REVIEW_RESULT_OUTPUT_SCHEMA);
+    for (const keyword of ["uniqueItems", "$data", "$ref"]) {
+      assert.equal(
+        serialized.includes(`"${keyword}"`),
+        false,
+        `unsupported schema keyword ${keyword} is not allowed`,
+      );
+    }
+  },
+);

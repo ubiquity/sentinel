@@ -14,7 +14,12 @@ import {
   type StructuredReviewPrepareV1,
 } from "../../src/github/codex-reviewer.ts";
 import {
+  MAX_UNAVAILABLE_REASON_CHARS,
+  staticUnavailableSummary,
+} from "../../src/github/codex-review-transport.ts";
+import {
   MAX_JOURNAL_BYTES,
+  MAX_RESULT_SUMMARY,
   REVIEW_RESULT_OUTPUT_SCHEMA,
 } from "../../src/github/review-journal.ts";
 import {
@@ -2610,5 +2615,288 @@ Deno.test(
       false,
       "a second, different user item invalidates clean",
     );
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Structured review contract: cross-field parser constraints are pinned by
+// the submitted instructions, and every rejected final message keeps the
+// fail-closed unavailable verdict with a distinct fixed sanitized category.
+// ---------------------------------------------------------------------------
+
+/**
+ * Parser-only cross-field constraints. The supported JSON-Schema keywords
+ * cannot express them, so the submitted instructions must state them exactly.
+ */
+const CONTRACT_INSTRUCTIONS = [
+  "Set findings to an empty array for a clean or unavailable verdict, and include at least one finding for a findings verdict.",
+  "Every finding must satisfy lineStart <= lineEnd.",
+  "Never repeat a finding: every finding must be distinct from every other finding.",
+] as const;
+
+const UNAVAILABLE_PREFIX = "structured review unavailable:";
+/** Exact sanitized prefix the reviewer emits for a refused structured result. */
+const MALFORMED_PREFIX =
+  `${UNAVAILABLE_PREFIX} the structured result was malformed `;
+const RAW_PATH_SENTINEL = "RAW_PATH_SENTINEL";
+const RAW_TITLE_SENTINEL = "RAW_TITLE_SENTINEL";
+const RAW_SENTINELS = [
+  "RAW_JSON_SENTINEL",
+  "RAW_SHAPE_SENTINEL",
+  "RAW_BOUND_SENTINEL",
+  RAW_PATH_SENTINEL,
+  RAW_TITLE_SENTINEL,
+] as const;
+const JSON_REJECT_TEXT = "RAW_JSON_SENTINEL this is not a structured result";
+const JSON_REJECT_TEXT_ALT = "RAW_JSON_SENTINEL {verdict: clean}";
+
+/** Complete instruction surface submitted for this review session. */
+function submittedGuidance(session: ScriptedCodexSession): string {
+  const parts: string[] = [];
+  for (const raw of session.params) {
+    const params = raw as {
+      input?: unknown;
+      baseInstructions?: unknown;
+      developerInstructions?: unknown;
+    };
+    if (Array.isArray(params.input)) {
+      for (const item of params.input) {
+        const text = (item as { text?: unknown }).text;
+        if (typeof text === "string") parts.push(text);
+      }
+    }
+    for (
+      const value of [params.baseInstructions, params.developerInstructions]
+    ) {
+      if (typeof value === "string") parts.push(value);
+    }
+  }
+  return parts.join("\n");
+}
+
+/** Strict-shape violation: a valid JSON result with a reversed line range. */
+function shapeRejectText(start: number): string {
+  return JSON.stringify({
+    verdict: "findings",
+    summary: `RAW_SHAPE_SENTINEL ${start}`,
+    findings: [{
+      priority: 1,
+      title: "t",
+      body: "b",
+      path: "account.ts",
+      lineStart: start,
+      lineEnd: start - 1,
+    }],
+  });
+}
+
+/** Parser-bound overflow: a valid JSON result over the summary bound. */
+function boundRejectText(): string {
+  return JSON.stringify({
+    verdict: "clean",
+    summary: `RAW_BOUND_SENTINEL ${"s".repeat(MAX_RESULT_SUMMARY)}`,
+    findings: [],
+  });
+}
+
+/** Single-field violation: a valid JSON drive path the parser refuses. */
+function pathRejectText(): string {
+  return JSON.stringify({
+    verdict: "findings",
+    summary: "ok",
+    findings: [{
+      priority: 1,
+      title: "t",
+      body: "b",
+      path: `C:/${RAW_PATH_SENTINEL}/x.ts`,
+      lineStart: 1,
+      lineEnd: 1,
+    }],
+  });
+}
+
+/** Single-field violation: a valid JSON title carrying a real LF. */
+function titleRejectText(): string {
+  return JSON.stringify({
+    verdict: "findings",
+    summary: "ok",
+    findings: [{
+      priority: 1,
+      title: `${RAW_TITLE_SENTINEL}\n`,
+      body: "b",
+      path: "account.ts",
+      lineStart: 1,
+      lineEnd: 1,
+    }],
+  });
+}
+
+/** Cross-field violation: a clean verdict that still carries a finding. */
+function cardinalityRejectText(): string {
+  return JSON.stringify({
+    verdict: "clean",
+    summary: "ok",
+    findings: [{
+      priority: 1,
+      title: "t",
+      body: "b",
+      path: "account.ts",
+      lineStart: 1,
+      lineEnd: 1,
+    }],
+  });
+}
+
+/** Run one complete scripted turn whose only final message is `text`. */
+async function completedFinalMessage(
+  text: string,
+): Promise<StructuredReviewOutcomeV1> {
+  const session = new ScriptedCodexSession();
+  session.plan = (scripted) => {
+    scripted.emit(
+      "item/completed",
+      agentMessage(scripted.turnId, "item-1", text),
+    );
+    scripted.emit("turn/completed", turnCompleted(scripted.turnId));
+  };
+  return await startReview(session, await snapshotFixture());
+}
+
+/** The rejected final message must keep the fail-closed unavailable shape. */
+async function rejectedFinalCategory(text: string): Promise<string> {
+  const outcome = await completedFinalMessage(text);
+  assert.equal(outcome.status, "unavailable");
+  assert.equal(outcome.result, null);
+  assert.equal(outcome.execution, null);
+  const detail = outcome.detail === null ? "" : outcome.detail;
+  assert.notEqual(detail, "", "a fixed sanitized category is required");
+  assert.ok(detail.startsWith(UNAVAILABLE_PREFIX), "fixed category prefix");
+  assert.ok(detail.length <= MAX_UNAVAILABLE_REASON_CHARS, "bounded category");
+  assert.match(detail, /^[\x20-\x7e]+$/, "printable single-line category");
+  assert.equal(
+    staticUnavailableSummary(detail),
+    detail,
+    "the category must reach the unavailable summary verbatim",
+  );
+  for (const sentinel of RAW_SENTINELS) {
+    assert.equal(
+      detail.includes(sentinel),
+      false,
+      "raw content must not leak into the category",
+    );
+  }
+  return detail;
+}
+
+Deno.test(
+  "structured review contract: rejected final messages keep unavailable with distinct fixed sanitized categories",
+  async () => {
+    const invalidJson = await rejectedFinalCategory(JSON_REJECT_TEXT);
+    assert.equal(
+      invalidJson,
+      `${MALFORMED_PREFIX}[json_syntax]`,
+      "invalid JSON keeps its exact fixed category",
+    );
+    assert.equal(
+      await rejectedFinalCategory(JSON_REJECT_TEXT_ALT),
+      invalidJson,
+      "invalid JSON keeps one fixed category",
+    );
+
+    const shape = await rejectedFinalCategory(shapeRejectText(3));
+    assert.equal(
+      shape,
+      `${MALFORMED_PREFIX}[finding_range]`,
+      "a reversed finding line range keeps its exact fixed category",
+    );
+    assert.equal(
+      await rejectedFinalCategory(shapeRejectText(7)),
+      shape,
+      "a strict-shape violation keeps one fixed category",
+    );
+    assert.notEqual(
+      invalidJson,
+      shape,
+      "invalid JSON and a strict-shape violation must not share one generic category",
+    );
+
+    const bound = await rejectedFinalCategory(boundRejectText());
+    assert.equal(
+      bound,
+      `${UNAVAILABLE_PREFIX} the structured result exceeded the accepted bound`,
+      "a bound overflow keeps its exact fixed category",
+    );
+    assert.notEqual(bound, invalidJson, "the bound category stays distinct");
+    assert.notEqual(bound, shape, "the bound category stays distinct");
+
+    // Three static malformed results must not collapse into one opaque
+    // category: the malformed finding path, the malformed finding title and
+    // the verdict/findings cardinality mismatch stay individually named.
+    const path = await rejectedFinalCategory(pathRejectText());
+    assert.equal(
+      path,
+      `${MALFORMED_PREFIX}[finding_path]`,
+      "a malformed finding path keeps its exact fixed category",
+    );
+    const title = await rejectedFinalCategory(titleRejectText());
+    assert.equal(
+      title,
+      `${MALFORMED_PREFIX}[finding_title]`,
+      "a malformed finding title keeps its exact fixed category",
+    );
+    const cardinality = await rejectedFinalCategory(cardinalityRejectText());
+    assert.equal(
+      cardinality,
+      `${MALFORMED_PREFIX}[findings_cardinality]`,
+      "a verdict/findings mismatch keeps its exact fixed category",
+    );
+    assert.equal(
+      new Set([path, title, cardinality]).size,
+      3,
+      "the three malformed results must keep three distinct categories",
+    );
+
+    const clean = await completedFinalMessage(JSON.stringify(CLEAN_RESULT));
+    assert.equal(clean.status, "clean");
+    assert.equal(clean.detail, null);
+    assert.deepEqual(clean.result, CLEAN_RESULT);
+    assert.ok(clean.execution !== null);
+    assert.ok(clean.actual !== null);
+
+    const findings = await completedFinalMessage(
+      JSON.stringify(FINDINGS_RESULT),
+    );
+    assert.equal(findings.status, "findings");
+    assert.equal(findings.detail, null);
+    assert.equal(findings.result?.verdict, "findings");
+    assert.equal(findings.result?.findings.length, 1);
+    assert.ok(findings.execution !== null);
+    assert.ok(findings.actual !== null);
+  },
+);
+
+Deno.test(
+  "structured review contract: parser-only cross-field constraints are stated in the submitted instructions",
+  async () => {
+    const session = new ScriptedCodexSession();
+    session.plan = (scripted) => {
+      scripted.emit(
+        "item/completed",
+        agentMessage(scripted.turnId, "item-1", JSON.stringify(CLEAN_RESULT)),
+      );
+      scripted.emit("turn/completed", turnCompleted(scripted.turnId));
+    };
+    const outcome = await startReview(session, await snapshotFixture());
+    assert.equal(outcome.status, "clean");
+    const guidance = submittedGuidance(session);
+    assert.notEqual(guidance, "", "the submitted turn carries instructions");
+    for (const instruction of CONTRACT_INSTRUCTIONS) {
+      contains(
+        guidance,
+        instruction,
+        "each parser-only cross-field constraint must be stated exactly",
+      );
+    }
+    contains(guidance, "lineEnd at most candidateLines");
   },
 );
