@@ -905,7 +905,12 @@ export function planHostedClosures(
  * runtime's own uncertainty handler owns that intent, and only a settled
  * implementation intent may be cleared here. Non-implementation intents (the
  * runtime clears an unprepared `base_refresh` itself) and null intents stay
- * retirable.
+ * retirable. A record already parked with the exact HOSTED_AUTONOMY_RETIRED
+ * marker is terminal and is never planned again: repeating the same retirement
+ * would bump the state sequence on every pass and, because a planned retirement
+ * takes the pass's single write before the closure pass, would starve eligible
+ * closures indefinitely. The skip is exact-marker only, so every other blocker
+ * still goes through the guards above.
  */
 export function planHostedRetirements(
   snapshot: RepairStateSnapshotV1,
@@ -915,6 +920,14 @@ export function planHostedRetirements(
   const plans: HostedClosurePlanV1[] = [];
   for (const record of snapshot.work) {
     if (record.nextStep === "done") continue;
+    // Already retired: the record is terminal, so re-planning it is pure state
+    // churn and would keep the retirement write ahead of the closure write.
+    if (
+      record.nextStep === "blocked" &&
+      record.blocker?.message === HOSTED_AUTONOMY_RETIRED
+    ) {
+      continue;
+    }
     const issueNumber = record.related.issueNumber;
     if (
       issueNumber === null ||
