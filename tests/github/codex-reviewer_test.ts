@@ -335,7 +335,14 @@ Deno.test(
     assert.deepEqual(session.sent, ["initialize", "thread/start"]);
     assert.deepEqual(
       (session.params[0] as Record<string, unknown>).capabilities,
-      { experimentalApi: true },
+      {
+        experimentalApi: true,
+        optOutNotificationMethods: [
+          "item/reasoning/summaryTextDelta",
+          "item/reasoning/summaryPartAdded",
+          "item/reasoning/textDelta",
+        ],
+      },
       "the required named profile enables the experimental capabilities",
     );
     assert.equal(session.opened, 1);
@@ -456,6 +463,92 @@ Deno.test(
 );
 
 Deno.test(
+  "reviewer: unused reasoning streams are opted out while clean completion and the event bound stay unchanged",
+  async () => {
+    const session = new ScriptedCodexSession();
+    session.live = (scripted) => {
+      scripted.emit("item/reasoning/summaryTextDelta", {
+        threadId: "thread-1",
+        turnId: scripted.turnId,
+        delta: "considering the manifest",
+      });
+      scripted.emit("item/reasoning/summaryPartAdded", {
+        threadId: "thread-1",
+        turnId: scripted.turnId,
+        summaryIndex: 0,
+      });
+      scripted.emit("item/reasoning/textDelta", {
+        threadId: "thread-1",
+        turnId: scripted.turnId,
+        delta: "raw reasoning",
+      });
+      scripted.emit(
+        "item/completed",
+        agentMessage(
+          scripted.turnId,
+          "item-1",
+          JSON.stringify(CLEAN_RESULT),
+        ),
+      );
+      scripted.emit("turn/completed", turnCompleted(scripted.turnId));
+    };
+    const snapshot = await snapshotFixture();
+    const reviewer = makeReviewer(session);
+    const prepared = await reviewer.prepare(prepareRequest(snapshot));
+    if (!prepared.ok) assert.fail(prepared.error.detail);
+    assert.deepEqual(
+      (session.params[0] as Record<string, unknown>).capabilities,
+      {
+        experimentalApi: true,
+        optOutNotificationMethods: [
+          "item/reasoning/summaryTextDelta",
+          "item/reasoning/summaryPartAdded",
+          "item/reasoning/textDelta",
+        ],
+      },
+      "the initialize request opts out of exactly the unused reasoning streams",
+    );
+
+    const review = prepared.value;
+    const outcome = await review.start();
+    if (!outcome.ok) assert.fail(outcome.error.detail);
+    assert.equal(outcome.value.status, "clean");
+    assert.deepEqual(outcome.value.result, CLEAN_RESULT);
+    assert.equal(outcome.value.resultId, "item-1");
+    assert.equal(outcome.value.execution?.turnId, "turn-1");
+    contains(submittedPrompt(session), `Base ${BASE}; head ${HEAD};`);
+    assert.equal(session.turnStarts(), 1);
+
+    // Control: a server that ignores the opt-out and floods notifications is
+    // still stopped by the EXISTING finite event bound, never a clean review.
+    const breach = new ScriptedCodexSession();
+    breach.live = (scripted) => {
+      for (let index = 0; index < 4_200; index++) {
+        scripted.emit("item/reasoning/textDelta", {
+          threadId: "thread-1",
+          turnId: scripted.turnId,
+          delta: "raw",
+        });
+      }
+      scripted.emit(
+        "item/completed",
+        agentMessage(
+          scripted.turnId,
+          "item-late",
+          JSON.stringify(CLEAN_RESULT),
+        ),
+      );
+      scripted.emit("turn/completed", turnCompleted(scripted.turnId));
+    };
+    const bounded = await startReview(breach, await snapshotFixture());
+    assert.equal(bounded.status, "unavailable");
+    contains(bounded.detail ?? "", "event bound was exceeded");
+    assert.equal(bounded.result, null);
+    assert.equal(bounded.execution, null);
+  },
+);
+
+Deno.test(
   "reviewer: bad thread acknowledgement fails preparation and closes the session",
   async () => {
     const session = new ScriptedCodexSession();
@@ -522,7 +615,14 @@ Deno.test(
     if (!prepared.ok) assert.fail(prepared.error.detail);
     assert.deepEqual(
       (session.params[0] as Record<string, unknown>).capabilities,
-      { experimentalApi: true },
+      {
+        experimentalApi: true,
+        optOutNotificationMethods: [
+          "item/reasoning/summaryTextDelta",
+          "item/reasoning/summaryPartAdded",
+          "item/reasoning/textDelta",
+        ],
+      },
       "experimental capabilities are enabled only for a configured profile",
     );
     const threadParams = session.params[1] as Record<string, unknown>;

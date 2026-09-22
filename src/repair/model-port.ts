@@ -941,6 +941,14 @@ export class CodexImplementationPort implements ImplementationPort {
         // configured named permission profile; the legacy path stays as is.
         experimentalApi: this.permissionProfile !== null,
         requestAttestation: false,
+        // This bounded port never consumes reasoning summary/text streams, so
+        // ask the server to stop streaming them. Any that still arrive are
+        // charged by the existing output bound like every other notification.
+        optOutNotificationMethods: [
+          "item/reasoning/summaryTextDelta",
+          "item/reasoning/summaryPartAdded",
+          "item/reasoning/textDelta",
+        ],
       },
     });
     if (

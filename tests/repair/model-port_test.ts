@@ -153,6 +153,49 @@ class ThrowingNotificationSession extends FakeCodexSession {
   }
 }
 
+/**
+ * Emits the three reasoning-stream notifications the initialize request opts
+ * out of before the scripted terminal. With `breach` one delta is large enough
+ * that the existing output bound must still interrupt the turn even though the
+ * port never consumes these methods.
+ */
+class ReasoningStreamSession extends FakeCodexSession {
+  constructor(private readonly breach: boolean) {
+    super();
+  }
+
+  override onNotification(
+    handler: (event: CodexServerNotificationV1) => void,
+  ): void {
+    super.onNotification(handler);
+    const delta = this.breach ? "r".repeat(4_096) : "thinking";
+    handler({
+      method: "item/reasoning/summaryTextDelta",
+      params: { threadId: "thread-1", turnId: "turn-1", delta },
+    });
+    handler({
+      method: "item/reasoning/summaryPartAdded",
+      params: { threadId: "thread-1", turnId: "turn-1", summaryIndex: 0 },
+    });
+    handler({
+      method: "item/reasoning/textDelta",
+      params: { threadId: "thread-1", turnId: "turn-1", delta },
+    });
+    if (this.breach) {
+      // The output bound already requested the interrupt; report the runtime
+      // terminal the real app-server sends for an interrupted turn. The
+      // queued successful completion is ignored once evidence stopped.
+      handler({
+        method: "turn/completed",
+        params: {
+          threadId: "thread-1",
+          turn: { id: "turn-1", status: "interrupted", durationMs: 1 },
+        },
+      });
+    }
+  }
+}
+
 Deno.test("model-port: thread starts with bounded isolated-checkout write capability", async () => {
   const session = new FakeCodexSession();
   const verified: ActualSessionEvidenceV1[] = [];
@@ -226,7 +269,15 @@ Deno.test("model-port: thread starts with bounded isolated-checkout write capabi
   );
   assert.deepEqual(
     (initialize?.params as Record<string, unknown>).capabilities,
-    { experimentalApi: false, requestAttestation: false },
+    {
+      experimentalApi: false,
+      requestAttestation: false,
+      optOutNotificationMethods: [
+        "item/reasoning/summaryTextDelta",
+        "item/reasoning/summaryPartAdded",
+        "item/reasoning/textDelta",
+      ],
+    },
     "an omitted permission profile keeps the legacy capabilities",
   );
   assert.equal(params.cwd, CHECKOUT, "write scope is the isolated checkout");
@@ -257,6 +308,104 @@ Deno.test("model-port: thread starts with bounded isolated-checkout write capabi
     "the trusted-host verifier observed the session evidence",
   );
 });
+
+Deno.test(
+  "model-port: unused reasoning streams are opted out and stay non-output while the output bound still fails closed",
+  async () => {
+    const session = new ReasoningStreamSession(false);
+    const port = new CodexImplementationPort({
+      openSession: () => Promise.resolve(session),
+      checkoutDir: CHECKOUT,
+      checkout: {
+        resolve: () =>
+          Promise.resolve({
+            head: SHA3,
+            checkpointSha: null,
+            changedPaths: ["src/app.ts"],
+          }),
+      },
+      modelProvider: "sentinel-host",
+    });
+    const request: ModelRunRequestV1 = {
+      taskId: asWorkItemId("issue-1"),
+      repository: { ...REPO },
+      base: SHA1,
+      issue: { number: 1, title: "title", body: "body" },
+      evidence: [],
+      model: "gpt-reserve",
+      reasoning: "max",
+      maxDurationMs: 5_000,
+      maxOutputChars: 10_000,
+    };
+
+    const result = await port.runModel(request);
+    assert.ok(result.ok, JSON.stringify(result));
+    if (!result.ok) return;
+    assert.equal(result.value.outcome, "completed");
+    assert.equal(result.value.candidate?.head, SHA3);
+    assert.deepEqual(result.value.candidate?.changedPaths, ["src/app.ts"]);
+    assert.equal(result.value.actual.evidenceKind, "request-runtime");
+    assert.equal(result.value.actual.provider, "sentinel-host");
+    assert.equal(result.value.actual.observedModel, "gpt-reserve");
+    assert.equal(result.value.actual.observedReasoning, "max");
+    assert.equal(result.value.actual.threadId, "thread-1");
+    assert.equal(result.value.actual.turnId, "turn-1");
+    assert.equal(result.value.actual.observedTerminalStatus, "completed");
+
+    const initialize = session.sent.find(
+      (frame) => frame.method === "initialize",
+    );
+    assert.ok(initialize, "initialize was sent");
+    assert.deepEqual(
+      (initialize?.params as Record<string, unknown>).capabilities,
+      {
+        experimentalApi: false,
+        requestAttestation: false,
+        optOutNotificationMethods: [
+          "item/reasoning/summaryTextDelta",
+          "item/reasoning/summaryPartAdded",
+          "item/reasoning/textDelta",
+        ],
+      },
+      "the initialize request opts out of exactly the unused reasoning streams",
+    );
+
+    // Control: a server that ignores the opt-out and still streams over-bound
+    // reasoning bytes is charged by the EXISTING output bound, which
+    // interrupts the turn and permits no candidate.
+    const breach = new ReasoningStreamSession(true);
+    const breachPort = new CodexImplementationPort({
+      openSession: () => Promise.resolve(breach),
+      checkoutDir: CHECKOUT,
+      checkout: {
+        resolve: () =>
+          Promise.resolve({
+            head: SHA3,
+            checkpointSha: null,
+            changedPaths: ["src/app.ts"],
+          }),
+      },
+      modelProvider: "sentinel-host",
+    });
+    const bounded = await breachPort.runModel({
+      ...request,
+      maxOutputChars: 512,
+    });
+    assert.ok(bounded.ok, JSON.stringify(bounded));
+    if (!bounded.ok) return;
+    assert.equal(bounded.value.outcome, "interrupted");
+    assert.equal(bounded.value.candidate, null);
+    assert.ok(
+      bounded.value.actual.outputChars > 512,
+      "ignored reasoning bytes are still charged against the output bound",
+    );
+    assert.equal(
+      breach.sent.some((frame) => frame.method === "turn/interrupt"),
+      true,
+      "the existing output bound interrupts the turn",
+    );
+  },
+);
 
 Deno.test(
   "runtime prompt: a correction carries the exact unresolved review findings",
@@ -499,7 +648,15 @@ Deno.test(
     assert.ok(initialize, "initialize was sent");
     assert.deepEqual(
       (initialize?.params as Record<string, unknown>).capabilities,
-      { experimentalApi: true, requestAttestation: false },
+      {
+        experimentalApi: true,
+        requestAttestation: false,
+        optOutNotificationMethods: [
+          "item/reasoning/summaryTextDelta",
+          "item/reasoning/summaryPartAdded",
+          "item/reasoning/textDelta",
+        ],
+      },
       "experimental capabilities are enabled only for a configured profile",
     );
     const threadStart = session.sent.find(

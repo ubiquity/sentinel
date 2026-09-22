@@ -1606,6 +1606,14 @@ export class CodexStructuredReviewer {
         // The prepared session always binds a trusted named permission profile,
         // so the app-server experimental capabilities are always enabled.
         experimentalApi: true,
+        // This bounded reviewer never consumes reasoning summary/text streams,
+        // so ask the server to stop streaming them. Any that still arrive are
+        // charged by the existing event bound like every other notification.
+        optOutNotificationMethods: [
+          "item/reasoning/summaryTextDelta",
+          "item/reasoning/summaryPartAdded",
+          "item/reasoning/textDelta",
+        ],
       },
     });
     const record = asRecord(response);
