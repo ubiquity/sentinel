@@ -1293,6 +1293,31 @@ export interface PrepareBaseRefreshAdapterInputV1 {
       repository: RepositoryIdentityV1;
     },
   ) => Promise<PortResultV1<void>>;
+  /**
+   * Existing trusted gated fetch of the target's own configured base branch.
+   *
+   * Deterministic integration runs entirely in the local object store, so the
+   * freshly observed `expectedBase` must exist locally before it is invoked.
+   * On the UNPREPARED path only, the adapter calls this capability with that
+   * exact base and requires the SAME target's authenticated remote and
+   * configured base branch to deliver it through the shared cooldown gate.
+   * The composed implementation fixes the repository, remote and branch: a
+   * mismatched repository, a failed fetch or a fetched branch head that is not
+   * the exact requested base fails closed and is never integrated. The
+   * prepared recovery path never calls it, so the frozen observed base and the
+   * byte-identical regeneration check stay unchanged. Omitted callers keep
+   * today's local-object-only behavior.
+   */
+  ensureBaseObjects?: (
+    input: {
+      base: GitSha;
+      /**
+       * Exact repository the base belongs to. The composed capability fetches
+       * only from THIS port's own validated repository identity.
+       */
+      repository: RepositoryIdentityV1;
+    },
+  ) => Promise<PortResultV1<void>>;
 }
 
 export type PrepareBaseRefreshV1 = (
@@ -1312,6 +1337,10 @@ const STATIC_BASE_REFRESH_RESTORE =
 const STATIC_BASE_REFRESH_UNSUPPORTED =
   "base refresh local integration is unavailable";
 const STATIC_BASE_REFRESH_PREPARED = "base refresh prepared identity mismatch";
+const STATIC_BASE_REFRESH_BASE_OBJECTS =
+  "base refresh target base objects are unavailable";
+const STATIC_BASE_REFRESH_BASE_REPOSITORY =
+  "base refresh base repository is not exact";
 
 /**
  * Trusted deterministic candidate-base generation over ONE executor instance.
@@ -1402,6 +1431,26 @@ export function createPrepareBaseRefresh(
         return portError("unavailable", STATIC_BASE_REFRESH_RESTORE);
       }
       if (!ensured.ok) return ensured;
+    }
+    // The freshly observed base is brought into THIS target's object store
+    // from its own authenticated remote and configured base branch before the
+    // deterministic integration runs. Only an unprepared refresh fetches: a
+    // prepared recovery regenerates from the already frozen observed base and
+    // must never observe a later branch movement.
+    if (
+      input.ensureBaseObjects !== undefined &&
+      request.preparedHead === undefined
+    ) {
+      let ensuredBase: PortResultV1<void>;
+      try {
+        ensuredBase = await input.ensureBaseObjects({
+          base: request.expectedBase,
+          repository: input.repository ?? LOCAL_REPOSITORY,
+        });
+      } catch {
+        return portError("unavailable", STATIC_BASE_REFRESH_BASE_OBJECTS);
+      }
+      if (!ensuredBase.ok) return ensuredBase;
     }
     const integrateBase = input.git.integrateBase?.bind(input.git);
     if (integrateBase === undefined) {
@@ -1572,6 +1621,48 @@ export function composeLocalGitHub(input: LocalGitHubInputV1): GitHubPort {
   // SAME port + executor identities: it re-observes through this exact port and
   // integrates through this exact executor, so host reconciliation and port
   // publication can never drift to a parallel instance.
+  //
+  // The freshly observed target base is ensured through the SAME target
+  // mirror, authenticated remote, configured base branch, host token and
+  // shared cooldown gate this port already uses. The closure fixes all of them
+  // to this port's validated identity, so a request can never select another
+  // repository, branch or remote. The existing gated refresh returns the
+  // fetched branch head; only the exact observed base is accepted, and a
+  // concurrent advance is a bounded conflict, never adoption of an
+  // unobserved base.
+  const ensureBaseObjects = async (value: {
+    base: GitSha;
+    repository: RepositoryIdentityV1;
+  }): Promise<PortResultV1<void>> => {
+    if (
+      value.repository.owner !== repository.owner ||
+      value.repository.name !== repository.name ||
+      value.repository.installationId !== repository.installationId
+    ) {
+      return portError("invalid", STATIC_BASE_REFRESH_BASE_REPOSITORY);
+    }
+    let fetchedBase: string;
+    try {
+      fetchedBase = await refreshDevelopment(
+        input.sourcePath,
+        {
+          stateRoot: input.stateRoot,
+          trustedPath: input.trustedPath,
+          githubToken: input.token,
+        },
+        input.scratch,
+        gate,
+        repository.installationId,
+        { remoteUrl, baseBranch },
+      );
+    } catch {
+      return portError("unavailable", STATIC_BASE_REFRESH_BASE_OBJECTS);
+    }
+    if (fetchedBase !== value.base) {
+      return portError("conflict", STATIC_BASE_REFRESH_BASE_MOVED);
+    }
+    return portOk(undefined);
+  };
   host.port.prepareBaseRefresh = createPrepareBaseRefresh({
     git: host.git,
     repository,
@@ -1579,6 +1670,7 @@ export function composeLocalGitHub(input: LocalGitHubInputV1): GitHubPort {
     baseBranch,
     trustedPrAuthor: input.login,
     ensureCandidateObjects,
+    ensureBaseObjects,
   });
   // Candidate preservation is composed on the SAME port + executor identities:
   // the authenticated operation-ref read and the create-only push use this
@@ -3142,7 +3234,16 @@ export async function prepareReviewCheckout(
 /** Refresh the exact remote development ref through trusted authenticated git. */
 export async function refreshDevelopment(
   sourcePath: string,
-  input: LocalRepairHostOptionsV1,
+  /**
+   * Narrowed to the exact trusted inputs this refresh reads, so an existing
+   * composed host can reuse it without carrying unrelated host options. Every
+   * existing caller passes a full `LocalRepairHostOptionsV1`, which remains
+   * assignable and keeps identical behavior.
+   */
+  input: Pick<
+    LocalRepairHostOptionsV1,
+    "stateRoot" | "trustedPath" | "githubToken"
+  >,
   scratch: string,
   gate: GitHubCooldownGateV1,
   installationId: number = LOCAL_REPOSITORY.installationId,

@@ -3,6 +3,7 @@
 import assert from "node:assert/strict";
 
 import {
+  composeLocalGitHub,
   createLocalCandidateLoader,
   createLocalRepositoryConfig,
   ensureBareStateRepository,
@@ -2645,6 +2646,328 @@ Deno.test(
     } finally {
       captured.restore();
       await Deno.remove(stateRoot, { recursive: true }).catch(() => {});
+    }
+  },
+);
+
+Deno.test(
+  "base refresh fetches a newly advanced target base before integration",
+  async () => {
+    // The fixture root stays under the worktree so the registered read
+    // permission covers it, and it is made absolute so nested Git children
+    // never duplicate a relative path.
+    const root = await Deno.realPath(
+      await Deno.makeTempDir({ dir: ".", prefix: "sentinel-base-refresh-" }),
+    );
+    const env = testGitEnv(`${root}/home`);
+    const mirror = `${root}/mirror`;
+    const pullPath = "/repos/ubiquity/sentinel/pulls/7";
+    const refPath = "/repos/ubiquity/sentinel/git/ref/heads/development";
+    const trustedAuthor = "ubiquity-sentinel[bot]";
+    const branch = "sentinel/repair-base-refresh";
+    const requests: string[] = [];
+    const admissions: number[] = [];
+    // The API observation of the configured base. It is deliberately advanced
+    // independently of the real remote branch below so a concurrent movement
+    // can be exercised without a second fixture.
+    let observedBase = "";
+    try {
+      await Deno.mkdir(`${root}/home`, { recursive: true });
+      // The target's authenticated remote holds only the FIRST base.
+      const remote = await makeRemoteCtx(root, env);
+      await Deno.writeTextFile(`${remote.work}/base-0.txt`, "base-0\n");
+      assert.equal((await gitRun(remote.work, ["add", "-A"], env)).ok, true);
+      assert.equal(
+        (await gitRun(remote.work, ["commit", "-q", "-m", "base 0"], env)).ok,
+        true,
+      );
+      const base0 = (await gitRun(remote.work, ["rev-parse", "HEAD"], env))
+        .stdout.trim();
+      const firstPush = await gitRun(
+        remote.work,
+        ["push", "-q", "origin", "HEAD:refs/heads/development"],
+        env,
+      );
+      assert.equal(firstPush.ok, true, firstPush.stderr);
+
+      // The private mirror is prepared BEFORE the new base exists, and the
+      // original candidate is produced locally on top of the first base.
+      const cloned = await gitRun(root, [
+        "clone",
+        "-q",
+        "--no-hardlinks",
+        "--no-checkout",
+        remote.bare,
+        mirror,
+      ], env);
+      assert.equal(cloned.ok, true, cloned.stderr);
+      assert.equal(
+        (await gitRun(mirror, [
+          "checkout",
+          "-q",
+          "-B",
+          "development",
+          base0,
+        ], env)).ok,
+        true,
+      );
+      assert.equal(
+        (await gitRun(mirror, ["checkout", "-q", "-b", branch, base0], env))
+          .ok,
+        true,
+      );
+      await Deno.writeTextFile(`${mirror}/candidate.txt`, "candidate\n");
+      assert.equal((await gitRun(mirror, ["add", "-A"], env)).ok, true);
+      assert.equal(
+        (await gitRun(mirror, ["commit", "-q", "-m", "candidate"], env)).ok,
+        true,
+      );
+      const candidate = (await gitRun(mirror, ["rev-parse", "HEAD"], env))
+        .stdout.trim();
+
+      // The composed port's remote is the fixed GitHub URL. The fixture
+      // rewrites exactly that URL to the local bare repository and refuses
+      // every un-rewritten https transport, so no unexpected rewrite can
+      // reach the network.
+      assert.equal(
+        (await gitRun(mirror, [
+          "config",
+          `url.file://${remote.bare}.insteadOf`,
+          "https://github.com/ubiquity/sentinel.git",
+        ], env)).ok,
+        true,
+      );
+      assert.equal(
+        (await gitRun(mirror, ["config", "protocol.https.allow", "never"], env))
+          .ok,
+        true,
+      );
+
+      // The new base is created ONLY AFTER mirror preparation and is genuinely
+      // absent from the mirror before the refresh runs.
+      await Deno.writeTextFile(`${remote.work}/base-1.txt`, "base-1\n");
+      assert.equal((await gitRun(remote.work, ["add", "-A"], env)).ok, true);
+      assert.equal(
+        (await gitRun(remote.work, ["commit", "-q", "-m", "base 1"], env)).ok,
+        true,
+      );
+      const base1 = (await gitRun(remote.work, ["rev-parse", "HEAD"], env))
+        .stdout.trim();
+      const secondPush = await gitRun(
+        remote.work,
+        ["push", "-q", "origin", "HEAD:refs/heads/development"],
+        env,
+      );
+      assert.equal(secondPush.ok, true, secondPush.stderr);
+      observedBase = base1;
+      assert.equal(
+        (await gitRun(mirror, ["cat-file", "-e", `${base1}^{commit}`], env))
+          .ok,
+        false,
+        "the newly advanced base must be absent before the refresh",
+      );
+
+      // THE production composition over the fixed repository identity, with
+      // the exact hardcoded GitHub remote routed to the local fixture.
+      const clock = new FakeClock(T0);
+      const gate: GitHubCooldownGateV1 = {
+        beforeRequest: (installationId) => {
+          admissions.push(installationId);
+          return Promise.resolve(portOk(undefined));
+        },
+        recordRateLimit: () => Promise.resolve(portOk(undefined)),
+      };
+      const stateRoot = `${root}/state`;
+      await Deno.mkdir(stateRoot, { recursive: true });
+      const http: HttpTransportV1 = (request) => {
+        const path = new URL(request.url).pathname;
+        requests.push(`${request.method} ${path}`);
+        if (request.method === "GET" && path.endsWith("/pulls/7")) {
+          return Promise.resolve({
+            status: 200,
+            headers: new Headers(),
+            bodyText: JSON.stringify({
+              number: 7,
+              title: "Sentinel repair",
+              body: "Refs 264",
+              state: "open",
+              head: { ref: branch, sha: candidate },
+              base: { ref: "development", sha: observedBase },
+              user: { login: trustedAuthor },
+              created_at: "2026-09-22T00:00:00Z",
+              updated_at: "2026-09-22T00:00:00Z",
+              merged_at: null,
+              merge_commit_sha: null,
+              review_decision: "none",
+            }),
+          });
+        }
+        if (
+          request.method === "GET" &&
+          path.endsWith("/git/ref/heads/development")
+        ) {
+          return Promise.resolve({
+            status: 200,
+            headers: new Headers(),
+            bodyText: JSON.stringify({
+              ref: "refs/heads/development",
+              object: { sha: observedBase, type: "commit" },
+            }),
+          });
+        }
+        return Promise.reject(new Error(`unscripted request: ${path}`));
+      };
+      const compose = (name: string) =>
+        composeLocalGitHub({
+          clock,
+          state: new MemoryState(),
+          gate,
+          http,
+          token: "dummy-token",
+          login: trustedAuthor,
+          invocationId: "base-refresh-composition",
+          stateRoot,
+          sourcePath: mirror,
+          scratch: `${root}/scratch`,
+          reviewCheckout: `${root}/review`,
+          reviewClientHome: `${root}/clients`,
+          reviewTmpDir: `${root}/tmp`,
+          reviewDenoDir: `${root}/deno`,
+          trustedPath: Deno.env.get("PATH") ?? "/usr/bin:/bin",
+          codexExecutable: "/usr/bin/false",
+          tracker: new LocalSessionTracker(),
+          repository: { ...createLocalRepositoryConfig().repository, name },
+          baseBranch: "development",
+        });
+      const prepare = compose("sentinel").prepareBaseRefresh;
+      assert.ok(
+        prepare !== undefined,
+        "the composed port carries the base-refresh capability",
+      );
+      if (prepare === undefined) return;
+      const request = {
+        pullRequestNumber: 7,
+        branch,
+        expectedHead: candidate as GitSha,
+        previousBase: base0 as GitSha,
+        expectedBase: base1 as GitSha,
+      };
+
+      // The refresh fetches the newly advanced base from THIS target's own
+      // authenticated remote before the deterministic integration, and the
+      // original candidate survives as the first parent.
+      const prepared = await prepare(request);
+      assert.equal(prepared.ok, true, JSON.stringify(prepared));
+      if (!prepared.ok) return;
+      const parents = (await gitRun(mirror, [
+        "rev-list",
+        "--parents",
+        "-n",
+        "1",
+        prepared.value,
+      ], env)).stdout.trim().split(" ");
+      assert.deepEqual(parents, [prepared.value, candidate, base1]);
+      assert.equal(
+        (await gitRun(mirror, ["rev-parse", `${candidate}^{commit}`], env))
+          .stdout.trim(),
+        candidate,
+        "the original candidate object is preserved",
+      );
+      assert.equal(
+        (await gitRun(mirror, ["cat-file", "-e", `${base1}^{commit}`], env))
+          .ok,
+        true,
+        "the newly advanced base is now local",
+      );
+      assert.ok(admissions.length > 0, "the shared cooldown gate was admitted");
+      assert.ok(
+        admissions.every((id) => id === 0),
+        "every admission is scoped to this repository's installation",
+      );
+      assert.ok(requests.includes(`GET ${pullPath}`));
+      assert.ok(requests.includes(`GET ${refPath}`));
+
+      // A concurrent advance the API observation has not seen is a bounded
+      // conflict: the fetched branch head is not the observed base, so nothing
+      // is integrated and no unobserved base is adopted.
+      await Deno.writeTextFile(`${remote.work}/base-2.txt`, "base-2\n");
+      assert.equal((await gitRun(remote.work, ["add", "-A"], env)).ok, true);
+      assert.equal(
+        (await gitRun(remote.work, ["commit", "-q", "-m", "base 2"], env)).ok,
+        true,
+      );
+      const thirdPush = await gitRun(
+        remote.work,
+        ["push", "-q", "origin", "HEAD:refs/heads/development"],
+        env,
+      );
+      assert.equal(thirdPush.ok, true, thirdPush.stderr);
+      const conflicted = await prepare(request);
+      assert.equal(conflicted.ok, false);
+      if (!conflicted.ok) {
+        assert.equal(conflicted.error.kind, "conflict");
+      }
+
+      // A failed fetch fails closed: the fixed remote rewrite now points at an
+      // absent fixture, and the adapter still observed the exact PR/base
+      // first, so the refusal comes from the fetch step before integration.
+      assert.equal(
+        (await gitRun(mirror, [
+          "config",
+          `url.file://${remote.bare}.insteadOf`,
+          `file://${root}/absent-target.git`,
+        ], env)).ok,
+        true,
+      );
+      const unavailable = await prepare(request);
+      assert.equal(unavailable.ok, false);
+      if (!unavailable.ok) {
+        assert.equal(unavailable.error.kind, "unavailable");
+      }
+
+      // Own-repository scope: a port composed for another repository fetches
+      // from THAT repository's own remote (routed here to its own local
+      // fixture) and refuses a head that is not the observed base. The
+      // un-rewritten https transport stays refused by the fixture policy.
+      await Deno.mkdir(`${root}/foreign`, { recursive: true });
+      const foreign = await makeRemoteCtx(`${root}/foreign`, env);
+      await Deno.writeTextFile(`${foreign.work}/foreign.txt`, "foreign\n");
+      assert.equal((await gitRun(foreign.work, ["add", "-A"], env)).ok, true);
+      assert.equal(
+        (await gitRun(foreign.work, ["commit", "-q", "-m", "foreign"], env))
+          .ok,
+        true,
+      );
+      const foreignBase = (await gitRun(foreign.work, [
+        "rev-parse",
+        "HEAD",
+      ], env)).stdout.trim();
+      const foreignPush = await gitRun(
+        foreign.work,
+        ["push", "-q", "origin", "HEAD:refs/heads/development"],
+        env,
+      );
+      assert.equal(foreignPush.ok, true, foreignPush.stderr);
+      assert.notEqual(foreignBase, base1);
+      assert.equal(
+        (await gitRun(mirror, [
+          "config",
+          `url.file://${foreign.bare}.insteadOf`,
+          "https://github.com/ubiquity/other.git",
+        ], env)).ok,
+        true,
+      );
+      const foreignPrepare = compose("other").prepareBaseRefresh;
+      assert.ok(foreignPrepare !== undefined);
+      if (foreignPrepare !== undefined) {
+        const foreignRefused = await foreignPrepare(request);
+        assert.equal(foreignRefused.ok, false);
+        if (!foreignRefused.ok) {
+          assert.equal(foreignRefused.error.kind, "conflict");
+        }
+      }
+    } finally {
+      await Deno.remove(root, { recursive: true }).catch(() => {});
     }
   },
 );
