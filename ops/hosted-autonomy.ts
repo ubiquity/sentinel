@@ -185,6 +185,15 @@ const API_BASE = "https://api.github.com";
 const REQUEST_TIMEOUT_MS = 30_000;
 const MAX_RESPONSE_BYTES = 1_048_576;
 
+/**
+ * Bounds on the check-run listing the delivery gate reads. GitHub returns
+ * 100 runs per page; a head with a longer listing must be read to the end
+ * within these bounds or refused outright, because a truncated listing is
+ * not evidence that the later pages carry no pending or failed run.
+ */
+const CHECK_RUNS_PER_PAGE = 100;
+const MAX_CHECK_RUN_PAGES = 10;
+
 export type HostedAutonomyReasonV1 =
   | "applied"
   | "no_change"
@@ -234,7 +243,10 @@ export interface HostedAutonomyPullV1 {
 export interface HostedAutonomyGitHubV1 {
   /** Current base-branch tip, or null when it cannot be read. */
   readBaseTip(): Promise<string | null>;
-  /** True when the exact head carries a successful deterministic check. */
+  /**
+   * True only when the COMPLETE check-run listing for the exact head was
+   * read and every run on it is completed and successful.
+   */
   hasSuccessfulCheck(head: string): Promise<boolean>;
   readPull(number: number): Promise<HostedAutonomyPullV1 | null>;
   /**
@@ -1447,6 +1459,49 @@ export function createHostedAutonomyGitHub(
     return { ...parsed, parents, revisionOnBaseBranch };
   }
 
+  /**
+   * The complete check-run listing for one head, or null when it cannot be
+   * read to the end. The endpoint paginates, so a first page alone never
+   * proves that no later page holds a pending or failed run; every page is
+   * read within the bound and the endpoint's own `total_count` (when present)
+   * must be fully carried by those pages before the listing is trusted.
+   */
+  async function readCheckRuns(
+    head: string,
+  ): Promise<Record<string, unknown>[] | null> {
+    const runs: Record<string, unknown>[] = [];
+    let expected: number | null = null;
+    for (let page = 1; page <= MAX_CHECK_RUN_PAGES; page++) {
+      const body = await request(
+        "GET",
+        `/repos/${ISSUE48_QUOTA_REPOSITORY}/commits/${head}/check-runs` +
+          `?per_page=${CHECK_RUNS_PER_PAGE}&page=${page}`,
+      );
+      if (body === null || typeof body !== "object") return null;
+      const obj = body as Record<string, unknown>;
+      const list = obj["check_runs"];
+      if (!Array.isArray(list)) return null;
+      const total = obj["total_count"];
+      if (
+        typeof total === "number" && Number.isSafeInteger(total) && total >= 0
+      ) {
+        expected = expected === null ? total : Math.max(expected, total);
+      }
+      for (const item of list) {
+        if (typeof item === "object" && item !== null) {
+          runs.push(item as Record<string, unknown>);
+        }
+      }
+      if (expected !== null && runs.length >= expected) return runs;
+      if (list.length < CHECK_RUNS_PER_PAGE) {
+        // The listing is complete only when it carries its own reported total.
+        return expected !== null && runs.length < expected ? null : runs;
+      }
+    }
+    // The page bound was reached with a full page still in hand.
+    return null;
+  }
+
   return {
     async readBaseTip() {
       const ref = await request(
@@ -1460,21 +1515,26 @@ export function createHostedAutonomyGitHub(
       return typeof sha === "string" ? sha : null;
     },
     async hasSuccessfulCheck(head: string) {
-      const runs = await request(
-        "GET",
-        `/repos/${ISSUE48_QUOTA_REPOSITORY}/commits/${head}/check-runs?per_page=100`,
+      const list = await readCheckRuns(head);
+      // An unreadable or incomplete listing never authorizes a merge: a later
+      // page could still hold a pending or failed run.
+      if (list === null) return false;
+      // Only the runs reported on the exact head count, and zero runs is not
+      // green. Every run on that head must be completed and successful, which
+      // also excludes anything pending, queued or failed; the deterministic
+      // check must additionally be present so a head whose own CI never ran
+      // the required gate is never delivered.
+      const onHead = list.filter((item) => item["head_sha"] === head);
+      if (onHead.length === 0) return false;
+      const required = onHead.some((item) =>
+        item["name"] === HOSTED_AUTONOMY_REQUIRED_CHECK &&
+        item["status"] === "completed" &&
+        item["conclusion"] === "success"
       );
-      const list = runs !== null && typeof runs === "object"
-        ? (runs as Record<string, unknown>)["check_runs"]
-        : null;
-      if (!Array.isArray(list)) return false;
-      return list.some((item) =>
-        typeof item === "object" && item !== null &&
-        (item as Record<string, unknown>)["name"] ===
-          HOSTED_AUTONOMY_REQUIRED_CHECK &&
-        (item as Record<string, unknown>)["head_sha"] === head &&
-        (item as Record<string, unknown>)["status"] === "completed" &&
-        (item as Record<string, unknown>)["conclusion"] === "success"
+      if (!required) return false;
+      return onHead.every((item) =>
+        item["status"] === "completed" &&
+        item["conclusion"] === "success"
       );
     },
     readPull,
