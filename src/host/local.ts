@@ -1916,6 +1916,46 @@ export interface LocalModelInputV1 {
    * Omitted callers keep the single `sourcePath` mirror.
    */
   resolveSourcePath?: (repository: RepositoryIdentityV1) => string;
+  /**
+   * Trusted on-demand base fetch for one requested target. A run fetches its
+   * mirrors when a target cycle starts, and the target branch can move while
+   * that same cycle is still running: a record created after the move is
+   * pinned to the newer base, and a mirror fetched before it can never check
+   * that base out. The host ensures the EXACT requested base object through
+   * its own bounded, gated git fetch; the model session itself never fetches.
+   * Omitted callers keep the fail-closed behavior (a missing base refuses the
+   * start instead of being repaired).
+   */
+  ensureBaseObject?: (
+    input: { repository: RepositoryIdentityV1; base: GitSha },
+  ) => Promise<PortResultV1<void>>;
+}
+
+/**
+ * Exact commit-object presence in the trusted source mirror, proved through
+ * the trusted git runtime only. A non-zero status (absent object, unreadable
+ * or foreign repository) is a refusal, never a silent success.
+ */
+async function commitObjectPresent(input: {
+  sourcePath: string;
+  sha: GitSha;
+  scratch: string;
+  trustedPath: string;
+}): Promise<boolean> {
+  try {
+    const result = await runTrustedGitResult({
+      args: ["-C", input.sourcePath, "cat-file", "-e", `${input.sha}^{commit}`],
+      cwd: input.sourcePath,
+      trustedPath: input.trustedPath,
+      scratch: input.scratch,
+    });
+    return result.code === 0;
+  } catch {
+    // An unsettled or refused trusted child proves nothing about the object:
+    // it counts as absent so the caller fails closed (or asks the host for
+    // the exact fetch) instead of continuing against an unproved mirror.
+    return false;
+  }
 }
 
 /**
@@ -1993,6 +2033,42 @@ export class LocalCheckoutModelPort implements ImplementationPort {
     // does not exist in the sentinel mirror.
     const sourcePath = this.input.resolveSourcePath?.(request.repository) ??
       this.input.sourcePath;
+    // The exact base object must exist in that mirror BEFORE a checkout is
+    // prepared. Requiring it here is what turns a mirror that was fetched
+    // before the branch moved into a bounded, gated catch-up instead of an
+    // unexplained checkout refusal for every record pinned to the newer base.
+    if (
+      !await commitObjectPresent({
+        sourcePath,
+        sha: checkoutBase,
+        scratch: this.input.scratch,
+        trustedPath: this.input.trustedPath,
+      })
+    ) {
+      if (this.input.ensureBaseObject === undefined) {
+        return await failCheckout();
+      }
+      let ensured: PortResultV1<void>;
+      try {
+        ensured = await this.input.ensureBaseObject({
+          repository: request.repository,
+          base: checkoutBase,
+        });
+      } catch {
+        return await failCheckout();
+      }
+      if (!ensured.ok) return await failCheckout();
+      if (
+        !await commitObjectPresent({
+          sourcePath,
+          sha: checkoutBase,
+          scratch: this.input.scratch,
+          trustedPath: this.input.trustedPath,
+        })
+      ) {
+        return await failCheckout();
+      }
+    }
     const prepared = await ensureTaskCheckout({
       taskId: request.taskId,
       base: checkoutBase,

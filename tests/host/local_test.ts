@@ -2653,6 +2653,160 @@ Deno.test(
 );
 
 Deno.test(
+  "local host: a base missing from the target mirror is fetched before the model checkout",
+  async () => {
+    // A run fetches its mirrors when a target cycle starts; the target branch
+    // can move while that cycle is still running, and an intake record pinned
+    // to the moved head then cannot be checked out. The exact base object is
+    // ensured through the host seam before any checkout is prepared, and a
+    // missing base with no seam still refuses the start.
+    const root = await Deno.realPath(
+      await Deno.makeTempDir({ dir: ".", prefix: "sentinel-base-fetch-" }),
+    );
+    const home = `${root}/home`;
+    await Deno.mkdir(home, { recursive: true });
+    const env = testGitEnv(home);
+    const trustedPath = env.PATH ?? "/usr/bin:/bin";
+    try {
+      const remote = await makeRemoteCtx(root, env);
+      const commit = async (name: string): Promise<GitSha> => {
+        await Deno.writeTextFile(`${remote.work}/${name}`, `${name}\n`);
+        assert.equal(
+          (await gitRun(remote.work, ["add", "-A"], env)).ok,
+          true,
+        );
+        assert.equal(
+          (await gitRun(
+            remote.work,
+            ["commit", "-q", "-m", name],
+            env,
+          )).ok,
+          true,
+        );
+        assert.equal(
+          (await gitRun(
+            remote.work,
+            ["push", "-q", "origin", "HEAD:refs/heads/development"],
+            env,
+          )).ok,
+          true,
+        );
+        return (await gitRun(remote.work, ["rev-parse", "HEAD"], env))
+          .stdout.trim() as GitSha;
+      };
+      const baseA = await commit("a.txt");
+      const baseB = await commit("b.txt");
+      // The mirror holds exactly the base that existed when the run fetched
+      // it, and no object of the newer base at all.
+      const mirror = `${root}/mirror.git`;
+      assert.equal(
+        (await gitRun(root, ["init", "-q", "--bare", mirror], env)).ok,
+        true,
+      );
+      assert.equal(
+        (await gitRun(
+          remote.work,
+          ["push", "-q", mirror, `${baseA}:refs/heads/development`],
+          env,
+        )).ok,
+        true,
+      );
+      assert.notEqual(
+        (await gitRun(mirror, ["cat-file", "-e", `${baseB}^{commit}`], env))
+          .code,
+        0,
+        "the mirror starts without the newer base",
+      );
+
+      const stateRoot = `${root}/state`;
+      const hostFetch = (): Promise<PortResultV1<void>> =>
+        gitRun(
+          mirror,
+          [
+            "fetch",
+            "--no-tags",
+            remote.remoteUrl,
+            "+refs/heads/development:refs/remotes/origin/development",
+          ],
+          env,
+        ).then((fetched) =>
+          fetched.ok
+            ? portOk(undefined)
+            : portError("unavailable", "test base fetch failed")
+        );
+      const port = (input: Partial<LocalModelInputV1> = {}) =>
+        new LocalCheckoutModelPort({
+          stateRoot,
+          sourcePath: mirror,
+          scratch: home,
+          trustedPath,
+          // Never reached here: this case proves the checkout stage only.
+          codexExecutable: "/nonexistent/sentinel-codex-marker",
+          denoExecutable: "/nonexistent/sentinel-deno-marker",
+          modelToken: "dummy-model-token-marker",
+          tracker: new LocalSessionTracker(),
+          clock: new FakeClock(T0),
+          ...input,
+        });
+      const requestFor = (
+        taskId: string,
+        base: GitSha,
+      ): ModelRunRequestV1 => ({
+        ...modelRequest(),
+        taskId: asWorkItemId(taskId),
+        base,
+      });
+
+      // 1. The newer base is fetched exactly once through the host seam, and
+      // the exact checkout is then prepared and detached at that base.
+      let baseFetches = 0;
+      const fetched = await port({
+        ensureBaseObject: () => {
+          baseFetches++;
+          return hostFetch();
+        },
+      }).runModel(requestFor("issue-1", baseB));
+      assert.equal(baseFetches, 1, "the host fetched the missing base once");
+      assert.equal(fetched.ok, false, "no session can launch in this case");
+      const firstKey = await localCheckoutKey(asWorkItemId("issue-1"));
+      const firstCheckout = `${stateRoot}/checkouts/${firstKey}`;
+      assert.equal(
+        (await gitRun(firstCheckout, ["rev-parse", "HEAD"], env)).stdout.trim(),
+        baseB,
+        "the checkout is detached at the fetched base",
+      );
+
+      // 2. A second task at the same base reuses the mirror object and never
+      // asks the host to fetch again.
+      await port({
+        ensureBaseObject: () => {
+          baseFetches++;
+          return hostFetch();
+        },
+      }).runModel(requestFor("issue-2", baseB));
+      assert.equal(baseFetches, 1, "a present base is never fetched again");
+
+      // 3. Fail closed without the host seam: a base absent from the mirror
+      // refuses the start and prepares no checkout at all.
+      const baseC = await commit("c.txt");
+      const refused = await port().runModel(requestFor("issue-3", baseC));
+      assert.equal(refused.ok, false);
+      const thirdKey = await localCheckoutKey(asWorkItemId("issue-3"));
+      let checkoutPrepared = false;
+      try {
+        await Deno.stat(`${stateRoot}/checkouts/${thirdKey}`);
+        checkoutPrepared = true;
+      } catch {
+        checkoutPrepared = false;
+      }
+      assert.equal(checkoutPrepared, false, "no checkout without the base");
+    } finally {
+      await Deno.remove(root, { recursive: true }).catch(() => {});
+    }
+  },
+);
+
+Deno.test(
   "base refresh fetches a newly advanced target base before integration",
   async () => {
     // The fixture root stays under the worktree so the registered read
