@@ -44,11 +44,17 @@ import {
   pushIntentKey,
   reviewReceiptId,
   workItemIdForIncident,
+  workItemIdForIssue,
 } from "../../src/repair/keys.ts";
 import { DurableGitHubCooldownGate } from "../../src/repair/github-cooldown.ts";
 import { runRepairCycle } from "../../src/repair/loop.ts";
 import type { RepairCycleDepsV1 } from "../../src/repair/loop.ts";
 import { runRepairEntrypoint } from "../../src/main.ts";
+import {
+  applyHostedRetirements,
+  HOSTED_AUTONOMY_RETIRED,
+  planHostedRetirements,
+} from "../../ops/hosted-autonomy.ts";
 import { persistHostedReceipt } from "../host/hosted-receipt-fixture.ts";
 import type { HostedReceiptPhaseV1 } from "../host/hosted-receipt-fixture.ts";
 import { parseReleaseStateSnapshotV1 } from "../../src/contracts/state-snapshots.ts";
@@ -5792,6 +5798,280 @@ Deno.test(
         rig.github.reviewRequestIdentities[1]!.operationKey,
         `review:7:${head}:attempt-3`,
       );
+    } finally {
+      await rig.ctx.cleanup();
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Retired PR WIP: the hosted retirement disposition must free a real WIP slot
+// for the ACTUAL loop, not only for a pure helper. These cases seed durable
+// state with records parked through the actual applyHostedRetirements and then
+// run the real repair cycle over real temporary Git state.
+// ---------------------------------------------------------------------------
+
+const RETIRED_AI_120 = workItemIdForIssue(REPO, 120);
+const RETIRED_SENTINEL_61 = workItemIdForIssue(REPO, 61);
+const HUMAN_MERGED_264 = workItemIdForIssue(REPO, 264);
+const FRESH_AFTER_RETIREMENT = workItemIdForIssue(REPO, 999);
+
+/** One closed-unmerged-PR record in the shape retirement consumes. */
+function retiredPrRecord(
+  id: WorkItemId,
+  issueNumber: number,
+  pr: number,
+  overrides: Record<string, unknown> = {},
+): WorkRecordV1 {
+  return workRecord(id, {
+    source: { kind: "issue", id: String(issueNumber), revision: SHA1 },
+    related: { incidentId: null, issueNumber },
+    target: {
+      base: SHA1,
+      branch: `sentinel/repair/issue-${issueNumber}`,
+      checkpoint: null,
+      head: SHA2,
+      pr,
+    },
+    nextStep: "review",
+    wait: { reason: "review_pending", since: T0, until: T0 + 3_600_000 },
+    counters: { attempts: 1, retries: 0, reviewRounds: 1 },
+    ...overrides,
+  });
+}
+
+/** One open issue row served to the real intake in these cases. */
+function freshIssueRow(number: number): GitHubIssueV1 {
+  return issueRecord(number, {
+    title: "fresh eligible repair after retirements",
+    labels: ["P2", "priority:9"],
+    createdAt: T0 - 100,
+  });
+}
+
+Deno.test(
+  "retired PR WIP: actual retirements free two slots and the fresh issue starts exactly one model session",
+  async () => {
+    const rig = await makeRig("retired-wip", {
+      summaries: false,
+      github: {
+        openIssues: [freshIssueRow(999)],
+        // The pre-admission freshness re-read must resolve the same row.
+        issues: [freshIssueRow(999)],
+      },
+    });
+    try {
+      const retiredAi120 = retiredPrRecord(RETIRED_AI_120, 120, 375, {
+        evidence: [{
+          kind: "review_receipt",
+          ref: "artifact:review-receipt/ai-120",
+        }],
+      });
+      const retiredSentinel61 = retiredPrRecord(RETIRED_SENTINEL_61, 61, 63, {
+        counters: { attempts: 2, retries: 0, reviewRounds: 1 },
+        intent: {
+          kind: "implementation",
+          key: "implementation:sentinel-61",
+          startedAt: T0 + 500,
+          branch: "sentinel/repair/issue-61",
+          expectedHead: null,
+          observedBase: SHA1,
+          pr: null,
+          requestId: "charge-61",
+          resultId: null,
+        },
+      });
+      // ai#264 / PR393: human-merged but unaccepted, so it stays counted.
+      const humanMerged264 = retiredPrRecord(HUMAN_MERGED_264, 264, 393, {
+        nextStep: "delivery",
+      });
+      const historicalCharge = reservation("charge-61", {
+        taskId: RETIRED_SENTINEL_61,
+        head: SHA1,
+        attempt: 2,
+        purpose: "implementation",
+        outcome: "submitted",
+        settledAt: T0 + 2000,
+      });
+      const historicalReceipt = reviewReceipt("review-receipt-ai-120", {
+        pullRequest: { number: 375, head: SHA2, base: SHA1 },
+        submittedAt: T0 + 1000,
+        observedAt: T0 + 2000,
+      });
+      const seeded = seededSnapshot(
+        [retiredAi120, retiredSentinel61, humanMerged264],
+        { reservations: [historicalCharge], reviews: [historicalReceipt] },
+      );
+      const seededWrite = await rig.store.writeRepair(seeded, null);
+      assert.ok(seededWrite.ok && seededWrite.value.status === "applied");
+      const read = await rig.store.readRepair();
+      assert.ok(read.ok && read.value.status === "found");
+      if (!read.ok || read.value.status !== "found") {
+        throw new Error("seeded repair state unavailable");
+      }
+
+      const plans = planHostedRetirements(
+        read.value.snapshot,
+        new Set([120, 61]),
+        new Set([retiredAi120.id, retiredSentinel61.id]),
+      );
+      assert.deepEqual(
+        plans.map((plan) => plan.id).sort(),
+        [retiredAi120.id, retiredSentinel61.id].sort(),
+        "the actual retirement helper parks both closed-unmerged PRs",
+      );
+      const retired = applyHostedRetirements(
+        read.value.snapshot,
+        read.value.head,
+        plans,
+        T0 + 1000,
+      );
+      const retiredWrite = await rig.store.writeRepair(
+        retired,
+        read.value.head,
+      );
+      assert.ok(retiredWrite.ok && retiredWrite.value.status === "applied");
+      // The retirement write advanced the durable state past the frozen rig
+      // clock; move the fake clock forward so the run's own writes are legal.
+      rig.clock.advance(2_000);
+
+      const outcome = await rig.run();
+      // Semantic red before the fix: the two retired records still count, the
+      // fresh issue is WIP-skipped and this is 0 with no model start.
+      assert.equal(rig.model.requests.length, 1, JSON.stringify(outcome));
+      assert.notEqual(outcome.status, "state_error", JSON.stringify(outcome));
+
+      const state = await rig.snapshot();
+      const fresh = state.work.find((record) =>
+        record.id === FRESH_AFTER_RETIREMENT
+      );
+      assert.ok(fresh, "the fresh issue reached durable state");
+      assert.equal(fresh.counters.attempts, 1);
+      assert.equal(
+        state.reservations.filter((record) =>
+          record.taskId === FRESH_AFTER_RETIREMENT &&
+          record.purpose === "implementation"
+        ).length,
+        1,
+        "exactly one durable implementation charge",
+      );
+
+      const ai120 = state.work.find((record) => record.id === RETIRED_AI_120);
+      assert.ok(ai120);
+      assert.equal(ai120.nextStep, "blocked");
+      assert.equal(ai120.target.pr, 375);
+      assert.equal(ai120.target.head, SHA2);
+      assert.equal(ai120.blocker?.kind, "other");
+      assert.equal(ai120.blocker?.message, HOSTED_AUTONOMY_RETIRED);
+      assert.equal(ai120.wait, null);
+      assert.equal(ai120.intent, null);
+      assert.equal(ai120.counters.attempts, 1);
+      assert.equal(ai120.counters.reviewRounds, 1);
+
+      const sentinel61 = state.work.find((record) =>
+        record.id === RETIRED_SENTINEL_61
+      );
+      assert.ok(sentinel61);
+      assert.equal(sentinel61.nextStep, "blocked");
+      assert.equal(sentinel61.target.pr, 63);
+      assert.equal(sentinel61.target.head, SHA2);
+      assert.equal(sentinel61.blocker?.kind, "other");
+      assert.equal(sentinel61.blocker?.message, HOSTED_AUTONOMY_RETIRED);
+      assert.equal(sentinel61.wait, null);
+      assert.equal(sentinel61.intent, null);
+      assert.equal(sentinel61.counters.attempts, 2);
+      assert.equal(sentinel61.counters.reviewRounds, 1);
+
+      assert.ok(
+        state.reservations.some((record) =>
+          record.id === historicalCharge.id &&
+          record.outcome === "submitted"
+        ),
+        "the historical charge is retained",
+      );
+      assert.ok(
+        state.reviews.some((record) => record.id === historicalReceipt.id),
+        "the historical review receipt is retained",
+      );
+
+      const humanMerged = state.work.find((record) =>
+        record.id === HUMAN_MERGED_264
+      );
+      assert.ok(humanMerged);
+      assert.equal(humanMerged.nextStep, "delivery");
+      assert.equal(humanMerged.target.pr, 393);
+      assert.equal(humanMerged.target.head, SHA2);
+    } finally {
+      await rig.ctx.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "retired PR WIP: three arbitrary blocked or waiting PRs yield no model start (control)",
+  async () => {
+    const rig = await makeRig("retired-wip-control", {
+      summaries: false,
+      github: {
+        openIssues: [freshIssueRow(999)],
+        // The control must fail only on the cap: a missing issue row would
+        // produce zero starts for the wrong reason.
+        issues: [freshIssueRow(999)],
+      },
+    });
+    try {
+      const genericBlocked = retiredPrRecord(
+        workItemIdForIssue(REPO, 301),
+        301,
+        401,
+        {
+          nextStep: "blocked",
+          wait: null,
+          blocker: {
+            kind: "other",
+            message: "model run ended without a trusted receipt",
+            since: T0,
+          },
+        },
+      );
+      const unavailableBlocked = retiredPrRecord(
+        workItemIdForIssue(REPO, 302),
+        302,
+        402,
+        {
+          nextStep: "blocked",
+          wait: null,
+          blocker: {
+            kind: "unavailable",
+            message: "review transport unavailable",
+            since: T0,
+          },
+        },
+      );
+      const waitingReview = retiredPrRecord(
+        workItemIdForIssue(REPO, 303),
+        303,
+        403,
+      );
+      const write = await rig.store.writeRepair(
+        seededSnapshot([genericBlocked, unavailableBlocked, waitingReview]),
+        null,
+      );
+      assert.ok(write.ok && write.value.status === "applied");
+
+      const outcome = await rig.run();
+      assert.equal(rig.model.requests.length, 0, JSON.stringify(outcome));
+
+      const state = await rig.snapshot();
+      const fresh = state.work.find((record) =>
+        record.id === FRESH_AFTER_RETIREMENT
+      );
+      assert.ok(fresh, "the fresh issue was admitted into state");
+      assert.equal(fresh.nextStep, "work");
+      assert.equal(fresh.target.pr, null);
+      assert.equal(fresh.counters.attempts, 0);
+      assert.equal(fresh.wait, null, "never selected or deferred");
+      assert.equal(state.reservations.length, 0);
     } finally {
       await rig.ctx.cleanup();
     }
