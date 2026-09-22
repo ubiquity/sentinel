@@ -320,6 +320,18 @@ export const OWNER_DEVELOPMENT_INSTALL_SETTLEMENT_RECOVERY_GENERATION = 34;
 export const OWNER_DEVELOPMENT_INSTALL_QUIET_REASONING_REVISION =
   "db16f8af810ee24f434938a3e9dd17c04c3e8084" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_QUIET_REASONING_GENERATION = 35;
+/**
+ * Exact owner-approved revision that fetches a newly advanced target base
+ * before deterministic integration through the existing same-target
+ * authenticated fetch and shared cooldown; bounds, models, review, merge and
+ * state admission policy are unchanged. Installed only after the quiet
+ * reasoning generation 35 healthy proof. A failed generation 36 candidate
+ * settles exactly once by rolling back to the recorded generation 35 revision
+ * with a monotonic generation 37; that post-rollback pointer is terminal.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_BASE_FETCH_REVISION =
+  "ae4629faeb75a80c1badf1ff37a58c8be00adf99" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_BASE_FETCH_GENERATION = 36;
 
 const API_BASE = "https://api.github.com";
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -1358,10 +1370,53 @@ export function planOwnerDevelopmentInstall(
       );
     }
     if (healthy !== null) {
-      return noChange("the owner development installation is complete");
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_BASE_FETCH_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_BASE_FETCH_GENERATION,
+        healthy,
+        "install the base fetch revision after the quiet reasoning healthy proof",
+      );
     }
     return waiting(
       "the quiet reasoning generation 35 healthy proof is not recorded",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_BASE_FETCH_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_BASE_FETCH_GENERATION
+  ) {
+    // An exact failed settlement of this pointer is candidate failure
+    // evidence even when a healthy proof exists; the rollback still requires
+    // the recorded healthy proof of the exact prior revision, so a missing or
+    // unrelated proof stays a zero-write waiting outcome.
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_QUIET_REASONING_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_QUIET_REASONING_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded quiet reasoning healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_QUIET_REASONING_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed base fetch candidate to its recorded prior",
+      );
+    }
+    if (healthy !== null) {
+      return noChange("the owner development installation is complete");
+    }
+    return waiting(
+      "the base fetch generation 36 healthy proof is not recorded",
     );
   }
 
