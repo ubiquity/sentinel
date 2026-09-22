@@ -108,6 +108,12 @@ const FOREIGN_AUTH = OWNER_DEVELOPMENT_INSTALL_FOREIGN_AUTH_REVISION;
 const REASON_CODE = OWNER_DEVELOPMENT_INSTALL_REASON_CODE_REVISION;
 const SETTLEMENT_RECOVERY =
   OWNER_DEVELOPMENT_INSTALL_SETTLEMENT_RECOVERY_REVISION;
+// The quiet-reasoning pins stay test-local exact literals: this suite must also
+// compile against pre-rung production source, where the newly exported
+// constants do not exist, so the expected red is a semantic plan mismatch and
+// never a missing import.
+const QUIET_REASONING = "db16f8af810ee24f434938a3e9dd17c04c3e8084" as GitSha;
+const QUIET_REASONING_GENERATION = 35;
 
 function hostedProof(input: {
   runId: number;
@@ -1093,20 +1099,22 @@ Deno.test(
     if (reasonSettled.status !== "install") throw new Error("expected install");
     assert.equal(reasonSettled.move.nextRevision, SETTLEMENT_RECOVERY);
     assert.equal(reasonSettled.move.nextGeneration, 34);
-    // The settlement recovery generation is the fixed end of the chain.
-    assert.equal(
-      planOwnerDevelopmentInstall(
-        releaseSnapshot({
-          runtime: runtimeRecord({
-            revision: SETTLEMENT_RECOVERY,
-            generation: 34,
-            healthyProof: healthyProof(SETTLEMENT_RECOVERY, 34, 105),
-          }),
+    // The settlement recovery healthy proof authorizes the fixed
+    // quiet-reasoning install, the last link of the chain.
+    const quietPlan = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: SETTLEMENT_RECOVERY,
+          generation: 34,
+          healthyProof: healthyProof(SETTLEMENT_RECOVERY, 34, 105),
         }),
-        NOW,
-      ).status,
-      "no_change",
+      }),
+      NOW,
     );
+    assert.equal(quietPlan.status, "install");
+    if (quietPlan.status !== "install") throw new Error("expected install");
+    assert.equal(quietPlan.move.nextRevision, QUIET_REASONING);
+    assert.equal(quietPlan.move.nextGeneration, QUIET_REASONING_GENERATION);
     const exitFailed = planOwnerDevelopmentInstall(
       releaseSnapshot({
         runtime: runtimeRecord({
@@ -1369,19 +1377,28 @@ Deno.test(
     );
 
     // The installed generation 34 pointer is stable only with its own bound
-    // healthy proof.
-    assert.equal(
-      planOwnerDevelopmentInstall(
-        releaseSnapshot({
-          runtime: runtimeRecord({
-            revision: SETTLEMENT_RECOVERY,
-            generation: 34,
-            healthyProof: healthyProof(SETTLEMENT_RECOVERY, 34, 114),
-          }),
+    // healthy proof; that proof authorizes the fixed quiet-reasoning install
+    // to generation 35.
+    const settlementHealthy = healthyProof(SETTLEMENT_RECOVERY, 34, 114);
+    const quietInstall = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: SETTLEMENT_RECOVERY,
+          generation: 34,
+          healthyProof: settlementHealthy,
         }),
-        NOW,
-      ).status,
-      "no_change",
+      }),
+      NOW,
+    );
+    assert.equal(quietInstall.status, "install");
+    if (quietInstall.status !== "install") throw new Error("expected install");
+    assert.equal(quietInstall.move.priorRevision, SETTLEMENT_RECOVERY);
+    assert.equal(quietInstall.move.priorGeneration, 34);
+    assert.equal(quietInstall.move.nextRevision, QUIET_REASONING);
+    assert.equal(quietInstall.move.nextGeneration, QUIET_REASONING_GENERATION);
+    assert.equal(
+      canonicalStringify(quietInstall.move.priorHealthyProof),
+      canonicalStringify(settlementHealthy),
     );
     assert.equal(
       planOwnerDevelopmentInstall(
@@ -1436,6 +1453,230 @@ Deno.test(
       ).status,
       "waiting",
     );
+  },
+);
+
+Deno.test(
+  "owner install: quiet reasoning revision preserves install and rollback gates",
+  () => {
+    const settlementHealthy = healthyProof(SETTLEMENT_RECOVERY, 34, 121);
+    // The fixed owner-approved pin: only the recorded generation 34 healthy
+    // proof authorizes exactly one move to the quiet reasoning revision.
+    const install = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: SETTLEMENT_RECOVERY,
+          generation: 34,
+          healthyProof: settlementHealthy,
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(install.status, "install");
+    if (install.status !== "install") throw new Error("expected install");
+    assert.equal(install.move.action, "install");
+    assert.equal(install.move.priorRevision, SETTLEMENT_RECOVERY);
+    assert.equal(install.move.priorGeneration, 34);
+    assert.equal(install.move.nextRevision, QUIET_REASONING);
+    assert.equal(install.move.nextGeneration, QUIET_REASONING_GENERATION);
+    assert.equal(install.move.nextGeneration, install.move.priorGeneration + 1);
+    assert.equal(
+      canonicalStringify(install.move.priorHealthyProof),
+      canonicalStringify(settlementHealthy),
+    );
+
+    // A healthy proof bound to another revision or generation, and no
+    // recorded proof at all, never authorize the fixed pin.
+    for (
+      const healthy of [
+        healthyProof(QUIET_REASONING, 34, 122),
+        healthyProof(SETTLEMENT_RECOVERY, 35, 123),
+        null,
+      ]
+    ) {
+      assert.equal(
+        planOwnerDevelopmentInstall(
+          releaseSnapshot({
+            runtime: runtimeRecord({
+              revision: SETTLEMENT_RECOVERY,
+              generation: 34,
+              healthyProof: healthy,
+            }),
+          }),
+          NOW,
+        ).status,
+        "waiting",
+      );
+    }
+
+    // An in-flight execution, a non-terminal release and an active cooldown
+    // each keep the pin a zero-write wait.
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: SETTLEMENT_RECOVERY,
+            generation: 34,
+            healthyProof: settlementHealthy,
+            execution: executionIntent(SETTLEMENT_RECOVERY, 34),
+          }),
+        }),
+        NOW,
+      ).status,
+      "waiting",
+    );
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: SETTLEMENT_RECOVERY,
+            generation: 34,
+            healthyProof: settlementHealthy,
+          }),
+          hostedReleases: [requestedRelease()],
+        }),
+        NOW,
+      ).status,
+      "waiting",
+    );
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: SETTLEMENT_RECOVERY,
+            generation: 34,
+            healthyProof: settlementHealthy,
+          }),
+          cooldowns: [cooldown(NOW + 1)],
+        }),
+        NOW,
+      ).status,
+      "waiting",
+    );
+
+    // The installed generation 35 pointer is stable only with its own bound
+    // healthy proof, and that stable candidate is terminal.
+    const quietHealthy = healthyProof(QUIET_REASONING, 35, 124);
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: QUIET_REASONING,
+            generation: QUIET_REASONING_GENERATION,
+            healthyProof: quietHealthy,
+          }),
+        }),
+        NOW,
+      ).status,
+      "no_change",
+    );
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: QUIET_REASONING,
+            generation: QUIET_REASONING_GENERATION,
+            healthyProof: settlementHealthy,
+          }),
+        }),
+        NOW,
+      ).status,
+      "waiting",
+    );
+
+    // A failed generation 35 candidate settles exactly once by rolling back
+    // to the exact previously proven generation 34 revision with a monotonic
+    // generation 36, authorized by its recorded healthy proof.
+    const failed = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: QUIET_REASONING,
+          generation: QUIET_REASONING_GENERATION,
+          healthyProof: settlementHealthy,
+          executionProof: failedProof(
+            QUIET_REASONING,
+            QUIET_REASONING_GENERATION,
+            125,
+          ),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(failed.status, "rollback");
+    if (failed.status !== "rollback") throw new Error("expected rollback");
+    assert.equal(failed.move.action, "rollback");
+    assert.equal(failed.move.priorRevision, QUIET_REASONING);
+    assert.equal(failed.move.priorGeneration, QUIET_REASONING_GENERATION);
+    assert.equal(failed.move.nextRevision, SETTLEMENT_RECOVERY);
+    assert.equal(failed.move.nextGeneration, 36);
+    assert.equal(failed.move.nextGeneration, failed.move.priorGeneration + 1);
+    assert.equal(
+      canonicalStringify(failed.move.priorHealthyProof),
+      canonicalStringify(settlementHealthy),
+    );
+
+    // A failure that does not bind the exact pointer, a no-execution
+    // settlement and a missing recorded prior never roll back.
+    const waits = [
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: QUIET_REASONING,
+          generation: QUIET_REASONING_GENERATION,
+          healthyProof: settlementHealthy,
+          executionProof: failedProof(QUIET_REASONING, 34, 126),
+        }),
+      }),
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: QUIET_REASONING,
+          generation: QUIET_REASONING_GENERATION,
+          healthyProof: settlementHealthy,
+          executionProof: notStartedProof(
+            QUIET_REASONING,
+            QUIET_REASONING_GENERATION,
+          ),
+        }),
+      }),
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: QUIET_REASONING,
+          generation: QUIET_REASONING_GENERATION,
+          executionProof: failedProof(
+            QUIET_REASONING,
+            QUIET_REASONING_GENERATION,
+            127,
+          ),
+        }),
+      }),
+    ];
+    for (const state of waits) {
+      const plan = planOwnerDevelopmentInstall(state, NOW);
+      assert.notEqual(plan.status, "rollback");
+      assert.equal(plan.status, "waiting");
+    }
+
+    // The post-rollback generation 36 pointer is terminal: it is outside the
+    // one-shot chain and never reattempts either movement.
+    for (
+      const healthy of [
+        healthyProof(SETTLEMENT_RECOVERY, 36, 128),
+        null,
+      ]
+    ) {
+      assert.equal(
+        planOwnerDevelopmentInstall(
+          releaseSnapshot({
+            runtime: runtimeRecord({
+              revision: SETTLEMENT_RECOVERY,
+              generation: 36,
+              healthyProof: healthy,
+            }),
+          }),
+          NOW,
+        ).status,
+        "no_change",
+      );
+    }
   },
 );
 

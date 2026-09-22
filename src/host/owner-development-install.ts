@@ -308,6 +308,18 @@ export const OWNER_DEVELOPMENT_INSTALL_REASON_CODE_GENERATION = 33;
 export const OWNER_DEVELOPMENT_INSTALL_SETTLEMENT_RECOVERY_REVISION =
   "83a7cd8162d808887a27ad733c64db6e3a7c77ac" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_SETTLEMENT_RECOVERY_GENERATION = 34;
+/**
+ * Exact owner-approved revision whose only behavior change is supported
+ * `optOutNotificationMethods` for three unused reasoning streams on the
+ * implementation and reviewer sessions; accounting, bounds and policy are
+ * unchanged. Installed only after the settlement-recovery generation 34
+ * healthy proof. A failed generation 35 candidate settles exactly once by
+ * rolling back to the recorded generation 34 revision with a monotonic
+ * generation 36; that post-rollback pointer is terminal.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_QUIET_REASONING_REVISION =
+  "db16f8af810ee24f434938a3e9dd17c04c3e8084" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_QUIET_REASONING_GENERATION = 35;
 
 const API_BASE = "https://api.github.com";
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -1303,10 +1315,53 @@ export function planOwnerDevelopmentInstall(
       );
     }
     if (healthy !== null) {
-      return noChange("the owner development installation is complete");
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_QUIET_REASONING_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_QUIET_REASONING_GENERATION,
+        healthy,
+        "install the quiet reasoning revision after the settlement recovery healthy proof",
+      );
     }
     return waiting(
       "the settlement recovery generation 34 healthy proof is not recorded",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_QUIET_REASONING_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_QUIET_REASONING_GENERATION
+  ) {
+    // An exact failed settlement of this pointer is candidate failure
+    // evidence even when a healthy proof exists; the rollback still requires
+    // the recorded healthy proof of the exact prior revision, so a missing or
+    // unrelated proof stays a zero-write waiting outcome.
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_SETTLEMENT_RECOVERY_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_SETTLEMENT_RECOVERY_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded settlement recovery healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_SETTLEMENT_RECOVERY_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed quiet reasoning candidate to its recorded prior",
+      );
+    }
+    if (healthy !== null) {
+      return noChange("the owner development installation is complete");
+    }
+    return waiting(
+      "the quiet reasoning generation 35 healthy proof is not recorded",
     );
   }
 
