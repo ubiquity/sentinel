@@ -38,6 +38,7 @@ import {
   readHostedRuntimeExecution,
   runHostedRuntimeLauncher,
 } from "../../src/host/hosted-runtime.ts";
+import { RUN_DEADLINE_MS } from "../../src/host/actions.ts";
 import type {
   HostedModelDiagnosticV1,
   HostedRuntimeIdentityV1,
@@ -864,6 +865,20 @@ Deno.test("hosted runtime: the child deadline fits the repair job and the minted
   assert.ok(
     jobMs < APP_TOKEN_LIFETIME_MS,
     "the job must end before the minted App token expires",
+  );
+
+  // The child keeps its own run budget, and nothing passes the launcher bound
+  // into it, so the two constants have to stay ordered here: the loop then
+  // refuses work that cannot finish and every started session settles and
+  // drains before the launcher's signal, instead of dying mid-flight and
+  // parking a durable implementation intent for manual disposition.
+  assert.ok(
+    RUN_DEADLINE_MS < HOSTED_RUNTIME_DEADLINE_MS,
+    "the child run budget must end before the launcher bound",
+  );
+  assert.ok(
+    HOSTED_RUNTIME_DEADLINE_MS - RUN_DEADLINE_MS >= 60_000,
+    "the child needs drain margin inside the launcher bound",
   );
 
   // The production launcher hands exactly that deadline to the process runner;
