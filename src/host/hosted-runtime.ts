@@ -223,6 +223,13 @@ export interface HostedRuntimeLauncherInputV1 {
   denoExecutable: string;
   /** The one process border: bounded Git identity reads and the child run. */
   process: ReplayRuntimeV1;
+  /**
+   * Optional advisory sink for reconstructed child diagnostics. Each summary
+   * is delivered as soon as its complete stdout line is retained, before the
+   * child exits; it never attests settlement, health, terminal or authority,
+   * and a throwing sink is swallowed. Absent means no streaming at all.
+   */
+  onDiagnostic?: (diagnostic: HostedModelDiagnosticV1) => void;
 }
 
 export type HostedRuntimeLauncherStatusV1 =
@@ -327,6 +334,12 @@ async function launchHostedRuntime(
     tmp: childTmp,
     denoDir: childDenoDir,
   });
+  // Streaming is attached only here, after the exact execution identity has
+  // been verified, and only to the actual child command: the bounded Git
+  // identity reads above never see a sink.
+  const diagnosticStream = input.onDiagnostic === undefined
+    ? undefined
+    : createHostedDiagnosticStream(execution, input.onDiagnostic);
 
   const run = await input.process.run({
     executable: input.denoExecutable,
@@ -335,6 +348,9 @@ async function launchHostedRuntime(
     env: childEnv,
     maxDurationMs: HOSTED_RUNTIME_DEADLINE_MS,
     maxOutputBytes: HOSTED_RUNTIME_MAX_OUTPUT_BYTES,
+    ...(diagnosticStream === undefined
+      ? {}
+      : { onStdoutChunk: diagnosticStream }),
   });
   const finishedAt = input.clock.now();
   // A backward or invalid clock is a refusal: no terminal instant is ever
@@ -502,6 +518,83 @@ type ChildStatusScanV1 =
   | { kind: "none" }
   | { kind: "one"; value: unknown }
   | { kind: "uncertain" };
+
+/**
+ * Incremental advisory stream over the RETAINED child stdout chunks. Complete
+ * lines are strictly re-parsed through the shared allow-list and stamped with
+ * the already-verified execution intent, exactly like the final capture scan;
+ * a partial line is bounded by the same line limit, an oversized line is
+ * discarded through its newline (a parseable-looking suffix is never
+ * interpreted), and UTF-8 sequences split across chunks are decoded with the
+ * decoder's own carry-over. Malformed, forged, private, incomplete and stderr
+ * bytes never produce a summary. Nothing here is evidence: a streamed advisory
+ * can precede a later truncation that leaves the final list empty, and it
+ * never affects settlement, health, the trusted terminal or the exit status.
+ * A throwing sink is swallowed so an advisory can never disturb the run.
+ */
+function createHostedDiagnosticStream(
+  execution: HostedExecutionIntentV1,
+  sink: (diagnostic: HostedModelDiagnosticV1) => void,
+): (chunk: Uint8Array) => void {
+  const decoder = new TextDecoder();
+  let partial = "";
+  let discarding = false;
+  let accepted = 0;
+  return (chunk) => {
+    if (accepted >= MAX_HOSTED_DIAGNOSTICS) return;
+    const text = decoder.decode(chunk, { stream: true });
+    let index = 0;
+    while (index < text.length) {
+      if (discarding) {
+        // Only the newline that ends the oversized line resumes parsing; the
+        // discarded bytes are never inspected, not even their suffix.
+        const newline = text.indexOf("\n", index);
+        if (newline < 0) return;
+        discarding = false;
+        index = newline + 1;
+        continue;
+      }
+      const newline = text.indexOf("\n", index);
+      if (newline < 0) {
+        const rest = text.slice(index);
+        if (partial.length + rest.length > MAX_DIAGNOSTIC_LINE_CHARS) {
+          partial = "";
+          discarding = true;
+        } else {
+          partial += rest;
+        }
+        return;
+      }
+      const line = `${partial}${text.slice(index, newline)}`.trim();
+      partial = "";
+      index = newline + 1;
+      if (line.length === 0 || line.length > MAX_DIAGNOSTIC_LINE_CHARS) {
+        continue;
+      }
+      let value: unknown;
+      try {
+        value = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      const diagnostic = parseLocalModelDiagnosticV1(value);
+      if (diagnostic === null) continue;
+      accepted += 1;
+      try {
+        sink({
+          version: "v1",
+          kind: "hosted_model_diagnostic",
+          advisory: true,
+          execution,
+          diagnostic,
+        });
+      } catch {
+        // Advisory only: a throwing sink can never disturb the child run.
+      }
+      if (accepted >= MAX_HOSTED_DIAGNOSTICS) return;
+    }
+  };
+}
 
 /**
  * A child status record is one whole JSON line carrying a `status` property.
@@ -889,6 +982,7 @@ export async function runHostedRuntimeMain(): Promise<
       runtimeDir,
       denoExecutable: Deno.execPath(),
       process: new DenoReplayRuntime(Deno.execPath()),
+      onDiagnostic: logHostedDiagnostic,
     });
     return result;
   } catch {
@@ -896,14 +990,22 @@ export async function runHostedRuntimeMain(): Promise<
   }
 }
 
+/**
+ * Production advisory sink: one sanitized summary per streamed line, printed
+ * as soon as its complete stdout line is retained instead of waiting for the
+ * whole child run. It is explicitly advisory and never evidence of child
+ * settlement, health or delivery.
+ */
+function logHostedDiagnostic(diagnostic: HostedModelDiagnosticV1): void {
+  console.log(JSON.stringify(diagnostic));
+}
+
 if (import.meta.main) {
   const result = await runHostedRuntimeMain();
-  // Each reconstructed advisory is printed first; it is not evidence. Then
-  // only the trusted parsed terminal is ever printed. A failed or unavailable
-  // run prints no terminal record and exits nonzero.
-  for (const diagnostic of result.diagnostics) {
-    console.log(JSON.stringify(diagnostic));
-  }
+  // Each reconstructed advisory already reached the sanitized sink as its
+  // complete line was retained, so it is never printed a second time here.
+  // Only the trusted parsed terminal is printed; a failed or unavailable run
+  // prints no terminal record and exits nonzero.
   if (result.terminal !== null) console.log(JSON.stringify(result.terminal));
   if (result.status !== "healthy") {
     console.error(result.detail);
