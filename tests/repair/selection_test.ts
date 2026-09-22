@@ -13,6 +13,11 @@ import {
   MAX_UNFINISHED_PRS,
   rankEligibleWork,
 } from "../../src/repair/selection.ts";
+import {
+  applyHostedRetirements,
+  HOSTED_AUTONOMY_RETIRED,
+  planHostedRetirements,
+} from "../../ops/hosted-autonomy.ts";
 import { SHA1, SHA2, T0, workRecord } from "../state/helpers.ts";
 import { repairConfigs } from "./helpers.ts";
 
@@ -475,3 +480,140 @@ Deno.test("selection: candidate records still obey WIP, dependency, wait and ter
   assert.equal(ranked.skipped[done.id], "terminal");
   assert.equal(ranked.skipped[blocked.id], "blocked");
 });
+
+// ---------------------------------------------------------------------------
+// Retired PR WIP: the EXACT hosted retirement disposition — source issue
+// closed, pull request definitively closed unmerged, parked by
+// applyHostedRetirements with kind `other`, the static retirement message and
+// intent/wait cleared — no longer occupies one of the three unfinished-PR
+// slots. Every other blocked, open or waiting pull request still does.
+// ---------------------------------------------------------------------------
+
+const RETIRED_ISSUES = new Set([120, 61]);
+
+function prRecord(
+  id: string,
+  issueNumber: number,
+  pr: number,
+  overrides: Record<string, unknown> = {},
+): WorkRecordV1 {
+  return work(id, {
+    source: { kind: "issue", id: String(issueNumber), revision: SHA2 },
+    related: { incidentId: null, issueNumber },
+    classification: { severity: "P2", priority: 9 },
+    target: {
+      base: SHA1,
+      branch: `sentinel/repair/${id}`,
+      checkpoint: null,
+      head: SHA2,
+      pr,
+    },
+    nextStep: "review",
+    wait: { reason: "review_pending", since: T0, until: T0 + 3_600_000 },
+    counters: { attempts: 1, retries: 0, reviewRounds: 1 },
+    ...overrides,
+  });
+}
+
+function freshIssue(id: string, issueNumber: number): WorkRecordV1 {
+  return work(id, {
+    source: { kind: "issue", id: String(issueNumber), revision: SHA2 },
+    related: { incidentId: null, issueNumber },
+    classification: { severity: "P2", priority: 9 },
+  });
+}
+
+Deno.test(
+  "retired PR WIP: exact retirements stop consuming the cap while a merged unaccepted PR still does",
+  () => {
+    const ai120 = prRecord("issue-ubiquity-ai.ubq.fi-120", 120, 375);
+    const sentinel61 = prRecord("issue-ubiquity-sentinel-61", 61, 63);
+    // ai#264 / PR393: human-merged but unaccepted, so it is NOT the retirement
+    // disposition and must keep occupying its slot.
+    const humanMerged264 = prRecord(
+      "issue-ubiquity-ai.ubq.fi-264",
+      264,
+      393,
+      { nextStep: "delivery" },
+    );
+    const fresh = freshIssue("issue-ubiquity-ai.ubq.fi-999", 999);
+    const initial = snapshot([ai120, sentinel61, humanMerged264, fresh]);
+    const plans = planHostedRetirements(
+      initial,
+      RETIRED_ISSUES,
+      new Set([ai120.id, sentinel61.id]),
+    );
+    assert.deepEqual(
+      plans.map((plan) => plan.id).sort(),
+      [ai120.id, sentinel61.id].sort(),
+      "both closed-unmerged PRs are retired by the actual helper",
+    );
+    const retired = applyHostedRetirements(initial, SHA1, plans, NOW);
+    for (const id of [ai120.id, sentinel61.id]) {
+      const record = retired.work.find((item) => item.id === id);
+      assert.ok(record, id);
+      assert.equal(record.nextStep, "blocked");
+      assert.equal(record.blocker?.kind, "other");
+      assert.equal(record.blocker?.message, HOSTED_AUTONOMY_RETIRED);
+      assert.equal(record.wait, null);
+      assert.equal(record.intent, null);
+      assert.equal(record.target.pr !== null, true, `${id} retains its PR`);
+      assert.equal(record.target.head, SHA2, `${id} retains its head`);
+      assert.equal(record.counters.reviewRounds, 1, `${id} keeps its counters`);
+    }
+    const ranked = rankEligibleWork(retired, repairConfigs(), NOW);
+    // Two retired PRs plus one real unfinished PR is two counted slots, so the
+    // fresh issue is admitted. Before the fix the count is three and this is [].
+    assert.deepEqual(ranked.ordered, [fresh.id]);
+    assert.equal(ranked.skipped[fresh.id], undefined);
+    assert.equal(ranked.skipped[ai120.id], "blocked");
+    assert.equal(ranked.skipped[sentinel61.id], "blocked");
+    assert.equal(ranked.skipped[humanMerged264.id], "waiting");
+  },
+);
+
+Deno.test(
+  "retired PR WIP: arbitrary blocked, open and waiting PRs still consume the cap",
+  () => {
+    const genericBlocked = prRecord(
+      "issue-ubiquity-ai.ubq.fi-301",
+      301,
+      401,
+      {
+        nextStep: "blocked",
+        wait: null,
+        blocker: {
+          kind: "other",
+          message: "model run ended without a trusted receipt",
+          since: T0,
+        },
+      },
+    );
+    const unavailableBlocked = prRecord(
+      "issue-ubiquity-ai.ubq.fi-302",
+      302,
+      402,
+      {
+        nextStep: "blocked",
+        wait: null,
+        blocker: {
+          kind: "unavailable",
+          message: "review transport unavailable",
+          since: T0,
+        },
+      },
+    );
+    const openWaiting = prRecord("issue-ubiquity-ai.ubq.fi-303", 303, 403);
+    const fresh = freshIssue("issue-ubiquity-ai.ubq.fi-999", 999);
+    const ranked = rankEligibleWork(
+      snapshot([genericBlocked, unavailableBlocked, openWaiting, fresh]),
+      repairConfigs(),
+      NOW,
+    );
+    assert.deepEqual(ranked.ordered, []);
+    assert.equal(ranked.skipped[fresh.id], "wip");
+    assert.equal(ranked.skipped[genericBlocked.id], "blocked");
+    assert.equal(ranked.skipped[unavailableBlocked.id], "blocked");
+    assert.equal(ranked.skipped[openWaiting.id], "waiting");
+  },
+);

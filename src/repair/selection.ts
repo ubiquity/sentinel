@@ -67,7 +67,16 @@ export function rankEligibleWork(
 ): RankedWorkV1 {
   const openPrCount =
     snapshot.work.filter((record) =>
-      record.target.pr !== null && record.nextStep !== "done"
+      record.target.pr !== null && record.nextStep !== "done" &&
+      // Trusted hosted retirement marks a record blocked with this exact
+      // blocker only after the source issue AND its PR were closed unmerged,
+      // so it no longer holds a target PR open.
+      !(record.nextStep === "blocked" &&
+        record.blocker?.kind === "other" &&
+        record.blocker?.message ===
+          "source issue is closed; the repair no longer exists" &&
+        record.intent === null &&
+        record.wait === null)
     ).length;
   const byRepository = new Map(
     configs.map((config) => [repoKey(config.repository), config] as const),
