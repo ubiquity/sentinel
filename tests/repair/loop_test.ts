@@ -856,6 +856,75 @@ Deno.test("model uncertainty stays charged ambiguous and never resubmits", async
   }
 });
 
+Deno.test(
+  "repair loop: implementation uncertainty persists after budget settlement",
+  async () => {
+    // Regression for the audited defect: the ambiguous settlement of an
+    // unsettled implementation intent writes the SAME authoritative repair
+    // state, so the block must be applied to the REREAD head. Applying it to
+    // the pre-settlement context is refused as state_error and the blocked
+    // disposition is lost (the reservation still moves reserved -> ambiguous).
+    const sourceIssue = issueRecord(31, {
+      title: "uncertain implementation",
+      relations: { openBlockers: [], subIssueCount: 0 },
+    });
+    const github = new RelationsFakeGithub({ baseSha: SHA1 });
+    github.listed = [sourceIssue];
+    github.latest.set(31, sourceIssue);
+    const rig = makeMemoryRig(github);
+    const reservationId = "res-uncertain";
+    const taskId = asWorkItemId("issue-31");
+    const branch = candidateBranch(taskId);
+    const uncertain = workRecord("issue-31", {
+      source: { kind: "issue", id: "31", revision: SHA1 },
+      related: { incidentId: null, issueNumber: 31 },
+      target: { base: SHA1, branch, checkpoint: null, head: null, pr: null },
+      nextStep: "work",
+      counters: { attempts: 1, retries: 0, reviewRounds: 0 },
+      intent: {
+        kind: "implementation",
+        key: implementationIntentKey(reservationId),
+        startedAt: T0,
+        branch,
+        expectedHead: null,
+        observedBase: SHA1,
+        pr: null,
+        requestId: reservationId,
+        resultId: null,
+      },
+    });
+    // Unsettled reservation in the authoritative state the budget port writes.
+    const charge = reservation(reservationId, {
+      taskId,
+      attempt: 1,
+      head: SHA1,
+      purpose: "implementation",
+      outcome: "reserved",
+      settledAt: null,
+    });
+    const written = await rig.state.writeRepair(
+      seededSnapshot([uncertain], { reservations: [charge] }),
+      null,
+    );
+    assert.ok(written.ok && written.value.status === "applied");
+
+    // BASE returns state_error here (settlement moved the head); the fix
+    // reloads the settled head and stores the blocked disposition.
+    const outcome = await rig.run(3);
+    assert.equal(outcome.status, "idle", JSON.stringify(outcome));
+    const state = await rig.snapshot();
+    assert.equal(state.reservations.length, 1, "no replacement admission");
+    assert.equal(state.reservations[0].id, reservationId);
+    assert.equal(state.reservations[0].outcome, "ambiguous");
+    assert.ok(state.reservations[0].settledAt !== null, "charge settled");
+    const stored = state.work.find((work) => work.id === "issue-31")!;
+    assert.equal(stored.nextStep, "blocked");
+    assert.equal(stored.blocker?.kind, "other");
+    assert.equal(stored.intent?.requestId, reservationId);
+    assert.equal(rig.model.requests.length, 0, "never resubmitted");
+  },
+);
+
 Deno.test("rolling budget caps share model starts and review requests", async () => {
   const rig = await makeRig("sharedcap", {
     configOverrides: { liveStartLimits: { perHour: 1, perSevenDays: 5 } },

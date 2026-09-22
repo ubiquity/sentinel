@@ -3034,9 +3034,12 @@ async function handleImplementationUncertainty(
       proofRef: null,
     });
   }
-  return persistTransition(
+  // The ambiguous settlement above writes the SAME authoritative repair state,
+  // so the block is applied against the reread head exactly like the adjacent
+  // settled-budget paths (a pre-settlement CAS is refused as state_error).
+  return persistAfterSettlement(
     deps,
-    context,
+    context.bounds,
     replaceWorkMutation(markBlocked(
       record,
       "other",
