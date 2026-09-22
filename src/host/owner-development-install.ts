@@ -356,6 +356,15 @@ export const OWNER_DEVELOPMENT_INSTALL_REVIEW_MODEL_GENERATION = 37;
 export const OWNER_DEVELOPMENT_INSTALL_APP_AUTH_REVISION =
   "3b6d3736e353ccfdb6da2902bb5be4184335803d" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_APP_AUTH_GENERATION = 38;
+/**
+ * Exact revision carrying the retirement-aware unfinished-PR count shared by
+ * the selection and publish gates, and the on-demand fetch of a target base
+ * that moved after the run fetched its mirror; installed only after the app
+ * auth generation 38 healthy proof.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_PUBLISH_GATE_REVISION =
+  "b022ec2fd554254aa7f0e9333d7faf2b09a99a68" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_PUBLISH_GATE_GENERATION = 39;
 
 const API_BASE = "https://api.github.com";
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -1523,10 +1532,53 @@ export function planOwnerDevelopmentInstall(
       );
     }
     if (healthy !== null) {
-      return noChange("the owner development installation is complete");
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_PUBLISH_GATE_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_PUBLISH_GATE_GENERATION,
+        healthy,
+        "install the publish-gate revision after the app auth healthy proof",
+      );
     }
     return waiting(
       "the app auth generation 38 healthy proof is not recorded",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_PUBLISH_GATE_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_PUBLISH_GATE_GENERATION
+  ) {
+    // An exact failed settlement of this pointer is candidate failure
+    // evidence even when a healthy proof exists; the rollback still requires
+    // the recorded healthy proof of the exact prior revision, so a missing or
+    // unrelated proof stays a zero-write waiting outcome.
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_APP_AUTH_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_APP_AUTH_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded app auth healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_APP_AUTH_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed publish-gate candidate to its recorded prior",
+      );
+    }
+    if (healthy !== null) {
+      return noChange("the owner development installation is complete");
+    }
+    return waiting(
+      "the publish-gate generation 39 healthy proof is not recorded",
     );
   }
 

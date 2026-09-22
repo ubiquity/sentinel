@@ -129,6 +129,12 @@ const REVIEW_MODEL_GENERATION = 37;
 // expected red is a semantic plan mismatch and never a missing import.
 const SUCCESSOR_REVISION = "3b6d3736e353ccfdb6da2902bb5be4184335803d" as GitSha;
 const SUCCESSOR_GENERATION = 38;
+// The publish-gate install pin stays a test-local exact literal for the same
+// reason: this suite must compile against pre-rung production source, so the
+// expected red is a semantic plan mismatch and never a missing import.
+const PUBLISH_GATE_REVISION =
+  "b022ec2fd554254aa7f0e9333d7faf2b09a99a68" as GitSha;
+const PUBLISH_GATE_GENERATION = 39;
 
 function hostedProof(input: {
   runId: number;
@@ -2115,19 +2121,41 @@ Deno.test(
     );
 
     // The installed successor generation 38 pointer is stable only with its
-    // own bound healthy proof, and that stable successor is terminal.
-    assert.equal(
-      planOwnerDevelopmentInstall(
-        releaseSnapshot({
-          runtime: runtimeRecord({
-            revision: SUCCESSOR_REVISION,
-            generation: SUCCESSOR_GENERATION,
-            healthyProof: healthyProof(SUCCESSOR_REVISION, 38, 151),
-          }),
+    // own bound healthy proof, and that exact proof authorizes exactly one
+    // move to the fixed owner-approved successor runtime revision.
+    const successorHealthy = healthyProof(SUCCESSOR_REVISION, 38, 151);
+    const publishGateInstall = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: SUCCESSOR_REVISION,
+          generation: SUCCESSOR_GENERATION,
+          healthyProof: successorHealthy,
         }),
-        NOW,
-      ).status,
-      "no_change",
+      }),
+      NOW,
+    );
+    assert.equal(publishGateInstall.status, "install");
+    if (publishGateInstall.status !== "install") {
+      throw new Error("expected publish gate install");
+    }
+    assert.equal(publishGateInstall.move.action, "install");
+    assert.equal(publishGateInstall.move.priorRevision, SUCCESSOR_REVISION);
+    assert.equal(
+      publishGateInstall.move.priorGeneration,
+      SUCCESSOR_GENERATION,
+    );
+    assert.equal(publishGateInstall.move.nextRevision, PUBLISH_GATE_REVISION);
+    assert.equal(
+      publishGateInstall.move.nextGeneration,
+      PUBLISH_GATE_GENERATION,
+    );
+    assert.equal(
+      publishGateInstall.move.nextGeneration,
+      publishGateInstall.move.priorGeneration + 1,
+    );
+    assert.equal(
+      canonicalStringify(publishGateInstall.move.priorHealthyProof),
+      canonicalStringify(successorHealthy),
     );
     for (
       const healthy of [
@@ -2148,6 +2176,127 @@ Deno.test(
           NOW,
         ).status,
         "waiting",
+      );
+    }
+
+    // The installed publish-gate generation 39 pointer is stable only with
+    // its own bound healthy proof, and that stable pointer is terminal.
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: PUBLISH_GATE_REVISION,
+            generation: PUBLISH_GATE_GENERATION,
+            healthyProof: healthyProof(PUBLISH_GATE_REVISION, 39, 157),
+          }),
+        }),
+        NOW,
+      ).status,
+      "no_change",
+    );
+    for (
+      const healthy of [
+        successorHealthy,
+        healthyProof(PUBLISH_GATE_REVISION, 38, 158),
+        null,
+      ]
+    ) {
+      assert.equal(
+        planOwnerDevelopmentInstall(
+          releaseSnapshot({
+            runtime: runtimeRecord({
+              revision: PUBLISH_GATE_REVISION,
+              generation: PUBLISH_GATE_GENERATION,
+              healthyProof: healthy,
+            }),
+          }),
+          NOW,
+        ).status,
+        "waiting",
+      );
+    }
+
+    // A failed publish-gate generation 39 candidate settles exactly once by
+    // rolling back only to the exact previously proven successor revision
+    // with a monotonic generation 40, authorized by its retained healthy
+    // proof.
+    const failedPublishGate = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: PUBLISH_GATE_REVISION,
+          generation: PUBLISH_GATE_GENERATION,
+          healthyProof: successorHealthy,
+          executionProof: failedProof(PUBLISH_GATE_REVISION, 39, 159),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(failedPublishGate.status, "rollback");
+    if (failedPublishGate.status !== "rollback") {
+      throw new Error("expected publish gate rollback");
+    }
+    assert.equal(failedPublishGate.move.action, "rollback");
+    assert.equal(failedPublishGate.move.priorRevision, PUBLISH_GATE_REVISION);
+    assert.equal(
+      failedPublishGate.move.priorGeneration,
+      PUBLISH_GATE_GENERATION,
+    );
+    assert.equal(failedPublishGate.move.nextRevision, SUCCESSOR_REVISION);
+    assert.equal(failedPublishGate.move.nextGeneration, 40);
+    assert.equal(
+      failedPublishGate.move.nextGeneration,
+      failedPublishGate.move.priorGeneration + 1,
+    );
+    assert.equal(
+      canonicalStringify(failedPublishGate.move.priorHealthyProof),
+      canonicalStringify(successorHealthy),
+    );
+
+    // A publish-gate failure that does not bind the exact pointer and a
+    // missing retained prior never roll back.
+    const publishGateWaits = [
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: PUBLISH_GATE_REVISION,
+          generation: PUBLISH_GATE_GENERATION,
+          healthyProof: successorHealthy,
+          executionProof: failedProof(PUBLISH_GATE_REVISION, 38, 160),
+        }),
+      }),
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: PUBLISH_GATE_REVISION,
+          generation: PUBLISH_GATE_GENERATION,
+          executionProof: failedProof(PUBLISH_GATE_REVISION, 39, 161),
+        }),
+      }),
+    ];
+    for (const state of publishGateWaits) {
+      const plan = planOwnerDevelopmentInstall(state, NOW);
+      assert.notEqual(plan.status, "rollback");
+      assert.equal(plan.status, "waiting");
+    }
+
+    // The post-rollback successor generation 40 pointer is terminal: it is
+    // outside the one-shot chain and never reattempts either movement.
+    for (
+      const healthy of [
+        healthyProof(SUCCESSOR_REVISION, 40, 162),
+        null,
+      ]
+    ) {
+      assert.equal(
+        planOwnerDevelopmentInstall(
+          releaseSnapshot({
+            runtime: runtimeRecord({
+              revision: SUCCESSOR_REVISION,
+              generation: 40,
+              healthyProof: healthy,
+            }),
+          }),
+          NOW,
+        ).status,
+        "no_change",
       );
     }
 
