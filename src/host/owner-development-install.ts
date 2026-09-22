@@ -298,6 +298,16 @@ export const OWNER_DEVELOPMENT_INSTALL_FOREIGN_AUTH_GENERATION = 32;
 export const OWNER_DEVELOPMENT_INSTALL_REASON_CODE_REVISION =
   "5b42603a28e04abed407cb850e3e7025d02b658e" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_REASON_CODE_GENERATION = 33;
+/**
+ * Exact owner-approved revision that re-reads settlement before declaring a
+ * failure and whose checkout error names the failing command. Installed only
+ * after the reason-code generation 33 healthy proof. A failed generation 34
+ * candidate settles exactly once by rolling back to the recorded generation 33
+ * revision with a monotonic generation 35.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_SETTLEMENT_RECOVERY_REVISION =
+  "83a7cd8162d808887a27ad733c64db6e3a7c77ac" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_SETTLEMENT_RECOVERY_GENERATION = 34;
 
 const API_BASE = "https://api.github.com";
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -1250,10 +1260,53 @@ export function planOwnerDevelopmentInstall(
     generation === OWNER_DEVELOPMENT_INSTALL_REASON_CODE_GENERATION
   ) {
     if (healthy !== null) {
-      return noChange("the owner development installation is complete");
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_SETTLEMENT_RECOVERY_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_SETTLEMENT_RECOVERY_GENERATION,
+        healthy,
+        "install the settlement recovery revision after the reason-code healthy proof",
+      );
     }
     return waiting(
       "the reason-code generation 33 healthy proof is not recorded",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_SETTLEMENT_RECOVERY_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_SETTLEMENT_RECOVERY_GENERATION
+  ) {
+    // An exact failed settlement of this pointer is candidate failure
+    // evidence even when an older healthy proof exists; the rollback still
+    // requires the recorded healthy proof of the exact prior revision, so a
+    // missing or unrelated proof stays a zero-write waiting outcome.
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_REASON_CODE_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_REASON_CODE_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded reason-code healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_REASON_CODE_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed settlement recovery candidate to its recorded prior",
+      );
+    }
+    if (healthy !== null) {
+      return noChange("the owner development installation is complete");
+    }
+    return waiting(
+      "the settlement recovery generation 34 healthy proof is not recorded",
     );
   }
 
