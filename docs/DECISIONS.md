@@ -33,3 +33,7 @@ Never add branch protection/rulesets. Supervisor source ruleset 23197450 is reco
 No Codex development reviews or PRs: make changes, immediately test, and deliver verified changes directly. This replaces development PRs, three-round reviews, and extra-review allowances. Do not request another development review/PR. Autonomous repairs retain their PRs/reviews and runtime receipt/admission contracts.
 
 For remaining delivery, use the global OSS-first, simplest-sufficient, and meaningful-test defaults; this exception does not waive them.
+
+## Repair job and App-token expiry bounds - 2026-09-22
+
+Bound the protected repair job at 55 minutes and the launcher child deadline at 50 minutes so checkout, setup, preparation and the child all finish inside the one-hour lifetime of the minted scoped App installation token. Keep the App identity and its private key separate; use the token exactly as minted, with no renewal configuration and no second credential. Promotion of the production supervisor ref remains a separate operation outside these bounds. The fixed candidate code and its focused tests are local only and are not deployed.
