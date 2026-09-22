@@ -838,6 +838,51 @@ Deno.test("hosted runtime: exact identity and clean source settle one healthy te
   }
 });
 
+Deno.test("hosted runtime: the child deadline fits the repair job and the minted App token lifetime", async () => {
+  // The protected workflow is the authority for the job bound. The repair job
+  // starts before the scoped App installation token is minted, so that bound
+  // must contain preparation plus the child and still end before the token's
+  // 60-minute lifetime; the token is used exactly as minted, with no renewal.
+  const workflow = await Deno.readTextFile(
+    `${ROOT}/.github/workflows/supervisor.yml`,
+  );
+  const repairAt = workflow.indexOf("\n  repair:");
+  const finalizeAt = workflow.indexOf("\n  finalize:");
+  assert.ok(repairAt > 0 && finalizeAt > repairAt, "repair job not found");
+  const match = workflow.slice(repairAt, finalizeAt).match(
+    /^\s*timeout-minutes:\s*(\d+)\s*$/m,
+  );
+  if (match === null) throw new Error("repair job timeout is missing");
+  const APP_TOKEN_LIFETIME_MS = 60 * 60 * 1000;
+  const jobMs = Number(match[1]) * 60_000;
+  assert.equal(jobMs, 55 * 60_000);
+  assert.equal(HOSTED_RUNTIME_DEADLINE_MS, 50 * 60_000);
+  assert.ok(
+    HOSTED_RUNTIME_DEADLINE_MS < jobMs,
+    "the child deadline must leave preparation margin inside the job",
+  );
+  assert.ok(
+    jobMs < APP_TOKEN_LIFETIME_MS,
+    "the job must end before the minted App token expires",
+  );
+
+  // The production launcher hands exactly that deadline to the process runner;
+  // the fake process and clock stand in for the hosted ones, so no minute is
+  // actually waited.
+  const rig = await makeRig();
+  try {
+    await seedRelease(rig);
+    rig.process.child = exited(childLine(rig.execution));
+    const result = await launch(rig);
+    assert.equal(result.status, "healthy", JSON.stringify(result));
+    const child = rig.process.childCalls()[0];
+    assert.equal(child.maxDurationMs, HOSTED_RUNTIME_DEADLINE_MS);
+    assert.ok(child.maxDurationMs < jobMs);
+  } finally {
+    await rig.cleanup();
+  }
+});
+
 Deno.test("hosted runtime: settled early failure is failed; unattestable zero exit is unavailable", async () => {
   const rig = await makeRig();
   try {
