@@ -1861,6 +1861,18 @@ export class LocalCheckoutModelPort implements ImplementationPort {
     if (!isGitSha(checkoutBase)) {
       return portError("unavailable", STATIC_MODEL_INPUT);
     }
+    // A valid request whose exact checkout cannot be prepared exits through the
+    // SAME finalized-result path as a completed run: the failure is persisted
+    // privately and its static reason code is emitted. No candidate exists, so
+    // the finalizer never imports, and a failed persistence still fails closed.
+    const failCheckout = () =>
+      finalizeLocalModelResult({
+        stateRoot: this.input.stateRoot,
+        request,
+        result: portError("unavailable", STATIC_CHECKOUT),
+        observedAt: this.input.clock.now(),
+        importCandidate: () => Promise.resolve(false),
+      });
     if (
       checkoutBase !== request.base &&
       this.input.ensureCandidateObjects !== undefined
@@ -1873,9 +1885,9 @@ export class LocalCheckoutModelPort implements ImplementationPort {
           repository: request.repository,
         });
       } catch {
-        return portError("unavailable", STATIC_CHECKOUT);
+        return await failCheckout();
       }
-      if (!restored.ok) return portError("unavailable", STATIC_CHECKOUT);
+      if (!restored.ok) return await failCheckout();
     }
     const key = await localCheckoutKey(request.taskId);
     // This request's OWN target mirror: the base commit of a foreign target
@@ -1891,7 +1903,7 @@ export class LocalCheckoutModelPort implements ImplementationPort {
       scratch: this.input.scratch,
       trustedPath: this.input.trustedPath,
     });
-    if (!prepared.ok) return portError("unavailable", STATIC_CHECKOUT);
+    if (!prepared.ok) return await failCheckout();
 
     const clientHome = joinPath(this.input.stateRoot, "clients", key);
     const tmpDir = joinPath(this.input.stateRoot, "tmp", key);

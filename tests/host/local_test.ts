@@ -9,7 +9,10 @@ import {
   ensureTaskCheckout,
   finalizeLocalModelResult,
   localCheckoutKey,
+  LocalCheckoutModelPort,
+  type LocalModelInputV1,
   type LocalRepairHostOptionsV1,
+  LocalSessionTracker,
   prepareReviewCheckout,
   prepareSourceRepository,
   readAuthenticatedLogin,
@@ -2519,6 +2522,126 @@ Deno.test(
       );
       assert.equal(imports, 0);
       assert.equal(captured.lines.length, 1);
+    } finally {
+      captured.restore();
+      await Deno.remove(stateRoot, { recursive: true }).catch(() => {});
+    }
+  },
+);
+
+Deno.test(
+  "local host: checkout failures emit a sanitized model diagnostic",
+  async () => {
+    // REGRESSION: the two VALID-request checkout failure exits (candidate
+    // restoration and checkout preparation) must use the same finalized
+    // persistence/diagnostic path as any other failed run. On the old code
+    // they returned STATIC_CHECKOUT directly: nothing persisted, nothing
+    // emitted, and the fixed launcher decoder had no model_checkout_unavailable
+    // record to read.
+    const captured = captureConsoleLog();
+    const stateRoot = await Deno.makeTempDir({
+      dir: ".",
+      prefix: "sentinel-checkout-diagnostic-",
+    });
+    try {
+      const request = modelRequest();
+      const key = await localCheckoutKey(request.taskId);
+      const port = (input: Partial<LocalModelInputV1> = {}) =>
+        new LocalCheckoutModelPort({
+          stateRoot,
+          sourcePath: `${stateRoot}/source.git`,
+          scratch: `${stateRoot}/scratch`,
+          trustedPath: `${stateRoot}/trusted`,
+          // Never reached: without a prepared checkout no session can launch.
+          codexExecutable: "/nonexistent/sentinel-codex-marker",
+          denoExecutable: "/nonexistent/sentinel-deno-marker",
+          modelToken: "dummy-model-token-marker",
+          tracker: new LocalSessionTracker(),
+          clock: new FakeClock(T0),
+          ...input,
+        });
+      let restorationCalls = 0;
+      const thrown = await port({
+        ensureCandidateObjects: () => {
+          restorationCalls++;
+          return Promise.reject(new Error(DUMMY_RAW_ERROR));
+        },
+      }).runModel({ ...request, checkoutBase: SHA3 });
+      const refused = await port({
+        ensureCandidateObjects: (): Promise<PortResultV1<void>> => {
+          restorationCalls++;
+          return Promise.resolve(portError("unavailable", DUMMY_RAW_ERROR));
+        },
+      }).runModel({ ...request, checkoutBase: SHA3 });
+      // No checkout was prepared for either restoration refusal.
+      let checkoutPrepared = false;
+      try {
+        await Deno.stat(`${stateRoot}/checkouts`);
+        checkoutPrepared = true;
+      } catch {
+        checkoutPrepared = false;
+      }
+      assert.equal(checkoutPrepared, false, "no checkout, so no launch");
+
+      // Second early path: a VALID request refused by checkout preparation
+      // (a stale mapping without its checkout) also fails before any start.
+      await Deno.mkdir(`${stateRoot}/checkouts`, { recursive: true });
+      await Deno.writeTextFile(`${stateRoot}/checkouts/${key}.json`, "{}\n");
+      const unprepared = await port().runModel(request);
+      assert.equal(restorationCalls, 2, "both restoration seams were used");
+      checkoutPrepared = false;
+      try {
+        await Deno.stat(`${stateRoot}/checkouts/${key}`);
+        checkoutPrepared = true;
+      } catch {
+        checkoutPrepared = false;
+      }
+      assert.equal(checkoutPrepared, false, "no checkout, so no launch");
+
+      // The original unavailable checkout failure is preserved, unchanged and
+      // without any raw seam text.
+      const failures = [thrown, refused, unprepared].filter((result) =>
+        !result.ok
+      );
+      assert.equal(failures.length, 3);
+      const firstDetail = thrown.ok ? null : thrown.error.detail;
+      assert.equal(typeof firstDetail, "string");
+      for (const failure of failures) {
+        if (failure.ok) continue;
+        assert.equal(failure.error.kind, "unavailable");
+        assert.equal(failure.error.detail, firstDetail);
+        assert.equal(failure.error.detail.includes(DUMMY_RAW_ERROR), false);
+      }
+
+      // Exactly one advisory per failure, carrying only the whitelisted static
+      // checkout reason code.
+      assert.equal(captured.lines.length, 3, "one diagnostic per failure");
+      for (const line of captured.lines) {
+        const advisory = JSON.parse(line) as Record<string, unknown>;
+        assert.equal(advisory.kind, "sentinel_model_diagnostic");
+        assert.equal(advisory.taskKey, key);
+        assert.equal(advisory.base, SHA1);
+        assert.equal(advisory.outcome, "port_error");
+        assert.equal(advisory.reasonCode, "model_checkout_unavailable");
+        assert.equal(advisory.candidatePresent, false);
+        assert.equal(line.includes(DUMMY_RAW_ERROR), false);
+      }
+
+      // The private model-result projection was actually persisted for the
+      // same failures.
+      const resultsDir = `${stateRoot}/model-results/${key}`;
+      const files = [...Deno.readDirSync(resultsDir)];
+      assert.equal(files.length, 3);
+      for (const file of files) {
+        const text = await Deno.readTextFile(`${resultsDir}/${file.name}`);
+        const privateResult = JSON.parse(text) as Record<string, unknown>;
+        assert.equal(privateResult.kind, "local_model_result");
+        assert.equal(privateResult.reason, "runtime_error");
+        const result = privateResult.result as Record<string, unknown>;
+        assert.equal(result.ok, false);
+        assert.equal(result.errorKind, "unavailable");
+        assert.equal(text.includes(DUMMY_RAW_ERROR), false);
+      }
     } finally {
       captured.restore();
       await Deno.remove(stateRoot, { recursive: true }).catch(() => {});
