@@ -254,6 +254,15 @@ jobs:
           # is repaired under this one App installation, while the sentinel
           # self-target keeps the reserved no-App scope 0.
           SENTINEL_APP_INSTALLATION_ID: "155687488"
+          # Model route. Repository/environment vars supply the primary and
+          # fallback route; the DeepSeek key is the documented once-per-run
+          # fallback credential. Blank optional vars stay blank and the
+          # launcher forwards only nonempty values, so an unset var keeps the
+          # existing resolver behavior. The App private key is never bound here.
+          SENTINEL_MODEL_BASE_URL: ${{ vars.SENTINEL_MODEL_BASE_URL }}
+          SENTINEL_MODEL_ID: ${{ vars.SENTINEL_MODEL_ID }}
+          SENTINEL_MODEL_FALLBACK: ${{ vars.SENTINEL_MODEL_FALLBACK }}
+          SENTINEL_DEEPSEEK_API_KEY: ${{ secrets.SENTINEL_DEEPSEEK_API_KEY }}
         run: >-
           deno run
           --allow-read

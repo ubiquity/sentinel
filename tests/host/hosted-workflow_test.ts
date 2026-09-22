@@ -566,3 +566,86 @@ Deno.test("hosted workflow: the release-role store can never write repair state"
     await rig.cleanup();
   }
 });
+
+Deno.test("hosted workflow: forwards the configured model route and secret to runtime", async () => {
+  const workflow = await Deno.readTextFile(
+    `${ROOT}/.github/workflows/supervisor.yml`,
+  );
+  // Bounded by the neighbouring job keys, so the slice is the repair job
+  // alone even though other jobs also bind these names.
+  const repairAt = workflow.indexOf("\n  repair:");
+  const finalizeAt = workflow.indexOf("\n  finalize:");
+  assert.ok(repairAt > 0 && finalizeAt > repairAt, "repair job not found");
+  const repair = workflow.slice(repairAt, finalizeAt);
+  const stepAt = repair.indexOf("      - name: Run selected Sentinel runtime");
+  assert.ok(stepAt > 0, "the selected runtime step is missing");
+  // The step ends at its sibling step or the end of the job.
+  const nextStepAt = repair.indexOf("\n      - ", stepAt + 1);
+  const step = repair.slice(
+    stepAt,
+    nextStepAt > stepAt ? nextStepAt : repair.length,
+  );
+
+  // The runtime env block must bind each documented route input to its exact
+  // source context. Names already occur in the --allow-env list, so assert
+  // the `NAME: ${{ context.NAME }}` mapping inside env, not the bare name.
+  const envAt = step.indexOf("        env:");
+  const runAt = step.indexOf("\n        run:", envAt);
+  assert.ok(envAt > 0 && runAt > envAt, "the runtime env block is missing");
+  const envBlock = step.slice(envAt, runAt);
+  const routeBindings: readonly [string, string][] = [
+    ["SENTINEL_MODEL_BASE_URL", "vars"],
+    ["SENTINEL_MODEL_ID", "vars"],
+    ["SENTINEL_MODEL_FALLBACK", "vars"],
+    ["SENTINEL_DEEPSEEK_API_KEY", "secrets"],
+  ];
+  const runtimeEnvLines = envBlock.split("\n").map((line) => line.trim());
+  for (const [name, context] of routeBindings) {
+    assert.ok(
+      runtimeEnvLines.includes(`${name}: \${{ ${context}.${name} }}`),
+      `runtime env block must bind ${name} from ${context}`,
+    );
+  }
+
+  // The Deno grant must permit exactly the names the step now binds.
+  const grantPrefix = "          --allow-env=";
+  const grantLine = step.split("\n").find((line) =>
+    line.startsWith(grantPrefix)
+  );
+  assert.ok(
+    grantLine !== undefined,
+    "the runtime --allow-env grant is missing",
+  );
+  const grantedEnv = new Set(
+    grantLine.slice(grantPrefix.length).trim().split(","),
+  );
+  // Assignment lines only: the block header `env:` and any comment must not
+  // be read as a granted variable name.
+  const stepEnvNames = new Set(
+    envBlock.split("\n")
+      .map((line) => line.trim())
+      .filter((line) => !line.startsWith("#"))
+      .map((line) => line.split(":")[0])
+      .filter((name) => /^[A-Z][A-Z0-9_]*$/.test(name)),
+  );
+  for (const name of stepEnvNames) {
+    assert.ok(
+      grantedEnv.has(name),
+      `the runtime grant must permit ${name}`,
+    );
+  }
+  for (const [name] of routeBindings) {
+    assert.ok(grantedEnv.has(name), `the runtime grant must permit ${name}`);
+  }
+
+  // The App private key stays in the token-minting step and is never
+  // forwarded to the runtime process or its child environment.
+  for (const [name] of routeBindings) {
+    assert.ok(
+      !step.includes(`SENTINEL_SUPERVISOR_APP_PRIVATE_KEY: \${{`),
+      `the runtime step must not bind the App private key alongside ${name}`,
+    );
+  }
+  assert.ok(!envBlock.includes("SENTINEL_SUPERVISOR_APP_PRIVATE_KEY"));
+  assert.ok(!grantedEnv.has("SENTINEL_SUPERVISOR_APP_PRIVATE_KEY"));
+});
