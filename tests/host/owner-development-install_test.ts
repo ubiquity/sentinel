@@ -119,6 +119,11 @@ const QUIET_REASONING_GENERATION = 35;
 // a semantic plan mismatch and never a missing import.
 const BASE_FETCH = "ae4629faeb75a80c1badf1ff37a58c8be00adf99" as GitSha;
 const BASE_FETCH_GENERATION = 36;
+// The review-model pins stay test-local exact literals for the same reason: this
+// suite must compile against pre-rung production source, so the expected red is
+// a semantic plan mismatch and never a missing import.
+const REVIEW_MODEL = "59940aece2d051b79c8e2e8ab7c611a0d45600b2" as GitSha;
+const REVIEW_MODEL_GENERATION = 37;
 
 function hostedProof(input: {
   runId: number;
@@ -1800,19 +1805,36 @@ Deno.test(
     );
 
     // The installed generation 36 pointer is stable only with its own bound
-    // healthy proof, and that stable candidate is terminal.
-    assert.equal(
-      planOwnerDevelopmentInstall(
-        releaseSnapshot({
-          runtime: runtimeRecord({
-            revision: BASE_FETCH,
-            generation: BASE_FETCH_GENERATION,
-            healthyProof: healthyProof(BASE_FETCH, 36, 134),
-          }),
+    // healthy proof; that proof authorizes the fixed review model install to
+    // generation 37.
+    const baseFetchHealthy = healthyProof(BASE_FETCH, 36, 134);
+    const reviewModelInstall = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: BASE_FETCH,
+          generation: BASE_FETCH_GENERATION,
+          healthyProof: baseFetchHealthy,
         }),
-        NOW,
-      ).status,
-      "no_change",
+      }),
+      NOW,
+    );
+    assert.equal(reviewModelInstall.status, "install");
+    if (reviewModelInstall.status !== "install") {
+      throw new Error("expected install");
+    }
+    assert.equal(reviewModelInstall.move.priorRevision, BASE_FETCH);
+    assert.equal(
+      reviewModelInstall.move.priorGeneration,
+      BASE_FETCH_GENERATION,
+    );
+    assert.equal(reviewModelInstall.move.nextRevision, REVIEW_MODEL);
+    assert.equal(
+      reviewModelInstall.move.nextGeneration,
+      REVIEW_MODEL_GENERATION,
+    );
+    assert.equal(
+      canonicalStringify(reviewModelInstall.move.priorHealthyProof),
+      canonicalStringify(baseFetchHealthy),
     );
     assert.equal(
       planOwnerDevelopmentInstall(
@@ -1902,6 +1924,229 @@ Deno.test(
             runtime: runtimeRecord({
               revision: QUIET_REASONING,
               generation: 37,
+              healthyProof: healthy,
+            }),
+          }),
+          NOW,
+        ).status,
+        "no_change",
+      );
+    }
+  },
+);
+
+Deno.test(
+  "owner install: review model revision preserves install and rollback gates",
+  () => {
+    const baseFetchHealthy = healthyProof(BASE_FETCH, 36, 141);
+    // The fixed owner-approved pin: only the recorded generation 36 healthy
+    // proof authorizes exactly one move to the review model revision.
+    const install = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: BASE_FETCH,
+          generation: BASE_FETCH_GENERATION,
+          healthyProof: baseFetchHealthy,
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(install.status, "install");
+    if (install.status !== "install") throw new Error("expected install");
+    assert.equal(install.move.action, "install");
+    assert.equal(install.move.priorRevision, BASE_FETCH);
+    assert.equal(install.move.priorGeneration, BASE_FETCH_GENERATION);
+    assert.equal(install.move.nextRevision, REVIEW_MODEL);
+    assert.equal(install.move.nextGeneration, REVIEW_MODEL_GENERATION);
+    assert.equal(install.move.nextGeneration, install.move.priorGeneration + 1);
+    assert.equal(
+      canonicalStringify(install.move.priorHealthyProof),
+      canonicalStringify(baseFetchHealthy),
+    );
+
+    // A healthy proof bound to another revision or generation, and no
+    // recorded proof at all, never authorize the fixed pin.
+    for (
+      const healthy of [
+        healthyProof(REVIEW_MODEL, 36, 142),
+        healthyProof(BASE_FETCH, 37, 143),
+        null,
+      ]
+    ) {
+      assert.equal(
+        planOwnerDevelopmentInstall(
+          releaseSnapshot({
+            runtime: runtimeRecord({
+              revision: BASE_FETCH,
+              generation: BASE_FETCH_GENERATION,
+              healthyProof: healthy,
+            }),
+          }),
+          NOW,
+        ).status,
+        "waiting",
+      );
+    }
+
+    // An in-flight execution, a non-terminal release and an active cooldown
+    // each keep the pin a zero-write wait.
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: BASE_FETCH,
+            generation: BASE_FETCH_GENERATION,
+            healthyProof: baseFetchHealthy,
+            execution: executionIntent(BASE_FETCH, BASE_FETCH_GENERATION),
+          }),
+        }),
+        NOW,
+      ).status,
+      "waiting",
+    );
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: BASE_FETCH,
+            generation: BASE_FETCH_GENERATION,
+            healthyProof: baseFetchHealthy,
+          }),
+          hostedReleases: [requestedRelease()],
+        }),
+        NOW,
+      ).status,
+      "waiting",
+    );
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: BASE_FETCH,
+            generation: BASE_FETCH_GENERATION,
+            healthyProof: baseFetchHealthy,
+          }),
+          cooldowns: [cooldown(NOW + 1)],
+        }),
+        NOW,
+      ).status,
+      "waiting",
+    );
+
+    // The installed generation 37 pointer is stable only with its own bound
+    // healthy proof, and that stable candidate is terminal.
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: REVIEW_MODEL,
+            generation: REVIEW_MODEL_GENERATION,
+            healthyProof: healthyProof(REVIEW_MODEL, 37, 144),
+          }),
+        }),
+        NOW,
+      ).status,
+      "no_change",
+    );
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: REVIEW_MODEL,
+            generation: REVIEW_MODEL_GENERATION,
+            healthyProof: baseFetchHealthy,
+          }),
+        }),
+        NOW,
+      ).status,
+      "waiting",
+    );
+
+    // A failed generation 37 candidate settles exactly once by rolling back
+    // to the exact previously proven generation 36 revision with a monotonic
+    // generation 38, authorized by its recorded healthy proof.
+    const failed = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: REVIEW_MODEL,
+          generation: REVIEW_MODEL_GENERATION,
+          healthyProof: baseFetchHealthy,
+          executionProof: failedProof(
+            REVIEW_MODEL,
+            REVIEW_MODEL_GENERATION,
+            145,
+          ),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(failed.status, "rollback");
+    if (failed.status !== "rollback") throw new Error("expected rollback");
+    assert.equal(failed.move.action, "rollback");
+    assert.equal(failed.move.priorRevision, REVIEW_MODEL);
+    assert.equal(failed.move.priorGeneration, REVIEW_MODEL_GENERATION);
+    assert.equal(failed.move.nextRevision, BASE_FETCH);
+    assert.equal(failed.move.nextGeneration, 38);
+    assert.equal(failed.move.nextGeneration, failed.move.priorGeneration + 1);
+    assert.equal(
+      canonicalStringify(failed.move.priorHealthyProof),
+      canonicalStringify(baseFetchHealthy),
+    );
+
+    // A failure that does not bind the exact pointer, a no-execution
+    // settlement and a missing recorded prior never roll back.
+    const waits = [
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: REVIEW_MODEL,
+          generation: REVIEW_MODEL_GENERATION,
+          healthyProof: baseFetchHealthy,
+          executionProof: failedProof(REVIEW_MODEL, 36, 146),
+        }),
+      }),
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: REVIEW_MODEL,
+          generation: REVIEW_MODEL_GENERATION,
+          healthyProof: baseFetchHealthy,
+          executionProof: notStartedProof(
+            REVIEW_MODEL,
+            REVIEW_MODEL_GENERATION,
+          ),
+        }),
+      }),
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: REVIEW_MODEL,
+          generation: REVIEW_MODEL_GENERATION,
+          executionProof: failedProof(
+            REVIEW_MODEL,
+            REVIEW_MODEL_GENERATION,
+            147,
+          ),
+        }),
+      }),
+    ];
+    for (const state of waits) {
+      const plan = planOwnerDevelopmentInstall(state, NOW);
+      assert.notEqual(plan.status, "rollback");
+      assert.equal(plan.status, "waiting");
+    }
+
+    // The post-rollback generation 38 pointer is terminal: it is outside the
+    // one-shot chain and never reattempts either movement.
+    for (
+      const healthy of [
+        healthyProof(BASE_FETCH, 38, 148),
+        null,
+      ]
+    ) {
+      assert.equal(
+        planOwnerDevelopmentInstall(
+          releaseSnapshot({
+            runtime: runtimeRecord({
+              revision: BASE_FETCH,
+              generation: 38,
               healthyProof: healthy,
             }),
           }),

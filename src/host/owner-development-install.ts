@@ -332,6 +332,19 @@ export const OWNER_DEVELOPMENT_INSTALL_QUIET_REASONING_GENERATION = 35;
 export const OWNER_DEVELOPMENT_INSTALL_BASE_FETCH_REVISION =
   "ae4629faeb75a80c1badf1ff37a58c8be00adf99" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_BASE_FETCH_GENERATION = 36;
+/**
+ * Exact owner-approved revision that binds the trusted route's model through
+ * the reviewer thread, acknowledgement, turn, reroute, verifier and journal
+ * instead of the hardcoded `gpt-reserve`; route/model policy, max reasoning,
+ * limits, quotas and the review/merge guards are unchanged. Installed only
+ * after the base fetch generation 36 healthy proof. A failed generation 37
+ * candidate settles exactly once by rolling back to the recorded generation 36
+ * revision with a monotonic generation 38; that post-rollback pointer is
+ * terminal.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_REVIEW_MODEL_REVISION =
+  "59940aece2d051b79c8e2e8ab7c611a0d45600b2" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_REVIEW_MODEL_GENERATION = 37;
 
 const API_BASE = "https://api.github.com";
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -1413,10 +1426,53 @@ export function planOwnerDevelopmentInstall(
       );
     }
     if (healthy !== null) {
-      return noChange("the owner development installation is complete");
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_REVIEW_MODEL_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_REVIEW_MODEL_GENERATION,
+        healthy,
+        "install the review model revision after the base fetch healthy proof",
+      );
     }
     return waiting(
       "the base fetch generation 36 healthy proof is not recorded",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_REVIEW_MODEL_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_REVIEW_MODEL_GENERATION
+  ) {
+    // An exact failed settlement of this pointer is candidate failure
+    // evidence even when a healthy proof exists; the rollback still requires
+    // the recorded healthy proof of the exact prior revision, so a missing or
+    // unrelated proof stays a zero-write waiting outcome.
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_BASE_FETCH_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_BASE_FETCH_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded base fetch healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_BASE_FETCH_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed review model candidate to its recorded prior",
+      );
+    }
+    if (healthy !== null) {
+      return noChange("the owner development installation is complete");
+    }
+    return waiting(
+      "the review model generation 37 healthy proof is not recorded",
     );
   }
 
