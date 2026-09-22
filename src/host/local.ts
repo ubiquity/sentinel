@@ -538,6 +538,36 @@ export interface LocalModelDiagnosticV1 {
   durationMs: number | null;
   outputChars: number | null;
   candidatePresent: boolean;
+  /**
+   * Exact seam code of a `port_error`, or null. The property is optional and
+   * is copied only when the record carries it: the supervisor and the runtime
+   * are independently pinned, so an installed runtime that emits this field
+   * must be readable while an older recorded summary without it stays exactly
+   * as it was. It can only ever be one of the frozen literals in
+   * {@link REASON_CODE_LITERALS}, never raw text.
+   */
+  reasonCode?: string | null;
+}
+
+/**
+ * The exact `reasonCode` literals emitted by the pinned installed runtime
+ * (5b42603). That emitter maps its own static failure strings to these eight
+ * codes and emits null for every other failure, so no other value is a code.
+ */
+const REASON_CODE_LITERALS: readonly string[] = [
+  "model_request_invalid",
+  "model_checkout_unavailable",
+  "candidate_import_failed",
+  "model_result_unpersisted",
+  "git_command_failed",
+  "git_output_over_bound",
+  "local_candidate_unavailable",
+  "authenticated_login_unavailable",
+];
+
+/** True only for one of the pinned runtime's own static seam codes. */
+function isReasonCode(value: unknown): value is string {
+  return typeof value === "string" && REASON_CODE_LITERALS.includes(value);
 }
 
 const LOCAL_DIAGNOSTIC_KEYS = [
@@ -555,6 +585,24 @@ const LOCAL_DIAGNOSTIC_KEYS = [
   "outputChars",
   "candidatePresent",
 ] as const;
+
+/**
+ * The one optional own key of a v1 summary. It is accepted in addition to the
+ * exact {@link LOCAL_DIAGNOSTIC_KEYS} set, never as a replacement for any of
+ * them, so an unknown or missing key still rejects the record.
+ */
+const LOCAL_DIAGNOSTIC_OPTIONAL_KEYS = ["reasonCode"] as const;
+
+/** Exact own-key allow-list: the fixed keys, plus the optional key at most. */
+function hasLocalDiagnosticKeys(record: Record<string, unknown>): boolean {
+  if (!LOCAL_DIAGNOSTIC_KEYS.every((key) => Object.hasOwn(record, key))) {
+    return false;
+  }
+  const present = LOCAL_DIAGNOSTIC_KEYS.length +
+    LOCAL_DIAGNOSTIC_OPTIONAL_KEYS.filter((key) => Object.hasOwn(record, key))
+      .length;
+  return Object.keys(record).length === present;
+}
 
 const PORT_ERROR_KINDS: readonly PortErrorKindV1[] = [
   "unavailable",
@@ -587,10 +635,7 @@ export function parseLocalModelDiagnosticV1(
     return null;
   }
   const record = value as Record<string, unknown>;
-  if (Object.keys(record).length !== LOCAL_DIAGNOSTIC_KEYS.length) return null;
-  if (!LOCAL_DIAGNOSTIC_KEYS.every((key) => Object.hasOwn(record, key))) {
-    return null;
-  }
+  if (!hasLocalDiagnosticKeys(record)) return null;
   const version = record.version;
   const kind = record.kind;
   const taskKey = record.taskKey;
@@ -632,6 +677,17 @@ export function parseLocalModelDiagnosticV1(
     if (terminalOrigin !== null || observedTerminalStatus !== null) return null;
     if (durationMs !== null || outputChars !== null) return null;
     if (candidatePresent !== false) return null;
+    // Only the fixed literals (or an explicit null) are codes: raw text, an
+    // unknown word or any other type is not this record.
+    const reasonCode = Object.hasOwn(record, "reasonCode")
+      ? record.reasonCode
+      : undefined;
+    if (
+      reasonCode !== undefined && reasonCode !== null &&
+      !isReasonCode(reasonCode)
+    ) {
+      return null;
+    }
     return {
       version: "v1",
       kind: "sentinel_model_diagnostic",
@@ -646,6 +702,7 @@ export function parseLocalModelDiagnosticV1(
       durationMs: null,
       outputChars: null,
       candidatePresent: false,
+      ...(reasonCode === undefined ? {} : { reasonCode }),
     };
   }
 
@@ -670,6 +727,13 @@ export function parseLocalModelDiagnosticV1(
     return null;
   }
   if (typeof candidatePresent !== "boolean") return null;
+  // A settled session names a code only when it failed before settling, so a
+  // settled record may carry the optional key only as an explicit null.
+  if (
+    Object.hasOwn(record, "reasonCode") && record.reasonCode !== null
+  ) {
+    return null;
+  }
   return {
     version: "v1",
     kind: "sentinel_model_diagnostic",

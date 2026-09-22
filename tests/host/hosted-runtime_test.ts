@@ -45,6 +45,7 @@ import type {
 } from "../../src/host/hosted-runtime.ts";
 import {
   localCheckoutKey,
+  parseLocalModelDiagnosticV1,
   writeLocalModelResult,
 } from "../../src/host/local.ts";
 import { createReleaseStateStore } from "../../src/state/mod.ts";
@@ -205,6 +206,30 @@ function diagnosticLine(overrides: Record<string, unknown> = {}): string {
     outputChars: 100,
     candidatePresent: true,
     ...overrides,
+  });
+}
+
+/**
+ * One advisory summary exactly as the independently pinned INSTALLED runtime
+ * version emits it: a port error carries `reasonCode`, either one of that
+ * version's own eight static seam codes or null. No raw detail is ever a code.
+ */
+function runtimeDiagnosticLine(reasonCode: string | null): string {
+  return JSON.stringify({
+    version: "v1",
+    kind: "sentinel_model_diagnostic",
+    taskKey: DIAGNOSTIC_TASK_KEY,
+    base: OBSERVED_BASE,
+    observedAt: T0,
+    outcome: "port_error",
+    reason: "runtime_error",
+    errorKind: "unavailable",
+    terminalOrigin: null,
+    observedTerminalStatus: null,
+    durationMs: null,
+    outputChars: null,
+    candidatePresent: false,
+    reasonCode,
   });
 }
 
@@ -1162,6 +1187,65 @@ Deno.test("hosted runtime: malformed, oversized, unknown-field or forged advisor
       assert.equal(result.terminal, null, JSON.stringify(run));
       assert.deepEqual(result.diagnostics, [], JSON.stringify(run));
     }
+  } finally {
+    await rig.cleanup();
+  }
+});
+
+Deno.test("hosted runtime: an installed-runtime advisory keeps its static reason code and refuses any other", async () => {
+  // Decoder contract first: the installed pinned runtime emits the optional
+  // `reasonCode`, either one of its own eight static seam codes or null.
+  const known = runtimeDiagnosticLine("model_checkout_unavailable");
+  const knownParsed = parseLocalModelDiagnosticV1(JSON.parse(known));
+  assert.deepEqual(knownParsed, JSON.parse(known), known);
+
+  const nullCode = runtimeDiagnosticLine(null);
+  const nullParsed = parseLocalModelDiagnosticV1(JSON.parse(nullCode));
+  assert.deepEqual(nullParsed, JSON.parse(nullCode), nullCode);
+
+  // The pre-migration thirteen-key record stays exactly as it is, with no
+  // invented code added to it.
+  const legacyParsed = parseLocalModelDiagnosticV1(
+    JSON.parse(diagnosticLine()),
+  );
+  assert.deepEqual(legacyParsed, JSON.parse(diagnosticLine()));
+
+  // Only the exact eight static literals are codes: a raw error or provider
+  // string, an unknown word, a near-miss code, an empty string and a code on
+  // a settled record are all still refused.
+  for (
+    const refused of [
+      runtimeDiagnosticLine("hosted-fixture-raw-error-marker"),
+      runtimeDiagnosticLine("unavailable"),
+      runtimeDiagnosticLine("model_checkout_unavailable_v2"),
+      runtimeDiagnosticLine(""),
+      diagnosticLine({ reasonCode: "model_checkout_unavailable" }),
+      diagnosticLine({ reasonCode: "not_a_static_code" }),
+      runtimeDiagnosticLine("model_checkout_unavailable").replace(
+        '"errorKind":"unavailable"',
+        '"errorKind":"made_up"',
+      ),
+      diagnosticLine({ reasonCode: null, candidatePresent: "true" }),
+    ]
+  ) {
+    assert.equal(
+      parseLocalModelDiagnosticV1(JSON.parse(refused)),
+      null,
+      refused,
+    );
+  }
+
+  // One real launcher call: the known code survives into the stamped advisory
+  // and health and terminal are unchanged.
+  const rig = await makeRig();
+  try {
+    await seedRelease(rig);
+    rig.process.child = exited(`${known}\n${childLine(rig.execution)}\n`);
+    const result = await launch(rig);
+    assert.equal(result.status, "healthy");
+    assert.equal(result.terminal?.outcome, "healthy");
+    assert.equal(result.diagnostics.length, 1);
+    assert.deepEqual(result.diagnostics[0]?.diagnostic, JSON.parse(known));
   } finally {
     await rig.cleanup();
   }
