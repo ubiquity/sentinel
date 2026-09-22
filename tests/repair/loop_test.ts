@@ -2184,6 +2184,94 @@ Deno.test("existing-PR corrections are not blocked by the unfinished-PR cap", as
   }
 });
 
+Deno.test(
+  "fresh publication: trusted retired PRs do not consume the unfinished-PR cap",
+  async () => {
+    const id = asWorkItemId("issue-1");
+    const rig = await makeRig("retired-publish-cap", {
+      summaries: false,
+      github: {
+        candidateLifecycle: {
+          ...positiveLifecycle(),
+          refs: {},
+          pullRequests: [exactOpenPr(7, SHA2, "sentinel/repair/issue-100")],
+        },
+      },
+    });
+    try {
+      const retired = [61, 120].map((number) =>
+        workRecord(`issue-${number}`, {
+          source: { kind: "issue", id: `${number}`, revision: SHA1 },
+          related: { incidentId: null, issueNumber: number },
+          nextStep: "blocked",
+          blocker: {
+            kind: "other",
+            message: "source issue is closed; the repair no longer exists",
+            since: T0,
+          },
+          target: {
+            base: SHA1,
+            branch: `sentinel/repair/issue-${number}`,
+            checkpoint: null,
+            head: SHA2,
+            pr: 500 + number,
+          },
+        })
+      );
+      const live = workRecord("issue-100", {
+        source: { kind: "issue", id: "100", revision: SHA1 },
+        related: { incidentId: null, issueNumber: 100 },
+        nextStep: "review",
+        wait: { reason: "review_pending", since: T0, until: T0 + 3600_000 },
+        target: {
+          base: SHA1,
+          branch: "sentinel/repair/issue-100",
+          checkpoint: null,
+          head: SHA2,
+          pr: 7,
+        },
+      });
+      const fresh = preservedIssueWork("issue-1", H1, {
+        pr: null,
+        publishedHead: null,
+      });
+      const written = await rig.store.writeRepair(
+        seededSnapshot([...retired, live, fresh]),
+        null,
+      );
+      assert.ok(written.ok && written.value.status === "applied");
+
+      const outcome = await rig.run();
+      assert.equal(outcome.status, "idle", JSON.stringify(outcome));
+      const state = await rig.snapshot();
+      const published = state.work.find((record) => record.id === id);
+      assert.ok(published, "the fresh record exists");
+      assert.equal(
+        published?.nextStep,
+        "review",
+        "the fresh candidate publishes past two trusted retirements",
+      );
+      assert.equal(published?.wait?.reason, "review_pending");
+      assert.equal(
+        rig.github.pushes.length,
+        1,
+        "exactly one fresh candidate push",
+      );
+      assert.equal(
+        rig.github.calls.filter((call) => call === "createPr").length,
+        1,
+        "exactly one fresh PR",
+      );
+      assert.equal(
+        rig.github.calls.filter((call) => call === "requestReview").length,
+        1,
+      );
+    } finally {
+      await rig.ctx.cleanup();
+    }
+  },
+);
+
 // ---------------------------------------------------------------------------
 // Local activation branch: the explicit local Sentinel scope (installationId
 // 0) reads only the private local receipt capability. The hosted Deno release
@@ -3419,7 +3507,8 @@ function preservedIssueWork(
   head: GitSha,
   options: {
     base?: GitSha;
-    publishedHead?: GitSha;
+    /** Explicit null models a preserved-but-never-published candidate. */
+    publishedHead?: GitSha | null;
     pr?: number | null;
     nextStep?: WorkRecordV1["nextStep"];
     counters?: WorkRecordV1["counters"];
@@ -3443,7 +3532,9 @@ function preservedIssueWork(
           head,
           ref: CANDIDATE_REF,
         },
-        publishedHead: options.publishedHead ?? head,
+        publishedHead: options.publishedHead === undefined
+          ? head
+          : options.publishedHead,
       },
     },
     nextStep: options.nextStep ?? "work",

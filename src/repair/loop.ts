@@ -83,6 +83,7 @@ import {
   reviewReceiptId,
 } from "./keys.ts";
 import {
+  countUnfinishedPullRequests,
   isWaiting,
   MAX_UNFINISHED_PRS,
   rankEligibleWork,
@@ -3099,10 +3100,7 @@ async function executePublishStep(
   // an existing PR does not open another unfinished PR — it updates the branch
   // this task already owns — so it must never be blocked by the cap (matching
   // the selection rule, which caps only records with target.pr === null).
-  const openPrs =
-    context.snapshot.work.filter((work) =>
-      work.target.pr !== null && work.nextStep !== "done"
-    ).length;
+  const openPrs = countUnfinishedPullRequests(context.snapshot.work);
   if (record.target.pr === null && openPrs >= MAX_UNFINISHED_PRS) {
     return persistWork(
       deps,

@@ -19,6 +19,41 @@ import type { WorkRecordV1 } from "../contracts/work-record.ts";
 /** One implementation writer globally; at most three unfinished target PRs. */
 export const MAX_UNFINISHED_PRS = 3;
 
+/**
+ * Exact hosted-retirement blocker. The hosted autonomy pass records it only
+ * after the source issue AND its pull request are closed unmerged, so the
+ * record no longer holds an open target PR.
+ */
+export const RETIRED_TARGET_MESSAGE =
+  "source issue is closed; the repair no longer exists";
+
+/**
+ * A trusted hosted retirement: the exact blocker above, still blocked, with
+ * no remaining intent or wait. Only this exact shape is exempt; arbitrary
+ * blocked, open or waiting PRs keep consuming the cap.
+ */
+export function isRetiredTargetRecord(record: WorkRecordV1): boolean {
+  return record.nextStep === "blocked" &&
+    record.blocker?.kind === "other" &&
+    record.blocker?.message === RETIRED_TARGET_MESSAGE &&
+    record.intent === null &&
+    record.wait === null;
+}
+
+/**
+ * Counted unfinished target pull requests. The selection gate and the publish
+ * gate MUST agree: a fresh publication is admitted only while this count is
+ * under MAX_UNFINISHED_PRS, and a trusted retirement never consumes a slot.
+ */
+export function countUnfinishedPullRequests(
+  work: readonly WorkRecordV1[],
+): number {
+  return work.filter((record) =>
+    record.target.pr !== null && record.nextStep !== "done" &&
+    !isRetiredTargetRecord(record)
+  ).length;
+}
+
 export interface RankedWorkV1 {
   /** Deterministic priority order; index 0 is the next eligible action. */
   ordered: WorkItemId[];
@@ -65,19 +100,7 @@ export function rankEligibleWork(
   configs: readonly RepositoryConfigV1[],
   now: number,
 ): RankedWorkV1 {
-  const openPrCount =
-    snapshot.work.filter((record) =>
-      record.target.pr !== null && record.nextStep !== "done" &&
-      // Trusted hosted retirement marks a record blocked with this exact
-      // blocker only after the source issue AND its PR were closed unmerged,
-      // so it no longer holds a target PR open.
-      !(record.nextStep === "blocked" &&
-        record.blocker?.kind === "other" &&
-        record.blocker?.message ===
-          "source issue is closed; the repair no longer exists" &&
-        record.intent === null &&
-        record.wait === null)
-    ).length;
+  const openPrCount = countUnfinishedPullRequests(snapshot.work);
   const byRepository = new Map(
     configs.map((config) => [repoKey(config.repository), config] as const),
   );
