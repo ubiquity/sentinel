@@ -751,12 +751,14 @@ Deno.test("journal: completed verdicts require real runtime completion evidence"
   });
   await assert.rejects(
     parseReviewJournalBody(renderReviewJournalBody(wrongModel)),
-    /observedModel.*expected one of/,
+    /observedModel.*does not match submitted configuration/,
   );
+  // A configured model must still be a bounded identity: a malformed value is
+  // rejected, while any bounded configured id is a first-class identity.
   assert.throws(() =>
     parseReviewJournalMetadata(JSON.stringify({
       ...runningJournal(),
-      execution: runningExecution({ model: "gpt-4" }),
+      execution: runningExecution({ model: "bad\nmodel" }),
     }))
   );
   assert.throws(() =>
@@ -766,6 +768,86 @@ Deno.test("journal: completed verdicts require real runtime completion evidence"
     }))
   );
 });
+
+Deno.test(
+  "journal: configured review model identity roundtrips and mismatched or malformed models are rejected",
+  async () => {
+    const configured = "route-selected-review-model";
+
+    // A nondefault configured model is a first-class durable identity in both
+    // the running and ready journal phases, never a hardcoded literal.
+    const running = parseReviewJournalMetadata(
+      JSON.stringify(runningJournal({
+        execution: runningExecution({ model: configured }),
+      })),
+    );
+    assert.equal(running.phase, "running");
+    if (running.phase === "running") {
+      assert.equal(running.execution.model, configured);
+    }
+
+    const ready = await readyJournal(cleanResult(), {
+      execution: readyExecution({
+        model: configured,
+        actual: { ...readyExecution().actual, observedModel: configured },
+      }),
+    });
+    const parsedReady = await parseReviewJournalBody(
+      renderReviewJournalBody(ready),
+    );
+    assert.equal(parsedReady.phase, "ready");
+    if (parsedReady.phase === "ready") {
+      assert.equal(parsedReady.execution?.model, configured);
+      assert.equal(parsedReady.execution?.actual.observedModel, configured);
+      assert.equal(parsedReady.execution?.actual.observedReasoning, "max");
+    }
+
+    // The observed actual must still equal the submitted configured identity:
+    // a default literal or any other model is refused, never relabeled.
+    for (const wrongActual of ["gpt-reserve", "other-review-model"]) {
+      const mismatch = await readyJournal(cleanResult(), {
+        execution: readyExecution({
+          model: configured,
+          actual: { ...readyExecution().actual, observedModel: wrongActual },
+        }),
+      });
+      await assert.rejects(
+        parseReviewJournalBody(renderReviewJournalBody(mismatch)),
+        /does not match submitted configuration/,
+      );
+    }
+
+    // Malformed configured identities fail closed: empty, whitespace-only,
+    // untrimmed, control-bearing and over-bound values are all rejected.
+    const malformed = [
+      "",
+      " ",
+      " model",
+      "model ",
+      "bad\nmodel",
+      "x".repeat(257),
+    ];
+    for (const bad of malformed) {
+      assert.throws(
+        () =>
+          parseReviewJournalMetadata(JSON.stringify(runningJournal({
+            execution: runningExecution({ model: bad }),
+          }))),
+        `running execution model ${JSON.stringify(bad)} must be rejected`,
+      );
+      const malformedActual = await readyJournal(cleanResult(), {
+        execution: readyExecution({
+          model: configured,
+          actual: { ...readyExecution().actual, observedModel: bad },
+        }),
+      });
+      await assert.rejects(
+        parseReviewJournalBody(renderReviewJournalBody(malformedActual)),
+        `observed model ${JSON.stringify(bad)} must be rejected`,
+      );
+    }
+  },
+);
 
 Deno.test("journal: rendered body overflow is unavailable, never partial", async () => {
   const big: ReviewFindingV1[] = Array.from({ length: 100 }, (_, i) =>

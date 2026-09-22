@@ -74,6 +74,7 @@ import type { HttpTransportV1 } from "../github/http.ts";
 import { classifyGitHubRateLimit } from "../github/rate-limit.ts";
 import { GitReviewSnapshot } from "../github/review-snapshot.ts";
 import { CodexStructuredReviewer } from "../github/codex-reviewer.ts";
+import { REVIEW_MODEL } from "../github/review-journal.ts";
 import { GitHubCodexReviewTransport } from "../github/codex-review-transport.ts";
 import {
   type CodexSessionV1,
@@ -1218,9 +1219,10 @@ export interface LocalGitHubInputV1 {
   modelBaseUrl?: string;
   /**
    * Trusted route selection. The composed reviewer submits the route's
-   * provider (the same provider the review client config names), so a
-   * route-selected fallback never submits a provider the config lacks.
-   * Omitted callers keep the primary gateway provider.
+   * provider (the same provider the review client config names) and the
+   * route's model, so a route-selected fallback never submits a provider or
+   * model the config lacks. Omitted callers keep the primary gateway provider
+   * and the frozen review model.
    */
   route?: ModelRouteV1;
   /**
@@ -1555,6 +1557,11 @@ export function composeLocalGitHub(input: LocalGitHubInputV1): GitHubPort {
   };
   const reviewer = new CodexStructuredReviewer({
     provider: input.route?.provider ?? DEFAULT_PROVIDER_NAME,
+    // The trusted route selects the review model. Only an OMITTED route keeps
+    // the frozen default; a present route whose runtime model is missing is
+    // normalized to the invalid empty sentinel the reviewer refuses at prepare,
+    // never silently replaced by the default.
+    model: input.route === undefined ? REVIEW_MODEL : input.route.model ?? "",
     sessionCwd: input.reviewCheckout,
     permissionProfile: "sentinel-review",
     openSession: ({ cwd }) =>

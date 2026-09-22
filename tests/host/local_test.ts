@@ -38,6 +38,8 @@ import {
   type RepairStateSnapshotV1,
 } from "../../src/contracts/state-snapshots.ts";
 import type { HttpTransportV1 } from "../../src/github/http.ts";
+import { REVIEW_MODEL } from "../../src/github/review-journal.ts";
+import type { ModelRouteV1 } from "../../src/host/model-route.ts";
 import { DurableGitHubCooldownGate } from "../../src/repair/github-cooldown.ts";
 import { LOOP_STOP_MARKER } from "../../src/repair/model-port.ts";
 import { FakeClock, FakeGithub, MemoryState } from "../repair/helpers.ts";
@@ -2965,6 +2967,122 @@ Deno.test(
         if (!foreignRefused.ok) {
           assert.equal(foreignRefused.error.kind, "conflict");
         }
+      }
+    } finally {
+      await Deno.remove(root, { recursive: true }).catch(() => {});
+    }
+  },
+);
+
+Deno.test(
+  "local composition forwards the configured review model and provider to the reviewer",
+  async () => {
+    const configuredRoute: ModelRouteV1 = {
+      provider: "deepseek",
+      baseUrl: "https://api.deepseek.com/v1",
+      model: "deepseek-flash",
+      reasoning: "max",
+      apiKeyEnv: "SENTINEL_DEEPSEEK_API_KEY",
+    };
+    const root = await Deno.realPath(
+      await Deno.makeTempDir({ dir: ".", prefix: "sentinel-review-model-" }),
+    );
+    try {
+      for (
+        const dir of [
+          "state",
+          "source",
+          "scratch",
+          "review",
+          "clients",
+          "tmp",
+          "deno",
+        ]
+      ) {
+        await Deno.mkdir(`${root}/${dir}`, { recursive: true });
+      }
+      const gate: GitHubCooldownGateV1 = {
+        beforeRequest: () => Promise.resolve(portOk(undefined)),
+        recordRateLimit: () => Promise.resolve(portOk(undefined)),
+      };
+      const http: HttpTransportV1 = () =>
+        Promise.reject(new Error("no request in this composition test"));
+      const compose = (route?: ModelRouteV1) =>
+        composeLocalGitHub({
+          clock: new FakeClock(T0),
+          state: new MemoryState(),
+          gate,
+          http,
+          token: "dummy-token",
+          login: "ubiquity-sentinel[bot]",
+          invocationId: "configured-review-model",
+          stateRoot: `${root}/state`,
+          sourcePath: `${root}/source`,
+          scratch: `${root}/scratch`,
+          reviewCheckout: `${root}/review`,
+          reviewClientHome: `${root}/clients`,
+          reviewTmpDir: `${root}/tmp`,
+          reviewDenoDir: `${root}/deno`,
+          trustedPath: Deno.env.get("PATH") ?? "/usr/bin:/bin",
+          codexExecutable: "/usr/bin/false",
+          tracker: new LocalSessionTracker(),
+          route,
+        });
+      // The composed review service owns exactly the reviewer this composition
+      // built; its trusted binding proves which provider/model were forwarded.
+      // The port is widened through unknown BEFORE the private fields are
+      // read, so the accessor itself never names an undeclared port property.
+      const reviewerOf = (port: ReturnType<typeof composeLocalGitHub>) =>
+        (port as unknown as {
+          reviewService: {
+            reviewer: {
+              provider: string;
+              model: string;
+              prepare: (request: unknown) => Promise<PortResultV1<unknown>>;
+            };
+          };
+        }).reviewService.reviewer;
+
+      const configured = reviewerOf(compose(configuredRoute));
+      assert.equal(configured.provider, "deepseek");
+      assert.equal(
+        configured.model,
+        "deepseek-flash",
+        "the route-selected model is forwarded, not the frozen default",
+      );
+
+      // A present route whose runtime model is missing must NOT become the
+      // omitted-caller default: the reviewer is bound to a value its bounded
+      // model validation refuses at prepare, before any session opens.
+      const malformedRoute = {
+        ...configuredRoute,
+        model: undefined,
+      } as unknown as ModelRouteV1;
+      const malformed = reviewerOf(compose(malformedRoute));
+      assert.equal(malformed.provider, "deepseek");
+      assert.equal(
+        malformed.model,
+        "",
+        "a present malformed route model is never replaced by the default",
+      );
+      const refused = await malformed.prepare({});
+      assert.equal(refused.ok, false);
+      if (!refused.ok) {
+        assert.match(String(refused.error.detail), /review model/);
+      }
+
+      // Omitted callers keep the frozen local provider and review model.
+      const fallback = reviewerOf(compose());
+      assert.equal(fallback.provider, "uos");
+      assert.equal(fallback.model, REVIEW_MODEL);
+      const fallbackRefused = await fallback.prepare({});
+      assert.equal(
+        fallbackRefused.ok,
+        false,
+        "the omitted-caller default is not a malformed model refusal",
+      );
+      if (!fallbackRefused.ok) {
+        assert.match(String(fallbackRefused.error.detail), /request identity/);
       }
     } finally {
       await Deno.remove(root, { recursive: true }).catch(() => {});

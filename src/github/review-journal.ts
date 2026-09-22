@@ -326,7 +326,12 @@ export interface ReviewJournalExecutionV1 {
   invocationId: string;
   threadId: string;
   submittedProvider: string;
-  model: typeof REVIEW_MODEL;
+  /**
+   * Trusted configured runtime model id for this review. The frozen
+   * `REVIEW_MODEL` is only the omitted-caller default, so a route-selected
+   * model round-trips as its own bounded identity (never a hardcoded literal).
+   */
+  model: string;
   reasoning: typeof REVIEW_REASONING;
   /** Explicit durable marker: a model start may occur after running readback. */
   startMayOccur: true;
@@ -340,7 +345,11 @@ export interface ReviewJournalRuntimeActualV1 {
   turnId: string;
   terminalOrigin: "runtime" | "host-timeout";
   observedTerminalStatus: "completed" | "interrupted" | "failed" | null;
-  observedModel: typeof REVIEW_MODEL;
+  /**
+   * Bounded observed runtime model id, exactly equal to the submitted
+   * `execution.model`; the default literal is never assumed.
+   */
+  observedModel: string;
   observedReasoning: typeof REVIEW_REASONING;
   durationMs: number;
   outputChars: number;
@@ -567,7 +576,7 @@ function parseExecutionFields(
   obj: Record<string, unknown>,
   path: string,
 ): ReviewJournalExecutionV1 {
-  const model = expectEnum(obj.model, [REVIEW_MODEL], `${path}.model`);
+  const model = expectModelId(obj.model, `${path}.model`);
   const reasoning = expectEnum(
     obj.reasoning,
     [REVIEW_REASONING],
@@ -703,9 +712,8 @@ function parseActual(
       "host timeout carries no observed runtime terminal",
     );
   }
-  const observedModel = expectEnum(
+  const observedModel = expectModelId(
     obj.observedModel,
-    [REVIEW_MODEL],
     `${path}.observedModel`,
   );
   const observedReasoning = expectEnum(
@@ -955,6 +963,19 @@ function expectBoundedId(value: unknown, path: string, max: number): string {
   const text = expectSingleLineText(value, path, max);
   if (text.length === 0) {
     fail(path, "invalid_pattern", "expected non-empty string");
+  }
+  return text;
+}
+
+/**
+ * Bounded model-id text: nonempty, no control characters, within the shared
+ * token bound and with no leading/trailing whitespace. The trusted configured
+ * identity is preserved verbatim; whitespace is never silently trimmed.
+ */
+function expectModelId(value: unknown, path: string): string {
+  const text = expectBoundedId(value, path, MaxText.token);
+  if (text.trim() !== text) {
+    fail(path, "invalid_pattern", "expected a trimmed model id");
   }
   return text;
 }

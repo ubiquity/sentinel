@@ -101,6 +101,8 @@ const FINAL_PHASES = new Set(["final_answer", "final", "answer"]);
 
 const PROVIDER_DETAIL =
   "structured review unavailable: the configured provider is not a nonempty finite string";
+const MODEL_DETAIL =
+  "structured review unavailable: the configured review model is not a bounded nonempty trimmed model id";
 const PERMISSION_PROFILE_DETAIL =
   "structured review unavailable: the configured permission profile is not a valid named profile";
 const DEADLINE_DETAIL =
@@ -341,6 +343,13 @@ export interface PreparedStructuredReviewV1 {
 export interface CodexStructuredReviewerOptionsV1 {
   /** Selected provider; acknowledged by thread/start and receipt verification. */
   provider: string;
+  /**
+   * Trusted route-selected review model id. Omitted callers keep the frozen
+   * `REVIEW_MODEL`; when supplied it must be a bounded nonempty trimmed
+   * control-free id (validated before any session opens) and every submitted,
+   * acknowledged and recorded runtime identity uses this exact value.
+   */
+  model?: string;
   /** Trusted host capability opening the app-server session for one cwd. */
   openSession: (input: { cwd: string }) => CodexSessionV1;
   /** Trusted absolute isolated session directory (read-only review cwd). */
@@ -374,6 +383,16 @@ function isValidProvider(value: string): boolean {
     if (code <= 0x1f || code === 0x7f) return false;
   }
   return true;
+}
+
+/**
+ * Bounded configured review model id: the same trusted shape contract as the
+ * provider name (nonempty, no leading/trailing whitespace, no control
+ * characters, finite length). The configured value is never silently trimmed
+ * or replaced by a built-in default.
+ */
+function isValidReviewModel(value: unknown): value is string {
+  return typeof value === "string" && isValidProvider(value);
 }
 
 /**
@@ -532,6 +551,8 @@ class PreparedStructuredReview implements PreparedStructuredReviewV1 {
 
   private readonly session: CodexSessionV1;
   private readonly provider: string;
+  /** Trusted configured review model id; never a built-in substitution. */
+  private readonly model: string;
   private readonly prompt: string;
   private readonly snapshot: ReviewSnapshotV1;
   private readonly now: () => number;
@@ -579,6 +600,7 @@ class PreparedStructuredReview implements PreparedStructuredReviewV1 {
   constructor(input: {
     session: CodexSessionV1;
     provider: string;
+    model: string;
     prompt: string;
     snapshot: ReviewSnapshotV1;
     now: () => number;
@@ -591,6 +613,7 @@ class PreparedStructuredReview implements PreparedStructuredReviewV1 {
   }) {
     this.session = input.session;
     this.provider = input.provider;
+    this.model = input.model;
     this.prompt = input.prompt;
     this.snapshot = input.snapshot;
     this.now = input.now;
@@ -612,7 +635,7 @@ class PreparedStructuredReview implements PreparedStructuredReviewV1 {
       invocationId: this.invocationId,
       threadId: this.threadId,
       submittedProvider: this.provider,
-      model: REVIEW_MODEL,
+      model: this.model,
       reasoning: REVIEW_REASONING,
       startMayOccur: true,
     };
@@ -682,7 +705,7 @@ class PreparedStructuredReview implements PreparedStructuredReviewV1 {
     let sendPromise: Promise<unknown>;
     const turnParams: Record<string, unknown> = {
       threadId: this.threadId,
-      model: REVIEW_MODEL,
+      model: this.model,
       effort: REVIEW_REASONING,
       input: [{ type: "text", text: this.prompt, text_elements: [] }],
       outputSchema: REVIEW_RESULT_OUTPUT_SCHEMA,
@@ -1303,7 +1326,7 @@ class PreparedStructuredReview implements PreparedStructuredReviewV1 {
       to,
       reason,
     });
-    if (from === to || from !== REVIEW_MODEL || to !== REVIEW_MODEL) {
+    if (from === to || from !== this.model || to !== this.model) {
       this.failEvidence(REROUTE_OFF_POLICY_DETAIL);
     }
   }
@@ -1319,7 +1342,7 @@ class PreparedStructuredReview implements PreparedStructuredReviewV1 {
       turnId,
       terminalOrigin: terminal === null ? "host-timeout" : "runtime",
       observedTerminalStatus: terminal === null ? null : terminal.status,
-      observedModel: REVIEW_MODEL,
+      observedModel: this.model,
       observedReasoning: REVIEW_REASONING,
       durationMs: terminal?.durationMs ??
         Math.max(0, this.now() - this.turnStartedAt),
@@ -1394,7 +1417,7 @@ class PreparedStructuredReview implements PreparedStructuredReviewV1 {
 
     const evidence: ActualSessionEvidenceV1 = {
       invocationId: this.invocationId,
-      requestedModel: REVIEW_MODEL,
+      requestedModel: this.model,
       requestedProvider: this.provider,
       requestedEffort: REVIEW_REASONING,
       threadId: this.threadId,
@@ -1413,7 +1436,12 @@ class PreparedStructuredReview implements PreparedStructuredReviewV1 {
       resultItems: [{ itemId: message.itemId, type: "agentMessage" }],
       outputChars: this.eventBytes,
     };
-    if (createRequestRuntimeReceiptVerifier(this.provider)(evidence) === null) {
+    if (
+      createRequestRuntimeReceiptVerifier(this.provider, this.model)(
+        evidence,
+      ) ===
+        null
+    ) {
       return unavailable(RECEIPT_DETAIL, result, message.itemId);
     }
     if (result.verdict === "unavailable") {
@@ -1427,7 +1455,7 @@ class PreparedStructuredReview implements PreparedStructuredReviewV1 {
       invocationId: this.invocationId,
       threadId: this.threadId,
       submittedProvider: this.provider,
-      model: REVIEW_MODEL,
+      model: this.model,
       reasoning: REVIEW_REASONING,
       startMayOccur: true,
       turnId,
@@ -1446,12 +1474,19 @@ class PreparedStructuredReview implements PreparedStructuredReviewV1 {
 }
 
 /**
- * Concrete structured Codex reviewer. Provider, session-open capability and
- * the trusted isolated session cwd come from the constructor; the runtime
- * model/effort are the frozen Luna/max policy with no fallback.
+ * Concrete structured Codex reviewer. Provider, model, session-open capability
+ * and the trusted isolated session cwd come from the constructor; the model is
+ * the trusted configured id (frozen `REVIEW_MODEL` only when omitted) and the
+ * reasoning effort is the frozen max policy with no fallback.
  */
 export class CodexStructuredReviewer {
   private readonly provider: string;
+  /**
+   * Trusted configured review model id: the trusted route's model when the
+   * caller supplies one, else the frozen `REVIEW_MODEL` default. Every
+   * submitted, acknowledged and recorded identity binds this exact value.
+   */
+  private readonly model: string;
   private readonly sessionCwd: string;
   private readonly openSession: (input: { cwd: string }) => CodexSessionV1;
   private readonly now: () => number;
@@ -1460,6 +1495,10 @@ export class CodexStructuredReviewer {
 
   constructor(options: CodexStructuredReviewerOptionsV1) {
     this.provider = options.provider;
+    // ONLY an omitted model keeps the frozen default: an explicit runtime null
+    // (or any other malformed value) is carried into the bounded validator and
+    // refuses at prepare instead of being silently replaced.
+    this.model = options.model === undefined ? REVIEW_MODEL : options.model;
     this.sessionCwd = options.sessionCwd;
     this.openSession = options.openSession;
     this.now = options.now ?? (() => Date.now());
@@ -1476,6 +1515,12 @@ export class CodexStructuredReviewer {
   ): Promise<PortResultV1<PreparedStructuredReviewV1>> {
     if (!isValidProvider(this.provider)) {
       return portError("unavailable", PROVIDER_DETAIL);
+    }
+    // The trusted configured review model is validated with the same bounded
+    // shape contract BEFORE any session opens: it is never silently trimmed,
+    // substituted or defaulted once the caller supplied it.
+    if (!isValidReviewModel(this.model)) {
+      return portError("unavailable", MODEL_DETAIL);
     }
     // The trusted named permission profile is REQUIRED and must be a valid
     // host-defined name BEFORE any session opens; built-in full-access ids are
@@ -1572,6 +1617,7 @@ export class CodexStructuredReviewer {
       const prepared = new PreparedStructuredReview({
         session,
         provider: this.provider,
+        model: this.model,
         prompt,
         snapshot,
         now: this.now,
@@ -1633,14 +1679,14 @@ export class CodexStructuredReviewer {
     // exec handler (`shell_tool` true, `unified_exec` false): no write_stdin,
     // TTY or resumable authority is granted for the named restricted profile.
     const threadParams: Record<string, unknown> = {
-      model: REVIEW_MODEL,
+      model: this.model,
       modelProvider: this.provider,
       cwd: this.sessionCwd,
       approvalPolicy: "never",
       ephemeral: true,
       config: {
         model_reasoning_effort: REVIEW_REASONING,
-        review_model: REVIEW_MODEL,
+        review_model: this.model,
         "features.shell_tool": true,
         "features.unified_exec": false,
         "features.multi_agent": false,
@@ -1667,7 +1713,7 @@ export class CodexStructuredReviewer {
     const modelProvider = record?.modelProvider;
     const reasoningEffort = record?.reasoningEffort;
     if (
-      model !== REVIEW_MODEL || modelProvider !== this.provider ||
+      model !== this.model || modelProvider !== this.provider ||
       reasoningEffort !== REVIEW_REASONING
     ) {
       throw new CodexProtocolError(

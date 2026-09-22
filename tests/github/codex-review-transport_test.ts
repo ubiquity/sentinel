@@ -15,6 +15,7 @@ import { asGitSha, type GitSha } from "../../src/contracts/brands.ts";
 import { portOk } from "../../src/contracts/ports.ts";
 import { GitHubApiClient } from "../../src/github/client.ts";
 import { CodexStructuredReviewer } from "../../src/github/codex-reviewer.ts";
+import type { CodexStructuredReviewerOptionsV1 } from "../../src/github/codex-reviewer.ts";
 import {
   GitHubCodexReviewTransport,
   type GitReviewSnapshotCaptureV1,
@@ -295,6 +296,8 @@ class RecordingSession implements CodexSessionV1 {
   delayMs = 0;
   readonly turnId = "turn-1";
   readonly threadId = "thread-1";
+  /** Configured model the scripted server acknowledges (default frozen id). */
+  model: string = REVIEW_MODEL;
 
   private handler: ((event: CodexServerNotificationV1) => void) | null = null;
   private readonly backlog: CodexServerNotificationV1[] = [];
@@ -313,7 +316,7 @@ class RecordingSession implements CodexSessionV1 {
     if (method === "thread/start") {
       return Promise.resolve({
         thread: { id: this.threadId },
-        model: REVIEW_MODEL,
+        model: this.model,
         modelProvider: PROVIDER,
         reasoningEffort: REVIEW_REASONING,
         activePermissionProfile: { id: "sentinel-review" },
@@ -441,14 +444,20 @@ function makeClient(
 function makeReviewer(
   session: RecordingSession,
   clock: FakeClock,
+  model?: string,
 ): CodexStructuredReviewer {
-  return new CodexStructuredReviewer({
-    provider: PROVIDER,
-    openSession: () => session,
-    sessionCwd: "/tmp/sentinel-review-transport",
-    permissionProfile: "sentinel-review",
-    now: () => clock.now(),
-  });
+  return new CodexStructuredReviewer(
+    Object.assign(
+      {
+        provider: PROVIDER,
+        openSession: () => session,
+        sessionCwd: "/tmp/sentinel-review-transport",
+        permissionProfile: "sentinel-review",
+        now: () => clock.now(),
+      },
+      model === undefined ? {} : { model },
+    ) as CodexStructuredReviewerOptionsV1,
+  );
 }
 
 interface HarnessV1 {
@@ -466,6 +475,8 @@ function makeHarness(
     session?: RecordingSession;
     snapshot?: GitReviewSnapshotCaptureV1;
     maxActiveReviews?: number;
+    /** Trusted configured review model for the composed reviewer. */
+    reviewModel?: string;
   } = {},
 ): HarnessV1 {
   const store = options.store ?? new DurableReviewStore();
@@ -493,7 +504,8 @@ function makeHarness(
         prepare: (request) => {
           const session = options.session ?? new RecordingSession();
           sessions.push(session);
-          return makeReviewer(session, clock).prepare(request);
+          return makeReviewer(session, clock, options.reviewModel)
+            .prepare(request);
         },
       },
       maxActiveReviews: options.maxActiveReviews,
@@ -745,6 +757,61 @@ Deno.test(
           await reviewResultDigest(CLEAN_RESULT),
         );
         assert.equal(read.value.expectedReviewer, REVIEWER);
+        assert.equal(read.value.expectedHead, head);
+      }
+    });
+  },
+);
+
+Deno.test(
+  "transport: configured review model identity is durable across the review handoff",
+  async () => {
+    const configured = "route-selected-review-model";
+    await withRealGitRange(async ({ base, head, snapshot }) => {
+      const session = new RecordingSession();
+      session.model = configured;
+      const h = makeHarness({ session, snapshot, reviewModel: configured });
+      const submitted = await h.transport.submitReview(
+        submission({ expectedBase: base, expectedHead: head }),
+      );
+      assert.equal(submitted.ok, true, JSON.stringify(submitted));
+      await settle(h.transport);
+      const review = onlyReview(h.store);
+      assert.equal(review.state, "commented");
+
+      // The submitted thread and turn bind the configured model, never the
+      // omitted-caller default literal.
+      const threadParams = session.params[1] as Record<string, unknown>;
+      assert.equal(threadParams.model, configured);
+      assert.equal(threadParams.modelProvider, PROVIDER);
+      assert.equal(
+        (threadParams.config as Record<string, unknown>).review_model,
+        configured,
+      );
+      const turnParams = session.params[2] as Record<string, unknown>;
+      assert.equal(turnParams.model, configured);
+      assert.equal(turnParams.effort, "max");
+
+      // The durable journal round-trips the exact configured identity.
+      const journal = await parseReviewJournalBody(review.body ?? "");
+      assert.equal(journal.phase, "ready");
+      if (journal.phase === "ready") {
+        assert.equal(journal.execution?.model, configured);
+        assert.equal(journal.execution?.submittedProvider, PROVIDER);
+        assert.equal(journal.execution?.reasoning, "max");
+        assert.equal(journal.execution?.actual.observedModel, configured);
+        assert.equal(journal.execution?.actual.observedReasoning, "max");
+      }
+
+      // A fresh transport instance still observes the durable completion.
+      const read = await h.freshTransport().readReview({
+        operationKey: OP_KEY,
+        requestId: null,
+        prNumber: PR,
+      });
+      assert.equal(read.ok, true);
+      if (read.ok) {
+        assert.equal(read.value.status, "completed");
         assert.equal(read.value.expectedHead, head);
       }
     });
