@@ -345,6 +345,17 @@ export const OWNER_DEVELOPMENT_INSTALL_BASE_FETCH_GENERATION = 36;
 export const OWNER_DEVELOPMENT_INSTALL_REVIEW_MODEL_REVISION =
   "59940aece2d051b79c8e2e8ab7c611a0d45600b2" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_REVIEW_MODEL_GENERATION = 37;
+/**
+ * Exact owner-approved successor revision that is locally validated,
+ * integrated and published; route/model policy, max reasoning, limits,
+ * quotas and the review/merge guards are unchanged. Installed only after the
+ * review model generation 37 healthy proof. A failed generation 38 candidate
+ * settles exactly once by rolling back to the recorded generation 37 revision
+ * with a monotonic generation 39; that post-rollback pointer is terminal.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_APP_AUTH_REVISION =
+  "3b6d3736e353ccfdb6da2902bb5be4184335803d" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_APP_AUTH_GENERATION = 38;
 
 const API_BASE = "https://api.github.com";
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -1469,10 +1480,53 @@ export function planOwnerDevelopmentInstall(
       );
     }
     if (healthy !== null) {
-      return noChange("the owner development installation is complete");
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_APP_AUTH_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_APP_AUTH_GENERATION,
+        healthy,
+        "install the app auth revision after the review model healthy proof",
+      );
     }
     return waiting(
       "the review model generation 37 healthy proof is not recorded",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_APP_AUTH_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_APP_AUTH_GENERATION
+  ) {
+    // An exact failed settlement of this pointer is candidate failure
+    // evidence even when a healthy proof exists; the rollback still requires
+    // the recorded healthy proof of the exact prior revision, so a missing or
+    // unrelated proof stays a zero-write waiting outcome.
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_REVIEW_MODEL_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_REVIEW_MODEL_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded review model healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_REVIEW_MODEL_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed app auth candidate to its recorded prior",
+      );
+    }
+    if (healthy !== null) {
+      return noChange("the owner development installation is complete");
+    }
+    return waiting(
+      "the app auth generation 38 healthy proof is not recorded",
     );
   }
 

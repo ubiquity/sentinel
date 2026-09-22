@@ -124,6 +124,11 @@ const BASE_FETCH_GENERATION = 36;
 // a semantic plan mismatch and never a missing import.
 const REVIEW_MODEL = "59940aece2d051b79c8e2e8ab7c611a0d45600b2" as GitSha;
 const REVIEW_MODEL_GENERATION = 37;
+// The successor install pin stays a test-local exact literal for the same
+// reason: this suite must compile against pre-rung production source, so the
+// expected red is a semantic plan mismatch and never a missing import.
+const SUCCESSOR_REVISION = "3b6d3736e353ccfdb6da2902bb5be4184335803d" as GitSha;
+const SUCCESSOR_GENERATION = 38;
 
 function hostedProof(input: {
   runId: number;
@@ -2033,34 +2038,210 @@ Deno.test(
       "waiting",
     );
 
-    // The installed generation 37 pointer is stable only with its own bound
-    // healthy proof, and that stable candidate is terminal.
-    assert.equal(
-      planOwnerDevelopmentInstall(
-        releaseSnapshot({
-          runtime: runtimeRecord({
-            revision: REVIEW_MODEL,
-            generation: REVIEW_MODEL_GENERATION,
-            healthyProof: healthyProof(REVIEW_MODEL, 37, 144),
-          }),
+    // The review model generation 37 healthy proof authorizes exactly one
+    // move to the fixed owner-approved successor runtime revision.
+    const reviewModelHealthy = healthyProof(REVIEW_MODEL, 37, 144);
+    const successorInstall = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: REVIEW_MODEL,
+          generation: REVIEW_MODEL_GENERATION,
+          healthyProof: reviewModelHealthy,
         }),
-        NOW,
-      ).status,
-      "no_change",
+      }),
+      NOW,
+    );
+    assert.equal(successorInstall.status, "install");
+    if (successorInstall.status !== "install") {
+      throw new Error("expected successor install");
+    }
+    assert.equal(successorInstall.move.action, "install");
+    assert.equal(successorInstall.move.priorRevision, REVIEW_MODEL);
+    assert.equal(
+      successorInstall.move.priorGeneration,
+      REVIEW_MODEL_GENERATION,
+    );
+    assert.equal(successorInstall.move.nextRevision, SUCCESSOR_REVISION);
+    assert.equal(successorInstall.move.nextGeneration, SUCCESSOR_GENERATION);
+    assert.equal(
+      successorInstall.move.nextGeneration,
+      successorInstall.move.priorGeneration + 1,
     );
     assert.equal(
+      canonicalStringify(successorInstall.move.priorHealthyProof),
+      canonicalStringify(reviewModelHealthy),
+    );
+
+    // A healthy proof bound to another revision or generation, and no
+    // recorded proof at all, never authorize the successor pin.
+    for (
+      const healthy of [
+        baseFetchHealthy,
+        healthyProof(SUCCESSOR_REVISION, 37, 149),
+        healthyProof(REVIEW_MODEL, 38, 150),
+        null,
+      ]
+    ) {
+      assert.equal(
+        planOwnerDevelopmentInstall(
+          releaseSnapshot({
+            runtime: runtimeRecord({
+              revision: REVIEW_MODEL,
+              generation: REVIEW_MODEL_GENERATION,
+              healthyProof: healthy,
+            }),
+          }),
+          NOW,
+        ).status,
+        "waiting",
+      );
+    }
+
+    // An in-flight execution of the authorized successor install stays a
+    // zero-write wait.
+    assert.equal(
       planOwnerDevelopmentInstall(
         releaseSnapshot({
           runtime: runtimeRecord({
             revision: REVIEW_MODEL,
             generation: REVIEW_MODEL_GENERATION,
-            healthyProof: baseFetchHealthy,
+            healthyProof: reviewModelHealthy,
+            execution: executionIntent(REVIEW_MODEL, REVIEW_MODEL_GENERATION),
           }),
         }),
         NOW,
       ).status,
       "waiting",
     );
+
+    // The installed successor generation 38 pointer is stable only with its
+    // own bound healthy proof, and that stable successor is terminal.
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: SUCCESSOR_REVISION,
+            generation: SUCCESSOR_GENERATION,
+            healthyProof: healthyProof(SUCCESSOR_REVISION, 38, 151),
+          }),
+        }),
+        NOW,
+      ).status,
+      "no_change",
+    );
+    for (
+      const healthy of [
+        reviewModelHealthy,
+        healthyProof(SUCCESSOR_REVISION, 39, 152),
+        null,
+      ]
+    ) {
+      assert.equal(
+        planOwnerDevelopmentInstall(
+          releaseSnapshot({
+            runtime: runtimeRecord({
+              revision: SUCCESSOR_REVISION,
+              generation: SUCCESSOR_GENERATION,
+              healthyProof: healthy,
+            }),
+          }),
+          NOW,
+        ).status,
+        "waiting",
+      );
+    }
+
+    // A failed generation 38 successor candidate settles exactly once by
+    // rolling back only to the exact previously proven review model revision
+    // with a monotonic generation 39, authorized by its retained healthy
+    // proof.
+    const failedSuccessor = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: SUCCESSOR_REVISION,
+          generation: SUCCESSOR_GENERATION,
+          healthyProof: reviewModelHealthy,
+          executionProof: failedProof(SUCCESSOR_REVISION, 38, 153),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(failedSuccessor.status, "rollback");
+    if (failedSuccessor.status !== "rollback") {
+      throw new Error("expected successor rollback");
+    }
+    assert.equal(failedSuccessor.move.action, "rollback");
+    assert.equal(failedSuccessor.move.priorRevision, SUCCESSOR_REVISION);
+    assert.equal(failedSuccessor.move.priorGeneration, SUCCESSOR_GENERATION);
+    assert.equal(failedSuccessor.move.nextRevision, REVIEW_MODEL);
+    assert.equal(failedSuccessor.move.nextGeneration, 39);
+    assert.equal(
+      failedSuccessor.move.nextGeneration,
+      failedSuccessor.move.priorGeneration + 1,
+    );
+    assert.equal(
+      canonicalStringify(failedSuccessor.move.priorHealthyProof),
+      canonicalStringify(reviewModelHealthy),
+    );
+
+    // A successor failure that does not bind the exact pointer, a
+    // no-execution settlement and a missing retained prior never roll back.
+    const successorWaits = [
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: SUCCESSOR_REVISION,
+          generation: SUCCESSOR_GENERATION,
+          healthyProof: reviewModelHealthy,
+          executionProof: failedProof(SUCCESSOR_REVISION, 37, 154),
+        }),
+      }),
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: SUCCESSOR_REVISION,
+          generation: SUCCESSOR_GENERATION,
+          healthyProof: reviewModelHealthy,
+          executionProof: notStartedProof(
+            SUCCESSOR_REVISION,
+            SUCCESSOR_GENERATION,
+          ),
+        }),
+      }),
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: SUCCESSOR_REVISION,
+          generation: SUCCESSOR_GENERATION,
+          executionProof: failedProof(SUCCESSOR_REVISION, 38, 155),
+        }),
+      }),
+    ];
+    for (const state of successorWaits) {
+      const plan = planOwnerDevelopmentInstall(state, NOW);
+      assert.notEqual(plan.status, "rollback");
+      assert.equal(plan.status, "waiting");
+    }
+
+    // The post-rollback review model generation 39 pointer is terminal: it is
+    // outside the one-shot chain and never reattempts either movement.
+    for (
+      const healthy of [
+        healthyProof(REVIEW_MODEL, 39, 156),
+        null,
+      ]
+    ) {
+      assert.equal(
+        planOwnerDevelopmentInstall(
+          releaseSnapshot({
+            runtime: runtimeRecord({
+              revision: REVIEW_MODEL,
+              generation: 39,
+              healthyProof: healthy,
+            }),
+          }),
+          NOW,
+        ).status,
+        "no_change",
+      );
+    }
 
     // A failed generation 37 candidate settles exactly once by rolling back
     // to the exact previously proven generation 36 revision with a monotonic
@@ -2133,8 +2314,8 @@ Deno.test(
       assert.equal(plan.status, "waiting");
     }
 
-    // The post-rollback generation 38 pointer is terminal: it is outside the
-    // one-shot chain and never reattempts either movement.
+    // The post-rollback base fetch generation 38 pointer is terminal: it is
+    // outside the one-shot chain and never reattempts either movement.
     for (
       const healthy of [
         healthyProof(BASE_FETCH, 38, 148),
