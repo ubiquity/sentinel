@@ -415,6 +415,20 @@ export const OWNER_DEVELOPMENT_INSTALL_ASSIGN_FIRST_GENERATION = 44;
 export const OWNER_DEVELOPMENT_INSTALL_REVIEW_PHASE_PR_REVISION =
   "529c2d3b81cf66f66d46d6c4cb1a573b3b4ba603" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_REVIEW_PHASE_PR_GENERATION = 45;
+/**
+ * The first review-phase PR rung was consumed by a real candidate failure: the
+ * generation 45 execution was killed by a runner shutdown, so the guard rolled
+ * exactly once to the recorded prior at monotic generation 46. This second,
+ * separate rung is keyed on that rollback target and installs the same
+ * owner-approved review-phase PR revision as generation 47 after the
+ * generation 46 healthy proof.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_REVIEW_PHASE_PR_RETRY_REVISION =
+  "529c2d3b81cf66f66d46d6c4cb1a573b3b4ba603" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_REVIEW_PHASE_PR_RETRY_GENERATION = 47;
+/** Monotonic rollback target the failed generation 45 candidate rolled to. */
+export const OWNER_DEVELOPMENT_INSTALL_ROLLBACK_TARGET_GENERATION =
+  OWNER_DEVELOPMENT_INSTALL_ASSIGN_FIRST_GENERATION + 2;
 
 const API_BASE = "https://api.github.com";
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -1887,6 +1901,81 @@ export function planOwnerDevelopmentInstall(
     }
     return waiting(
       "the review-phase PR generation 45 healthy proof is not recorded",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_ASSIGN_FIRST_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_ROLLBACK_TARGET_GENERATION
+  ) {
+    // Monotonic rollback target of the failed generation 45 candidate:
+    // exactly one further owner-approved move installs the same review-phase
+    // PR revision as generation 47, and a failed generation 47 candidate rolls
+    // back exactly once more to this same recorded prior at generation 48.
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_ASSIGN_FIRST_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_ROLLBACK_TARGET_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded rollback-target healthy proof is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_ASSIGN_FIRST_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed review-phase PR retry candidate to its recorded prior",
+      );
+    }
+    if (healthy !== null) {
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_REVIEW_PHASE_PR_RETRY_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_REVIEW_PHASE_PR_RETRY_GENERATION,
+        healthy,
+        "install the review-phase PR revision after the rollback-target healthy proof",
+      );
+    }
+    return waiting(
+      "the review-phase PR retry generation 47 healthy proof is not recorded",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_REVIEW_PHASE_PR_RETRY_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_REVIEW_PHASE_PR_RETRY_GENERATION
+  ) {
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_ASSIGN_FIRST_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_ROLLBACK_TARGET_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded rollback-target healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_ASSIGN_FIRST_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed review-phase PR retry candidate to its recorded prior",
+      );
+    }
+    if (healthy !== null) {
+      return noChange("the owner development installation is complete");
+    }
+    return waiting(
+      "the review-phase PR retry generation 47 healthy proof is not recorded",
     );
   }
 

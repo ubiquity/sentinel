@@ -170,6 +170,11 @@ const ASSIGN_FIRST_GENERATION = 44;
 const REVIEW_PHASE_PR_REVISION =
   "529c2d3b81cf66f66d46d6c4cb1a573b3b4ba603" as GitSha;
 const REVIEW_PHASE_PR_GENERATION = 45;
+// The retry pin is the same owner-approved revision re-installed after a real
+// candidate failure rolled the pointer to its recorded prior.
+const REVIEW_PHASE_PR_RETRY_REVISION = REVIEW_PHASE_PR_REVISION;
+const REVIEW_PHASE_PR_RETRY_GENERATION = 47;
+const ROLLBACK_TARGET_GENERATION = 46;
 
 function hostedProof(input: {
   runId: number;
@@ -2636,6 +2641,117 @@ Deno.test(
         "waiting",
       );
     }
+
+    // The generation 45 candidate really failed (a runner shutdown killed its
+    // execution), so the guard rolled exactly once to the recorded prior at
+    // monotonic generation 46; that rollback-target pointer is now the base of
+    // a separate owner-approved rung.
+    const rollbackTargetHealthy = healthyProof(
+      ASSIGN_FIRST_REVISION,
+      ROLLBACK_TARGET_GENERATION,
+      193,
+    );
+    const retryInstall = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: ASSIGN_FIRST_REVISION,
+          generation: ROLLBACK_TARGET_GENERATION,
+          healthyProof: rollbackTargetHealthy,
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(retryInstall.status, "install");
+    if (retryInstall.status !== "install") {
+      throw new Error("expected review-phase PR retry install");
+    }
+    assert.equal(retryInstall.move.action, "install");
+    assert.equal(retryInstall.move.priorRevision, ASSIGN_FIRST_REVISION);
+    assert.equal(
+      retryInstall.move.priorGeneration,
+      ROLLBACK_TARGET_GENERATION,
+    );
+    assert.equal(
+      retryInstall.move.nextRevision,
+      REVIEW_PHASE_PR_RETRY_REVISION,
+    );
+    assert.equal(
+      retryInstall.move.nextGeneration,
+      REVIEW_PHASE_PR_RETRY_GENERATION,
+    );
+    assert.equal(
+      retryInstall.move.nextGeneration,
+      retryInstall.move.priorGeneration + 1,
+    );
+    assert.equal(
+      canonicalStringify(retryInstall.move.priorHealthyProof),
+      canonicalStringify(rollbackTargetHealthy),
+    );
+
+    // A failed retry candidate rolls exactly once more to the same recorded
+    // prior at generation 48, and a missing proof stays a zero-write wait.
+    const failedRetry = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: REVIEW_PHASE_PR_RETRY_REVISION,
+          generation: REVIEW_PHASE_PR_RETRY_GENERATION,
+          healthyProof: rollbackTargetHealthy,
+          executionProof: failedProof(
+            REVIEW_PHASE_PR_RETRY_REVISION,
+            REVIEW_PHASE_PR_RETRY_GENERATION,
+            194,
+          ),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(failedRetry.status, "rollback");
+    if (failedRetry.status !== "rollback") {
+      throw new Error("expected review-phase PR retry rollback");
+    }
+    assert.equal(failedRetry.move.nextRevision, ASSIGN_FIRST_REVISION);
+    assert.equal(failedRetry.move.nextGeneration, 48);
+    assert.equal(
+      canonicalStringify(failedRetry.move.priorHealthyProof),
+      canonicalStringify(rollbackTargetHealthy),
+    );
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: REVIEW_PHASE_PR_RETRY_REVISION,
+            generation: REVIEW_PHASE_PR_RETRY_GENERATION,
+            executionProof: failedProof(
+              REVIEW_PHASE_PR_RETRY_REVISION,
+              REVIEW_PHASE_PR_RETRY_GENERATION,
+              195,
+            ),
+          }),
+        }),
+        NOW,
+      ).status,
+      "waiting",
+    );
+
+    // The installed retry generation 47 pointer is stable only with its own
+    // bound healthy proof, and that stable pointer is terminal.
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: REVIEW_PHASE_PR_RETRY_REVISION,
+            generation: REVIEW_PHASE_PR_RETRY_GENERATION,
+            healthyProof: healthyProof(
+              REVIEW_PHASE_PR_RETRY_REVISION,
+              REVIEW_PHASE_PR_RETRY_GENERATION,
+              196,
+            ),
+          }),
+        }),
+        NOW,
+      ).status,
+      "no_change",
+    );
 
     // A failed review-phase PR generation 45 candidate settles exactly once by
     // rolling back only to the exact previously proven assign-first revision
