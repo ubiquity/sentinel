@@ -2,6 +2,15 @@
 
 ## Active task register — primary agent owned
 
+### Review-phase PR disposition and the capacity unblock — 2026-09-23
+
+Live blocker at 19:59 UTC: all three publication slots were held by review-phase records whose pull requests can never be delivered as written — issue 140's PR 432 was closed unmerged, issue 264's PR 393 was merged by a human outside the trusted review path, and issue 115's PR 488 was live. The first two kept polling their reviews forever and no fresh repair (including issue 138's already-published candidate `f29ba1da`) could publish.
+
+Fix (development `529c2d3b`): review observation now reads the record's own pull request before the standing review. A closed-unmerged own PR retires only the publication identity and returns the record to `work`, so the next publish step creates the replacement PR for the same preserved candidate — the same recovery the publication path already applies, now reachable from the review phase where issue 140 sits. An own PR merged outside the trusted review path blocks the record with the exact `pull request was merged outside the trusted review path` message: a human merge is never treated as autonomous delivery and is never republished, and the record becomes terminal for capacity, so `isRetiredTargetRecord` accepts this second exact blocker shape and the finished PR stops consuming a slot (live issue-264 record). Foreign or unreadable observations change nothing.
+
+Focused evidence: both dispositions pass as named cases (`review-phase record`), the capacity exemption has its own selection case with a control, eleven candidate lifecycle cases and the selection/base-refresh/run-bounds suites pass (44 plus 11), fmt/lint/check clean, evidence ref `cc48556d9d6816f2605c36c352452867e2de5be694f7aa26c8a9330e9268c576/6ee096de-a7db-4438-9430-84a92e48a5f4`. Delivery: installer rung `73033f31` on `sentinel-supervisor` pins `529c2d3b` as generation 45 after the assign-first generation 44 healthy proof; installation waits on that revision's `test-local` check. Issue 264's issue itself remains open: its fix landed through the human merge, which the plan deliberately does not count as autonomous delivery, so closing it stays an owner decision.
+
+
 ### Issue assignment is best-effort; harness allowlist corrected — 2026-09-23
 
 Owner clarification and platform finding: the organization's anti-spam daemon requires the pull request author to be the issue assignee, but GitHub refuses to assign a GitHub App at all (`POST .../assignees` with `ubiquity-sentinel[bot]` → 403; the App node is not an assignable Actor; the bot user reports "Bot does not have access to the repository"). The owner also noted an organization-owned author may be an explicit exception, and the live evidence supports it: PR #488 (`Resolves #115`, authored by `app/ubiquity-sentinel`, created 18:05:41 UTC) remained open and untouched well over an hour after linking, while the 15:02 UTC sweep followed the daemon's own comment that the issue could not be started without a price label.
