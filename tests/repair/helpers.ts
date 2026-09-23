@@ -213,6 +213,8 @@ export interface FakeGithubOptionsV1 {
   mergeFailNext?: boolean;
   closeOutcome?: "closed" | "already_closed";
   closeFailNext?: boolean;
+  /** One transient failure of the next issue-assignment call. */
+  assignFailNext?: boolean;
 }
 
 /** Recording fake GitHubPort; product logic never lives here. */
@@ -688,6 +690,15 @@ export class FakeGithub implements GitHubPort {
         mergeSha: this.releasedHead ?? SHA1,
       },
     ));
+  }
+
+  assignIssue(issueNumber: number): Promise<PortResultV1<void>> {
+    this.calls.push(`assignIssue:${issueNumber}`);
+    if (this.options.assignFailNext) {
+      this.options.assignFailNext = false;
+      return Promise.resolve(portError("unavailable", "assign failed"));
+    }
+    return Promise.resolve(portOk(undefined));
   }
 
   closeIssue(

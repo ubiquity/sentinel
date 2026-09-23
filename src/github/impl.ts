@@ -882,6 +882,27 @@ export class GitHubPortImpl implements GitHubPort {
   }
 
   // -------------------------------------------------------------------------
+  // assignIssue
+  // -------------------------------------------------------------------------
+
+  /**
+   * Assigns the trusted publication identity to the source issue. The issue
+   * must exist and be open; a closed or missing issue is a typed refusal, not
+   * a successful assignment. The remote call is idempotent.
+   */
+  async assignIssue(issueNumber: number): Promise<PortResultV1<void>> {
+    const current = await this.client.readIssue(issueNumber);
+    if (!current.ok) return current;
+    if (current.value === null) {
+      return portError("not_found", "issue not found");
+    }
+    if (current.value.state !== "open") {
+      return portError("conflict", "issue is not open");
+    }
+    return await this.client.assignIssue(issueNumber, this.trustedPrAuthor);
+  }
+
+  // -------------------------------------------------------------------------
   // Internal helpers
   // -------------------------------------------------------------------------
 

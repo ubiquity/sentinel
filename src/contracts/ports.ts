@@ -497,6 +497,15 @@ export interface GitHubPort {
   ): Promise<PortResultV1<MergeOutcomeV1>>;
   closeIssue(issueNumber: number): Promise<PortResultV1<IssueCloseOutcomeV1>>;
   /**
+   * Assigns the trusted publication identity to the source issue BEFORE any
+   * pull request for it is created. The organization's anti-spam policy closes
+   * a pull request whose author is not assigned to the issue first, so this is
+   * a publication prerequisite rather than bookkeeping. Idempotent: a login
+   * that is already assigned is a success; it never closes, comments on or
+   * otherwise mutates the issue.
+   */
+  assignIssue(issueNumber: number): Promise<PortResultV1<void>>;
+  /**
    * Required trusted candidate-preservation capability.
    *
    * It revalidates the exact durable operation binding, stores the exact

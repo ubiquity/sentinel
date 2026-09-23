@@ -3868,9 +3868,61 @@ Deno.test(
           "recovering a closed publication starts no model run",
         );
         assert.equal(rig.github.pushes.length, 0, "no additional push");
+        const assignIndex = rig.github.calls.indexOf("assignIssue:1");
+        const createIndex = rig.github.calls.indexOf("createPr");
+        assert.ok(
+          assignIndex !== -1 && createIndex !== -1 && assignIndex < createIndex,
+          "the source issue is assigned before the pull request exists",
+        );
       } finally {
         await rig.ctx.cleanup();
       }
+    }
+  },
+);
+
+Deno.test(
+  "candidate lifecycle: a failed issue assignment defers publication and creates nothing",
+  async () => {
+    const id = asWorkItemId("issue-1");
+    const branch = candidateBranch(id);
+    const rig = await makeRig("candidate-assign-failed", {
+      summaries: false,
+      github: {
+        assignFailNext: true,
+        candidateLifecycle: {
+          ...positiveLifecycle(),
+          refs: { [`refs/heads/${branch}`]: H1 },
+          pullRequests: [],
+        },
+      },
+    });
+    try {
+      const written = await rig.store.writeRepair(
+        seededSnapshot([preservedIssueWork("issue-1", H1, { pr: null })]),
+        null,
+      );
+      assert.ok(written.ok && written.value.status === "applied");
+
+      const outcome = await rig.run();
+      const state = await rig.snapshot();
+      const work = state.work[0]!;
+      assert.equal(work.target.pr, null, "no pull request was created");
+      assert.equal(work.target.head, H1, "the candidate is retained");
+      assert.equal(work.wait?.reason, "unavailable");
+      assert.equal(
+        rig.github.calls.filter((call) => call === "createPr").length,
+        0,
+        "publication never ran",
+      );
+      assert.ok(
+        rig.github.calls.includes("assignIssue:1"),
+        "the assignment was attempted first",
+      );
+      assert.equal(rig.model.requests.length, 0);
+      assert.equal(outcome.status, "idle", JSON.stringify(outcome));
+    } finally {
+      await rig.ctx.cleanup();
     }
   },
 );
