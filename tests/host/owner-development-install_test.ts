@@ -162,7 +162,7 @@ const CLOSED_PR_HEAD_GENERATION = 43;
 // reason: this suite must compile against pre-rung production source, so the
 // expected red is a semantic plan mismatch and never a missing import.
 const ASSIGN_FIRST_REVISION =
-  "faa7a57df6820d649f73028ab37e7b950aaaa5ee" as GitSha;
+  "b58cce6d05d29ed493b60ae610b9950f3496386c" as GitSha;
 const ASSIGN_FIRST_GENERATION = 44;
 
 function hostedProof(input: {
