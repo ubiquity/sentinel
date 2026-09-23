@@ -3437,7 +3437,7 @@ async function ensureReviewFreshness(
   context: LoopContextV1,
   record: WorkRecordV1,
   prNumber: number,
-): Promise<StepResultV1 | null> {
+): Promise<StepResultV1 | "closed_unmerged" | null> {
   const config = configFor(deps, record.repository);
   const head = record.target.head;
   const branch = record.target.branch;
@@ -3477,11 +3477,22 @@ async function ensureReviewFreshness(
     return { kind: "deferred", detail: "review PR observation unavailable" };
   }
   if (
-    pr.value === null || pr.value.state !== "open" ||
-    pr.value.head !== head || pr.value.headRef !== branch ||
+    pr.value === null || pr.value.head !== head ||
+    pr.value.headRef !== branch ||
     pr.value.baseRef !== config.baseBranch
   ) {
     return { kind: "deferred", detail: "review PR identity mismatch" };
+  }
+  if (pr.value.state === "closed") {
+    // The task's own pull request was closed unmerged while the source issue
+    // is still open. The exact preserved candidate is already published on the
+    // task branch, so one replacement publication recovers the round: the
+    // caller retires the closed publication identity instead of refusing this
+    // review forever. A merged close is a different disposition and is never
+    // treated as recoverable here.
+    return pr.value.mergeSha === null
+      ? "closed_unmerged"
+      : { kind: "deferred", detail: "review PR was merged" };
   }
   // Actual candidate branch observation.
   const ref = await deps.github.readRef(`refs/heads/${branch}`);
@@ -3564,6 +3575,18 @@ async function requestReviewFor(
     record,
     prNumber,
   );
+  if (freshness === "closed_unmerged") {
+    // Only the publication identity is retired: the preserved candidate, the
+    // target head, the base and every counter stay exactly as they were, so
+    // the next publish step creates the replacement pull request for the same
+    // reviewed bytes. No model, review or merge effect happens here.
+    const recovered: WorkRecordV1 = {
+      ...record,
+      target: { ...record.target, pr: null },
+      updatedAt: deps.clock.now(),
+    };
+    return persistWork(deps, context, recovered);
+  }
   if (freshness !== null) return freshness;
   // The cooling check was awaited wall-clock work and only guards the total
   // deadline: recheck the 90-minute model cutoff (and the deadline) at the

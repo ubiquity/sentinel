@@ -3812,6 +3812,55 @@ Deno.test(
 );
 
 Deno.test(
+  "candidate lifecycle: a closed-unmerged own PR republishes the preserved candidate once",
+  async () => {
+    const id = asWorkItemId("issue-1");
+    const branch = candidateBranch(id);
+    const closedOwnPr = {
+      ...exactOpenPr(7, H1, branch),
+      state: "closed" as const,
+    };
+    const rig = await makeRig("candidate-closed-pr", {
+      summaries: false,
+      github: {
+        candidateLifecycle: {
+          ...positiveLifecycle(),
+          refs: { [`refs/heads/${branch}`]: H1 },
+          pullRequests: [closedOwnPr],
+        },
+      },
+    });
+    try {
+      const written = await rig.store.writeRepair(
+        seededSnapshot([preservedIssueWork("issue-1", H1)]),
+        null,
+      );
+      assert.ok(written.ok && written.value.status === "applied");
+
+      const outcome = await rig.run();
+      assert.equal(outcome.status, "idle", JSON.stringify(outcome));
+      const state = await rig.snapshot();
+      const work = state.work[0]!;
+      assert.equal(work.target.head, H1, "the exact candidate is retained");
+      assert.equal(work.target.pr, 8, "one replacement pull request");
+      assert.equal(work.nextStep, "review");
+      assert.equal(work.wait?.reason, "review_pending");
+      const replaced = rig.github.candidatePullRequests.get(8);
+      assert.equal(replaced?.head, H1, "the replacement carries the candidate");
+      assert.equal(replaced?.body, "Resolves #1", "the closing keyword body");
+      assert.equal(
+        rig.model.requests.length,
+        0,
+        "recovering a closed publication starts no model run",
+      );
+      assert.equal(rig.github.pushes.length, 0, "no additional push");
+    } finally {
+      await rig.ctx.cleanup();
+    }
+  },
+);
+
+Deno.test(
   "candidate lifecycle: an exact preserved/published candidate progresses to one review",
   async () => {
     const id = asWorkItemId("issue-1");
@@ -4180,10 +4229,9 @@ Deno.test(
   async () => {
     const id = asWorkItemId("issue-1");
     const branch = candidateBranch(id);
-    const closedPr = {
-      ...exactOpenPr(7, H1, branch),
-      state: "closed" as const,
-    };
+    // NOTE: a closed-unmerged own PR is no longer a refusal. It recovers by
+    // retiring the publication identity, asserted by the dedicated
+    // "a closed-unmerged own PR republishes the preserved candidate once" case.
     const wrongBranchPr = { ...exactOpenPr(7, H1, branch), headRef: "other" };
     const wrongBasePr = { ...exactOpenPr(7, H1, branch), baseRef: "main" };
     let prepareCalls = 0;
@@ -4266,15 +4314,6 @@ Deno.test(
           refs: { [`refs/heads/${branch}`]: H1 },
           pullRequests: [exactOpenPr(7, H1, branch)],
         },
-      },
-      {
-        name: "closed PR",
-        lifecycle: {
-          ...positiveLifecycle(),
-          refs: { [`refs/heads/${branch}`]: H1 },
-          pullRequests: [closedPr],
-        },
-        expectPrObservation: true,
       },
       {
         name: "wrong PR branch",
