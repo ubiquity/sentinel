@@ -73,6 +73,16 @@ import { parseReleaseRequestV1 } from "../src/contracts/release.ts";
 import type { ReviewReceiptV1 } from "../src/contracts/review-receipt.ts";
 import type { GitSha } from "../src/contracts/brands.ts";
 import type { RepositoryIdentityV1 } from "../src/contracts/shared.ts";
+import {
+  extractSelfFailureSignature,
+  planSelfObservations,
+  SELF_DEFECT_MAX_ISSUES_PER_PASS,
+  SELF_DEFECT_MAX_LOG_BYTES,
+  SELF_DEFECT_MAX_RUNS_PER_PASS,
+  SELF_DEFECT_WINDOW_MS,
+  SELF_DEFECT_WORKFLOWS,
+  type SelfFailureV1,
+} from "./self-defects.ts";
 import { canonicalStringify } from "../src/contracts/canonical.ts";
 import { releaseRequestId } from "../src/repair/keys.ts";
 import { githubGitAuthEnv } from "../src/host/local.ts";
@@ -348,6 +358,44 @@ export interface HostedAutonomyGitHubV1 {
   listParkedRuns(head: string): Promise<number[]>;
   /** Approve one parked workflow run; true when the approval was accepted. */
   approveRun(id: number): Promise<boolean>;
+
+  /**
+   * Optional self-observation capability. Present only where the deployment
+   * may read its own Actions history and file defects into its own tracker.
+   */
+  selfObservation?: HostedSelfObservationV1;
+}
+
+export interface HostedSelfRunV1 {
+  id: number;
+  name: string;
+  conclusion: string | null;
+  createdAt: string;
+}
+
+export interface HostedSelfJobV1 {
+  id: number;
+  name: string;
+  conclusion: string | null;
+}
+
+/**
+ * Optional self-observation surface: this deployment's own recent workflow
+ * runs, the failed job logs (bounded read) and the issue write used to report
+ * a defect class. Absent means the pass is skipped entirely — no reads, no
+ * writes — so a host without the capability behaves exactly as before.
+ */
+export interface HostedSelfObservationV1 {
+  listRuns(input: {
+    sinceIso: string;
+    limit: number;
+  }): Promise<HostedSelfRunV1[] | null>;
+  listJobs(runId: number): Promise<HostedSelfJobV1[] | null>;
+  readJobLog(
+    input: { jobId: number; maxBytes: number },
+  ): Promise<string | null>;
+  listOpenIssueBodies(): Promise<string[] | null>;
+  fileIssue(input: { title: string; body: string }): Promise<number | null>;
 }
 
 export interface HostedAutonomyDepsV1 {
@@ -1013,6 +1061,135 @@ export function applyHostedClosures(
  * single maintenance run can therefore never write an unbounded amount of
  * state.
  */
+/**
+ * Bounded self-observation: read this deployment's own recent failed or
+ * cancelled runs, extract ONE allowlisted signature per failed job from a
+ * bounded log read, and file at most `SELF_DEFECT_MAX_ISSUES_PER_PASS`
+ * deduplicated reports into the repository's own tracker. The normal repair
+ * loop then works those issues like any other. Every read and write here is
+ * optional: a surface without the capability is skipped with an explicit
+ * action, and no failure of this pass changes any state or blocks another
+ * pass.
+ */
+export async function runSelfObservationPass(input: {
+  github: HostedAutonomyGitHubV1 | null;
+  now: number;
+}): Promise<string[]> {
+  const actions: string[] = [];
+  const surface = input.github;
+  const observation = surface?.selfObservation;
+  if (surface === null || observation === undefined) {
+    return ["self-observation:skipped:capability_absent"];
+  }
+  let runs: Awaited<ReturnType<HostedSelfObservationV1["listRuns"]>> = null;
+  try {
+    runs = await observation.listRuns({
+      sinceIso: new Date(input.now - SELF_DEFECT_WINDOW_MS).toISOString(),
+      limit: 30,
+    });
+  } catch {
+    runs = null;
+  }
+  if (runs === null) return ["self-observation:skipped:runs_unavailable"];
+  const failed = runs
+    .filter((run) =>
+      SELF_DEFECT_WORKFLOWS.includes(run.name) &&
+      run.conclusion !== null && run.conclusion !== "success" &&
+      run.conclusion !== "skipped"
+    )
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+    .slice(0, SELF_DEFECT_MAX_RUNS_PER_PASS);
+  if (failed.length === 0) return ["self-observation:skipped:no_failed_runs"];
+  const failures: (SelfFailureV1 & {
+    signature: ReturnType<typeof extractSelfFailureSignature>;
+  })[] = [];
+  for (const run of failed) {
+    let jobs: Awaited<ReturnType<HostedSelfObservationV1["listJobs"]>> = null;
+    try {
+      jobs = await observation.listJobs(run.id);
+    } catch {
+      jobs = null;
+    }
+    if (jobs === null) {
+      actions.push(`self-observation:skipped:run=${run.id}:jobs_unavailable`);
+      continue;
+    }
+    const job = jobs.find((entry) =>
+      entry.conclusion !== null && entry.conclusion !== "success" &&
+      entry.conclusion !== "skipped"
+    );
+    if (job === undefined) continue;
+    let log: string | null = null;
+    try {
+      log = await observation.readJobLog({
+        jobId: job.id,
+        maxBytes: SELF_DEFECT_MAX_LOG_BYTES,
+      });
+    } catch {
+      log = null;
+    }
+    if (log === null) {
+      actions.push(
+        `self-observation:skipped:run=${run.id}:log_unavailable`,
+      );
+      continue;
+    }
+    const context: SelfFailureV1 = {
+      runId: run.id,
+      workflow: run.name,
+      job: job.name,
+      conclusion: job.conclusion ?? run.conclusion ?? "unknown",
+      createdAt: run.createdAt,
+    };
+    failures.push({
+      ...context,
+      signature: extractSelfFailureSignature(log, context),
+    });
+  }
+  if (failures.length === 0) {
+    return actions.length > 0
+      ? actions
+      : ["self-observation:skipped:no_readable_failure"];
+  }
+  let existing: string[] | null = null;
+  try {
+    existing = await observation.listOpenIssueBodies();
+  } catch {
+    existing = null;
+  }
+  if (existing === null) {
+    return [...actions, "self-observation:skipped:markers_unavailable"];
+  }
+  const existingMarkers = existing
+    .flatMap((body) => {
+      const found = body.match(/<!-- sentinel:self-observation:[^>]*-->/g);
+      return found ?? [];
+    });
+  const planned = planSelfObservations({
+    failures,
+    existingMarkers,
+    maxIssues: SELF_DEFECT_MAX_ISSUES_PER_PASS,
+  });
+  for (const issue of planned) {
+    let number: number | null = null;
+    try {
+      number = await observation.fileIssue({
+        title: issue.title,
+        body: issue.body,
+      });
+    } catch {
+      number = null;
+    }
+    actions.push(
+      number === null
+        ? `self-observation:refused:${issue.key}`
+        : `self-observation:filed:${number}:${issue.occurrences}x`,
+    );
+  }
+  if (actions.length === 0) actions.push("self-observation:no_change");
+  return actions;
+}
+
 export async function runHostedAutonomy(
   deps: HostedAutonomyDepsV1,
 ): Promise<HostedAutonomyResultV1> {
@@ -1712,6 +1889,24 @@ export async function runHostedAutonomy(
     }
   }
 
+  // ---- self-observation pass ---------------------------------------------
+  // Runs LAST and is fully optional: every read is bounded and state-free, its
+  // only write is one deduplicated issue in this deployment's own tracker, and
+  // any refusal inside it is reported as an action rather than a failure. The
+  // normal repair loop then works those issues like any other.
+  let selfSurface: HostedAutonomyGitHubV1 | null = null;
+  try {
+    selfSurface = (await scopeFor(HOSTED_AUTONOMY_SELF_SCOPE)).surface;
+  } catch {
+    selfSurface = null;
+  }
+  actions.push(
+    ...await runSelfObservationPass({
+      github: selfSurface,
+      now: deps.clock.now(),
+    }),
+  );
+
   const suffix = (value: string) =>
     actions.some((action) => action.endsWith(value));
   const reason: HostedAutonomyReasonV1 =
@@ -1952,6 +2147,158 @@ export function createHostedAutonomyGitHub(
       );
       if (closed === null || typeof closed !== "object") return false;
       return (closed as Record<string, unknown>)["state"] === "closed";
+    },
+    selfObservation: {
+      async listRuns(input: { sinceIso: string; limit: number }) {
+        const runs = await request(
+          "GET",
+          `/repos/${scope}/actions/runs?created=${
+            encodeURIComponent(
+              `>=${input.sinceIso}`,
+            )
+          }&per_page=${Math.min(Math.max(input.limit, 1), 50)}`,
+        );
+        const list = runs !== null && typeof runs === "object"
+          ? (runs as Record<string, unknown>)["workflow_runs"]
+          : null;
+        if (!Array.isArray(list)) return null;
+        const parsed: HostedSelfRunV1[] = [];
+        for (const item of list) {
+          if (typeof item !== "object" || item === null) continue;
+          const obj = item as Record<string, unknown>;
+          const id = Number(obj["id"]);
+          const name = obj["name"];
+          const conclusion = obj["conclusion"];
+          const createdAt = obj["created_at"];
+          if (!Number.isSafeInteger(id) || id <= 0) continue;
+          if (typeof name !== "string" || typeof createdAt !== "string") {
+            continue;
+          }
+          parsed.push({
+            id,
+            name,
+            conclusion: typeof conclusion === "string" ? conclusion : null,
+            createdAt,
+          });
+        }
+        return parsed;
+      },
+      async listJobs(runId: number) {
+        const jobs = await request(
+          "GET",
+          `/repos/${scope}/actions/runs/${runId}/jobs?per_page=50`,
+        );
+        const list = jobs !== null && typeof jobs === "object"
+          ? (jobs as Record<string, unknown>)["jobs"]
+          : null;
+        if (!Array.isArray(list)) return null;
+        const parsed: HostedSelfJobV1[] = [];
+        for (const item of list) {
+          if (typeof item !== "object" || item === null) continue;
+          const obj = item as Record<string, unknown>;
+          const id = Number(obj["id"]);
+          const name = obj["name"];
+          const conclusion = obj["conclusion"];
+          if (!Number.isSafeInteger(id) || id <= 0) continue;
+          if (typeof name !== "string") continue;
+          parsed.push({
+            id,
+            name,
+            conclusion: typeof conclusion === "string" ? conclusion : null,
+          });
+        }
+        return parsed;
+      },
+      async readJobLog(input: { jobId: number; maxBytes: number }) {
+        // The log endpoint answers with a redirect to a pre-signed URL that
+        // must NEVER receive the installation token, so the redirect is taken
+        // manually and the signed URL is fetched unauthenticated.
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+        try {
+          const head = await fetch(
+            `${API_BASE}/repos/${scope}/actions/jobs/${input.jobId}/logs`,
+            {
+              method: "GET",
+              redirect: "manual",
+              headers: {
+                authorization: `Bearer ${token}`,
+                accept: "application/vnd.github+json",
+                "user-agent": "sentinel-hosted-autonomy",
+              },
+              signal: controller.signal,
+            },
+          );
+          const location = head.headers.get("location");
+          const isRedirect = head.status >= 300 && head.status < 400;
+          if (isRedirect && location === null) return null;
+          const target = isRedirect ? location! : null;
+          if (target !== null && !target.startsWith("https://")) return null;
+          const response = target === null ? head : await fetch(target, {
+            method: "GET",
+            redirect: "manual",
+            signal: controller.signal,
+          });
+          if (response.status < 200 || response.status >= 300) return null;
+          const body = response.body;
+          if (body === null) return null;
+          const reader = body.getReader();
+          const chunks: Uint8Array[] = [];
+          let total = 0;
+          while (total < input.maxBytes) {
+            const chunk = await reader.read();
+            if (chunk.done) break;
+            const value = chunk.value;
+            if (value === undefined) break;
+            const remaining = input.maxBytes - total;
+            const slice = value.byteLength > remaining
+              ? value.slice(0, remaining)
+              : value;
+            chunks.push(slice);
+            total += slice.byteLength;
+            if (value.byteLength > remaining) break;
+          }
+          try {
+            await reader.cancel();
+          } catch {
+            // A body that refuses cancellation is still bounded by total.
+          }
+          const merged = new Uint8Array(total);
+          let offset = 0;
+          for (const chunk of chunks) {
+            merged.set(chunk, offset);
+            offset += chunk.byteLength;
+          }
+          return new TextDecoder().decode(merged);
+        } catch {
+          return null;
+        } finally {
+          clearTimeout(timer);
+        }
+      },
+      async listOpenIssueBodies() {
+        const issues = await request(
+          "GET",
+          `/repos/${scope}/issues?state=open&per_page=100`,
+        );
+        if (!Array.isArray(issues)) return null;
+        const bodies: string[] = [];
+        for (const item of issues) {
+          if (typeof item !== "object" || item === null) continue;
+          const body = (item as Record<string, unknown>)["body"];
+          if (typeof body === "string") bodies.push(body);
+        }
+        return bodies;
+      },
+      async fileIssue(input: { title: string; body: string }) {
+        const created = await request("POST", `/repos/${scope}/issues`, {
+          title: input.title,
+          body: input.body,
+        });
+        if (created === null || typeof created !== "object") return null;
+        const number = Number((created as Record<string, unknown>)["number"]);
+        return Number.isSafeInteger(number) && number > 0 ? number : null;
+      },
     },
     async merge(number: number, head: string) {
       const response = await request(
