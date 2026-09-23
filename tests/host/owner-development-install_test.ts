@@ -147,6 +147,11 @@ const CLOSING_KEYWORD_GENERATION = 40;
 const CANDIDATE_LOSS_REVISION =
   "09d2efbe962dec3e2f64ed45e76bc05ecbac0ab5" as GitSha;
 const CANDIDATE_LOSS_GENERATION = 41;
+// The closed-PR install pin stays a test-local exact literal for the same
+// reason: this suite must compile against pre-rung production source, so the
+// expected red is a semantic plan mismatch and never a missing import.
+const CLOSED_PR_REVISION = "58ae6135a01a0887e8f167b117c7d69420649dc1" as GitSha;
+const CLOSED_PR_GENERATION = 42;
 
 function hostedProof(input: {
   runId: number;
@@ -2326,19 +2331,41 @@ Deno.test(
     }
 
     // The installed candidate-loss generation 41 pointer is stable only with
-    // its own bound healthy proof, and that stable pointer is terminal.
-    assert.equal(
-      planOwnerDevelopmentInstall(
-        releaseSnapshot({
-          runtime: runtimeRecord({
-            revision: CANDIDATE_LOSS_REVISION,
-            generation: CANDIDATE_LOSS_GENERATION,
-            healthyProof: healthyProof(CANDIDATE_LOSS_REVISION, 41, 168),
-          }),
+    // its own bound healthy proof, and that exact proof authorizes exactly one
+    // move to the fixed owner-approved successor runtime revision.
+    const candidateLossHealthy = healthyProof(CANDIDATE_LOSS_REVISION, 41, 168);
+    const closedPrInstall = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: CANDIDATE_LOSS_REVISION,
+          generation: CANDIDATE_LOSS_GENERATION,
+          healthyProof: candidateLossHealthy,
         }),
-        NOW,
-      ).status,
-      "no_change",
+      }),
+      NOW,
+    );
+    assert.equal(closedPrInstall.status, "install");
+    if (closedPrInstall.status !== "install") {
+      throw new Error("expected closed PR install");
+    }
+    assert.equal(closedPrInstall.move.action, "install");
+    assert.equal(
+      closedPrInstall.move.priorRevision,
+      CANDIDATE_LOSS_REVISION,
+    );
+    assert.equal(
+      closedPrInstall.move.priorGeneration,
+      CANDIDATE_LOSS_GENERATION,
+    );
+    assert.equal(closedPrInstall.move.nextRevision, CLOSED_PR_REVISION);
+    assert.equal(closedPrInstall.move.nextGeneration, CLOSED_PR_GENERATION);
+    assert.equal(
+      closedPrInstall.move.nextGeneration,
+      closedPrInstall.move.priorGeneration + 1,
+    );
+    assert.equal(
+      canonicalStringify(closedPrInstall.move.priorHealthyProof),
+      canonicalStringify(candidateLossHealthy),
     );
     for (
       const healthy of [
@@ -2360,6 +2387,104 @@ Deno.test(
         ).status,
         "waiting",
       );
+    }
+
+    // The installed closed-PR generation 42 pointer is stable only with its
+    // own bound healthy proof, and that stable pointer is terminal.
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: CLOSED_PR_REVISION,
+            generation: CLOSED_PR_GENERATION,
+            healthyProof: healthyProof(CLOSED_PR_REVISION, 42, 173),
+          }),
+        }),
+        NOW,
+      ).status,
+      "no_change",
+    );
+    for (
+      const healthy of [
+        candidateLossHealthy,
+        healthyProof(CLOSED_PR_REVISION, 41, 174),
+        null,
+      ]
+    ) {
+      assert.equal(
+        planOwnerDevelopmentInstall(
+          releaseSnapshot({
+            runtime: runtimeRecord({
+              revision: CLOSED_PR_REVISION,
+              generation: CLOSED_PR_GENERATION,
+              healthyProof: healthy,
+            }),
+          }),
+          NOW,
+        ).status,
+        "waiting",
+      );
+    }
+
+    // A failed closed-PR generation 42 candidate settles exactly once by
+    // rolling back only to the exact previously proven candidate-loss
+    // revision with a monotonic generation 43, authorized by its retained
+    // healthy proof.
+    const failedClosedPr = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: CLOSED_PR_REVISION,
+          generation: CLOSED_PR_GENERATION,
+          healthyProof: candidateLossHealthy,
+          executionProof: failedProof(CLOSED_PR_REVISION, 42, 175),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(failedClosedPr.status, "rollback");
+    if (failedClosedPr.status !== "rollback") {
+      throw new Error("expected closed PR rollback");
+    }
+    assert.equal(failedClosedPr.move.action, "rollback");
+    assert.equal(failedClosedPr.move.priorRevision, CLOSED_PR_REVISION);
+    assert.equal(failedClosedPr.move.priorGeneration, CLOSED_PR_GENERATION);
+    assert.equal(
+      failedClosedPr.move.nextRevision,
+      CANDIDATE_LOSS_REVISION,
+    );
+    assert.equal(failedClosedPr.move.nextGeneration, 43);
+    assert.equal(
+      failedClosedPr.move.nextGeneration,
+      failedClosedPr.move.priorGeneration + 1,
+    );
+    assert.equal(
+      canonicalStringify(failedClosedPr.move.priorHealthyProof),
+      canonicalStringify(candidateLossHealthy),
+    );
+
+    // A closed-PR failure that does not bind the exact pointer or a missing
+    // retained prior never rolls back.
+    const closedPrWaits = [
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: CLOSED_PR_REVISION,
+          generation: CLOSED_PR_GENERATION,
+          healthyProof: candidateLossHealthy,
+          executionProof: failedProof(CLOSED_PR_REVISION, 41, 176),
+        }),
+      }),
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: CLOSED_PR_REVISION,
+          generation: CLOSED_PR_GENERATION,
+          executionProof: failedProof(CLOSED_PR_REVISION, 42, 177),
+        }),
+      }),
+    ];
+    for (const state of closedPrWaits) {
+      const plan = planOwnerDevelopmentInstall(state, NOW);
+      assert.notEqual(plan.status, "rollback");
+      assert.equal(plan.status, "waiting");
     }
 
     // A failed candidate-loss generation 41 candidate settles exactly once by
