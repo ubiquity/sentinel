@@ -3477,22 +3477,26 @@ async function ensureReviewFreshness(
     return { kind: "deferred", detail: "review PR observation unavailable" };
   }
   if (
-    pr.value === null || pr.value.head !== head ||
+    pr.value === null ||
     pr.value.headRef !== branch ||
     pr.value.baseRef !== config.baseBranch
   ) {
     return { kind: "deferred", detail: "review PR identity mismatch" };
   }
+  // The task's own pull request closed unmerged is recoverable even when its
+  // frozen head predates the refreshed candidate now published on the task
+  // branch: one replacement publication recovers the round, and the caller
+  // retires the closed publication identity instead of refusing this review
+  // forever. The identity checks above already bound the observation to this
+  // task's exact branch and base; a merged close is a different disposition
+  // and is never treated as recoverable here.
   if (pr.value.state === "closed") {
-    // The task's own pull request was closed unmerged while the source issue
-    // is still open. The exact preserved candidate is already published on the
-    // task branch, so one replacement publication recovers the round: the
-    // caller retires the closed publication identity instead of refusing this
-    // review forever. A merged close is a different disposition and is never
-    // treated as recoverable here.
     return pr.value.mergeSha === null
       ? "closed_unmerged"
       : { kind: "deferred", detail: "review PR was merged" };
+  }
+  if (pr.value.head !== head) {
+    return { kind: "deferred", detail: "review PR identity mismatch" };
   }
   // Actual candidate branch observation.
   const ref = await deps.github.readRef(`refs/heads/${branch}`);

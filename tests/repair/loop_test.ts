@@ -3816,46 +3816,61 @@ Deno.test(
   async () => {
     const id = asWorkItemId("issue-1");
     const branch = candidateBranch(id);
-    const closedOwnPr = {
-      ...exactOpenPr(7, H1, branch),
-      state: "closed" as const,
-    };
-    const rig = await makeRig("candidate-closed-pr", {
-      summaries: false,
-      github: {
-        candidateLifecycle: {
-          ...positiveLifecycle(),
-          refs: { [`refs/heads/${branch}`]: H1 },
-          pullRequests: [closedOwnPr],
+    // GitHub freezes a closed pull request's head forever, so both shapes are
+    // recoverable: the exact published head and a head that predates the
+    // refreshed candidate now on the task branch (the live issue-138 shape).
+    for (const closedHead of [H1, H0]) {
+      const rig = await makeRig(
+        `candidate-closed-pr-${closedHead.slice(0, 6)}`,
+        {
+          summaries: false,
+          github: {
+            candidateLifecycle: {
+              ...positiveLifecycle(),
+              refs: { [`refs/heads/${branch}`]: H1 },
+              pullRequests: [{
+                ...exactOpenPr(7, closedHead, branch),
+                state: "closed" as const,
+              }],
+            },
+          },
         },
-      },
-    });
-    try {
-      const written = await rig.store.writeRepair(
-        seededSnapshot([preservedIssueWork("issue-1", H1)]),
-        null,
       );
-      assert.ok(written.ok && written.value.status === "applied");
+      try {
+        const written = await rig.store.writeRepair(
+          seededSnapshot([preservedIssueWork("issue-1", H1)]),
+          null,
+        );
+        assert.ok(written.ok && written.value.status === "applied");
 
-      const outcome = await rig.run();
-      assert.equal(outcome.status, "idle", JSON.stringify(outcome));
-      const state = await rig.snapshot();
-      const work = state.work[0]!;
-      assert.equal(work.target.head, H1, "the exact candidate is retained");
-      assert.equal(work.target.pr, 8, "one replacement pull request");
-      assert.equal(work.nextStep, "review");
-      assert.equal(work.wait?.reason, "review_pending");
-      const replaced = rig.github.candidatePullRequests.get(8);
-      assert.equal(replaced?.head, H1, "the replacement carries the candidate");
-      assert.equal(replaced?.body, "Resolves #1", "the closing keyword body");
-      assert.equal(
-        rig.model.requests.length,
-        0,
-        "recovering a closed publication starts no model run",
-      );
-      assert.equal(rig.github.pushes.length, 0, "no additional push");
-    } finally {
-      await rig.ctx.cleanup();
+        const outcome = await rig.run();
+        assert.equal(outcome.status, "idle", JSON.stringify(outcome));
+        const state = await rig.snapshot();
+        const work = state.work[0]!;
+        assert.equal(work.target.head, H1, "the exact candidate is retained");
+        assert.equal(work.target.pr, 8, "one replacement pull request");
+        assert.equal(work.nextStep, "review");
+        assert.equal(work.wait?.reason, "review_pending");
+        const replaced = rig.github.candidatePullRequests.get(8);
+        assert.equal(
+          replaced?.head,
+          H1,
+          "the replacement carries the candidate",
+        );
+        assert.equal(
+          replaced?.body,
+          "Resolves #1",
+          "the closing keyword body",
+        );
+        assert.equal(
+          rig.model.requests.length,
+          0,
+          "recovering a closed publication starts no model run",
+        );
+        assert.equal(rig.github.pushes.length, 0, "no additional push");
+      } finally {
+        await rig.ctx.cleanup();
+      }
     }
   },
 );
