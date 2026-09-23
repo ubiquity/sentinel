@@ -2,6 +2,15 @@
 
 ## Active task register — primary agent owned
 
+### Closed-unmerged own-PR recovery: frozen head ordering — 2026-09-23
+
+The first closed-PR recovery cut (`58ae6135`) still compared the pull request head before its state, so the live issue-138 shape was refused: PR 431 is closed at `f7041ff9` while the task branch already carries the refreshed candidate `f29ba1da`. The generation-42 execution (`35892035211:1:repair`, healthy, 16:56-17:05 UTC) confirmed it with zero publication writes: the record kept `pr` 431 and only its `updatedAt` moved.
+
+Fix (development `a683d27e`): identity is bounded by the exact own branch and base ref, the closed-unmerged pull request recovers regardless of its frozen head, and only an OPEN pull request must still carry the exact target head; a merged close and every branch/base mismatch keep the previous refusal. The focused case now covers both closed shapes and is red when the head check is restored ahead of the state check. All eight candidate-lifecycle cases pass; fresh evidence ref `cc48556d9d6816f2605c36c352452867e2de5be694f7aa26c8a9330e9268c576/f08249fa-b2eb-4215-9630-60e42c790e2e`.
+
+Delivery: installer rung `63fa6168` on `sentinel-supervisor` (plain fast-forward from `9568e2e0`) pins `a683d27e` as generation 43 after the closed-PR generation 42 healthy proof; installer suite 11/0. The next execution after installation is expected to retire issue 138's closed publication identity and create the replacement pull request with the `Resolves #138` body.
+
+
 ### Closed-unmerged own-PR republish recovery — 2026-09-23
 
 External event with delivery impact: all six Sentinel repair pull requests in `ubiquity/ai.ubq.fi` (#431-#436, bodies `Resolves #138/#140/#141/#208/#209/#257`) were closed unmerged by `ubiquity-os[bot]` at 15:02:45-15:02:56 UTC with no comment, label or stated reason while every source issue stayed open. The loop had no path for that shape: review admission returned a silent no-write deferral (`review PR identity mismatch`) and the record kept its closed PR number, so no replacement could ever be published and the publication slot stayed consumed.
