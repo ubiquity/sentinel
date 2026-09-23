@@ -152,6 +152,12 @@ const CANDIDATE_LOSS_GENERATION = 41;
 // expected red is a semantic plan mismatch and never a missing import.
 const CLOSED_PR_REVISION = "58ae6135a01a0887e8f167b117c7d69420649dc1" as GitSha;
 const CLOSED_PR_GENERATION = 42;
+// The closed-PR head install pin stays a test-local exact literal for the same
+// reason: this suite must compile against pre-rung production source, so the
+// expected red is a semantic plan mismatch and never a missing import.
+const CLOSED_PR_HEAD_REVISION =
+  "a683d27e95a661e2cf7fba410f4a141257a659f3" as GitSha;
+const CLOSED_PR_HEAD_GENERATION = 43;
 
 function hostedProof(input: {
   runId: number;
@@ -2390,19 +2396,44 @@ Deno.test(
     }
 
     // The installed closed-PR generation 42 pointer is stable only with its
-    // own bound healthy proof, and that stable pointer is terminal.
-    assert.equal(
-      planOwnerDevelopmentInstall(
-        releaseSnapshot({
-          runtime: runtimeRecord({
-            revision: CLOSED_PR_REVISION,
-            generation: CLOSED_PR_GENERATION,
-            healthyProof: healthyProof(CLOSED_PR_REVISION, 42, 173),
-          }),
+    // own bound healthy proof, and that exact proof authorizes exactly one
+    // move to the fixed owner-approved successor runtime revision.
+    const closedPrHealthy = healthyProof(CLOSED_PR_REVISION, 42, 173);
+    const closedPrHeadInstall = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: CLOSED_PR_REVISION,
+          generation: CLOSED_PR_GENERATION,
+          healthyProof: closedPrHealthy,
         }),
-        NOW,
-      ).status,
-      "no_change",
+      }),
+      NOW,
+    );
+    assert.equal(closedPrHeadInstall.status, "install");
+    if (closedPrHeadInstall.status !== "install") {
+      throw new Error("expected closed PR head install");
+    }
+    assert.equal(closedPrHeadInstall.move.action, "install");
+    assert.equal(closedPrHeadInstall.move.priorRevision, CLOSED_PR_REVISION);
+    assert.equal(
+      closedPrHeadInstall.move.priorGeneration,
+      CLOSED_PR_GENERATION,
+    );
+    assert.equal(
+      closedPrHeadInstall.move.nextRevision,
+      CLOSED_PR_HEAD_REVISION,
+    );
+    assert.equal(
+      closedPrHeadInstall.move.nextGeneration,
+      CLOSED_PR_HEAD_GENERATION,
+    );
+    assert.equal(
+      closedPrHeadInstall.move.nextGeneration,
+      closedPrHeadInstall.move.priorGeneration + 1,
+    );
+    assert.equal(
+      canonicalStringify(closedPrHeadInstall.move.priorHealthyProof),
+      canonicalStringify(closedPrHealthy),
     );
     for (
       const healthy of [
@@ -2424,6 +2455,103 @@ Deno.test(
         ).status,
         "waiting",
       );
+    }
+
+    // The installed closed-PR head generation 43 pointer is stable only with
+    // its own bound healthy proof, and that stable pointer is terminal.
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: CLOSED_PR_HEAD_REVISION,
+            generation: CLOSED_PR_HEAD_GENERATION,
+            healthyProof: healthyProof(CLOSED_PR_HEAD_REVISION, 43, 178),
+          }),
+        }),
+        NOW,
+      ).status,
+      "no_change",
+    );
+    for (
+      const healthy of [
+        closedPrHealthy,
+        healthyProof(CLOSED_PR_HEAD_REVISION, 42, 179),
+        null,
+      ]
+    ) {
+      assert.equal(
+        planOwnerDevelopmentInstall(
+          releaseSnapshot({
+            runtime: runtimeRecord({
+              revision: CLOSED_PR_HEAD_REVISION,
+              generation: CLOSED_PR_HEAD_GENERATION,
+              healthyProof: healthy,
+            }),
+          }),
+          NOW,
+        ).status,
+        "waiting",
+      );
+    }
+
+    // A failed closed-PR head generation 43 candidate settles exactly once by
+    // rolling back only to the exact previously proven closed-PR revision
+    // with a monotonic generation 44, authorized by its retained healthy
+    // proof.
+    const failedClosedPrHead = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: CLOSED_PR_HEAD_REVISION,
+          generation: CLOSED_PR_HEAD_GENERATION,
+          healthyProof: closedPrHealthy,
+          executionProof: failedProof(CLOSED_PR_HEAD_REVISION, 43, 180),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(failedClosedPrHead.status, "rollback");
+    if (failedClosedPrHead.status !== "rollback") {
+      throw new Error("expected closed PR head rollback");
+    }
+    assert.equal(failedClosedPrHead.move.action, "rollback");
+    assert.equal(
+      failedClosedPrHead.move.priorRevision,
+      CLOSED_PR_HEAD_REVISION,
+    );
+    assert.equal(
+      failedClosedPrHead.move.priorGeneration,
+      CLOSED_PR_HEAD_GENERATION,
+    );
+    assert.equal(failedClosedPrHead.move.nextRevision, CLOSED_PR_REVISION);
+    assert.equal(failedClosedPrHead.move.nextGeneration, 44);
+    assert.equal(
+      canonicalStringify(failedClosedPrHead.move.priorHealthyProof),
+      canonicalStringify(closedPrHealthy),
+    );
+
+    // A closed-PR head failure that does not bind the exact pointer or a
+    // missing retained prior never rolls back.
+    const closedPrHeadWaits = [
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: CLOSED_PR_HEAD_REVISION,
+          generation: CLOSED_PR_HEAD_GENERATION,
+          healthyProof: closedPrHealthy,
+          executionProof: failedProof(CLOSED_PR_HEAD_REVISION, 42, 181),
+        }),
+      }),
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: CLOSED_PR_HEAD_REVISION,
+          generation: CLOSED_PR_HEAD_GENERATION,
+          executionProof: failedProof(CLOSED_PR_HEAD_REVISION, 43, 182),
+        }),
+      }),
+    ];
+    for (const state of closedPrHeadWaits) {
+      const plan = planOwnerDevelopmentInstall(state, NOW);
+      assert.notEqual(plan.status, "rollback");
+      assert.equal(plan.status, "waiting");
     }
 
     // A failed closed-PR generation 42 candidate settles exactly once by

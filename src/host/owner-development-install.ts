@@ -389,6 +389,14 @@ export const OWNER_DEVELOPMENT_INSTALL_CANDIDATE_LOSS_GENERATION = 41;
 export const OWNER_DEVELOPMENT_INSTALL_CLOSED_PR_REVISION =
   "58ae6135a01a0887e8f167b117c7d69420649dc1" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_CLOSED_PR_GENERATION = 42;
+/**
+ * Exact revision recovering a closed-unmerged own pull request whose frozen
+ * head predates the refreshed candidate; installed only after the closed-PR
+ * generation 42 healthy proof.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_CLOSED_PR_HEAD_REVISION =
+  "a683d27e95a661e2cf7fba410f4a141257a659f3" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_CLOSED_PR_HEAD_GENERATION = 43;
 
 const API_BASE = "https://api.github.com";
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -1728,10 +1736,53 @@ export function planOwnerDevelopmentInstall(
       );
     }
     if (healthy !== null) {
-      return noChange("the owner development installation is complete");
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_CLOSED_PR_HEAD_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_CLOSED_PR_HEAD_GENERATION,
+        healthy,
+        "install the closed-PR head revision after the closed-PR healthy proof",
+      );
     }
     return waiting(
       "the closed-PR generation 42 healthy proof is not recorded",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_CLOSED_PR_HEAD_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_CLOSED_PR_HEAD_GENERATION
+  ) {
+    // An exact failed settlement of this pointer is candidate failure evidence
+    // even when a healthy proof exists; the rollback still requires the
+    // recorded healthy proof of the exact prior revision, so a missing or
+    // unrelated proof stays a zero-write waiting outcome.
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_CLOSED_PR_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_CLOSED_PR_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded closed-PR healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_CLOSED_PR_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed closed-PR head candidate to its recorded prior",
+      );
+    }
+    if (healthy !== null) {
+      return noChange("the owner development installation is complete");
+    }
+    return waiting(
+      "the closed-PR head generation 43 healthy proof is not recorded",
     );
   }
 
