@@ -3700,6 +3700,118 @@ Deno.test(
 );
 
 Deno.test(
+  "candidate lifecycle: a positively missing candidate returns to a fresh attempt instead of retrying forever",
+  async () => {
+    const id = asWorkItemId("issue-1");
+    const branch = candidateBranch(id);
+    const operationKey = implementationIntentKey(PRODUCING_RESERVATION);
+    const ref = await candidatePreservationRef(REPO, id, operationKey);
+    const lifecycle = positiveLifecycle();
+    const positivePreserve = lifecycle.preserveCandidate!;
+    let preservations = 0;
+    const rig = await makeRig("candidate-preserve-missing", {
+      github: {
+        issues: [{ number: 1, title: "reproducible failure", body: "body" }],
+        candidateLifecycle: {
+          ...lifecycle,
+          refs: { [`refs/heads/${branch}`]: H1 },
+          pullRequests: [exactOpenPr(7, H1, branch)],
+          preserveCandidate: (request) => {
+            preservations++;
+            if (preservations === 1) {
+              // The host loader's exact positive-absence classification: no
+              // trusted store or remote ref holds the produced candidate.
+              return Promise.resolve(
+                portError(
+                  "not_found",
+                  "candidate is not available in the trusted local store",
+                ),
+              );
+            }
+            return positivePreserve(request);
+          },
+        },
+      },
+    });
+    try {
+      const record = workRecord("issue-1", {
+        source: { kind: "issue", id: "1", revision: SHA1 },
+        related: { incidentId: null, issueNumber: 1 },
+        target: {
+          base: SHA1,
+          branch,
+          checkpoint: null,
+          head: H0,
+          pr: 7,
+          candidateState: { preserved: null, publishedHead: H1 },
+        },
+        nextStep: "work",
+        intent: {
+          kind: "candidate_preservation",
+          key: operationKey,
+          startedAt: T0,
+          branch: ref,
+          expectedHead: H0,
+          observedBase: SHA1,
+          pr: null,
+          requestId: PRODUCING_RESERVATION,
+          resultId: null,
+        },
+        counters: { attempts: 1, retries: 0, reviewRounds: 0 },
+      });
+      const written = await rig.store.writeRepair(
+        seededSnapshot([record]),
+        null,
+      );
+      assert.ok(written.ok && written.value.status === "applied");
+
+      // Run 1: the missing candidate is never reconciled and the record never
+      // parks on it. It returns to the legacy work shape bound to the published
+      // branch head with its charged attempt history preserved, and the same
+      // cycle buys exactly one fresh implementation attempt whose candidate is
+      // preserved under a new operation identity.
+      const first = await rig.run();
+      assert.equal(first.status, "idle", JSON.stringify(first));
+      const state = await rig.snapshot();
+      const work = state.work[0]!;
+      assert.ok(
+        rig.model.requests.length >= 1,
+        "the recovery buys a fresh run",
+      );
+      assert.equal(work.target.head, SHA3, "the fresh candidate head");
+      assert.equal(work.counters.attempts, 2, "one charged fresh attempt");
+      assert.notEqual(
+        work.target.candidateState?.preserved?.operationKey ?? null,
+        operationKey,
+        "the lost operation identity is retired",
+      );
+      assert.equal(
+        work.target.candidateState?.preserved?.head ?? null,
+        SHA3,
+        "the fresh candidate is preserved",
+      );
+      assert.equal(work.target.candidateState?.publishedHead, SHA3);
+      assert.equal(
+        work.nextStep,
+        "review",
+        "the record advances past the loss",
+      );
+      assert.equal(work.wait?.reason, "review_pending");
+      assert.ok(
+        state.reservations.some((entry) =>
+          entry.attempt === 2 && entry.purpose === "retry" &&
+          entry.outcome === "submitted"
+        ),
+        "the fresh attempt is charged as a retry",
+      );
+      assert.ok(preservations >= 2, "one refused and one durable preservation");
+    } finally {
+      await rig.ctx.cleanup();
+    }
+  },
+);
+
+Deno.test(
   "candidate lifecycle: an exact preserved/published candidate progresses to one review",
   async () => {
     const id = asWorkItemId("issue-1");

@@ -2956,6 +2956,31 @@ async function executeCandidatePreservation(
   });
   const at = deps.clock.now();
   if (!preserved.ok) {
+    // A positively proven absent candidate can never be reconciled: the
+    // producing checkout lived only inside that run's private scratch, no
+    // trusted store or remote ref holds the object, and every retry repeats
+    // the same refusal forever while the record keeps a shared publication
+    // slot. The attempt stays charged (its reservation is already settled) and
+    // the record returns to the legacy work shape whose retained identity is
+    // the published branch head, so the next cycle buys a fresh implementation
+    // attempt under the existing attempt ceiling instead of retrying a
+    // candidate that can never appear.
+    if (preserved.error.kind === "not_found") {
+      const recovered: WorkRecordV1 = {
+        ...record,
+        intent: null,
+        target: {
+          base: record.target.base,
+          branch: record.target.branch,
+          checkpoint: null,
+          head: candidateState.publishedHead,
+          pr: record.target.pr,
+        },
+        wait: null,
+        updatedAt: at,
+      };
+      return persistWork(deps, context, recovered);
+    }
     // A generic transport/CAS/permission failure is not permanent loss: keep
     // the same intent/head/accounting and reconcile the same operation later.
     return persistWork(
