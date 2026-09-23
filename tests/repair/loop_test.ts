@@ -471,6 +471,13 @@ Deno.test(
       );
       assert.equal(rig.github.pushes.length, 1);
       assert.ok(rig.github.calls.includes("createPr"));
+      const published = [...rig.github.candidatePullRequests.values()];
+      assert.equal(published.length, 1, "one published pull request");
+      assert.equal(
+        published[0].body,
+        `Sentinel repair for incident ${work.source.id}`,
+        "an incident task keeps a non-closing descriptive body",
+      );
       assert.ok(rig.github.calls.includes("requestReview"));
 
       // Unchanged wait exit: no new model call, no state write.
@@ -1778,6 +1785,13 @@ Deno.test("closure failure retries closure only", async () => {
     assert.ok(seeded.ok && seeded.value.status === "applied");
 
     await rig.run();
+    const published = [...rig.github.candidatePullRequests.values()];
+    assert.equal(published.length, 1, "one published pull request");
+    assert.equal(
+      published[0].body,
+      "Resolves #1",
+      "an issue task publishes exactly the GitHub closing keyword",
+    );
     rig.clock.advance(15 * 60_000 + 1);
     rig.github.completeReview([], rig.clock.now());
     await rig.run();

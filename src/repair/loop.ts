@@ -3339,15 +3339,18 @@ async function createPullRequestFor(
   const title = record.source.kind === "incident"
     ? `Sentinel repair: ${record.source.id}`
     : `Sentinel repair: issue ${record.related.issueNumber}`;
-  // No auto-close keywords anywhere in the title or body ("Refs" is inert).
+  // Owner directive, 2026-09-23 (docs/DECISIONS.md): an issue-backed repair
+  // publishes exactly the GitHub closing keyword as its whole body, so the
+  // pull request is linked to the source issue and the merge closes it. A
+  // record with no issue reference keeps a non-closing descriptive body.
+  const body = record.related.issueNumber === null
+    ? `Sentinel repair for ${record.source.kind} ${record.source.id}`
+    : `Resolves #${record.related.issueNumber}`;
   const created = await deps.github.createPullRequest({
     title: title.slice(0, 200),
     headRef: branch,
     baseRef: config.baseBranch,
-    body:
-      `Sentinel repair for ${record.source.kind} ${record.source.id}. Refs: ${
-        record.related.issueNumber ?? ""
-      }`.trim(),
+    body,
     expectedBase: record.target.base,
     expectedHeadRef: head,
   });

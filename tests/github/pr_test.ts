@@ -1,11 +1,10 @@
 // createPullRequest / closeIssue suite: deterministic-head publication with
 // exact branch precondition, reuse of the exact own PR, foreign/human
-// collisions, duplicate-publication reconciliation, auto-close keyword
-// removal (source body otherwise preserved) and idempotent issue closure
-// with lost-response reconciliation.
+// collisions, duplicate-publication reconciliation, byte-for-byte body
+// publication (including GitHub closing keywords) and idempotent issue
+// closure with lost-response reconciliation.
 import assert from "node:assert/strict";
 
-import { sanitizeAutoCloseKeywords } from "../../src/github/text.ts";
 import {
   httpRespond,
   issueWire,
@@ -33,31 +32,11 @@ function createRequest(
   };
 }
 
-Deno.test("createPullRequest: publishes with source body preserved except close keywords", async () => {
-  const sourceBody = "Keep this surrounding text.\n" +
-    "Fix #101, FIXES: #102, fixed ubiquity/sentinel#103; " +
-    "close:#104, Closes: #105, CLOSES: #106, " +
-    "closed: ubiquity/sentinel#107; " +
-    "resolve #108, RESOLVES: #109, resolved ubiquity/sentinel#110.\n" +
-    "Fixes#113, CLOSES:#114, RESOLVES:ubiquity/sentinel#115.\n" +
-    "References #111 and ubiquity/sentinel#112 remain.\n" +
-    "References fixed-tools/widget#123; keep this text.\n" +
-    "fixesowner/repo#123, closed-source/project#123, and " +
-    "resolved-tools/project#123 remain unchanged.\n" +
-    "Fixes ubiquity/www.repo#123, and this stays.\n" +
-    "[r]: /foo:fixes:#123\n" +
-    "Fixes #118 after the reference definition.\n" +
-    "Links https://example.test/fixes#123, " +
-    "https://example.test/?fixes#116, " +
-    "https://example.test/?fixes:#116, " +
-    "https://example.test/?x=fixes:#123, and " +
-    "https://example.test/foo.fixes:#123 remain unchanged.\n" +
-    "Markdown [link](https://example.test)Fixes:#123 remains a reference.\n" +
-    "Relative [link](/foo:fixes:#123) remains unchanged.\n" +
-    "Angle [link](<https://example.test/foo)Fixes:#123>) remains unchanged.\n" +
-    "References ubiquity/repo.fixes#123 remain unchanged.\n" +
-    "Literal fixes#117 remains unchanged.\n" +
-    "Fixes fixed-tools/widget#123 is sanitized without losing its owner.";
+Deno.test("createPullRequest: publishes the requested body byte-for-byte", async () => {
+  // The loop builds `Resolves #N` for an issue-backed repair; the port must
+  // publish that body unchanged so GitHub links the issue and the merge
+  // closes it. No keyword stripping happens anywhere on this path.
+  const sourceBody = "Resolves #123\n";
   const { port, transport } = makePort({
     script: [
       httpRespond("GET", "/git/ref/heads/sentinel/fix-1", 200, refWire(SHA1)),
@@ -89,32 +68,7 @@ Deno.test("createPullRequest: publishes with source body preserved except close 
   assert.equal(body.head, "ubiquity:sentinel/fix-1");
   assert.equal(body.base, "development");
   assert.equal(body.title, "fix the bug");
-  assert.equal(
-    body.body,
-    "Keep this surrounding text.\n" +
-      "#101, #102, ubiquity/sentinel#103; " +
-      "#104, #105, #106, ubiquity/sentinel#107; " +
-      "#108, #109, ubiquity/sentinel#110.\n" +
-      "Fixes#113, #114, ubiquity/sentinel#115.\n" +
-      "References #111 and ubiquity/sentinel#112 remain.\n" +
-      "References fixed-tools/widget#123; keep this text.\n" +
-      "fixesowner/repo#123, closed-source/project#123, and " +
-      "resolved-tools/project#123 remain unchanged.\n" +
-      "ubiquity/www.repo#123, and this stays.\n" +
-      "[r]: /foo:fixes:#123\n" +
-      "#118 after the reference definition.\n" +
-      "Links https://example.test/fixes#123, " +
-      "https://example.test/?fixes#116, " +
-      "https://example.test/?fixes:#116, " +
-      "https://example.test/?x=fixes:#123, and " +
-      "https://example.test/foo.fixes:#123 remain unchanged.\n" +
-      "Markdown [link](https://example.test)#123 remains a reference.\n" +
-      "Relative [link](/foo:fixes:#123) remains unchanged.\n" +
-      "Angle [link](<https://example.test/foo)Fixes:#123>) remains unchanged.\n" +
-      "References ubiquity/repo.fixes#123 remain unchanged.\n" +
-      "Literal fixes#117 remains unchanged.\n" +
-      "fixed-tools/widget#123 is sanitized without losing its owner.",
-  );
+  assert.equal(body.body, sourceBody, "body published byte-for-byte");
 });
 
 Deno.test("createPullRequest: missing or mismatched head branch fails closed", async () => {
@@ -416,43 +370,6 @@ Deno.test("closeIssue: idempotent closure with lost-response reconciliation", as
   const missing = await port5.closeIssue(99);
   assert.equal(missing.ok, false);
   if (!missing.ok) assert.equal(missing.error.kind, "not_found");
-});
-
-Deno.test("sanitizeAutoCloseKeywords: removes close keywords, preserves everything else", () => {
-  assert.equal(
-    sanitizeAutoCloseKeywords("Fixes #123 and closes #124"),
-    "#123 and #124",
-  );
-  assert.equal(
-    sanitizeAutoCloseKeywords("This resolves #5 and references #6"),
-    "This #5 and references #6",
-  );
-  assert.equal(
-    sanitizeAutoCloseKeywords("plain text without refs #123 alone"),
-    "plain text without refs #123 alone",
-  );
-  assert.equal(sanitizeAutoCloseKeywords("touch #12"), "touch #12");
-  assert.equal(sanitizeAutoCloseKeywords(""), "");
-  // Only the keyword form is removed; the body is otherwise byte-identical.
-  const body = "Closes #9\n\nBody paragraph remains.";
-  assert.equal(
-    sanitizeAutoCloseKeywords(body),
-    "#9\n\nBody paragraph remains.",
-  );
-  assert.equal(
-    sanitizeAutoCloseKeywords("Fixes: ubiquity/sentinel#123"),
-    "ubiquity/sentinel#123",
-  );
-  // A colon or space separates a closing keyword from its reference; a
-  // zero-width form is ordinary text and must not rewrite URLs or prose.
-  assert.equal(
-    sanitizeAutoCloseKeywords("Fixes#123 and CLOSES:#124"),
-    "Fixes#123 and #124",
-  );
-  assert.equal(
-    sanitizeAutoCloseKeywords("ordinary prose and references #123 remain"),
-    "ordinary prose and references #123 remain",
-  );
 });
 
 // Author identity used in fixture helpers stays consistent.
