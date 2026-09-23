@@ -3336,27 +3336,16 @@ async function createPullRequestFor(
   if (cooling.kind === "deferred") {
     return { kind: "deferred", detail: cooling.detail };
   }
-  // The organization's anti-spam policy closes a pull request whose trusted
-  // author is not assigned to the source issue first, so the assignment is a
-  // publication prerequisite: it happens BEFORE the pull_request intent is
-  // written and before any create or replacement publication. It is
-  // idempotent, and a failure defers this publication with the bounded wait
-  // and creates nothing.
+  // The organization's anti-spam policy expects the pull request author to be
+  // assigned to the source issue first: the trusted publication identity is
+  // assigned BEFORE the pull_request intent is written and before any create
+  // or replacement publication. The call is idempotent and best-effort — the
+  // observed policy exempts an organization-owned author, and GitHub refuses
+  // to assign a GitHub App at all — so a refusal never blocks publication and
+  // never fabricates an assignment.
   const issueNumber = record.related.issueNumber;
   if (issueNumber !== null) {
-    const assigned = await deps.github.assignIssue(issueNumber);
-    if (!assigned.ok) {
-      const at = deps.clock.now();
-      return persistWork(
-        deps,
-        context,
-        setWait(
-          record,
-          { reason: "unavailable", since: at, until: at + CHECK_POLL_MS },
-          at,
-        ),
-      );
-    }
+    await deps.github.assignIssue(issueNumber);
   }
   const intent = {
     kind: "pull_request" as const,

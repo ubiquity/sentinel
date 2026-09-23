@@ -3882,7 +3882,7 @@ Deno.test(
 );
 
 Deno.test(
-  "candidate lifecycle: a failed issue assignment defers publication and creates nothing",
+  "candidate lifecycle: a refused issue assignment still publishes from the preserved candidate",
   async () => {
     const id = asWorkItemId("issue-1");
     const branch = candidateBranch(id);
@@ -3907,17 +3907,18 @@ Deno.test(
       const outcome = await rig.run();
       const state = await rig.snapshot();
       const work = state.work[0]!;
-      assert.equal(work.target.pr, null, "no pull request was created");
+      assert.equal(work.target.pr, 7, "the replacement was published anyway");
       assert.equal(work.target.head, H1, "the candidate is retained");
-      assert.equal(work.wait?.reason, "unavailable");
-      assert.equal(
-        rig.github.calls.filter((call) => call === "createPr").length,
-        0,
-        "publication never ran",
-      );
+      assert.equal(work.nextStep, "review");
       assert.ok(
         rig.github.calls.includes("assignIssue:1"),
         "the assignment was attempted first",
+      );
+      const assignIndex = rig.github.calls.indexOf("assignIssue:1");
+      const createIndex = rig.github.calls.indexOf("createPr");
+      assert.ok(
+        assignIndex !== -1 && createIndex !== -1 && assignIndex < createIndex,
+        "the assignment attempt precedes the pull request",
       );
       assert.equal(rig.model.requests.length, 0);
       assert.equal(outcome.status, "idle", JSON.stringify(outcome));
