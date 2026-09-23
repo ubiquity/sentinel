@@ -164,6 +164,12 @@ const CLOSED_PR_HEAD_GENERATION = 43;
 const ASSIGN_FIRST_REVISION =
   "b58cce6d05d29ed493b60ae610b9950f3496386c" as GitSha;
 const ASSIGN_FIRST_GENERATION = 44;
+// The review-phase PR install pin stays a test-local exact literal for the
+// same reason: this suite must compile against pre-rung production source, so
+// the expected red is a semantic plan mismatch and never a missing import.
+const REVIEW_PHASE_PR_REVISION =
+  "529c2d3b81cf66f66d46d6c4cb1a573b3b4ba603" as GitSha;
+const REVIEW_PHASE_PR_GENERATION = 45;
 
 function hostedProof(input: {
   runId: number;
@@ -2530,19 +2536,47 @@ Deno.test(
     }
 
     // The installed assign-first generation 44 pointer is stable only with its
-    // own bound healthy proof, and that stable pointer is terminal.
-    assert.equal(
-      planOwnerDevelopmentInstall(
-        releaseSnapshot({
-          runtime: runtimeRecord({
-            revision: ASSIGN_FIRST_REVISION,
-            generation: ASSIGN_FIRST_GENERATION,
-            healthyProof: healthyProof(ASSIGN_FIRST_REVISION, 44, 183),
-          }),
+    // own bound healthy proof, and that exact proof authorizes exactly one
+    // move to the fixed owner-approved successor runtime revision.
+    const assignFirstHealthy = healthyProof(ASSIGN_FIRST_REVISION, 44, 183);
+    const reviewPhaseInstall = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: ASSIGN_FIRST_REVISION,
+          generation: ASSIGN_FIRST_GENERATION,
+          healthyProof: assignFirstHealthy,
         }),
-        NOW,
-      ).status,
-      "no_change",
+      }),
+      NOW,
+    );
+    assert.equal(reviewPhaseInstall.status, "install");
+    if (reviewPhaseInstall.status !== "install") {
+      throw new Error("expected review-phase PR install");
+    }
+    assert.equal(reviewPhaseInstall.move.action, "install");
+    assert.equal(
+      reviewPhaseInstall.move.priorRevision,
+      ASSIGN_FIRST_REVISION,
+    );
+    assert.equal(
+      reviewPhaseInstall.move.priorGeneration,
+      ASSIGN_FIRST_GENERATION,
+    );
+    assert.equal(
+      reviewPhaseInstall.move.nextRevision,
+      REVIEW_PHASE_PR_REVISION,
+    );
+    assert.equal(
+      reviewPhaseInstall.move.nextGeneration,
+      REVIEW_PHASE_PR_GENERATION,
+    );
+    assert.equal(
+      reviewPhaseInstall.move.nextGeneration,
+      reviewPhaseInstall.move.priorGeneration + 1,
+    );
+    assert.equal(
+      canonicalStringify(reviewPhaseInstall.move.priorHealthyProof),
+      canonicalStringify(assignFirstHealthy),
     );
     for (
       const healthy of [
@@ -2564,6 +2598,106 @@ Deno.test(
         ).status,
         "waiting",
       );
+    }
+
+    // The installed review-phase PR generation 45 pointer is stable only with
+    // its own bound healthy proof, and that stable pointer is terminal.
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: REVIEW_PHASE_PR_REVISION,
+            generation: REVIEW_PHASE_PR_GENERATION,
+            healthyProof: healthyProof(REVIEW_PHASE_PR_REVISION, 45, 188),
+          }),
+        }),
+        NOW,
+      ).status,
+      "no_change",
+    );
+    for (
+      const healthy of [
+        assignFirstHealthy,
+        healthyProof(REVIEW_PHASE_PR_REVISION, 44, 189),
+        null,
+      ]
+    ) {
+      assert.equal(
+        planOwnerDevelopmentInstall(
+          releaseSnapshot({
+            runtime: runtimeRecord({
+              revision: REVIEW_PHASE_PR_REVISION,
+              generation: REVIEW_PHASE_PR_GENERATION,
+              healthyProof: healthy,
+            }),
+          }),
+          NOW,
+        ).status,
+        "waiting",
+      );
+    }
+
+    // A failed review-phase PR generation 45 candidate settles exactly once by
+    // rolling back only to the exact previously proven assign-first revision
+    // with a monotonic generation 46, authorized by its retained healthy
+    // proof.
+    const failedReviewPhase = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: REVIEW_PHASE_PR_REVISION,
+          generation: REVIEW_PHASE_PR_GENERATION,
+          healthyProof: assignFirstHealthy,
+          executionProof: failedProof(REVIEW_PHASE_PR_REVISION, 45, 190),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(failedReviewPhase.status, "rollback");
+    if (failedReviewPhase.status !== "rollback") {
+      throw new Error("expected review-phase PR rollback");
+    }
+    assert.equal(failedReviewPhase.move.action, "rollback");
+    assert.equal(
+      failedReviewPhase.move.priorRevision,
+      REVIEW_PHASE_PR_REVISION,
+    );
+    assert.equal(
+      failedReviewPhase.move.priorGeneration,
+      REVIEW_PHASE_PR_GENERATION,
+    );
+    assert.equal(
+      failedReviewPhase.move.nextRevision,
+      ASSIGN_FIRST_REVISION,
+    );
+    assert.equal(failedReviewPhase.move.nextGeneration, 46);
+    assert.equal(
+      canonicalStringify(failedReviewPhase.move.priorHealthyProof),
+      canonicalStringify(assignFirstHealthy),
+    );
+
+    // A review-phase PR failure that does not bind the exact pointer or a
+    // missing retained prior never rolls back.
+    const reviewPhaseWaits = [
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: REVIEW_PHASE_PR_REVISION,
+          generation: REVIEW_PHASE_PR_GENERATION,
+          healthyProof: assignFirstHealthy,
+          executionProof: failedProof(REVIEW_PHASE_PR_REVISION, 44, 191),
+        }),
+      }),
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: REVIEW_PHASE_PR_REVISION,
+          generation: REVIEW_PHASE_PR_GENERATION,
+          executionProof: failedProof(REVIEW_PHASE_PR_REVISION, 45, 192),
+        }),
+      }),
+    ];
+    for (const state of reviewPhaseWaits) {
+      const plan = planOwnerDevelopmentInstall(state, NOW);
+      assert.notEqual(plan.status, "rollback");
+      assert.equal(plan.status, "waiting");
     }
 
     // A failed assign-first generation 44 candidate settles exactly once by
