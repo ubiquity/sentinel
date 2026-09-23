@@ -2,6 +2,15 @@
 
 ## Active task register — primary agent owned
 
+### Issue assignment is best-effort; harness allowlist corrected — 2026-09-23
+
+Owner clarification and platform finding: the organization's anti-spam daemon requires the pull request author to be the issue assignee, but GitHub refuses to assign a GitHub App at all (`POST .../assignees` with `ubiquity-sentinel[bot]` → 403; the App node is not an assignable Actor; the bot user reports "Bot does not have access to the repository"). The owner also noted an organization-owned author may be an explicit exception, and the live evidence supports it: PR #488 (`Resolves #115`, authored by `app/ubiquity-sentinel`, created 18:05:41 UTC) remained open and untouched well over an hour after linking, while the 15:02 UTC sweep followed the daemon's own comment that the issue could not be started without a price label.
+
+Correction (development `b58cce6d`): the assignment stays in the publication path — attempted BEFORE the pull_request intent and any create, idempotent — but it is best-effort; a refusal neither blocks publication nor fabricates an assignment. The focused case now proves a refused assignment still publishes the preserved candidate from the branch, with the attempt preceding the create. The required harness also failed on `faa7a57d` only because `tests/integration/composed-lifecycle_test.ts` keeps a strict allowlist of fake GitHub calls; `^assignIssue:\d+$` is now accepted there. Local evidence: nine candidate-lifecycle cases pass, `tests/github/` + `tests/contracts/ports_test.ts` + `tests/repair/base-refresh_test.ts` 274 passed/0 failed, fmt/lint/check clean, evidence ref `cc48556d9d6816f2605c36c352452867e2de5be694f7aa26c8a9330e9268c576/4c04858d-d2ff-4ce8-a26e-77c77779acc8`.
+
+Delivery: the generation 44 rung on `sentinel-supervisor` (`3c9cfff7`) now pins `b58cce6d`; installation waits on that revision's `test-local` check. Live pipeline state at 19:21 UTC: runtime generation 43 `a683d27e` (last healthy execution `35903604966:1:repair`, 18:44 UTC), one open Sentinel PR (#488 for issue 115), and issue 138's record at the WIP cap with its fresh candidate `f29ba1da` published on the task branch, waiting for a free publication slot.
+
+
 ### Closed-unmerged own-PR recovery: frozen head ordering — 2026-09-23
 
 The first closed-PR recovery cut (`58ae6135`) still compared the pull request head before its state, so the live issue-138 shape was refused: PR 431 is closed at `f7041ff9` while the task branch already carries the refreshed candidate `f29ba1da`. The generation-42 execution (`35892035211:1:repair`, healthy, 16:56-17:05 UTC) confirmed it with zero publication writes: the record kept `pr` 431 and only its `updatedAt` moved.
