@@ -158,6 +158,12 @@ const CLOSED_PR_GENERATION = 42;
 const CLOSED_PR_HEAD_REVISION =
   "a683d27e95a661e2cf7fba410f4a141257a659f3" as GitSha;
 const CLOSED_PR_HEAD_GENERATION = 43;
+// The assign-first install pin stays a test-local exact literal for the same
+// reason: this suite must compile against pre-rung production source, so the
+// expected red is a semantic plan mismatch and never a missing import.
+const ASSIGN_FIRST_REVISION =
+  "faa7a57df6820d649f73028ab37e7b950aaaa5ee" as GitSha;
+const ASSIGN_FIRST_GENERATION = 44;
 
 function hostedProof(input: {
   runId: number;
@@ -2458,19 +2464,48 @@ Deno.test(
     }
 
     // The installed closed-PR head generation 43 pointer is stable only with
-    // its own bound healthy proof, and that stable pointer is terminal.
-    assert.equal(
-      planOwnerDevelopmentInstall(
-        releaseSnapshot({
-          runtime: runtimeRecord({
-            revision: CLOSED_PR_HEAD_REVISION,
-            generation: CLOSED_PR_HEAD_GENERATION,
-            healthyProof: healthyProof(CLOSED_PR_HEAD_REVISION, 43, 178),
-          }),
+    // its own bound healthy proof, and that exact proof authorizes exactly one
+    // move to the fixed owner-approved successor runtime revision.
+    const closedPrHeadHealthy = healthyProof(
+      CLOSED_PR_HEAD_REVISION,
+      43,
+      178,
+    );
+    const assignFirstInstall = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: CLOSED_PR_HEAD_REVISION,
+          generation: CLOSED_PR_HEAD_GENERATION,
+          healthyProof: closedPrHeadHealthy,
         }),
-        NOW,
-      ).status,
-      "no_change",
+      }),
+      NOW,
+    );
+    assert.equal(assignFirstInstall.status, "install");
+    if (assignFirstInstall.status !== "install") {
+      throw new Error("expected assign first install");
+    }
+    assert.equal(assignFirstInstall.move.action, "install");
+    assert.equal(
+      assignFirstInstall.move.priorRevision,
+      CLOSED_PR_HEAD_REVISION,
+    );
+    assert.equal(
+      assignFirstInstall.move.priorGeneration,
+      CLOSED_PR_HEAD_GENERATION,
+    );
+    assert.equal(assignFirstInstall.move.nextRevision, ASSIGN_FIRST_REVISION);
+    assert.equal(
+      assignFirstInstall.move.nextGeneration,
+      ASSIGN_FIRST_GENERATION,
+    );
+    assert.equal(
+      assignFirstInstall.move.nextGeneration,
+      assignFirstInstall.move.priorGeneration + 1,
+    );
+    assert.equal(
+      canonicalStringify(assignFirstInstall.move.priorHealthyProof),
+      canonicalStringify(closedPrHeadHealthy),
     );
     for (
       const healthy of [
@@ -2492,6 +2527,106 @@ Deno.test(
         ).status,
         "waiting",
       );
+    }
+
+    // The installed assign-first generation 44 pointer is stable only with its
+    // own bound healthy proof, and that stable pointer is terminal.
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: ASSIGN_FIRST_REVISION,
+            generation: ASSIGN_FIRST_GENERATION,
+            healthyProof: healthyProof(ASSIGN_FIRST_REVISION, 44, 183),
+          }),
+        }),
+        NOW,
+      ).status,
+      "no_change",
+    );
+    for (
+      const healthy of [
+        closedPrHeadHealthy,
+        healthyProof(ASSIGN_FIRST_REVISION, 43, 184),
+        null,
+      ]
+    ) {
+      assert.equal(
+        planOwnerDevelopmentInstall(
+          releaseSnapshot({
+            runtime: runtimeRecord({
+              revision: ASSIGN_FIRST_REVISION,
+              generation: ASSIGN_FIRST_GENERATION,
+              healthyProof: healthy,
+            }),
+          }),
+          NOW,
+        ).status,
+        "waiting",
+      );
+    }
+
+    // A failed assign-first generation 44 candidate settles exactly once by
+    // rolling back only to the exact previously proven closed-PR head revision
+    // with a monotonic generation 45, authorized by its retained healthy
+    // proof.
+    const failedAssignFirst = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: ASSIGN_FIRST_REVISION,
+          generation: ASSIGN_FIRST_GENERATION,
+          healthyProof: closedPrHeadHealthy,
+          executionProof: failedProof(ASSIGN_FIRST_REVISION, 44, 185),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(failedAssignFirst.status, "rollback");
+    if (failedAssignFirst.status !== "rollback") {
+      throw new Error("expected assign first rollback");
+    }
+    assert.equal(failedAssignFirst.move.action, "rollback");
+    assert.equal(
+      failedAssignFirst.move.priorRevision,
+      ASSIGN_FIRST_REVISION,
+    );
+    assert.equal(
+      failedAssignFirst.move.priorGeneration,
+      ASSIGN_FIRST_GENERATION,
+    );
+    assert.equal(
+      failedAssignFirst.move.nextRevision,
+      CLOSED_PR_HEAD_REVISION,
+    );
+    assert.equal(failedAssignFirst.move.nextGeneration, 45);
+    assert.equal(
+      canonicalStringify(failedAssignFirst.move.priorHealthyProof),
+      canonicalStringify(closedPrHeadHealthy),
+    );
+
+    // An assign-first failure that does not bind the exact pointer or a
+    // missing retained prior never rolls back.
+    const assignFirstWaits = [
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: ASSIGN_FIRST_REVISION,
+          generation: ASSIGN_FIRST_GENERATION,
+          healthyProof: closedPrHeadHealthy,
+          executionProof: failedProof(ASSIGN_FIRST_REVISION, 43, 186),
+        }),
+      }),
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: ASSIGN_FIRST_REVISION,
+          generation: ASSIGN_FIRST_GENERATION,
+          executionProof: failedProof(ASSIGN_FIRST_REVISION, 44, 187),
+        }),
+      }),
+    ];
+    for (const state of assignFirstWaits) {
+      const plan = planOwnerDevelopmentInstall(state, NOW);
+      assert.notEqual(plan.status, "rollback");
+      assert.equal(plan.status, "waiting");
     }
 
     // A failed closed-PR head generation 43 candidate settles exactly once by
