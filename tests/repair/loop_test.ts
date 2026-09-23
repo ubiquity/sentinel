@@ -3929,6 +3929,104 @@ Deno.test(
 );
 
 Deno.test(
+  "candidate lifecycle: a review-phase record whose own PR was closed unmerged republishes once",
+  async () => {
+    const id = asWorkItemId("issue-1");
+    const branch = candidateBranch(id);
+    const rig = await makeRig("candidate-review-closed-pr", {
+      summaries: false,
+      github: {
+        candidateLifecycle: {
+          ...positiveLifecycle(),
+          refs: { [`refs/heads/${branch}`]: H1 },
+          pullRequests: [{
+            ...exactOpenPr(7, H1, branch),
+            state: "closed" as const,
+          }],
+        },
+      },
+    });
+    try {
+      const written = await rig.store.writeRepair(
+        seededSnapshot([
+          preservedIssueWork("issue-1", H1, { nextStep: "review", pr: 7 }),
+        ]),
+        null,
+      );
+      assert.ok(written.ok && written.value.status === "applied");
+
+      const outcome = await rig.run();
+      assert.equal(outcome.status, "idle", JSON.stringify(outcome));
+      const state = await rig.snapshot();
+      const work = state.work[0]!;
+      assert.equal(work.target.head, H1, "the exact candidate is retained");
+      assert.equal(work.target.pr, 8, "one replacement pull request");
+      assert.equal(work.nextStep, "review");
+      assert.equal(work.wait?.reason, "review_pending");
+      assert.equal(
+        rig.github.candidatePullRequests.get(8)?.body,
+        "Resolves #1",
+      );
+      assert.equal(rig.model.requests.length, 0, "no model runs to recover");
+    } finally {
+      await rig.ctx.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "candidate lifecycle: a review-phase record whose own PR was merged outside the path is terminal",
+  async () => {
+    const id = asWorkItemId("issue-1");
+    const branch = candidateBranch(id);
+    const rig = await makeRig("candidate-review-merged-pr", {
+      summaries: false,
+      github: {
+        candidateLifecycle: {
+          ...positiveLifecycle(),
+          refs: { [`refs/heads/${branch}`]: H1 },
+          pullRequests: [{
+            ...exactOpenPr(7, H1, branch),
+            state: "merged" as const,
+            mergeSha: SHA2,
+          }],
+        },
+      },
+    });
+    try {
+      const written = await rig.store.writeRepair(
+        seededSnapshot([
+          preservedIssueWork("issue-1", H1, { nextStep: "review", pr: 7 }),
+        ]),
+        null,
+      );
+      assert.ok(written.ok && written.value.status === "applied");
+
+      const outcome = await rig.run();
+      assert.equal(outcome.status, "idle", JSON.stringify(outcome));
+      const state = await rig.snapshot();
+      const work = state.work[0]!;
+      assert.equal(work.nextStep, "blocked");
+      assert.equal(
+        work.blocker?.message,
+        "pull request was merged outside the trusted review path",
+      );
+      assert.equal(work.target.pr, 7, "the merged PR identity is retained");
+      assert.equal(work.intent, null);
+      assert.equal(work.wait, null);
+      assert.equal(
+        rig.github.calls.filter((call) => call === "createPr").length,
+        0,
+        "a merged repair is never republished",
+      );
+      assert.equal(rig.model.requests.length, 0);
+    } finally {
+      await rig.ctx.cleanup();
+    }
+  },
+);
+
+Deno.test(
   "candidate lifecycle: an exact preserved/published candidate progresses to one review",
   async () => {
     const id = asWorkItemId("issue-1");

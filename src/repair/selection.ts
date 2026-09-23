@@ -28,14 +28,24 @@ export const RETIRED_TARGET_MESSAGE =
   "source issue is closed; the repair no longer exists";
 
 /**
+ * Exact blocker for a repair whose own pull request was merged outside the
+ * trusted review path (a human merge): the PR is not unfinished work, so the
+ * record is terminal for capacity purposes and must never be republished.
+ */
+export const RETIRED_MERGED_MESSAGE =
+  "pull request was merged outside the trusted review path";
+
+/**
  * A trusted hosted retirement: the exact blocker above, still blocked, with
  * no remaining intent or wait. Only this exact shape is exempt; arbitrary
  * blocked, open or waiting PRs keep consuming the cap.
  */
 export function isRetiredTargetRecord(record: WorkRecordV1): boolean {
+  const message = record.blocker?.message;
   return record.nextStep === "blocked" &&
     record.blocker?.kind === "other" &&
-    record.blocker?.message === RETIRED_TARGET_MESSAGE &&
+    (message === RETIRED_TARGET_MESSAGE ||
+      message === RETIRED_MERGED_MESSAGE) &&
     record.intent === null &&
     record.wait === null;
 }

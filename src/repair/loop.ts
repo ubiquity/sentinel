@@ -87,6 +87,7 @@ import {
   isWaiting,
   MAX_UNFINISHED_PRS,
   rankEligibleWork,
+  RETIRED_MERGED_MESSAGE,
 } from "./selection.ts";
 import {
   advanceToCorrection,
@@ -3534,6 +3535,24 @@ async function ensureReviewFreshness(
   return null;
 }
 
+/**
+ * Retire one closed-unmerged own publication identity. The exact preserved
+ * candidate stays published on the task branch and the next publish step
+ * creates its replacement; no counter, base, head or descriptor changes.
+ */
+function retireClosedPublication(
+  record: WorkRecordV1,
+  now: number,
+  nextStep: WorkRecordV1["nextStep"] = record.nextStep,
+): WorkRecordV1 {
+  return {
+    ...record,
+    nextStep,
+    target: { ...record.target, pr: null },
+    updatedAt: now,
+  };
+}
+
 async function requestReviewFor(
   deps: RepairCycleDepsV1,
   context: LoopContextV1,
@@ -3595,12 +3614,11 @@ async function requestReviewFor(
     // target head, the base and every counter stay exactly as they were, so
     // the next publish step creates the replacement pull request for the same
     // reviewed bytes. No model, review or merge effect happens here.
-    const recovered: WorkRecordV1 = {
-      ...record,
-      target: { ...record.target, pr: null },
-      updatedAt: deps.clock.now(),
-    };
-    return persistWork(deps, context, recovered);
+    return persistWork(
+      deps,
+      context,
+      retireClosedPublication(record, deps.clock.now()),
+    );
   }
   if (freshness !== null) return freshness;
   // The cooling check was awaited wall-clock work and only guards the total
@@ -4164,6 +4182,34 @@ async function observeReview(
   }
   if (cooling.kind === "deferred") {
     return { kind: "deferred", detail: cooling.detail };
+  }
+  // The record's own pull request is observed BEFORE the review: a closed
+  // unmerged pull request can never produce another verdict, and a pull
+  // request merged outside the trusted review path is a human disposition the
+  // runtime must never treat as its own delivery. Foreign or unreadable
+  // observations change nothing and fall through to the standing review.
+  const pull = await deps.github.readPullRequest(pr);
+  if (!pull.ok) {
+    return { kind: "deferred", detail: "review PR observation unavailable" };
+  }
+  if (pull.value !== null && pull.value.headRef === record.target.branch) {
+    if (pull.value.state === "closed" && pull.value.mergeSha === null) {
+      // The review phase has no pull request to review: the record returns to
+      // work so the next publish step creates the replacement for the same
+      // preserved candidate.
+      return persistWork(
+        deps,
+        context,
+        retireClosedPublication(record, now, "work"),
+      );
+    }
+    if (pull.value.state === "merged") {
+      return persistWork(
+        deps,
+        context,
+        markBlocked(record, "other", RETIRED_MERGED_MESSAGE, now),
+      );
+    }
   }
   const observed = await observeStandingReview(deps, record, pr, head);
   if (!observed.ok) {
