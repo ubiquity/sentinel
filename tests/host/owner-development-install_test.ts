@@ -135,6 +135,12 @@ const SUCCESSOR_GENERATION = 38;
 const PUBLISH_GATE_REVISION =
   "b022ec2fd554254aa7f0e9333d7faf2b09a99a68" as GitSha;
 const PUBLISH_GATE_GENERATION = 39;
+// The closing-keyword install pin stays a test-local exact literal for the
+// same reason: this suite must compile against pre-rung production source, so
+// the expected red is a semantic plan mismatch and never a missing import.
+const CLOSING_KEYWORD_REVISION =
+  "5e2a828420150f46631ea4b0f96a989307b74bdb" as GitSha;
+const CLOSING_KEYWORD_GENERATION = 40;
 
 function hostedProof(input: {
   runId: number;
@@ -2180,19 +2186,47 @@ Deno.test(
     }
 
     // The installed publish-gate generation 39 pointer is stable only with
-    // its own bound healthy proof, and that stable pointer is terminal.
-    assert.equal(
-      planOwnerDevelopmentInstall(
-        releaseSnapshot({
-          runtime: runtimeRecord({
-            revision: PUBLISH_GATE_REVISION,
-            generation: PUBLISH_GATE_GENERATION,
-            healthyProof: healthyProof(PUBLISH_GATE_REVISION, 39, 157),
-          }),
+    // its own bound healthy proof, and that exact proof authorizes exactly one
+    // move to the fixed owner-approved successor runtime revision.
+    const publishGateHealthy = healthyProof(PUBLISH_GATE_REVISION, 39, 157);
+    const closingKeywordInstall = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: PUBLISH_GATE_REVISION,
+          generation: PUBLISH_GATE_GENERATION,
+          healthyProof: publishGateHealthy,
         }),
-        NOW,
-      ).status,
-      "no_change",
+      }),
+      NOW,
+    );
+    assert.equal(closingKeywordInstall.status, "install");
+    if (closingKeywordInstall.status !== "install") {
+      throw new Error("expected closing keyword install");
+    }
+    assert.equal(closingKeywordInstall.move.action, "install");
+    assert.equal(
+      closingKeywordInstall.move.priorRevision,
+      PUBLISH_GATE_REVISION,
+    );
+    assert.equal(
+      closingKeywordInstall.move.priorGeneration,
+      PUBLISH_GATE_GENERATION,
+    );
+    assert.equal(
+      closingKeywordInstall.move.nextRevision,
+      CLOSING_KEYWORD_REVISION,
+    );
+    assert.equal(
+      closingKeywordInstall.move.nextGeneration,
+      CLOSING_KEYWORD_GENERATION,
+    );
+    assert.equal(
+      closingKeywordInstall.move.nextGeneration,
+      closingKeywordInstall.move.priorGeneration + 1,
+    );
+    assert.equal(
+      canonicalStringify(closingKeywordInstall.move.priorHealthyProof),
+      canonicalStringify(publishGateHealthy),
     );
     for (
       const healthy of [
@@ -2214,6 +2248,110 @@ Deno.test(
         ).status,
         "waiting",
       );
+    }
+
+    // The installed closing-keyword generation 40 pointer is stable only with
+    // its own bound healthy proof, and that stable pointer is terminal.
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: CLOSING_KEYWORD_REVISION,
+            generation: CLOSING_KEYWORD_GENERATION,
+            healthyProof: healthyProof(CLOSING_KEYWORD_REVISION, 40, 163),
+          }),
+        }),
+        NOW,
+      ).status,
+      "no_change",
+    );
+    for (
+      const healthy of [
+        publishGateHealthy,
+        healthyProof(CLOSING_KEYWORD_REVISION, 39, 164),
+        null,
+      ]
+    ) {
+      assert.equal(
+        planOwnerDevelopmentInstall(
+          releaseSnapshot({
+            runtime: runtimeRecord({
+              revision: CLOSING_KEYWORD_REVISION,
+              generation: CLOSING_KEYWORD_GENERATION,
+              healthyProof: healthy,
+            }),
+          }),
+          NOW,
+        ).status,
+        "waiting",
+      );
+    }
+
+    // A failed closing-keyword generation 40 candidate settles exactly once by
+    // rolling back only to the exact previously proven publish-gate revision
+    // with a monotonic generation 41, authorized by its retained healthy
+    // proof.
+    const failedClosingKeyword = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: CLOSING_KEYWORD_REVISION,
+          generation: CLOSING_KEYWORD_GENERATION,
+          healthyProof: publishGateHealthy,
+          executionProof: failedProof(CLOSING_KEYWORD_REVISION, 40, 165),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(failedClosingKeyword.status, "rollback");
+    if (failedClosingKeyword.status !== "rollback") {
+      throw new Error("expected closing keyword rollback");
+    }
+    assert.equal(failedClosingKeyword.move.action, "rollback");
+    assert.equal(
+      failedClosingKeyword.move.priorRevision,
+      CLOSING_KEYWORD_REVISION,
+    );
+    assert.equal(
+      failedClosingKeyword.move.priorGeneration,
+      CLOSING_KEYWORD_GENERATION,
+    );
+    assert.equal(
+      failedClosingKeyword.move.nextRevision,
+      PUBLISH_GATE_REVISION,
+    );
+    assert.equal(failedClosingKeyword.move.nextGeneration, 41);
+    assert.equal(
+      failedClosingKeyword.move.nextGeneration,
+      failedClosingKeyword.move.priorGeneration + 1,
+    );
+    assert.equal(
+      canonicalStringify(failedClosingKeyword.move.priorHealthyProof),
+      canonicalStringify(publishGateHealthy),
+    );
+
+    // A closing-keyword failure that does not bind the exact pointer or a
+    // missing retained prior never rolls back.
+    const closingKeywordWaits = [
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: CLOSING_KEYWORD_REVISION,
+          generation: CLOSING_KEYWORD_GENERATION,
+          healthyProof: publishGateHealthy,
+          executionProof: failedProof(CLOSING_KEYWORD_REVISION, 39, 166),
+        }),
+      }),
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: CLOSING_KEYWORD_REVISION,
+          generation: CLOSING_KEYWORD_GENERATION,
+          executionProof: failedProof(CLOSING_KEYWORD_REVISION, 40, 167),
+        }),
+      }),
+    ];
+    for (const state of closingKeywordWaits) {
+      const plan = planOwnerDevelopmentInstall(state, NOW);
+      assert.notEqual(plan.status, "rollback");
+      assert.equal(plan.status, "waiting");
     }
 
     // A failed publish-gate generation 39 candidate settles exactly once by
