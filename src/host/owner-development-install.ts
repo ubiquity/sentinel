@@ -373,6 +373,14 @@ export const OWNER_DEVELOPMENT_INSTALL_PUBLISH_GATE_GENERATION = 39;
 export const OWNER_DEVELOPMENT_INSTALL_CLOSING_KEYWORD_REVISION =
   "5e2a828420150f46631ea4b0f96a989307b74bdb" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_CLOSING_KEYWORD_GENERATION = 40;
+/**
+ * Exact revision re-driving a repair whose preserved candidate is permanently
+ * missing instead of retrying the lost candidate forever; installed only after
+ * the closing-keyword generation 40 healthy proof.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_CANDIDATE_LOSS_REVISION =
+  "09d2efbe962dec3e2f64ed45e76bc05ecbac0ab5" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_CANDIDATE_LOSS_GENERATION = 41;
 
 const API_BASE = "https://api.github.com";
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -1626,10 +1634,53 @@ export function planOwnerDevelopmentInstall(
       );
     }
     if (healthy !== null) {
-      return noChange("the owner development installation is complete");
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_CANDIDATE_LOSS_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_CANDIDATE_LOSS_GENERATION,
+        healthy,
+        "install the candidate-loss revision after the closing-keyword healthy proof",
+      );
     }
     return waiting(
       "the closing-keyword generation 40 healthy proof is not recorded",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_CANDIDATE_LOSS_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_CANDIDATE_LOSS_GENERATION
+  ) {
+    // An exact failed settlement of this pointer is candidate failure evidence
+    // even when a healthy proof exists; the rollback still requires the
+    // recorded healthy proof of the exact prior revision, so a missing or
+    // unrelated proof stays a zero-write waiting outcome.
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_CLOSING_KEYWORD_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_CLOSING_KEYWORD_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded closing-keyword healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_CLOSING_KEYWORD_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed candidate-loss candidate to its recorded prior",
+      );
+    }
+    if (healthy !== null) {
+      return noChange("the owner development installation is complete");
+    }
+    return waiting(
+      "the candidate-loss generation 41 healthy proof is not recorded",
     );
   }
 
