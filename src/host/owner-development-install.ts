@@ -141,6 +141,210 @@ export const OWNER_DEVELOPMENT_INSTALL_HISTORY_GENERATION = 14;
 export const OWNER_DEVELOPMENT_INSTALL_RECEIPT_REVISION =
   "9fcc959bcdc903aed21f2bbe968c8838d86010ef" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_RECEIPT_GENERATION = 15;
+/**
+ * Exact revision carrying the delivery-evidence ledger and the local case
+ * evaluator (the CI-verified development tip); its install also triggers an
+ * immediate execution, so a delivered review round is observed without waiting
+ * for the hourly ordinary cadence.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_LEDGER_REVISION =
+  "2b6a25b7d9992c6a027448e43d5ce104d8f1a93e" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_LEDGER_GENERATION = 16;
+/**
+ * Exact revision carrying the honest cancelled-execution settlement and the
+ * delivery ledger; its install also triggers an immediate execution after a
+ * further bounded correction grant.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_SETTLEMENT_REVISION =
+  "fc25d716981870ce6b7038c2eda94ed2430cca58" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_SETTLEMENT_GENERATION = 17;
+/**
+ * Exact revision the hosted promotion accepted for the delivered self-repair
+ * (generation 18). It is the pointer the trigger install below starts from.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_RELEASED_REVISION =
+  "1ed66cd191271cc206aaf436d0f93d245aaee936" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_RELEASED_GENERATION = 18;
+/**
+ * Exact revision carrying default-include intake, the autonomous delivery pass
+ * and the automatic issue closure. Its install also triggers an immediate
+ * execution, which is how the owner asks the fleet to start working now instead
+ * of waiting for the hourly ordinary cadence.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_TRIGGER_REVISION =
+  "0853a5c0454d17ab73856d3c9621dc534a0fa706" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_TRIGGER_GENERATION = 19;
+/**
+ * Exact revision carrying the base-advance recovery for a wedged attempt
+ * budget. Its install triggers an immediate execution, which is how the loop
+ * reconciles the pending refresh and runs the next model session now.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_ADVANCE_REVISION =
+  "33ff7fb27c5cb272d953f9ddaae3be1271212afd" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_ADVANCE_GENERATION = 20;
+/**
+ * Exact revision carrying the cadence-based retry policy. Its install triggers
+ * the immediate execution that retries the wedged tasks.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_CADENCE_REVISION =
+  "9f1bde9e342547c23dc1dc69f7650704d0f43e7f" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_CADENCE_GENERATION = 21;
+/**
+ * Exact revision carrying the closed-issue retry guard, so the next execution
+ * spends its model session on a repairable task instead of a closed one.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_GUARD_REVISION =
+  "6c5ab021deff64f0df38e1841cbed259cc6287fb" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_GUARD_GENERATION = 22;
+/**
+ * Exact revision carrying the retirement pass. Its install triggers the
+ * immediate execution that records the pending review verdict and starts the
+ * correction round.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_RETIRE_REVISION =
+  "cf8e6610b206f80b976785d12eef9d8fa1706311" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_RETIRE_GENERATION = 23;
+/**
+ * Exact revision and generation the live pointer may carry when the App
+ * identity install is authorized: the delivered self-repair merge advanced
+ * the pointer one generation past the retirement link through an ordinary
+ * correction round. Its own healthy proof authorizes the next install.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_DELIVERED_ROUND2_REVISION =
+  "38c70a5bf3e58ff3fb1c7cfeb7a91e98105c3d1a" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_DELIVERED_ROUND2_GENERATION = 24;
+/**
+ * Exact revision carrying the single ubiquity-sentinel App identity. Installed
+ * only after the retirement revision's own healthy proof, so every
+ * repository-visible code change the runtime publishes is attributed to
+ * `ubiquity-sentinel[bot]` instead of the native Actions bot.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_APP_IDENTITY_REVISION =
+  "c07fc944759a3fb1eaddfc4d180a17b9ac15136d" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_APP_IDENTITY_GENERATION = 25;
+/**
+ * Exact revision carrying the DeepSeek-direct fallback model route together
+ * with the launcher pass-through that lets the child actually receive it.
+ * Installed only after the App identity revision's own healthy proof.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_MODEL_ROUTE_REVISION =
+  "c09c9fd84614298a6b3fd6eeabd42e9a6b4d6eb8" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_MODEL_ROUTE_GENERATION = 26;
+/**
+ * Exact revision switching the gateway model id to the separately metered
+ * `gpt-reserve` (luna under its own quota class). Installed only after the
+ * model-route revision's own healthy proof.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_RESERVE_MODEL_REVISION =
+  "cbfa39cb8fc35630ea01281bcc5bdf9075d89d1a" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_RESERVE_MODEL_GENERATION = 27;
+/**
+ * Exact revision addressing EVERY committed target. It gives each target its
+ * own private source mirror seeded from that target's authenticated remote,
+ * so a foreign target's base commit can actually be resolved, and it restores
+ * each target's candidate objects from that target's own remote under the
+ * `ubiquity-sentinel` App installation scope. Installed only after the
+ * reserve-model revision's own healthy proof.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_MULTI_TARGET_REVISION =
+  "dfd283e83e634dad4473c612bb3ee1aefe25f6b8" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_MULTI_TARGET_GENERATION = 28;
+/**
+ * Exact revision whose repair cooldown gate admits each target's own
+ * installation scope. Generation 28 still latched the shared gate on the first
+ * foreign-scope request, which faulted the ONE gate every target shares, so
+ * generation 29 is what actually lets a foreign target run. Installed only
+ * after the multi-target revision's own healthy proof.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_SCOPE_GATE_REVISION =
+  "dbae19f218141a44becd7d1fffc22d792913b4f0" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_SCOPE_GATE_GENERATION = 29;
+/**
+ * Exact revision scoping the candidate Git auth header to the target's own
+ * remote. Generation 29 ran a full multi-target cycle and produced a genuine
+ * ai.ubq.fi candidate, but every candidate push was anonymous because the
+ * header named the sentinel URL, so nothing landed on the foreign remote.
+ * Installed only after the scope-gate revision's own healthy proof.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_CANDIDATE_AUTH_REVISION =
+  "4da7f5a87a159d36aad1e20d8698d41e777c52fe" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_CANDIDATE_AUTH_GENERATION = 30;
+/**
+ * Exact revision binding candidate preservation to the target repository and
+ * widening the session bound so a larger codebase's session can finish.
+ * Generation 30 produced genuine ai.ubq.fi candidates but could never publish
+ * them: the preserver and loss prover still filtered durable records by the
+ * sentinel self-identity. Installed only after the generation 30 healthy proof.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_PRESERVE_SCOPE_REVISION =
+  "fa419afb2a2b4960c95daeb9041fd86ddc2c3a7a" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_PRESERVE_SCOPE_GENERATION = 31;
+/**
+ * Exact revision authenticating a foreign target's mirror with the App token.
+ * Generation 31 could not clone or fetch a foreign repository at all: the
+ * mirror inherited the sentinel-scoped native token, so Git sent a credential
+ * the server rejected and never fell back to anonymous access. Installed only
+ * after the preserve-scope generation 31 healthy proof.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_FOREIGN_AUTH_REVISION =
+  "30803374b8eb9bd6e3c2636096493b3371a4f543" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_FOREIGN_AUTH_GENERATION = 32;
+/**
+ * Exact revision whose advisory diagnostic names the seam a failed model run
+ * died at. Without it a failure reports only `unavailable`, so the failing
+ * check is unknowable without another full hourly cycle. Installed only after
+ * the foreign-auth generation 32 healthy proof.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_REASON_CODE_REVISION =
+  "5b42603a28e04abed407cb850e3e7025d02b658e" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_REASON_CODE_GENERATION = 33;
+/**
+ * Exact owner-approved revision that re-reads settlement before declaring a
+ * failure and whose checkout error names the failing command. Installed only
+ * after the reason-code generation 33 healthy proof. A failed generation 34
+ * candidate settles exactly once by rolling back to the recorded generation 33
+ * revision with a monotonic generation 35.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_SETTLEMENT_RECOVERY_REVISION =
+  "83a7cd8162d808887a27ad733c64db6e3a7c77ac" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_SETTLEMENT_RECOVERY_GENERATION = 34;
+/**
+ * Exact owner-approved revision whose only behavior change is supported
+ * `optOutNotificationMethods` for three unused reasoning streams on the
+ * implementation and reviewer sessions; accounting, bounds and policy are
+ * unchanged. Installed only after the settlement-recovery generation 34
+ * healthy proof. A failed generation 35 candidate settles exactly once by
+ * rolling back to the recorded generation 34 revision with a monotonic
+ * generation 36; that post-rollback pointer is terminal.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_QUIET_REASONING_REVISION =
+  "db16f8af810ee24f434938a3e9dd17c04c3e8084" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_QUIET_REASONING_GENERATION = 35;
+/**
+ * Exact owner-approved revision that fetches a newly advanced target base
+ * before deterministic integration through the existing same-target
+ * authenticated fetch and shared cooldown; bounds, models, review, merge and
+ * state admission policy are unchanged. Installed only after the quiet
+ * reasoning generation 35 healthy proof. A failed generation 36 candidate
+ * settles exactly once by rolling back to the recorded generation 35 revision
+ * with a monotonic generation 37; that post-rollback pointer is terminal.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_BASE_FETCH_REVISION =
+  "ae4629faeb75a80c1badf1ff37a58c8be00adf99" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_BASE_FETCH_GENERATION = 36;
+/**
+ * Exact owner-approved revision that binds the trusted route's model through
+ * the reviewer thread, acknowledgement, turn, reroute, verifier and journal
+ * instead of the hardcoded `gpt-reserve`; route/model policy, max reasoning,
+ * limits, quotas and the review/merge guards are unchanged. Installed only
+ * after the base fetch generation 36 healthy proof. A failed generation 37
+ * candidate settles exactly once by rolling back to the recorded generation 36
+ * revision with a monotonic generation 38; that post-rollback pointer is
+ * terminal.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_REVIEW_MODEL_REVISION =
+  "59940aece2d051b79c8e2e8ab7c611a0d45600b2" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_REVIEW_MODEL_GENERATION = 37;
 
 const API_BASE = "https://api.github.com";
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -621,10 +825,869 @@ export function planOwnerDevelopmentInstall(
       );
     }
     if (healthy !== null) {
-      return noChange("the owner development installation is complete");
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_LEDGER_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_LEDGER_GENERATION,
+        healthy,
+        "install the ledger revision after the receipt-submission healthy proof",
+      );
     }
     return waiting(
       "the receipt-submission generation 15 healthy proof is not recorded",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_LEDGER_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_LEDGER_GENERATION
+  ) {
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_RECEIPT_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_RECEIPT_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded receipt-submission healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_RECEIPT_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed ledger candidate to its recorded prior",
+      );
+    }
+    if (healthy !== null) {
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_SETTLEMENT_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_SETTLEMENT_GENERATION,
+        healthy,
+        "install the settlement revision after the ledger healthy proof",
+      );
+    }
+    return waiting("the ledger generation 16 healthy proof is not recorded");
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_SETTLEMENT_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_SETTLEMENT_GENERATION
+  ) {
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_LEDGER_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_LEDGER_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded ledger healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_LEDGER_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed settlement candidate to its recorded prior",
+      );
+    }
+    if (healthy !== null) {
+      // The 17 -> 18 movement belongs to the separate hosted promotion that
+      // accepted the released revision; planning the trigger revision here
+      // would be a two-generation jump the install snapshot builder always
+      // rejects, so this planner waits for that promotion instead.
+      return waiting(
+        "the released generation 18 promotion owns the next movement",
+      );
+    }
+    return waiting(
+      "the settlement generation 17 healthy proof is not recorded",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_RELEASED_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_RELEASED_GENERATION
+  ) {
+    if (healthy !== null) {
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_TRIGGER_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_TRIGGER_GENERATION,
+        healthy,
+        "install the trigger revision after the released generation healthy proof",
+      );
+    }
+    return waiting(
+      "the released generation 18 healthy proof is not recorded",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_TRIGGER_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_TRIGGER_GENERATION
+  ) {
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_RELEASED_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_RELEASED_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded released healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_RELEASED_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed trigger candidate to the released revision",
+      );
+    }
+    if (healthy !== null) {
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_ADVANCE_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_ADVANCE_GENERATION,
+        healthy,
+        "install the base-advance revision after the trigger healthy proof",
+      );
+    }
+    return waiting(
+      "the trigger generation 19 healthy proof is not recorded",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_ADVANCE_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_ADVANCE_GENERATION
+  ) {
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_TRIGGER_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_TRIGGER_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded trigger healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_TRIGGER_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed base-advance candidate to the trigger revision",
+      );
+    }
+    if (healthy !== null) {
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_CADENCE_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_CADENCE_GENERATION,
+        healthy,
+        "install the cadence revision after the base-advance healthy proof",
+      );
+    }
+    return waiting(
+      "the base-advance generation 20 healthy proof is not recorded",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_CADENCE_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_CADENCE_GENERATION
+  ) {
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_ADVANCE_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_ADVANCE_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded base-advance healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_ADVANCE_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed cadence candidate to the base-advance revision",
+      );
+    }
+    if (healthy !== null) {
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_GUARD_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_GUARD_GENERATION,
+        healthy,
+        "install the guard revision after the cadence healthy proof",
+      );
+    }
+    return waiting(
+      "the cadence generation 21 healthy proof is not recorded",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_GUARD_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_GUARD_GENERATION
+  ) {
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_CADENCE_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_CADENCE_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded cadence healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_CADENCE_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed guard candidate to the cadence revision",
+      );
+    }
+    if (healthy !== null) {
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_RETIRE_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_RETIRE_GENERATION,
+        healthy,
+        "install the retirement revision after the guard healthy proof",
+      );
+    }
+    return waiting("the guard generation 22 healthy proof is not recorded");
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_RETIRE_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_RETIRE_GENERATION
+  ) {
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_GUARD_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_GUARD_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded guard healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_GUARD_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed retirement candidate to the guard revision",
+      );
+    }
+    if (healthy !== null) {
+      return noChange("the owner development installation is complete");
+    }
+    return waiting(
+      "the retirement generation 23 healthy proof is not recorded",
+    );
+  }
+
+  // The live pointer sits one generation past the retirement link (the
+  // delivered self-repair merge advanced it through an ordinary correction
+  // round). That exact revision still carries its own healthy proof, which
+  // authorizes the App identity install; any other pointer stays a no-op.
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_DELIVERED_ROUND2_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_DELIVERED_ROUND2_GENERATION &&
+    failed === null &&
+    healthy !== null
+  ) {
+    return movePlan(
+      "install",
+      runtime,
+      OWNER_DEVELOPMENT_INSTALL_APP_IDENTITY_REVISION,
+      OWNER_DEVELOPMENT_INSTALL_APP_IDENTITY_GENERATION,
+      healthy,
+      "install the ubiquity-sentinel App identity revision after the delivered round-2 healthy proof",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_APP_IDENTITY_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_APP_IDENTITY_GENERATION
+  ) {
+    // An exact failed settlement of this pointer is candidate failure
+    // evidence even when an older healthy proof exists; the rollback still
+    // requires the recorded healthy proof of the exact prior revision, so a
+    // missing or unrelated proof stays a zero-write waiting outcome.
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_DELIVERED_ROUND2_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_DELIVERED_ROUND2_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded delivered round-2 healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_DELIVERED_ROUND2_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed App identity candidate to its recorded prior",
+      );
+    }
+    if (healthy !== null) {
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_MODEL_ROUTE_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_MODEL_ROUTE_GENERATION,
+        healthy,
+        "install the DeepSeek fallback model-route revision after the App identity healthy proof",
+      );
+    }
+    return waiting(
+      "the App identity generation 25 healthy proof is not recorded",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_MODEL_ROUTE_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_MODEL_ROUTE_GENERATION
+  ) {
+    // An exact failed settlement of this pointer is candidate failure
+    // evidence even when an older healthy proof exists; the rollback still
+    // requires the recorded healthy proof of the exact prior revision, so a
+    // missing or unrelated proof stays a zero-write waiting outcome.
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_APP_IDENTITY_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_APP_IDENTITY_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded App identity healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_APP_IDENTITY_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed model-route candidate to its recorded prior",
+      );
+    }
+    if (healthy !== null) {
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_RESERVE_MODEL_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_RESERVE_MODEL_GENERATION,
+        healthy,
+        "install the gpt-reserve model revision after the model-route healthy proof",
+      );
+    }
+    return waiting(
+      "the model-route generation 26 healthy proof is not recorded",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_RESERVE_MODEL_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_RESERVE_MODEL_GENERATION
+  ) {
+    // An exact failed settlement of this pointer is candidate failure
+    // evidence even when an older healthy proof exists; the rollback still
+    // requires the recorded healthy proof of the exact prior revision, so a
+    // missing or unrelated proof stays a zero-write waiting outcome.
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_MODEL_ROUTE_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_MODEL_ROUTE_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded model-route healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_MODEL_ROUTE_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed reserve-model candidate to its recorded prior",
+      );
+    }
+    if (healthy !== null) {
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_MULTI_TARGET_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_MULTI_TARGET_GENERATION,
+        healthy,
+        "install the multi-target revision after the reserve-model healthy proof",
+      );
+    }
+    return waiting(
+      "the reserve-model generation 27 healthy proof is not recorded",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_MULTI_TARGET_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_MULTI_TARGET_GENERATION
+  ) {
+    // An exact failed settlement of this pointer is candidate failure
+    // evidence even when an older healthy proof exists; the rollback still
+    // requires the recorded healthy proof of the exact prior revision, so a
+    // missing or unrelated proof stays a zero-write waiting outcome.
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_RESERVE_MODEL_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_RESERVE_MODEL_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded reserve-model healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_RESERVE_MODEL_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed multi-target candidate to its recorded prior",
+      );
+    }
+    if (healthy !== null) {
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_SCOPE_GATE_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_SCOPE_GATE_GENERATION,
+        healthy,
+        "install the scope-admitting revision after the multi-target healthy proof",
+      );
+    }
+    return waiting(
+      "the multi-target generation 28 healthy proof is not recorded",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_SCOPE_GATE_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_SCOPE_GATE_GENERATION
+  ) {
+    // An exact failed settlement of this pointer is candidate failure
+    // evidence even when an older healthy proof exists; the rollback still
+    // requires the recorded healthy proof of the exact prior revision, so a
+    // missing or unrelated proof stays a zero-write waiting outcome.
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_MULTI_TARGET_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_MULTI_TARGET_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded multi-target healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_MULTI_TARGET_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed scope-gate candidate to its recorded prior",
+      );
+    }
+    if (healthy !== null) {
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_CANDIDATE_AUTH_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_CANDIDATE_AUTH_GENERATION,
+        healthy,
+        "install the target-scoped candidate auth revision after the scope-gate healthy proof",
+      );
+    }
+    return waiting(
+      "the scope-gate generation 29 healthy proof is not recorded",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_CANDIDATE_AUTH_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_CANDIDATE_AUTH_GENERATION
+  ) {
+    // An exact failed settlement of this pointer is candidate failure
+    // evidence even when an older healthy proof exists; the rollback still
+    // requires the recorded healthy proof of the exact prior revision, so a
+    // missing or unrelated proof stays a zero-write waiting outcome.
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_SCOPE_GATE_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_SCOPE_GATE_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded scope-gate healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_SCOPE_GATE_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed candidate-auth candidate to its recorded prior",
+      );
+    }
+    if (healthy !== null) {
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_PRESERVE_SCOPE_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_PRESERVE_SCOPE_GENERATION,
+        healthy,
+        "install the target-bound preservation revision after the candidate-auth healthy proof",
+      );
+    }
+    return waiting(
+      "the candidate-auth generation 30 healthy proof is not recorded",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_PRESERVE_SCOPE_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_PRESERVE_SCOPE_GENERATION
+  ) {
+    // An exact failed settlement of this pointer is candidate failure
+    // evidence even when an older healthy proof exists; the rollback still
+    // requires the recorded healthy proof of the exact prior revision, so a
+    // missing or unrelated proof stays a zero-write waiting outcome.
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_CANDIDATE_AUTH_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_CANDIDATE_AUTH_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded candidate-auth healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_CANDIDATE_AUTH_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed preserve-scope candidate to its recorded prior",
+      );
+    }
+    if (healthy !== null) {
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_FOREIGN_AUTH_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_FOREIGN_AUTH_GENERATION,
+        healthy,
+        "install the foreign-auth revision after the preserve-scope healthy proof",
+      );
+    }
+    return waiting(
+      "the preserve-scope generation 31 healthy proof is not recorded",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_FOREIGN_AUTH_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_FOREIGN_AUTH_GENERATION
+  ) {
+    // An exact failed settlement of this pointer is candidate failure
+    // evidence even when an older healthy proof exists; the rollback still
+    // requires the recorded healthy proof of the exact prior revision, so a
+    // missing or unrelated proof stays a zero-write waiting outcome.
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_PRESERVE_SCOPE_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_PRESERVE_SCOPE_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded preserve-scope healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_PRESERVE_SCOPE_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed foreign-auth candidate to its recorded prior",
+      );
+    }
+    if (healthy !== null) {
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_REASON_CODE_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_REASON_CODE_GENERATION,
+        healthy,
+        "install the reason-code revision after the foreign-auth healthy proof",
+      );
+    }
+    return waiting(
+      "the foreign-auth generation 32 healthy proof is not recorded",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_REASON_CODE_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_REASON_CODE_GENERATION
+  ) {
+    // An exact failed settlement of this pointer is candidate failure
+    // evidence even when an older healthy proof exists; the rollback still
+    // requires the recorded healthy proof of the exact prior revision, so a
+    // missing or unrelated proof stays a zero-write waiting outcome.
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_FOREIGN_AUTH_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_FOREIGN_AUTH_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded foreign-auth healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_FOREIGN_AUTH_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed reason-code candidate to its recorded prior",
+      );
+    }
+    if (healthy !== null) {
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_SETTLEMENT_RECOVERY_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_SETTLEMENT_RECOVERY_GENERATION,
+        healthy,
+        "install the settlement recovery revision after the reason-code healthy proof",
+      );
+    }
+    return waiting(
+      "the reason-code generation 33 healthy proof is not recorded",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_SETTLEMENT_RECOVERY_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_SETTLEMENT_RECOVERY_GENERATION
+  ) {
+    // An exact failed settlement of this pointer is candidate failure
+    // evidence even when an older healthy proof exists; the rollback still
+    // requires the recorded healthy proof of the exact prior revision, so a
+    // missing or unrelated proof stays a zero-write waiting outcome.
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_REASON_CODE_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_REASON_CODE_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded reason-code healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_REASON_CODE_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed settlement recovery candidate to its recorded prior",
+      );
+    }
+    if (healthy !== null) {
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_QUIET_REASONING_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_QUIET_REASONING_GENERATION,
+        healthy,
+        "install the quiet reasoning revision after the settlement recovery healthy proof",
+      );
+    }
+    return waiting(
+      "the settlement recovery generation 34 healthy proof is not recorded",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_QUIET_REASONING_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_QUIET_REASONING_GENERATION
+  ) {
+    // An exact failed settlement of this pointer is candidate failure
+    // evidence even when a healthy proof exists; the rollback still requires
+    // the recorded healthy proof of the exact prior revision, so a missing or
+    // unrelated proof stays a zero-write waiting outcome.
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_SETTLEMENT_RECOVERY_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_SETTLEMENT_RECOVERY_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded settlement recovery healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_SETTLEMENT_RECOVERY_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed quiet reasoning candidate to its recorded prior",
+      );
+    }
+    if (healthy !== null) {
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_BASE_FETCH_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_BASE_FETCH_GENERATION,
+        healthy,
+        "install the base fetch revision after the quiet reasoning healthy proof",
+      );
+    }
+    return waiting(
+      "the quiet reasoning generation 35 healthy proof is not recorded",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_BASE_FETCH_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_BASE_FETCH_GENERATION
+  ) {
+    // An exact failed settlement of this pointer is candidate failure
+    // evidence even when a healthy proof exists; the rollback still requires
+    // the recorded healthy proof of the exact prior revision, so a missing or
+    // unrelated proof stays a zero-write waiting outcome.
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_QUIET_REASONING_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_QUIET_REASONING_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded quiet reasoning healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_QUIET_REASONING_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed base fetch candidate to its recorded prior",
+      );
+    }
+    if (healthy !== null) {
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_REVIEW_MODEL_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_REVIEW_MODEL_GENERATION,
+        healthy,
+        "install the review model revision after the base fetch healthy proof",
+      );
+    }
+    return waiting(
+      "the base fetch generation 36 healthy proof is not recorded",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_REVIEW_MODEL_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_REVIEW_MODEL_GENERATION
+  ) {
+    // An exact failed settlement of this pointer is candidate failure
+    // evidence even when a healthy proof exists; the rollback still requires
+    // the recorded healthy proof of the exact prior revision, so a missing or
+    // unrelated proof stays a zero-write waiting outcome.
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_BASE_FETCH_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_BASE_FETCH_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded base fetch healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_BASE_FETCH_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed review model candidate to its recorded prior",
+      );
+    }
+    if (healthy !== null) {
+      return noChange("the owner development installation is complete");
+    }
+    return waiting(
+      "the review model generation 37 healthy proof is not recorded",
     );
   }
 
