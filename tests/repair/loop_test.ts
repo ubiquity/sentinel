@@ -2982,11 +2982,17 @@ Deno.test(
     assert.equal(state.work[0].target.base, SHA1, "base stays as recorded");
     assert.equal(state.work[0].wait?.reason, "unavailable");
     assert.equal(state.work[0].wait?.until, T0 + 60 * 60_000);
-    assert.deepEqual(state.work[0].counters, {
-      attempts: 0,
-      retries: 0,
-      reviewRounds: 0,
-    });
+    // No reservation, model start or charged counter: the record only re-armed
+    // its bounded wait, which the additive no-progress counter records.
+    assert.deepEqual(
+      {
+        attempts: state.work[0].counters.attempts,
+        retries: state.work[0].counters.retries,
+        reviewRounds: state.work[0].counters.reviewRounds,
+      },
+      { attempts: 0, retries: 0, reviewRounds: 0 },
+    );
+    assert.equal(state.work[0].counters.stalled, 2);
   },
 );
 
@@ -3558,12 +3564,16 @@ function preservedIssueWork(
 
 /** Stable candidate/accounting subset that no freshness refusal may alter. */
 function candidateAccounting(record: WorkRecordV1): unknown {
+  // `counters.stalled` is the per-record no-progress budget, not candidate or
+  // attempt accounting: a refused/failed read legitimately advances it while
+  // the charged counters and the candidate bytes stay exactly as recorded.
+  const { stalled: _noProgress, ...chargedCounters } = record.counters;
   return {
     id: record.id,
     source: record.source,
     fingerprint: record.fingerprint,
     target: record.target,
-    counters: record.counters,
+    counters: chargedCounters,
     dependencies: record.dependencies,
     controller: record.controller,
     evidence: record.evidence,
