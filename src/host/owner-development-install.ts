@@ -440,6 +440,18 @@ export const OWNER_DEVELOPMENT_INSTALL_REVIEW_PHASE_PR_RETRY_GENERATION = 47;
 export const OWNER_DEVELOPMENT_INSTALL_LIVELOCK_BOUND_REVISION =
   "4304d1acd77d0e49874a2a59398c7fe00b94741c" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_LIVELOCK_BOUND_GENERATION = 48;
+/**
+ * Exact revision that bounds the review wait: a review that never produced a
+ * verdict (or stayed unobservable) past the four-hour budget blocks with the
+ * classified message instead of re-arming the fifteen-minute poll forever, and
+ * the unfinished-PR cap no longer skips a record whose durable intent already
+ * names a published pull request, so an existing publication can retire or
+ * repair itself instead of starving behind the cap it holds; installed only
+ * after the livelock-bound generation 48 healthy proof.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_REVIEW_WAIT_BOUND_REVISION =
+  "d0b9ac8542949ed2d880329f666f638103b0226c" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_REVIEW_WAIT_BOUND_GENERATION = 49;
 /** Monotonic rollback target the failed generation 45 candidate rolled to. */
 export const OWNER_DEVELOPMENT_INSTALL_ROLLBACK_TARGET_GENERATION =
   OWNER_DEVELOPMENT_INSTALL_ASSIGN_FIRST_GENERATION + 2;
@@ -2028,10 +2040,52 @@ export function planOwnerDevelopmentInstall(
       );
     }
     if (healthy !== null) {
-      return noChange("the owner development installation is complete");
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_REVIEW_WAIT_BOUND_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_REVIEW_WAIT_BOUND_GENERATION,
+        healthy,
+        "install the review-wait-bound revision after the livelock-bound healthy proof",
+      );
     }
     return waiting(
       "the livelock-bound generation 48 healthy proof is not recorded",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_REVIEW_WAIT_BOUND_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_REVIEW_WAIT_BOUND_GENERATION
+  ) {
+    // A failed candidate settles exactly once by rolling back to the recorded
+    // prior — the proven livelock-bound revision — at a monotonic generation,
+    // authorized by its retained healthy proof.
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_LIVELOCK_BOUND_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_LIVELOCK_BOUND_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded livelock-bound healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_LIVELOCK_BOUND_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed review-wait-bound candidate to its recorded prior",
+      );
+    }
+    if (healthy !== null) {
+      return noChange("the owner development installation is complete");
+    }
+    return waiting(
+      "the review-wait-bound generation 49 healthy proof is not recorded",
     );
   }
 

@@ -180,6 +180,12 @@ const REVIEW_PHASE_PR_RETRY_GENERATION = 47;
 const LIVELOCK_BOUND_REVISION =
   "4304d1acd77d0e49874a2a59398c7fe00b94741c" as GitSha;
 const LIVELOCK_BOUND_GENERATION = 48;
+// The review-wait-bound install pin stays a test-local exact literal for the
+// same reason: this suite must compile against pre-rung production source, so
+// the expected red is a semantic plan mismatch and never a missing import.
+const REVIEW_WAIT_BOUND_REVISION =
+  "d0b9ac8542949ed2d880329f666f638103b0226c" as GitSha;
+const REVIEW_WAIT_BOUND_GENERATION = 49;
 const ROLLBACK_TARGET_GENERATION = 46;
 
 function hostedProof(input: {
@@ -2781,23 +2787,42 @@ Deno.test(
     // The installed generation 48 pointer is terminal only with its own bound
     // healthy proof; without it the plan is a zero-write wait, and a failed
     // candidate rolls back exactly once to the recorded retry prior at a
-    // monotonic generation.
-    assert.equal(
-      planOwnerDevelopmentInstall(
-        releaseSnapshot({
-          runtime: runtimeRecord({
-            revision: LIVELOCK_BOUND_REVISION,
-            generation: LIVELOCK_BOUND_GENERATION,
-            healthyProof: healthyProof(
-              LIVELOCK_BOUND_REVISION,
-              LIVELOCK_BOUND_GENERATION,
-              197,
-            ),
-          }),
+    // monotonic generation. Its own healthy proof authorizes exactly one
+    // further move: the review-wait-bound revision at generation 49.
+    const livelockHealthy = healthyProof(
+      LIVELOCK_BOUND_REVISION,
+      LIVELOCK_BOUND_GENERATION,
+      197,
+    );
+    const reviewWaitInstall = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: LIVELOCK_BOUND_REVISION,
+          generation: LIVELOCK_BOUND_GENERATION,
+          healthyProof: livelockHealthy,
         }),
-        NOW,
-      ).status,
-      "no_change",
+      }),
+      NOW,
+    );
+    assert.equal(reviewWaitInstall.status, "install");
+    if (reviewWaitInstall.status !== "install") {
+      throw new Error("expected review-wait-bound install");
+    }
+    assert.equal(
+      reviewWaitInstall.move.nextRevision,
+      REVIEW_WAIT_BOUND_REVISION,
+    );
+    assert.equal(
+      reviewWaitInstall.move.nextGeneration,
+      REVIEW_WAIT_BOUND_GENERATION,
+    );
+    assert.equal(
+      reviewWaitInstall.move.nextGeneration,
+      reviewWaitInstall.move.priorGeneration + 1,
+    );
+    assert.equal(
+      canonicalStringify(reviewWaitInstall.move.priorHealthyProof),
+      canonicalStringify(livelockHealthy),
     );
     assert.equal(
       planOwnerDevelopmentInstall(
@@ -2810,6 +2835,62 @@ Deno.test(
         NOW,
       ).status,
       "waiting",
+    );
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: REVIEW_WAIT_BOUND_REVISION,
+            generation: REVIEW_WAIT_BOUND_GENERATION,
+            healthyProof: healthyProof(
+              REVIEW_WAIT_BOUND_REVISION,
+              REVIEW_WAIT_BOUND_GENERATION,
+              199,
+            ),
+          }),
+        }),
+        NOW,
+      ).status,
+      "no_change",
+    );
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: REVIEW_WAIT_BOUND_REVISION,
+            generation: REVIEW_WAIT_BOUND_GENERATION,
+          }),
+        }),
+        NOW,
+      ).status,
+      "waiting",
+    );
+    const failedReviewWait = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: REVIEW_WAIT_BOUND_REVISION,
+          generation: REVIEW_WAIT_BOUND_GENERATION,
+          healthyProof: livelockHealthy,
+          executionProof: failedProof(
+            REVIEW_WAIT_BOUND_REVISION,
+            REVIEW_WAIT_BOUND_GENERATION,
+            200,
+          ),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(failedReviewWait.status, "rollback");
+    if (failedReviewWait.status !== "rollback") {
+      throw new Error("expected review-wait-bound rollback");
+    }
+    assert.equal(
+      failedReviewWait.move.nextRevision,
+      LIVELOCK_BOUND_REVISION,
+    );
+    assert.equal(
+      failedReviewWait.move.nextGeneration,
+      REVIEW_WAIT_BOUND_GENERATION + 1,
     );
     const failedLivelock = planOwnerDevelopmentInstall(
       releaseSnapshot({
