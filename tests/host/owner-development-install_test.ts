@@ -174,6 +174,12 @@ const REVIEW_PHASE_PR_GENERATION = 45;
 // candidate failure rolled the pointer to its recorded prior.
 const REVIEW_PHASE_PR_RETRY_REVISION = REVIEW_PHASE_PR_REVISION;
 const REVIEW_PHASE_PR_RETRY_GENERATION = 47;
+// The livelock-bound install pin stays a test-local exact literal: this suite
+// must compile against pre-rung production source, so the expected red is a
+// semantic plan mismatch and never a missing import.
+const LIVELOCK_BOUND_REVISION =
+  "4304d1acd77d0e49874a2a59398c7fe00b94741c" as GitSha;
+const LIVELOCK_BOUND_GENERATION = 48;
 const ROLLBACK_TARGET_GENERATION = 46;
 
 function hostedProof(input: {
@@ -2734,23 +2740,107 @@ Deno.test(
     );
 
     // The installed retry generation 47 pointer is stable only with its own
-    // bound healthy proof, and that stable pointer is terminal.
+    // bound healthy proof, and that proof authorizes exactly one further
+    // owner-approved move: the livelock-bound revision at generation 48.
+    const retryHealthy = healthyProof(
+      REVIEW_PHASE_PR_RETRY_REVISION,
+      REVIEW_PHASE_PR_RETRY_GENERATION,
+      196,
+    );
+    const livelockInstall = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: REVIEW_PHASE_PR_RETRY_REVISION,
+          generation: REVIEW_PHASE_PR_RETRY_GENERATION,
+          healthyProof: retryHealthy,
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(livelockInstall.status, "install");
+    if (livelockInstall.status !== "install") {
+      throw new Error("expected livelock-bound install");
+    }
+    assert.equal(
+      livelockInstall.move.nextRevision,
+      LIVELOCK_BOUND_REVISION,
+    );
+    assert.equal(
+      livelockInstall.move.nextGeneration,
+      LIVELOCK_BOUND_GENERATION,
+    );
+    assert.equal(
+      livelockInstall.move.nextGeneration,
+      livelockInstall.move.priorGeneration + 1,
+    );
+    assert.equal(
+      canonicalStringify(livelockInstall.move.priorHealthyProof),
+      canonicalStringify(retryHealthy),
+    );
+
+    // The installed generation 48 pointer is terminal only with its own bound
+    // healthy proof; without it the plan is a zero-write wait, and a failed
+    // candidate rolls back exactly once to the recorded retry prior at a
+    // monotonic generation.
     assert.equal(
       planOwnerDevelopmentInstall(
         releaseSnapshot({
           runtime: runtimeRecord({
-            revision: REVIEW_PHASE_PR_RETRY_REVISION,
-            generation: REVIEW_PHASE_PR_RETRY_GENERATION,
+            revision: LIVELOCK_BOUND_REVISION,
+            generation: LIVELOCK_BOUND_GENERATION,
             healthyProof: healthyProof(
-              REVIEW_PHASE_PR_RETRY_REVISION,
-              REVIEW_PHASE_PR_RETRY_GENERATION,
-              196,
+              LIVELOCK_BOUND_REVISION,
+              LIVELOCK_BOUND_GENERATION,
+              197,
             ),
           }),
         }),
         NOW,
       ).status,
       "no_change",
+    );
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: LIVELOCK_BOUND_REVISION,
+            generation: LIVELOCK_BOUND_GENERATION,
+          }),
+        }),
+        NOW,
+      ).status,
+      "waiting",
+    );
+    const failedLivelock = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: LIVELOCK_BOUND_REVISION,
+          generation: LIVELOCK_BOUND_GENERATION,
+          healthyProof: retryHealthy,
+          executionProof: failedProof(
+            LIVELOCK_BOUND_REVISION,
+            LIVELOCK_BOUND_GENERATION,
+            198,
+          ),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(failedLivelock.status, "rollback");
+    if (failedLivelock.status !== "rollback") {
+      throw new Error("expected livelock-bound rollback");
+    }
+    assert.equal(
+      failedLivelock.move.nextRevision,
+      REVIEW_PHASE_PR_RETRY_REVISION,
+    );
+    assert.equal(
+      failedLivelock.move.nextGeneration,
+      LIVELOCK_BOUND_GENERATION + 1,
+    );
+    assert.equal(
+      canonicalStringify(failedLivelock.move.priorHealthyProof),
+      canonicalStringify(retryHealthy),
     );
 
     // A failed review-phase PR generation 45 candidate settles exactly once by
