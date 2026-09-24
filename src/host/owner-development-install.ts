@@ -452,6 +452,17 @@ export const OWNER_DEVELOPMENT_INSTALL_LIVELOCK_BOUND_GENERATION = 48;
 export const OWNER_DEVELOPMENT_INSTALL_REVIEW_WAIT_BOUND_REVISION =
   "d0b9ac8542949ed2d880329f666f638103b0226c" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_REVIEW_WAIT_BOUND_GENERATION = 49;
+/**
+ * Exact revision that stops a cooldown-gate fault from freezing the lane: both
+ * durable GitHub cooldown gates refuse for a bounded one-minute window and then
+ * re-read the real state, every fault carries its closed identity, and the
+ * injected `SENTINEL_COOLDOWN_MODE` switch (off during development) makes the
+ * gates pass-throughs; installed only after the review-wait-bound generation 49
+ * healthy proof.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_COOLDOWN_BOUND_REVISION =
+  "46a182b0713f60279b3f1a521849e745ab3432b4" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_COOLDOWN_BOUND_GENERATION = 50;
 /** Monotonic rollback target the failed generation 45 candidate rolled to. */
 export const OWNER_DEVELOPMENT_INSTALL_ROLLBACK_TARGET_GENERATION =
   OWNER_DEVELOPMENT_INSTALL_ASSIGN_FIRST_GENERATION + 2;
@@ -2082,10 +2093,52 @@ export function planOwnerDevelopmentInstall(
       );
     }
     if (healthy !== null) {
-      return noChange("the owner development installation is complete");
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_COOLDOWN_BOUND_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_COOLDOWN_BOUND_GENERATION,
+        healthy,
+        "install the cooldown-bound revision after the review-wait-bound healthy proof",
+      );
     }
     return waiting(
       "the review-wait-bound generation 49 healthy proof is not recorded",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_COOLDOWN_BOUND_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_COOLDOWN_BOUND_GENERATION
+  ) {
+    // A failed candidate settles exactly once by rolling back to the recorded
+    // prior — the proven review-wait-bound revision — at a monotonic
+    // generation, authorized by its retained healthy proof.
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_REVIEW_WAIT_BOUND_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_REVIEW_WAIT_BOUND_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded review-wait-bound healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_REVIEW_WAIT_BOUND_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed cooldown-bound candidate to its recorded prior",
+      );
+    }
+    if (healthy !== null) {
+      return noChange("the owner development installation is complete");
+    }
+    return waiting(
+      "the cooldown-bound generation 50 healthy proof is not recorded",
     );
   }
 

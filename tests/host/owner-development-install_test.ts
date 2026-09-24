@@ -186,6 +186,12 @@ const LIVELOCK_BOUND_GENERATION = 48;
 const REVIEW_WAIT_BOUND_REVISION =
   "d0b9ac8542949ed2d880329f666f638103b0226c" as GitSha;
 const REVIEW_WAIT_BOUND_GENERATION = 49;
+// The cooldown-bound install pin stays a test-local exact literal: this suite
+// must compile against pre-rung production source, so the expected red is a
+// semantic plan mismatch and never a missing import.
+const COOLDOWN_BOUND_REVISION =
+  "46a182b0713f60279b3f1a521849e745ab3432b4" as GitSha;
+const COOLDOWN_BOUND_GENERATION = 50;
 const ROLLBACK_TARGET_GENERATION = 46;
 
 function hostedProof(input: {
@@ -2836,22 +2842,93 @@ Deno.test(
       ).status,
       "waiting",
     );
+    const reviewWaitHealthy = healthyProof(
+      REVIEW_WAIT_BOUND_REVISION,
+      REVIEW_WAIT_BOUND_GENERATION,
+      199,
+    );
+    const cooldownInstall = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: REVIEW_WAIT_BOUND_REVISION,
+          generation: REVIEW_WAIT_BOUND_GENERATION,
+          healthyProof: reviewWaitHealthy,
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(cooldownInstall.status, "install");
+    if (cooldownInstall.status !== "install") {
+      throw new Error("expected cooldown-bound install");
+    }
+    assert.equal(cooldownInstall.move.nextRevision, COOLDOWN_BOUND_REVISION);
+    assert.equal(
+      cooldownInstall.move.nextGeneration,
+      COOLDOWN_BOUND_GENERATION,
+    );
+    assert.equal(
+      cooldownInstall.move.nextGeneration,
+      cooldownInstall.move.priorGeneration + 1,
+    );
+    assert.equal(
+      canonicalStringify(cooldownInstall.move.priorHealthyProof),
+      canonicalStringify(reviewWaitHealthy),
+    );
+    // The installed generation 50 pointer is terminal only with its own bound
+    // healthy proof; without it the plan waits, and a failed candidate rolls
+    // back exactly once to the recorded review-wait-bound prior.
     assert.equal(
       planOwnerDevelopmentInstall(
         releaseSnapshot({
           runtime: runtimeRecord({
-            revision: REVIEW_WAIT_BOUND_REVISION,
-            generation: REVIEW_WAIT_BOUND_GENERATION,
+            revision: COOLDOWN_BOUND_REVISION,
+            generation: COOLDOWN_BOUND_GENERATION,
             healthyProof: healthyProof(
-              REVIEW_WAIT_BOUND_REVISION,
-              REVIEW_WAIT_BOUND_GENERATION,
-              199,
+              COOLDOWN_BOUND_REVISION,
+              COOLDOWN_BOUND_GENERATION,
+              201,
             ),
           }),
         }),
         NOW,
       ).status,
       "no_change",
+    );
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: COOLDOWN_BOUND_REVISION,
+            generation: COOLDOWN_BOUND_GENERATION,
+          }),
+        }),
+        NOW,
+      ).status,
+      "waiting",
+    );
+    const failedCooldown = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: COOLDOWN_BOUND_REVISION,
+          generation: COOLDOWN_BOUND_GENERATION,
+          healthyProof: reviewWaitHealthy,
+          executionProof: failedProof(
+            COOLDOWN_BOUND_REVISION,
+            COOLDOWN_BOUND_GENERATION,
+            202,
+          ),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(failedCooldown.status, "rollback");
+    if (failedCooldown.status !== "rollback") {
+      throw new Error("expected cooldown-bound rollback");
+    }
+    assert.equal(failedCooldown.move.nextRevision, REVIEW_WAIT_BOUND_REVISION);
+    assert.equal(
+      failedCooldown.move.nextGeneration,
+      COOLDOWN_BOUND_GENERATION + 1,
     );
     assert.equal(
       planOwnerDevelopmentInstall(
