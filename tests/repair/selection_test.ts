@@ -751,3 +751,52 @@ Deno.test(
     );
   },
 );
+
+Deno.test(
+  "selection: the WIP cap skips only NEW publications, never an existing published intent",
+  () => {
+    // Three unfinished pull requests saturate the cap.
+    const saturated = [
+      prRecord("issue-1", 1, 7),
+      prRecord("issue-2", 2, 8),
+      prRecord("issue-3", 3, 9),
+    ];
+    // A record whose durable intent already names a published PR is recovering
+    // an EXISTING publication (retiring a closed one, observing its review) and
+    // must stay selectable even though the cap is full.
+    const carrier = work("issue-4", {
+      source: { kind: "issue", id: "4", revision: SHA2 },
+      related: { incidentId: null, issueNumber: 4 },
+      classification: { severity: "P2", priority: 9 },
+      firstSeenAt: T0 - 900_000,
+      createdAt: T0 - 900_000,
+      intent: {
+        kind: "review_request",
+        key: `review:21:${SHA2}`,
+        startedAt: T0,
+        branch: "sentinel/repair/issue-4",
+        expectedHead: SHA2,
+        observedBase: SHA1,
+        pr: 21,
+        requestId: null,
+        resultId: null,
+      },
+    });
+    // A record with no published identity at all is still a NEW publication.
+    const fresh = freshIssue("issue-5", 5);
+
+    const ranked = rankEligibleWork(
+      snapshot([...saturated, carrier, fresh]),
+      repairConfigs(),
+      NOW,
+    );
+    assert.deepEqual(ranked.ordered, [carrier.id]);
+    assert.equal(ranked.skipped[carrier.id], undefined, "never wip-skipped");
+    assert.equal(ranked.skipped[fresh.id], "wip");
+    assert.equal(
+      countUnfinishedPullRequests(snapshot([...saturated, carrier]).work),
+      3,
+      "the cap itself still counts only records holding a target PR",
+    );
+  },
+);

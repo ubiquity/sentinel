@@ -6509,3 +6509,55 @@ Deno.test(
     }
   },
 );
+
+Deno.test(
+  "review wait: a reviewer that never posts a verdict blocks at the bounded budget",
+  async () => {
+    const rig = await makeRig("review-budget", {
+      github: { candidateLifecycle: positiveLifecycle() },
+    });
+    try {
+      // Run 1: the repair reaches the review wait with its request submitted.
+      const first = await rig.run();
+      assert.equal(first.status, "idle", JSON.stringify(first));
+      let state = await rig.snapshot();
+      const pending = state.work[0];
+      assert.equal(pending.nextStep, "review");
+      assert.equal(pending.wait?.reason, "review_pending");
+      const since = pending.wait?.since;
+      assert.ok(typeof since === "number", "the pending baseline is recorded");
+
+      // One poll still under the budget re-arms the wait and preserves the
+      // FIRST pending instant, so the bound is total wall-clock.
+      const budget = 4 * 60 * 60_000;
+      const elapsed = rig.clock.now() - since;
+      rig.clock.advance(budget - elapsed - 60_000);
+      const under = await rig.run();
+      assert.equal(under.status, "idle", JSON.stringify(under));
+      state = await rig.snapshot();
+      assert.equal(state.work[0].nextStep, "review", "still waiting");
+      assert.equal(state.work[0].wait?.reason, "review_pending");
+      assert.equal(state.work[0].wait?.since, since, "baseline preserved");
+
+      // Crossing the budget ends the wait with the classified blocker instead
+      // of re-arming the poll forever. The poll interval must also elapse, so
+      // the record is eligible again before the bounded check can run.
+      rig.clock.advance(17 * 60_000);
+      const over = await rig.run();
+      assert.equal(over.status, "idle", JSON.stringify(over));
+      state = await rig.snapshot();
+      const blocked = state.work[0];
+      assert.equal(blocked.nextStep, "blocked");
+      assert.equal(blocked.blocker?.kind, "unavailable");
+      assert.equal(
+        blocked.blocker?.message,
+        "review produced no verdict within the bounded review wait",
+      );
+      assert.equal(blocked.wait, null, "no wait is re-armed");
+      assert.equal(blocked.target.head, SHA3, "the candidate is retained");
+      assert.equal(rig.model.requests.length, 1, "no new model work");
+    } finally {
+      await rig.ctx.cleanup();
+    }
+  },
+);

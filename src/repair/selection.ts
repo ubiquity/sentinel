@@ -134,7 +134,13 @@ export function rankEligibleWork(
       skipped[record.id] = "dependency";
       continue;
     }
-    if (record.target.pr === null && openPrCount >= MAX_UNFINISHED_PRS) {
+    // The unfinished-PR cap bounds NEW publications only. A record that
+    // already carries a durable published pull request in its intent is
+    // recovering an EXISTING publication — retiring a closed one, repairing a
+    // conflicting one or observing its review — and must never be starved
+    // behind the cap it is itself holding, or the cap re-arms its own cause.
+    const publishedIdentity = record.target.pr ?? record.intent?.pr ?? null;
+    if (publishedIdentity === null && openPrCount >= MAX_UNFINISHED_PRS) {
       skipped[record.id] = "wip";
       continue;
     }

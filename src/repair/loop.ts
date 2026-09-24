@@ -152,6 +152,17 @@ const MAX_IMPLEMENTATION_ATTEMPTS = 4;
  * allowance the task is blocked with the recorded reason, never merged.
  */
 const MAX_REVIEW_ROUNDS = 3;
+/**
+ * Total wall-clock a review may stay pending (or unobservable) for one exact
+ * head before the task blocks. The baseline is the FIRST pending instant, so
+ * the bound is never reset by re-arming the poll: a reviewer that never posts
+ * a verdict becomes a durable classified blocker instead of an endless
+ * fifteen-minute wait that also holds a capacity slot.
+ */
+const REVIEW_PENDING_BUDGET_MS = 4 * 60 * 60_000;
+/** The one classified blocker for a review that spent the bounded wait. */
+const REVIEW_PENDING_BUDGET_MESSAGE =
+  "review produced no verdict within the bounded review wait";
 const MAX_OUTPUT_LIMIT_BYTES = 4096;
 /**
  * Frozen gateway default model id. It is used ONLY when neither the trusted
@@ -4278,6 +4289,18 @@ async function observeReview(
   const observed = await observeStandingReview(deps, record, pr, head);
   if (!observed.ok) {
     const since = reviewWaitSince(record, now);
+    if (now - since >= REVIEW_PENDING_BUDGET_MS) {
+      return persistWork(
+        deps,
+        context,
+        markBlocked(
+          record,
+          "unavailable",
+          REVIEW_PENDING_BUDGET_MESSAGE,
+          now,
+        ),
+      );
+    }
     return persistWork(
       deps,
       context,
@@ -4291,6 +4314,18 @@ async function observeReview(
   const value = observed.value.observation;
   if (value.status === "pending") {
     const since = reviewWaitSince(record, now);
+    if (now - since >= REVIEW_PENDING_BUDGET_MS) {
+      return persistWork(
+        deps,
+        context,
+        markBlocked(
+          record,
+          "unavailable",
+          REVIEW_PENDING_BUDGET_MESSAGE,
+          now,
+        ),
+      );
+    }
     return persistWork(
       deps,
       context,
@@ -4312,6 +4347,18 @@ async function observeReview(
     // forever and the task could never move again.
     if (value.completedAt === null) {
       const since = reviewWaitSince(record, now);
+      if (now - since >= REVIEW_PENDING_BUDGET_MS) {
+        return persistWork(
+          deps,
+          context,
+          markBlocked(
+            record,
+            "unavailable",
+            REVIEW_PENDING_BUDGET_MESSAGE,
+            now,
+          ),
+        );
+      }
       return persistWork(
         deps,
         context,
