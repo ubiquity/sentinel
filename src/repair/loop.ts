@@ -336,6 +336,13 @@ interface LoopContextV1 {
   head: GitSha | null;
   /** Run-relative bounds for every start decision in this run. */
   bounds: RunBoundsV1;
+  /**
+   * The record one in-flight execution was planned against, or null outside an
+   * execution. Every write that execution performs is compared with THIS
+   * baseline, so the per-record no-progress budget is counted once per
+   * execution instead of once per bookkeeping write.
+   */
+  executionBaseline: WorkRecordV1 | null;
 }
 
 /** Effective run bounds: caller deadline clamped by the fixed ceiling. */
@@ -545,7 +552,9 @@ export async function runRepairCycle(
       };
     }
 
+    context.executionBaseline = selected;
     const result = await executeStep(deps, context, selected);
+    context.executionBaseline = null;
     if (result.kind === "deferred") {
       deferred.add(selected.id);
       continue;
@@ -567,31 +576,6 @@ export async function runRepairCycle(
     }
     didWork = true;
     steps++;
-
-    // Per-record no-progress budget (run fairness). ONE execution of the
-    // selected record either advanced its durable shape or only re-armed
-    // state; comparing the execution baseline with the persisted result counts
-    // exactly that, so bookkeeping writes inside a single execution can never
-    // look like progress and a stalled queue head stops consuming the run
-    // ahead of work that can move. Ranking, the plan buckets and the
-    // unfinished-PR cap are unchanged.
-    const executed = context.snapshot.work.find(
-      (work) => work.id === selected.id,
-    );
-    if (executed !== undefined) {
-      const counted = noteExecution(
-        executed,
-        selected.counters.stalled ?? 0,
-        executionAdvanced(selected, executed),
-        deps.clock.now(),
-      );
-      if (counted !== executed) {
-        const budgeted = await persistWork(deps, context, counted);
-        if (budgeted.kind === "state_error") {
-          return { status: "state_error", detail: budgeted.detail };
-        }
-      }
-    }
   }
 }
 
@@ -637,7 +621,12 @@ async function loadSnapshot(
 ): Promise<LoopContextV1 | null> {
   const read = await deps.state.readRepair();
   if (!read.ok || read.value.status === "absent") return null;
-  return { snapshot: read.value.snapshot, head: read.value.head, bounds };
+  return {
+    snapshot: read.value.snapshot,
+    head: read.value.head,
+    bounds,
+    executionBaseline: null,
+  };
 }
 
 /** Seed the repair branch once with sequence 1 when no snapshot exists. */
@@ -663,7 +652,12 @@ async function seedSnapshot(
   });
   const written = await deps.state.writeRepair(seed, null);
   if (!written.ok || written.value.status !== "applied") return null;
-  return { snapshot: seed, head: written.value.head, bounds };
+  return {
+    snapshot: seed,
+    head: written.value.head,
+    bounds,
+    executionBaseline: null,
+  };
 }
 
 async function persistTransition(
@@ -829,7 +823,21 @@ function persistWork(
   context: LoopContextV1,
   next: WorkRecordV1,
 ): Promise<StepResultV1> {
-  return persistTransition(deps, context, replaceWorkMutation(next));
+  // Per-record no-progress budget (run fairness): ONE execution of the
+  // selected record either advanced its durable shape or only re-armed state.
+  // The comparison is always against the execution baseline — never against an
+  // intermediate write of the same execution — so the count is idempotent
+  // across a step's bookkeeping writes and no extra state movement is created.
+  const baseline = context.executionBaseline;
+  const counted = baseline !== null && baseline.id === next.id
+    ? noteExecution(
+      next,
+      baseline.counters.stalled ?? 0,
+      executionAdvanced(baseline, next),
+      deps.clock.now(),
+    )
+    : next;
+  return persistTransition(deps, context, replaceWorkMutation(counted));
 }
 
 // ---------------------------------------------------------------------------
