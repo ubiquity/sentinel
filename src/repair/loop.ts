@@ -4645,17 +4645,104 @@ async function ensureBaseRefreshIntent(
 }
 
 /**
+ * Consecutive failed executions of one exact base-refresh intent that are
+ * tolerated before the record blocks. The intent is re-armed at most
+ * MAX_BASE_REFRESH_FAILURES - 1 times, so no refresh can hold a slot in a
+ * silent `unavailable` loop forever.
+ */
+const MAX_BASE_REFRESH_FAILURES = 3;
+
+/** Closed failure details stored in the bounded base-refresh failure record. */
+const BASE_REFRESH_CAPABILITY_DETAIL = "base refresh port is unavailable";
+const BASE_REFRESH_PR_OBSERVATION_DETAIL =
+  "own pull request could not be observed";
+const BASE_REFRESH_UNPREPARED_DETAIL =
+  "prepared candidate could not be generated";
+const BASE_REFRESH_BASE_READ_DETAIL = "configured base could not be observed";
+const BASE_REFRESH_PRESERVE_DETAIL = "candidate could not be preserved";
+const BASE_REFRESH_REF_READ_DETAIL = "candidate ref could not be observed";
+const BASE_REFRESH_PUSH_DETAIL = "prepared candidate was not published";
+const BASE_REFRESH_FOREIGN_HEAD_DETAIL =
+  "candidate ref carries an unrelated head";
+
+/**
+ * One failed execution of the exact base-refresh intent.
+ *
+ * The bounded failure record is written with the SAME intent — same key, same
+ * observedBase, same persisted prepared result — so the state ref alone shows
+ * why the refresh cannot finish: only the closed port error kind and a closed
+ * detail constant are stored, never raw upstream text. The wait is re-armed
+ * only while the consecutive failure count is under MAX_BASE_REFRESH_FAILURES;
+ * at the bound the intent is cleared and the record blocks with the classified
+ * message, so a livelocked refresh becomes a visible blocker instead of an
+ * endless `unavailable` wait. Target, counters, evidence and reviews are
+ * preserved.
+ */
+function failBaseRefresh(
+  deps: RepairCycleDepsV1,
+  context: LoopContextV1,
+  record: WorkRecordV1,
+  intent: IncompleteOperationV1,
+  failure: { kind: string; detail: string },
+): Promise<StepResultV1> {
+  const at = deps.clock.now();
+  const attempts = (intent.failure?.attempts ?? 0) + 1;
+  if (attempts >= MAX_BASE_REFRESH_FAILURES) {
+    return persistWork(
+      deps,
+      context,
+      clearIntent(
+        markBlocked(
+          record,
+          "other",
+          `base refresh failed ${attempts} consecutive times: ${failure.kind} ${failure.detail}`,
+          at,
+        ),
+        at,
+      ),
+    );
+  }
+  return persistWork(
+    deps,
+    context,
+    setWait(
+      setIntent(
+        record,
+        {
+          ...intent,
+          failure: {
+            kind: failure.kind,
+            detail: failure.detail,
+            atMs: at,
+            attempts,
+          },
+        },
+        at,
+      ),
+      { reason: "unavailable", since: at, until: at + CHECK_POLL_MS },
+      at,
+    ),
+  );
+}
+
+/**
  * Execute or resume one durable base-refresh intent.
  *
- * The deterministic prepared commit is regenerated through the optional
- * trusted port capability (a fresh run reproduces the identical SHA after a
- * runner disappeared) and persisted as the intent result BEFORE any push. The
- * exact branch is then read: only the old candidate head or the exact prepared
- * result are accepted. The old head is pushed with the existing expected-ref
- * pushHead; an already-published prepared commit is reconciled without a
- * duplicate push. Unknown heads, failures and lost responses leave the same
- * durable intent with a bounded wait, while a known merge conflict blocks the
- * task with the existing blocker fields and retains the candidate. On success
+ * The record's own publication is reconciled FIRST: a merge outside the trusted
+ * review path is terminal for capacity and is never republished, and a
+ * closed-unmerged pull request retires the closed publication so the next
+ * publish step creates its replacement. The deterministic prepared commit is
+ * then regenerated through the optional trusted port capability (a fresh run
+ * reproduces the identical SHA after a runner disappeared) and persisted as the
+ * intent result BEFORE any push. The exact branch is read: only the old
+ * candidate head or the exact prepared result are accepted, and the old head is
+ * pushed with the existing expected-ref pushHead; an already-published prepared
+ * commit is reconciled without a duplicate push. Unknown heads, failures and
+ * lost responses leave the same durable intent with a bounded wait AND a
+ * bounded failure record, and after MAX_BASE_REFRESH_FAILURES consecutive
+ * failed executions the record blocks with a classified message instead of
+ * re-arming that wait forever, while a known merge conflict blocks the task
+ * with the existing blocker fields and retains the candidate. On success
  * the target advances to the exact new base/prepared head, the intent is
  * cleared and nextStep returns to `work`, so the existing publication and
  * fresh-review admission handle the exact new head (an old review is never
@@ -4700,20 +4787,52 @@ async function executeBaseRefreshIntent(
       detail: "base refresh without repository configuration",
     };
   }
+  // The record's OWN publication may have been merged or closed unmerged while
+  // this intent was parked across runs. A refresh can never complete against a
+  // published disposition, so it is reconciled before any refresh work: a
+  // human merge is terminal for capacity and is never republished, and a
+  // closed-unmerged pull request retires the closed publication so the next
+  // publish step creates its replacement for the same preserved candidate. A
+  // foreign branch at that number and an unreadable observation change nothing
+  // (the observation is a bounded failure, never a fabricated disposition).
+  const pull = await deps.github.readPullRequest(record.target.pr);
+  if (!pull.ok) {
+    return failBaseRefresh(deps, context, record, intent, {
+      kind: pull.error.kind,
+      detail: BASE_REFRESH_PR_OBSERVATION_DETAIL,
+    });
+  }
+  if (pull.value !== null && pull.value.headRef === record.target.branch) {
+    if (pull.value.state === "merged") {
+      const at = deps.clock.now();
+      return persistWork(
+        deps,
+        context,
+        clearIntent(
+          markBlocked(record, "other", RETIRED_MERGED_MESSAGE, at),
+          at,
+        ),
+      );
+    }
+    if (pull.value.state === "closed" && pull.value.mergeSha === null) {
+      const at = deps.clock.now();
+      return persistWork(
+        deps,
+        context,
+        clearIntent(retireClosedPublication(record, at, "work"), at),
+      );
+    }
+  }
   const prepare = deps.github.prepareBaseRefresh?.bind(deps.github);
   if (prepare === undefined) {
     // Capability absence is an explicit bounded wait: the durable intent and
-    // the old candidate are preserved and no deprecated path is taken.
-    const at = deps.clock.now();
-    return persistWork(
-      deps,
-      context,
-      setWait(
-        record,
-        { reason: "unavailable", since: at, until: at + CHECK_POLL_MS },
-        at,
-      ),
-    );
+    // the old candidate are preserved and no deprecated path is taken. The
+    // bounded failure record still applies, so a permanently missing
+    // capability becomes a classified blocker instead of a silent loop.
+    return failBaseRefresh(deps, context, record, intent, {
+      kind: "unavailable",
+      detail: BASE_REFRESH_CAPABILITY_DETAIL,
+    });
   }
   const expectedBase: GitSha = observedBase;
   const prepared = await prepare({
@@ -4745,7 +4864,6 @@ async function executeBaseRefreshIntent(
         ),
       );
     }
-    const at = deps.clock.now();
     if (persistedPrepared === null) {
       // No authorized push can exist before the prepared result was persisted.
       // Re-observe the configured base under the shared cooldown: a SECOND
@@ -4768,20 +4886,12 @@ async function executeBaseRefreshIntent(
       );
       const observedAt = deps.clock.now();
       if (!currentBase.ok || currentBase.value === null) {
-        // A failed ref read retains the exact intent with a bounded wait.
-        return persistWork(
-          deps,
-          context,
-          setWait(
-            record,
-            {
-              reason: "unavailable",
-              since: observedAt,
-              until: observedAt + CHECK_POLL_MS,
-            },
-            observedAt,
-          ),
-        );
+        // A failed ref read retains the exact intent with a bounded wait and a
+        // bounded failure record (never a fabricated "unchanged" base).
+        return failBaseRefresh(deps, context, record, intent, {
+          kind: currentBase.ok ? "unavailable" : currentBase.error.kind,
+          detail: BASE_REFRESH_BASE_READ_DETAIL,
+        });
       }
       if (currentBase.value.sha !== expectedBase) {
         // Clear only this unprepared intent; the same run replans a fresh
@@ -4790,15 +4900,10 @@ async function executeBaseRefreshIntent(
         return persistWork(deps, context, clearIntent(record, observedAt));
       }
     }
-    return persistWork(
-      deps,
-      context,
-      setWait(
-        record,
-        { reason: "unavailable", since: at, until: at + CHECK_POLL_MS },
-        at,
-      ),
-    );
+    return failBaseRefresh(deps, context, record, intent, {
+      kind: prepared.error.kind,
+      detail: BASE_REFRESH_UNPREPARED_DETAIL,
+    });
   }
   const preparedHead = prepared.value;
   if (!isGitSha(preparedHead)) {
@@ -4815,14 +4920,16 @@ async function executeBaseRefreshIntent(
     };
   }
   // Persist the exact prepared result BEFORE any push: a crash after a
-  // successful push is then recoverable from the durable intent alone.
+  // successful push is then recoverable from the durable intent alone. The
+  // exact persisted result is part of the intent identity every failure below
+  // stays bound to (same key, same observed base, same prepared commit).
+  const durableIntent: IncompleteOperationV1 = {
+    ...intent,
+    resultId: preparedHead,
+  };
   let durable = record;
   if (persistedPrepared === null) {
-    durable = setIntent(
-      record,
-      { ...intent, resultId: preparedHead },
-      deps.clock.now(),
-    );
+    durable = setIntent(record, durableIntent, deps.clock.now());
     const persisted = await persistWork(deps, context, durable);
     if (persisted.kind !== "progress") return persisted;
   }
@@ -4860,16 +4967,10 @@ async function executeBaseRefreshIntent(
       publishedHead: candidateState.publishedHead,
     });
     if (!preserved.ok) {
-      const at = deps.clock.now();
-      return persistWork(
-        deps,
-        context,
-        setWait(
-          durable,
-          { reason: "unavailable", since: at, until: at + CHECK_POLL_MS },
-          at,
-        ),
-      );
+      return failBaseRefresh(deps, context, durable, durableIntent, {
+        kind: preserved.error.kind,
+        detail: BASE_REFRESH_PRESERVE_DETAIL,
+      });
     }
   }
   // Recheck the total run deadline and the shared cooldown immediately before
@@ -4899,17 +5000,11 @@ async function executeBaseRefreshIntent(
   }
   const ref = `refs/heads/${record.target.branch}`;
   const current = await deps.github.readRef(ref);
-  const readAt = deps.clock.now();
   if (!current.ok || current.value === null) {
-    return persistWork(
-      deps,
-      context,
-      setWait(
-        durable,
-        { reason: "unavailable", since: readAt, until: readAt + CHECK_POLL_MS },
-        readAt,
-      ),
-    );
+    return failBaseRefresh(deps, context, durable, durableIntent, {
+      kind: current.ok ? "unavailable" : current.error.kind,
+      detail: BASE_REFRESH_REF_READ_DETAIL,
+    });
   }
   const currentHead = current.value.sha;
   if (currentHead === record.target.head) {
@@ -4930,35 +5025,22 @@ async function executeBaseRefreshIntent(
       preparedHead,
       record.target.head,
     );
-    const pushAt = deps.clock.now();
     if (!pushed.ok || pushed.value !== "applied") {
-      // Unknown/error/lost push: keep the same durable intent and wait
-      // bounded; a later run reconciles the exact ref before repeating.
-      return persistWork(
-        deps,
-        context,
-        setWait(
-          durable,
-          {
-            reason: "unavailable",
-            since: pushAt,
-            until: pushAt + CHECK_POLL_MS,
-          },
-          pushAt,
-        ),
-      );
+      // Unknown/error/lost push: keep the same durable intent and wait bounded;
+      // a later run reconciles the exact ref before repeating. The bounded
+      // failure record makes a repeated non-application a classified blocker.
+      return failBaseRefresh(deps, context, durable, durableIntent, {
+        kind: pushed.ok ? "unavailable" : pushed.error.kind,
+        detail: BASE_REFRESH_PUSH_DETAIL,
+      });
     }
   } else if (currentHead !== preparedHead) {
-    // Any unrelated head is never adopted: preserve the intent and wait.
-    return persistWork(
-      deps,
-      context,
-      setWait(
-        durable,
-        { reason: "unavailable", since: readAt, until: readAt + CHECK_POLL_MS },
-        readAt,
-      ),
-    );
+    // Any unrelated head is never adopted: preserve the intent, record the
+    // closed conflict identity and wait bounded.
+    return failBaseRefresh(deps, context, durable, durableIntent, {
+      kind: "conflict",
+      detail: BASE_REFRESH_FOREIGN_HEAD_DETAIL,
+    });
   }
   // Success: the refreshed candidate becomes the exact target and the existing
   // publication path requests a fresh review for the new head. For a

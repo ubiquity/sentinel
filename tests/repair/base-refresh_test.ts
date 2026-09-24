@@ -29,6 +29,10 @@ import type { BaseRefreshObserverV1 } from "../../src/host/local.ts";
 import { createPrepareBaseRefresh } from "../../src/host/local.ts";
 import { DurableGitHubCooldownGate } from "../../src/repair/github-cooldown.ts";
 import { baseRefreshIntentKey } from "../../src/repair/keys.ts";
+import {
+  isRetiredTargetRecord,
+  RETIRED_MERGED_MESSAGE,
+} from "../../src/repair/selection.ts";
 import { runRepairCycle } from "../../src/repair/loop.ts";
 import { REPO, SHA1, SHA2, SHA3, T0, workRecord } from "../state/helpers.ts";
 import {
@@ -167,6 +171,9 @@ class RefreshGithub extends FakeGithub {
   remoteWrites = 0;
   lostPush = false;
   refReadFails = false;
+  /** Published disposition reported for the one current PR (default open). */
+  prState: "open" | "closed" | "merged" = "open";
+  prReadFails = false;
   reviewRequests = 0;
   onPush: (() => Promise<void>) | null = null;
   onReadRef: ((ref: string) => void) | null = null;
@@ -223,16 +230,16 @@ class RefreshGithub extends FakeGithub {
       number: 7,
       title: "Sentinel repair",
       body: "Refs 1",
-      state: "open",
+      state: this.prState,
       head,
       base: this.remoteBase,
-      mergeSha: null,
+      mergeSha: this.prState === "merged" ? this.remoteBase : null,
       headRef: BRANCH,
       baseRef: BASE_BRANCH,
       author: TRUSTED_AUTHOR,
       createdAt: T0,
       updatedAt: T0,
-      mergedAt: null,
+      mergedAt: this.prState === "merged" ? T0 + 1 : null,
       reviewDecision: "none",
     };
   }
@@ -240,6 +247,9 @@ class RefreshGithub extends FakeGithub {
     number: number,
   ): Promise<PortResultV1<GitHubPullRequestV1 | null>> {
     this.calls.push(`readPr:${number}`);
+    if (this.prReadFails) {
+      return Promise.resolve(portError("unavailable", "pr read failed"));
+    }
     return Promise.resolve(portOk(this.currentPullRequest(number, BRANCH)));
   }
   override findPullRequestByHeadRef(
@@ -960,6 +970,21 @@ Deno.test(
   },
 );
 
+/** The durable base-refresh intent a parked delivery record would carry. */
+function parkedBaseRefreshIntent(head: GitSha, base: GitSha) {
+  return {
+    kind: "base_refresh" as const,
+    key: baseRefreshIntentKey(7, head, base),
+    startedAt: T0,
+    branch: BRANCH,
+    expectedHead: head,
+    observedBase: base,
+    pr: 7,
+    requestId: null,
+    resultId: null,
+  };
+}
+
 /** Exact open trusted-author PR shape observed by the real adapter. */
 function pullRequest(head: GitSha): GitHubPullRequestV1 {
   return {
@@ -979,3 +1004,155 @@ function pullRequest(head: GitSha): GitHubPullRequestV1 {
     reviewDecision: "none",
   };
 }
+
+Deno.test(
+  "base refresh: a merged own publication is retired instead of refreshed",
+  async () => {
+    const fake = new RefreshGithub(SHA2, OLD_HEAD);
+    fake.prState = "merged";
+    const github: GitHubPort = fake;
+    const rig = makeRig(github);
+    let prepareCalls = 0;
+    github.prepareBaseRefresh = () => {
+      prepareCalls++;
+      return Promise.resolve(portOk(PREPARED));
+    };
+    await rig.seed([deliveryRecord(OLD_HEAD, {
+      intent: parkedBaseRefreshIntent(OLD_HEAD, SHA2),
+    })]);
+
+    const outcome = await rig.run();
+    assert.equal(outcome.status, "idle", JSON.stringify(outcome));
+    const work = (await rig.snapshot()).work[0];
+    assert.equal(work.nextStep, "blocked");
+    assert.equal(work.blocker?.kind, "other");
+    assert.equal(work.blocker?.message, RETIRED_MERGED_MESSAGE);
+    assert.equal(work.intent, null, "the refresh intent is cleared");
+    assert.equal(work.wait, null);
+    assert.equal(
+      isRetiredTargetRecord(work),
+      true,
+      "a human merge is terminal and consumes no capacity slot",
+    );
+    assert.equal(prepareCalls, 0, "a merged publication is never refreshed");
+    assert.equal(fake.pushCalls.length, 0);
+    assert.equal(rig.model.requests.length, 0);
+  },
+);
+
+Deno.test(
+  "base refresh: a closed-unmerged own publication retires the closed PR and clears the intent",
+  async () => {
+    const fake = new RefreshGithub(SHA2, OLD_HEAD);
+    fake.prState = "closed";
+    const github: GitHubPort = fake;
+    const rig = makeRig(github);
+    let prepareCalls = 0;
+    github.prepareBaseRefresh = () => {
+      prepareCalls++;
+      return Promise.resolve(portOk(PREPARED));
+    };
+    await rig.seed([deliveryRecord(OLD_HEAD, {
+      intent: parkedBaseRefreshIntent(OLD_HEAD, SHA2),
+    })]);
+
+    // One step: the delivery step reconciles the parked intent and retires the
+    // closed publication; the following work step is a separate concern.
+    await rig.run(1);
+    const work = (await rig.snapshot()).work[0];
+    assert.equal(work.nextStep, "work");
+    assert.equal(work.target.pr, null, "the closed publication is retired");
+    assert.equal(work.target.head, OLD_HEAD, "the candidate is retained");
+    assert.equal(work.intent, null, "the refresh intent is cleared");
+    assert.equal(work.wait, null);
+    assert.equal(prepareCalls, 0, "a closed publication is never refreshed");
+    assert.equal(fake.pushCalls.length, 0);
+  },
+);
+
+Deno.test(
+  "base refresh: consecutive failures are bounded and end in a classified blocker",
+  async () => {
+    const fake = new RefreshGithub(SHA2, OLD_HEAD);
+    const github: GitHubPort = fake;
+    const rig = makeRig(github);
+    github.prepareBaseRefresh = () =>
+      Promise.resolve(portError("unavailable", "prepared unavailable"));
+    await rig.seed([deliveryRecord(OLD_HEAD)]);
+
+    // First failed execution: the exact intent is retained WITH the bounded
+    // failure record and the wait is re-armed once.
+    const first = await rig.run();
+    assert.equal(first.status, "idle", JSON.stringify(first));
+    let work = (await rig.snapshot()).work[0];
+    assert.equal(work.intent?.kind, "base_refresh");
+    assert.equal(work.intent?.failure?.kind, "unavailable");
+    assert.equal(
+      work.intent?.failure?.detail,
+      "prepared candidate could not be generated",
+    );
+    assert.equal(work.intent?.failure?.attempts, 1);
+    assert.equal(work.intent?.failure?.atMs, T0);
+    assert.equal(work.wait?.reason, "unavailable");
+    assert.equal(work.wait?.until, T0 + CHECK_POLL_MS);
+    assert.equal(work.target.base, SHA1, "the target stays on the old base");
+
+    // Second failed execution of the SAME intent: the count advances, never
+    // resets, and the record still waits.
+    rig.clock.advance(CHECK_POLL_MS + 1000);
+    await rig.run();
+    work = (await rig.snapshot()).work[0];
+    assert.equal(work.intent?.failure?.attempts, 2);
+    assert.equal(work.wait?.reason, "unavailable");
+
+    // Third failed execution: the bound is reached, so the intent is cleared
+    // and the record blocks with the closed failure identity instead of
+    // re-arming another silent wait.
+    rig.clock.advance(CHECK_POLL_MS + 1000);
+    await rig.run();
+    work = (await rig.snapshot()).work[0];
+    assert.equal(work.nextStep, "blocked");
+    assert.equal(work.blocker?.kind, "other");
+    assert.equal(
+      work.blocker?.message,
+      "base refresh failed 3 consecutive times: unavailable prepared candidate could not be generated",
+    );
+    assert.equal(work.intent, null, "the livelocked intent is cleared");
+    assert.equal(work.wait, null, "no wait is re-armed");
+    assert.equal(work.target.head, OLD_HEAD, "the candidate is retained");
+    assert.equal(work.target.base, SHA1);
+    assert.equal(rig.model.requests.length, 0, "no model start");
+  },
+);
+
+Deno.test(
+  "base refresh: an unreadable own publication is a bounded failure, never a disposition",
+  async () => {
+    const fake = new RefreshGithub(SHA2, OLD_HEAD);
+    fake.prReadFails = true;
+    const github: GitHubPort = fake;
+    const rig = makeRig(github);
+    let prepareCalls = 0;
+    github.prepareBaseRefresh = () => {
+      prepareCalls++;
+      return Promise.resolve(portOk(PREPARED));
+    };
+    await rig.seed([deliveryRecord(OLD_HEAD)]);
+
+    const outcome = await rig.run();
+    assert.equal(outcome.status, "idle", JSON.stringify(outcome));
+    const work = (await rig.snapshot()).work[0];
+    assert.equal(work.nextStep, "delivery");
+    assert.equal(work.intent?.kind, "base_refresh");
+    assert.equal(work.intent?.failure?.kind, "unavailable");
+    assert.equal(
+      work.intent?.failure?.detail,
+      "own pull request could not be observed",
+    );
+    assert.equal(work.intent?.failure?.attempts, 1);
+    assert.equal(work.wait?.reason, "unavailable");
+    assert.equal(work.blocker, null, "no disposition is fabricated");
+    assert.equal(prepareCalls, 0, "no preparation against an unknown PR");
+    assert.equal(fake.pushCalls.length, 0);
+  },
+);
