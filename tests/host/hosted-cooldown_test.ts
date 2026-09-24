@@ -517,23 +517,37 @@ Deno.test("hosted cooldown: duplicate observations are idempotent and unknown pe
   }
 });
 
-Deno.test("hosted cooldown: absent or unreadable state latches and never reopens", async () => {
+Deno.test("hosted cooldown: an absent or unreadable state refuses for a bounded window only", async () => {
   const rig = await makeRig();
   try {
     const supervisor = rig.supervisor();
     const repairGate = rig.repairGate();
-    assertUnavailable(await supervisor.beforeRequest(0));
+    const absent = await supervisor.beforeRequest(0);
+    assertUnavailable(absent);
+    if (!absent.ok) {
+      assert.match(absent.error.detail, /release state unavailable/);
+    }
     assertUnavailable(await repairGate.beforeRequest(0));
-    // Seeding real state later never reopens a latched instance.
+
+    // Seeding real state does not reopen the window: it is still fail-closed.
     await rig.seedRelease([]);
     await rig.seedRepair([]);
     assertUnavailable(await supervisor.beforeRequest(0));
     assertUnavailable(await repairGate.beforeRequest(0));
 
+    // Once the bounded window elapses the gates re-read the real state and
+    // recover, so a bookkeeping fault can never freeze the lane permanently.
+    rig.clock.advance(61_000);
+    assert.ok((await supervisor.beforeRequest(0)).ok, "supervisor recovers");
+    assert.ok((await repairGate.beforeRequest(0)).ok, "repair gate recovers");
+
     const unreadable = new HostedSupervisorCooldownGate({
       state: new FaultyReleaseStore(rig.release, "readFailure"),
       clock: rig.clock,
     });
+    assertUnavailable(await unreadable.beforeRequest(0));
+    // A fault that is still real after the window re-arms the refusal.
+    rig.clock.advance(61_000);
     assertUnavailable(await unreadable.beforeRequest(0));
 
     const unreadableForRepair = new HostedRepairCooldownGate({
@@ -541,6 +555,40 @@ Deno.test("hosted cooldown: absent or unreadable state latches and never reopens
       clock: rig.clock,
     });
     assertUnavailable(await unreadableForRepair.beforeRequest(0));
+  } finally {
+    await rig.cleanup();
+  }
+});
+
+Deno.test("hosted cooldown: the development switch never blocks and never writes", async () => {
+  const rig = await makeRig();
+  try {
+    await rig.seedRelease([]);
+    await rig.seedRepair([]);
+    const before = await readReleaseSnapshot(rig);
+    const supervisor = new HostedSupervisorCooldownGate({
+      state: rig.release,
+      clock: rig.clock,
+      mode: "off",
+    });
+    const repairGate = new HostedRepairCooldownGate({
+      state: rig.repair,
+      clock: rig.clock,
+      mode: "off",
+    });
+
+    // A real, currently-active hold is ignored while the switch is off.
+    await rig.seedRelease([scopeCooldown()]);
+    assert.ok((await supervisor.beforeRequest(0)).ok, "hold ignored");
+    assert.ok((await repairGate.beforeRequest(0)).ok, "hold ignored");
+
+    // Recording is a no-op too: no state is written at all.
+    const seeded = await readReleaseSnapshot(rig);
+    assert.ok((await supervisor.recordRateLimit(0, rate())).ok);
+    const after = await readReleaseSnapshot(rig);
+    assert.equal(after.sequence, seeded.sequence, "no release write");
+    assert.deepEqual(after.githubCooldowns, seeded.githubCooldowns);
+    assert.notEqual(before.sequence, seeded.sequence);
   } finally {
     await rig.cleanup();
   }

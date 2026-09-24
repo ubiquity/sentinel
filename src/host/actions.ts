@@ -19,6 +19,10 @@
  */
 
 import { isGitSha } from "../contracts/brands.ts";
+import {
+  COOLDOWN_MODE_ENV,
+  parseCooldownModeV1,
+} from "../contracts/cooldown-mode.ts";
 import type { GitSha } from "../contracts/brands.ts";
 import { SystemClock } from "../contracts/ports.ts";
 import type {
@@ -396,7 +400,15 @@ export async function runActionsRepairHost(): Promise<
     controllerSha,
   });
   await ensureRepairStateSeed(state, clock);
-  const gate = new HostedRepairCooldownGate({ state, clock });
+  // The enforcement mode is injected through the environment and parsed
+  // strictly: an absent or empty setting enforces, a typo fails the run before
+  // any request, and `off` is the explicit development switch.
+  const cooldownMode = parseCooldownModeV1(optionalEnv(COOLDOWN_MODE_ENV));
+  const gate = new HostedRepairCooldownGate({
+    state,
+    clock,
+    mode: cooldownMode,
+  });
   const hostInput = {
     stateRoot,
     sourceDir,

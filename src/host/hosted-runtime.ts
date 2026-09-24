@@ -78,6 +78,9 @@ export const HOSTED_RUNTIME_CHILD_ENV_KEYS = [
   "SENTINEL_MODEL_ID",
   "SENTINEL_MODEL_FALLBACK",
   "SENTINEL_DEEPSEEK_API_KEY",
+  // Explicit development switch for the durable GitHub cooldown gates; it
+  // crosses only when the launcher was given a non-empty value.
+  "SENTINEL_COOLDOWN_MODE",
   "UOS_AI_TOKEN",
   "GITHUB_RUN_ID",
   "GITHUB_RUN_ATTEMPT",
@@ -680,6 +683,7 @@ function buildChildEnvironment(
     "SENTINEL_MODEL_ID",
     "SENTINEL_MODEL_FALLBACK",
     "SENTINEL_DEEPSEEK_API_KEY",
+    "SENTINEL_COOLDOWN_MODE",
   ] as const;
   const routeEnv: Record<string, string> = {};
   for (const key of routeKeys) {
