@@ -460,7 +460,16 @@ Deno.test(
     assert.equal(headAtPrepare, OLD_HEAD, "old candidate at preparation time");
     assert.equal(rig.model.requests.length, 0, "no model start");
     assert.equal(state.reservations.length, 0, "no budget admission");
-    assert.deepEqual(work.counters, seeded.counters);
+    // Charged counters are untouched; the additive no-progress counter is the
+    // only one an execution that only re-armed the wait may advance.
+    assert.deepEqual(
+      {
+        attempts: work.counters.attempts,
+        retries: work.counters.retries,
+        reviewRounds: work.counters.reviewRounds,
+      },
+      seeded.counters,
+    );
     assert.deepEqual(work.source, seeded.source);
     assert.equal(work.failingRevision, seeded.failingRevision);
     assert.deepEqual(work.controller, seeded.controller);
@@ -775,7 +784,14 @@ Deno.test(
     assert.equal(work.target.head, OLD_HEAD);
     assert.equal(work.nextStep, "delivery");
     assert.equal(fake.prepareCalls.length, 2, "one failed and one replanned");
-    assert.deepEqual(work.counters, seeded.counters);
+    assert.deepEqual(
+      {
+        attempts: work.counters.attempts,
+        retries: work.counters.retries,
+        reviewRounds: work.counters.reviewRounds,
+      },
+      seeded.counters,
+    );
     assert.deepEqual(work.source, seeded.source);
     assert.deepEqual(work.evidence, seeded.evidence);
     assert.equal(state.reviews.length, 1);
@@ -1154,5 +1170,33 @@ Deno.test(
     assert.equal(work.blocker, null, "no disposition is fabricated");
     assert.equal(prepareCalls, 0, "no preparation against an unknown PR");
     assert.equal(fake.pushCalls.length, 0);
+    assert.equal(
+      work.counters.stalled,
+      1,
+      "the re-armed execution spent one no-progress unit",
+    );
+
+    // A second execution of the SAME intent advances nothing durable (the
+    // observation still fails and the wait is only re-armed), so the
+    // per-record no-progress budget counts it on top of the first execution.
+    rig.clock.advance(CHECK_POLL_MS + 1000);
+    await rig.run();
+    const stalled = (await rig.snapshot()).work[0];
+    assert.equal(stalled.intent?.failure?.attempts, 2);
+    assert.equal(stalled.counters.stalled, 2);
+
+    // Once the Observation is readable again the refresh advances, and an
+    // advancing execution clears the budget instead of carrying it forward.
+    fake.prReadFails = false;
+    rig.clock.advance(CHECK_POLL_MS + 1000);
+    await rig.run();
+    const advanced = (await rig.snapshot()).work[0];
+    assert.equal(advanced.counters.stalled, undefined);
+    assert.equal(advanced.intent, null, "the refresh completed");
+    assert.equal(
+      advanced.target.base,
+      SHA2,
+      "the refreshed base is the target",
+    );
   },
 );

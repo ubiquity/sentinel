@@ -656,3 +656,98 @@ Deno.test(
     assert.equal(countUnfinishedPullRequests([merged, open]), 1);
   },
 );
+
+/** Backlog record with an exact age, so oldest-first ordering is explicit. */
+function agedIssue(
+  id: string,
+  issueNumber: number,
+  firstSeenAt: number,
+  overrides: Record<string, unknown> = {},
+): WorkRecordV1 {
+  return work(id, {
+    source: { kind: "issue", id: String(issueNumber), revision: SHA2 },
+    related: { incidentId: null, issueNumber },
+    classification: { severity: "P2", priority: 9 },
+    firstSeenAt,
+    createdAt: firstSeenAt,
+    counters: { attempts: 0, retries: 0, reviewRounds: 0 },
+    ...overrides,
+  });
+}
+
+/**
+ * The documented per-record no-progress budget. Pinned as a literal so this
+ * case can be run against a revision without the budget and fail on ORDERING
+ * (a setup/import error would prove nothing).
+ */
+const BUDGET = 3;
+
+Deno.test(
+  "no-progress budget: a stalled oldest record yields to a younger record that advanced",
+  () => {
+    const older = agedIssue("issue-1", 1, T0 - 900_000, {
+      counters: {
+        attempts: 0,
+        retries: 0,
+        reviewRounds: 0,
+        stalled: BUDGET,
+      },
+    });
+    const younger = agedIssue("issue-2", 2, T0 - 60_000);
+    const ranked = rankEligibleWork(
+      snapshot([older, younger]),
+      repairConfigs(),
+      NOW,
+    );
+    assert.deepEqual(ranked.ordered, [younger.id, older.id]);
+    assert.equal(
+      ranked.skipped[older.id],
+      undefined,
+      "demotion is ordering, never a skip",
+    );
+
+    // Boundary: one execution under the budget keeps the oldest-first order,
+    // so the budget is a bound and not a blanket reordering.
+    const withinBudget = agedIssue("issue-1", 1, T0 - 900_000, {
+      counters: {
+        attempts: 0,
+        retries: 0,
+        reviewRounds: 0,
+        stalled: BUDGET - 1,
+      },
+    });
+    const bounded = rankEligibleWork(
+      snapshot([withinBudget, younger]),
+      repairConfigs(),
+      NOW,
+    );
+    assert.deepEqual(bounded.ordered, [withinBudget.id, younger.id]);
+  },
+);
+
+Deno.test(
+  "no-progress budget: demotion never crosses a plan bucket",
+  () => {
+    const stalledDelivery = prRecord("issue-1", 1, 7, {
+      nextStep: "delivery",
+      wait: null,
+      counters: {
+        attempts: 1,
+        retries: 0,
+        reviewRounds: 1,
+        stalled: BUDGET + 4,
+      },
+    });
+    const advancing = agedIssue("issue-2", 2, T0 - 60_000);
+    const ranked = rankEligibleWork(
+      snapshot([stalledDelivery, advancing]),
+      repairConfigs(),
+      NOW,
+    );
+    assert.deepEqual(
+      ranked.ordered,
+      [stalledDelivery.id, advancing.id],
+      "delivery bookkeeping stays ahead of new work even when demoted",
+    );
+  },
+);

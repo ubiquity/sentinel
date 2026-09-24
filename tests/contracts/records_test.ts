@@ -1719,3 +1719,76 @@ Deno.test("intent failure record: malformed records reject", async () => {
     expectRejected(testCase.raw, testCase.code, testCase.path, testCase.name);
   }
 });
+
+// --- additive no-progress counter --------------------------------------------
+// `counters.stalled` is the per-record no-progress budget the selector reads.
+// It follows the same additive rule as the intent failure record: absent means
+// zero and stays absent, present must be an exact count, and no default is
+// injected.
+
+function countersOf(raw: Record<string, unknown>): Record<string, unknown> {
+  const counters = raw.counters;
+  if (counters === null || typeof counters !== "object") {
+    throw new Error("fixture has no counters group");
+  }
+  return counters as Record<string, unknown>;
+}
+
+Deno.test("no-progress counter: absent is the exact legacy shape", async () => {
+  const raw = await rawLegacyWork();
+  const parsed = parseWorkRecordV1(raw);
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(parsed.counters, "stalled"),
+    false,
+    "a legacy counter group must not gain the additive key",
+  );
+  assert.equal(parsed.counters.stalled, undefined);
+  assert.equal(canonicalStringify(parsed), canonicalStringify(raw));
+});
+
+Deno.test("no-progress counter: a present count parses and round-trips", async () => {
+  const raw = await rawLegacyWork();
+  countersOf(raw).stalled = 3;
+  const parsed = parseWorkRecordV1(raw);
+  assert.equal(parsed.counters.stalled, 3);
+  assert.equal(canonicalStringify(parsed), canonicalStringify(raw));
+});
+
+Deno.test("no-progress counter: malformed values reject", async () => {
+  const cases: {
+    name: string;
+    value: (counters: Record<string, unknown>) => void;
+    code: string;
+    path: string;
+  }[] = [
+    {
+      name: "negative",
+      value: (counters) => counters.stalled = -1,
+      code: "invalid_count",
+      path: "$.counters.stalled",
+    },
+    {
+      name: "fractional",
+      value: (counters) => counters.stalled = 1.5,
+      code: "invalid_count",
+      path: "$.counters.stalled",
+    },
+    {
+      name: "string",
+      value: (counters) => counters.stalled = "3",
+      code: "invalid_count",
+      path: "$.counters.stalled",
+    },
+    {
+      name: "misspelled key",
+      value: (counters) => counters.stall = 1,
+      code: "unknown_key",
+      path: "$.counters.stall",
+    },
+  ];
+  for (const testCase of cases) {
+    const raw = await rawLegacyWork();
+    testCase.value(countersOf(raw));
+    expectRejected(raw, testCase.code, testCase.path, testCase.name);
+  }
+});

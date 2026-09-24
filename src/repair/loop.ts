@@ -103,6 +103,7 @@ import {
   markBlocked,
   markDone,
   noteCandidate,
+  noteExecution,
   setCandidateState,
   setIntent,
   setWait,
@@ -566,7 +567,62 @@ export async function runRepairCycle(
     }
     didWork = true;
     steps++;
+
+    // Per-record no-progress budget (run fairness). ONE execution of the
+    // selected record either advanced its durable shape or only re-armed
+    // state; comparing the execution baseline with the persisted result counts
+    // exactly that, so bookkeeping writes inside a single execution can never
+    // look like progress and a stalled queue head stops consuming the run
+    // ahead of work that can move. Ranking, the plan buckets and the
+    // unfinished-PR cap are unchanged.
+    const executed = context.snapshot.work.find(
+      (work) => work.id === selected.id,
+    );
+    if (executed !== undefined) {
+      const counted = noteExecution(
+        executed,
+        selected.counters.stalled ?? 0,
+        executionAdvanced(selected, executed),
+        deps.clock.now(),
+      );
+      if (counted !== executed) {
+        const budgeted = await persistWork(deps, context, counted);
+        if (budgeted.kind === "state_error") {
+          return { status: "state_error", detail: budgeted.detail };
+        }
+      }
+    }
   }
+}
+
+/**
+ * True when one execution advanced the record's durable shape. The lifecycle
+ * step, the published target, the intent identity, the blocker, the terminal
+ * step and the charged counters all count; a re-armed wait, a fresh wait
+ * timestamp and free-text notes alone do not, because they leave the record
+ * exactly where a later run will find it.
+ */
+function executionAdvanced(
+  before: WorkRecordV1,
+  after: WorkRecordV1,
+): boolean {
+  if (after.nextStep !== before.nextStep) return true;
+  if (after.blocker?.message !== before.blocker?.message) return true;
+  if (after.target.base !== before.target.base) return true;
+  if (after.target.head !== before.target.head) return true;
+  if (after.target.pr !== before.target.pr) return true;
+  if (
+    after.target.candidateState?.publishedHead !==
+      before.target.candidateState?.publishedHead
+  ) {
+    return true;
+  }
+  if (after.intent?.key !== before.intent?.key) return true;
+  if (after.intent?.resultId !== before.intent?.resultId) return true;
+  if (after.counters.attempts !== before.counters.attempts) return true;
+  if (after.counters.retries !== before.counters.retries) return true;
+  if (after.counters.reviewRounds !== before.counters.reviewRounds) return true;
+  return false;
 }
 
 // ---------------------------------------------------------------------------

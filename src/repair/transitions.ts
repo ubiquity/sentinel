@@ -311,6 +311,38 @@ export function startAttempt(record: WorkRecordV1, now: number): WorkRecordV1 {
 }
 
 /**
+ * Per-record no-progress budget: ONE execution of this record either advanced
+ * its durable shape or only re-armed state. An advancing execution clears the
+ * counter (and drops the additive key entirely, so a progressing record's bytes
+ * stay in their original shape); an execution that advanced nothing increments
+ * it from the execution baseline. Selection demotes a record once it reaches
+ * the budget, which is what stops an oldest-first queue head from starving
+ * younger work.
+ */
+export function noteExecution(
+  record: WorkRecordV1,
+  previousStalled: number,
+  advanced: boolean,
+  now: number,
+): WorkRecordV1 {
+  const stalled = advanced ? 0 : previousStalled + 1;
+  const carriers = Object.prototype.hasOwnProperty.call(
+    record.counters,
+    "stalled",
+  );
+  if (stalled === (carriers ? record.counters.stalled : 0)) return record;
+  if (stalled === 0) {
+    const { stalled: _dropped, ...rest } = record.counters;
+    return expectWork({ ...record, counters: rest, updatedAt: now });
+  }
+  return expectWork({
+    ...record,
+    counters: { ...record.counters, stalled },
+    updatedAt: now,
+  });
+}
+
+/**
  * Record a locally validated candidate head/checkpoint.
  *
  * V1 candidate state (when the record already carries it) follows the exact

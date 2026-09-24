@@ -154,23 +154,39 @@ export function rankEligibleWork(
 }
 
 /**
- * Lexicographic priority key. The first element is the fixed plan bucket;
- * later elements are the documented tie-breakers. Compare lower-first.
+ * Per-record no-progress budget. An execution that advanced nothing durable
+ * increments the record's `stalled` counter; at this budget the record is
+ * demoted inside its own plan bucket so an oldest-first queue head can never
+ * starve younger eligible work. It stays eligible — demotion is ordering, not
+ * a blocker — and the plan buckets, the ranking tie-breakers and the
+ * unfinished-PR cap are unchanged.
+ */
+export const NO_PROGRESS_BUDGET = 3;
+
+/**
+ * Lexicographic priority key. The first element is the fixed plan bucket; the
+ * second is the no-progress demotion tier (records that spent the budget come
+ * after records that did not); later elements are the documented tie-breakers.
+ * Compare lower-first.
  */
 function scoreKey(record: WorkRecordV1, now: number): string[] {
   const bucket = planBucket(record, now);
   const severityOrder = { P0: 0, P1: 1, P2: 2, P3: 3 };
   const oldest = record.firstSeenAt ?? record.createdAt;
+  const demoted = (record.counters.stalled ?? 0) >= NO_PROGRESS_BUDGET
+    ? "1"
+    : "0";
   switch (bucket) {
     case 0: {
       // Delivery bookkeeping: outstanding merges/closure first, oldest last
       // update first; the same bucket never races a new repair.
-      return [`0`, zeroPad(record.updatedAt), tie(record)];
+      return [`0`, demoted, zeroPad(record.updatedAt), tie(record)];
     }
     case 1: {
       // Active incidents: severity, then oldest first seen.
       return [
         `1`,
+        demoted,
         String(severityOrder[record.classification.severity]),
         zeroPad(oldest),
         tie(record),
@@ -180,16 +196,17 @@ function scoreKey(record: WorkRecordV1, now: number): string[] {
       // P0/P1 corrections: severity, then oldest.
       return [
         `2`,
+        demoted,
         String(severityOrder[record.classification.severity]),
         zeroPad(oldest),
         tie(record),
       ];
     }
     case 3: {
-      return [`3`, zeroPad(oldest), tie(record)];
+      return [`3`, demoted, zeroPad(oldest), tie(record)];
     }
     case 4: {
-      return [`4`, zeroPad(record.createdAt), tie(record)];
+      return [`4`, demoted, zeroPad(record.createdAt), tie(record)];
     }
     default: {
       // Issues/backlog: highest recognized numeric priority, missing last,
@@ -200,6 +217,7 @@ function scoreKey(record: WorkRecordV1, now: number): string[] {
         : zeroPad(Number.MAX_SAFE_INTEGER - record.classification.priority);
       return [
         `5`,
+        demoted,
         priorityKey,
         zeroPad(oldest),
         tie(record),

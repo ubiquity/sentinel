@@ -204,6 +204,16 @@ export interface WorkCountersV1 {
   retries: number;
   /** Codex review rounds used on this work item. */
   reviewRounds: number;
+  /**
+   * Consecutive executions of this record that advanced nothing durable (the
+   * lifecycle, target, intent identity, blocker and counters all stayed put, so
+   * the execution only re-armed a wait). ABSENT means zero — the exact shape of
+   * every row written before this counter existed — and a default is never
+   * injected, so legacy bytes round-trip exactly. Selection uses it as a
+   * per-record no-progress budget: a record past the budget is ordered behind
+   * records that did advance, inside its own plan bucket.
+   */
+  stalled?: number;
 }
 
 export interface WorkRecordV1 {
@@ -311,6 +321,8 @@ const CHECKPOINT_KEYS = ["branch", "sha"] as const;
 const WAIT_KEYS = ["reason", "since", "until"] as const;
 const BLOCKER_KEYS = ["kind", "message", "since"] as const;
 const COUNTERS_KEYS = ["attempts", "retries", "reviewRounds"] as const;
+/** Additive counter keys absent from rows written before they existed. */
+const COUNTERS_OPTIONAL_KEYS = ["stalled"] as const;
 const INTENT_KEYS = [
   "kind",
   "key",
@@ -791,11 +803,14 @@ function parseBlocker(input: unknown, path: string): WorkBlockerV1 {
 
 function parseCounters(input: unknown, path: string): WorkCountersV1 {
   const obj = expectRecord(input, path);
-  expectExactKeys(obj, COUNTERS_KEYS, path);
+  expectExactKeysWithOptional(obj, COUNTERS_KEYS, COUNTERS_OPTIONAL_KEYS, path);
   return {
     attempts: expectCount(obj.attempts, `${path}.attempts`),
     retries: expectCount(obj.retries, `${path}.retries`),
     reviewRounds: expectCount(obj.reviewRounds, `${path}.reviewRounds`),
+    ...(obj.stalled === undefined
+      ? {}
+      : { stalled: expectCount(obj.stalled, `${path}.stalled`) }),
   };
 }
 
