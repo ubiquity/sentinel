@@ -127,6 +127,7 @@ const OPTIONAL_CHILD_ENV_KEYS = [
   "SENTINEL_MODEL_FALLBACK",
   "SENTINEL_DEEPSEEK_API_KEY",
   "SENTINEL_APP_INSTALLATION_ID",
+  "SENTINEL_COOLDOWN_MODE",
 ] as const;
 
 /** The exact child key set for a run that supplies no optional value. */

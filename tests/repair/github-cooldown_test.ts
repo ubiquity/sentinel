@@ -161,13 +161,33 @@ Deno.test("cooldown durable: actual HTTP through durable Git gate with restart/s
       state: failingRead,
       clock: rig.clock,
     });
-    assert.equal((await readFault.beforeRequest(9)).ok, false);
+    const faulted = await readFault.beforeRequest(9);
+    assert.equal(faulted.ok, false);
+    if (!faulted.ok) {
+      assert.equal(faulted.error.kind, "unavailable");
+      assert.match(faulted.error.detail, /state unavailable/);
+    }
+    // The source recovers, but the BOUNDED window still refuses: a request is
+    // never gated open on trust while a fault is unproven.
     readUnavailable = false;
     assert.equal(
       (await readFault.beforeRequest(9)).ok,
       false,
-      "read fault must remain latched after source recovery",
+      "the open fault window keeps refusing after source recovery",
     );
+    // Once the window elapses the gate re-reads the recovered state instead of
+    // refusing forever, so a bookkeeping problem can never freeze the lane.
+    rig.clock.advance(61_000);
+    assert.ok(
+      (await readFault.beforeRequest(9)).ok,
+      "the bounded window reopens on a readable state",
+    );
+    // A fault that is still real after the window re-arms the refusal.
+    readUnavailable = true;
+    assert.equal((await readFault.beforeRequest(9)).ok, false);
+    readUnavailable = false;
+    rig.clock.advance(61_000);
+    assert.ok((await readFault.beforeRequest(9)).ok);
 
     console.log(
       "PASS actual HTTP -> durable Git store -> restart/shared installation, deadlines, backoff, manual hold and fault latch",

@@ -6,11 +6,12 @@
  * successful request never clears a cooldown. Observed limits are persisted
  * through strict expected-head compare-and-swap with exactly one write.
  *
- * The gate fails closed but not silently: any invalid input, clock anomaly,
- * missing/unreadable/unparseable state, failed, conflicting or ambiguous
- * write or unexpected throw permanently latches the instance; every later
- * call then returns the same sanitized unavailable error and no request is
- * gated open on trust. A normal rate_limited denial never latches.
+ * The gate fails closed but never freezes: an invalid input, clock anomaly,
+ * missing, unreadable or unparseable state, or a failed, conflicting,
+ * ambiguous or thrown write refuses every request for a BOUNDED window and is
+ * then re-checked against the real state, with the closed fault identity in
+ * the error detail. A normal rate_limited denial carries no fault at all. Only
+ * an unreadable clock — which no later read can repair — stays sticky.
  */
 
 import {
@@ -21,7 +22,12 @@ import type {
   GitHubCooldownV1,
   GitHubRateLimitV1,
 } from "../contracts/github-cooldown.ts";
+import {
+  type CooldownModeV1,
+  DEFAULT_COOLDOWN_MODE,
+} from "../contracts/cooldown-mode.ts";
 import { parseRepairStateSnapshotV1 } from "../contracts/state-snapshots.ts";
+import type { RepairStateSnapshotV1 } from "../contracts/state-snapshots.ts";
 import { portOk } from "../contracts/ports.ts";
 import type {
   Clock,
@@ -36,30 +42,60 @@ const MAX_FALLBACK_COUNT = 10;
 
 const FAULT_DETAIL = "github cooldown gate faulted; state not trustworthy";
 const RATE_LIMITED_DETAIL = "github cooldown active";
+/** Bounded fail-closed window: refuse, then re-read the real state. */
+const FAULT_WINDOW_MS = 60_000;
+const FAULT_SCOPE = "github cooldown gate faulted: scope invalid";
+const FAULT_CLOCK = "github cooldown gate faulted: clock invalid";
+const FAULT_STATE = "github cooldown gate faulted: state unavailable";
+const FAULT_STATE_SHAPE = "github cooldown gate faulted: state unparseable";
+const FAULT_WRITE = "github cooldown gate faulted: write outcome unknown";
 
 export class DurableGitHubCooldownGate implements GitHubCooldownGateV1 {
   private readonly state: StateReadView & RepairStateWriter;
   private readonly clock: Clock;
-  private faulted = false;
+  private readonly mode: CooldownModeV1;
+  /** Only an unreadable clock stays sticky; no later read can repair it. */
+  private clockFaulted = false;
+  /** One bounded fault window; null when the gate is checking normally. */
+  private fault: { detail: string; until: number } | null = null;
 
   constructor(
-    deps: { state: StateReadView & RepairStateWriter; clock: Clock },
+    deps: {
+      state: StateReadView & RepairStateWriter;
+      clock: Clock;
+      /** Injected enforcement mode; absent keeps the production default. */
+      mode?: CooldownModeV1;
+    },
   ) {
     this.state = deps.state;
     this.clock = deps.clock;
+    this.mode = deps.mode ?? DEFAULT_COOLDOWN_MODE;
   }
 
   async beforeRequest(installationId: number): Promise<PortResultV1<void>> {
-    if (this.faulted) return faultResult();
+    if (this.mode === "off") return portOk(undefined);
+    if (this.clockFaulted) return faultResult(FAULT_CLOCK);
+    const now = this.clock.now();
+    if (!isNonNegativeSafeInteger(now)) {
+      this.clockFaulted = true;
+      return faultResult(FAULT_CLOCK);
+    }
+    const open = this.openFault(now);
+    if (open !== null) return open;
     try {
-      if (!isNonNegativeSafeInteger(installationId)) return this.latch();
-      const now = this.clock.now();
-      if (!isNonNegativeSafeInteger(now)) return this.latch();
+      if (!isNonNegativeSafeInteger(installationId)) {
+        return this.faulted(FAULT_SCOPE, now);
+      }
 
       const read = await this.state.readRepair();
-      if (!read.ok) return this.latch();
-      if (read.value.status !== "found") return this.latch();
-      const snapshot = parseRepairStateSnapshotV1(read.value.snapshot);
+      if (!read.ok) return this.faulted(FAULT_STATE, now);
+      if (read.value.status !== "found") return this.faulted(FAULT_STATE, now);
+      let snapshot: RepairStateSnapshotV1;
+      try {
+        snapshot = parseRepairStateSnapshotV1(read.value.snapshot);
+      } catch {
+        return this.faulted(FAULT_STATE_SHAPE, now);
+      }
 
       const cooldown = snapshot.githubCooldowns.find(
         (record) => record.installationId === installationId,
@@ -73,7 +109,7 @@ export class DurableGitHubCooldownGate implements GitHubCooldownGateV1 {
       }
       return portOk(undefined);
     } catch {
-      return this.latch();
+      return this.faulted(FAULT_STATE, now);
     }
   }
 
@@ -81,19 +117,37 @@ export class DurableGitHubCooldownGate implements GitHubCooldownGateV1 {
     installationId: number,
     rateLimit: GitHubRateLimitV1,
   ): Promise<PortResultV1<void>> {
-    if (this.faulted) return faultResult();
+    if (this.mode === "off") return portOk(undefined);
+    if (this.clockFaulted) return faultResult(FAULT_CLOCK);
+    const now = this.clock.now();
+    if (!isNonNegativeSafeInteger(now)) {
+      this.clockFaulted = true;
+      return faultResult(FAULT_CLOCK);
+    }
+    const open = this.openFault(now);
+    if (open !== null) return open;
     try {
-      if (!isNonNegativeSafeInteger(installationId)) return this.latch();
+      if (!isNonNegativeSafeInteger(installationId)) {
+        return this.faulted(FAULT_SCOPE, now);
+      }
       // A caller-supplied plain object is re-validated through the strict
       // parser; the parsed result, never the raw input, is recorded.
-      const rate = parseGitHubRateLimitV1(rateLimit);
-      const now = this.clock.now();
-      if (!isNonNegativeSafeInteger(now)) return this.latch();
+      let rate: GitHubRateLimitV1;
+      try {
+        rate = parseGitHubRateLimitV1(rateLimit);
+      } catch {
+        return this.faulted(FAULT_SCOPE, now);
+      }
 
       const read = await this.state.readRepair();
-      if (!read.ok) return this.latch();
-      if (read.value.status !== "found") return this.latch();
-      const snapshot = parseRepairStateSnapshotV1(read.value.snapshot);
+      if (!read.ok) return this.faulted(FAULT_STATE, now);
+      if (read.value.status !== "found") return this.faulted(FAULT_STATE, now);
+      let snapshot: RepairStateSnapshotV1;
+      try {
+        snapshot = parseRepairStateSnapshotV1(read.value.snapshot);
+      } catch {
+        return this.faulted(FAULT_STATE_SHAPE, now);
+      }
 
       const prior = snapshot.githubCooldowns.find(
         (record) => record.installationId === installationId,
@@ -117,24 +171,41 @@ export class DurableGitHubCooldownGate implements GitHubCooldownGateV1 {
       });
 
       const write = await this.state.writeRepair(next, read.value.head);
-      if (!write.ok) return this.latch();
-      if (write.value.status !== "applied") return this.latch();
+      if (!write.ok) return this.faulted(FAULT_WRITE, now);
+      if (write.value.status !== "applied") {
+        return this.faulted(FAULT_WRITE, now);
+      }
       return portOk(undefined);
     } catch {
-      return this.latch();
+      return this.faulted(FAULT_WRITE, now);
     }
   }
 
-  private latch(): PortResultV1<void> {
-    this.faulted = true;
-    return faultResult();
+  /** Refuse while a bounded fault window is open; then re-read the state. */
+  private openFault(now: number): PortResultV1<void> | null {
+    const fault = this.fault;
+    if (fault === null) return null;
+    if (now < fault.until) return faultResult(fault.detail);
+    this.fault = null;
+    return null;
+  }
+
+  /**
+   * One classified, BOUNDED fail-closed refusal. Every request is refused until
+   * the window elapses and is then re-checked against the real state, so a
+   * bookkeeping problem can never freeze the lane permanently while a request
+   * is still never gated open on trust.
+   */
+  private faulted(detail: string, now: number): PortResultV1<void> {
+    this.fault = { detail, until: now + FAULT_WINDOW_MS };
+    return faultResult(detail);
   }
 }
 
-function faultResult(): PortResultV1<void> {
+function faultResult(detail: string = FAULT_DETAIL): PortResultV1<void> {
   return {
     ok: false,
-    error: { kind: "unavailable", detail: FAULT_DETAIL },
+    error: { kind: "unavailable", detail },
   };
 }
 

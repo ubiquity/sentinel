@@ -52,6 +52,10 @@ import type { ReplayRuntimeV1 } from "../replay/runtime.ts";
 import { createReleaseStateStore, DenoGitRunner } from "../state/mod.ts";
 import { HostedSupervisorCooldownGate } from "./hosted-cooldown.ts";
 import {
+  COOLDOWN_MODE_ENV,
+  parseCooldownModeV1,
+} from "../contracts/cooldown-mode.ts";
+import {
   parseHostedEnvironment,
   readCleanGitHead,
   readHostedIdentityEnv,
@@ -1155,9 +1159,14 @@ export async function runHostedSupervisorHost(
   const nativeToken = input.env[NATIVE_TOKEN_ENV];
   if (!isToken(nativeToken)) throw new Error(STATIC_TOKEN);
 
+  // The enforcement mode is injected with the rest of the trusted host input
+  // and parsed strictly: absent or empty enforces, `off` is the explicit
+  // development switch, and any other value fails here before one request is
+  // gated.
   const gate = new HostedSupervisorCooldownGate({
     state: input.state,
     clock: input.clock,
+    mode: parseCooldownModeV1(input.env[COOLDOWN_MODE_ENV]),
   });
   const client = new GitHubApiClient({
     repository: { ...SUPERVISOR_REPOSITORY },
@@ -1238,6 +1247,7 @@ async function main(): Promise<void> {
     [NATIVE_TOKEN_ENV]: Deno.env.get(NATIVE_TOKEN_ENV),
     [SUPERVISOR_TOKEN_ENV]: Deno.env.get(SUPERVISOR_TOKEN_ENV),
     [OUTPUT_ENV]: Deno.env.get(OUTPUT_ENV),
+    [COOLDOWN_MODE_ENV]: Deno.env.get(COOLDOWN_MODE_ENV),
   };
   const job = supervisorJob(env.GITHUB_JOB);
   const identity = parseHostedEnvironment(env, job);

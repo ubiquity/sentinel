@@ -517,23 +517,37 @@ Deno.test("hosted cooldown: duplicate observations are idempotent and unknown pe
   }
 });
 
-Deno.test("hosted cooldown: absent or unreadable state latches and never reopens", async () => {
+Deno.test("hosted cooldown: an absent or unreadable state refuses for a bounded window only", async () => {
   const rig = await makeRig();
   try {
     const supervisor = rig.supervisor();
     const repairGate = rig.repairGate();
-    assertUnavailable(await supervisor.beforeRequest(0));
+    const absent = await supervisor.beforeRequest(0);
+    assertUnavailable(absent);
+    if (!absent.ok) {
+      assert.match(absent.error.detail, /release state unavailable/);
+    }
     assertUnavailable(await repairGate.beforeRequest(0));
-    // Seeding real state later never reopens a latched instance.
+
+    // Seeding real state does not reopen the window: it is still fail-closed.
     await rig.seedRelease([]);
     await rig.seedRepair([]);
     assertUnavailable(await supervisor.beforeRequest(0));
     assertUnavailable(await repairGate.beforeRequest(0));
 
+    // Once the bounded window elapses the gates re-read the real state and
+    // recover, so a bookkeeping fault can never freeze the lane permanently.
+    rig.clock.advance(61_000);
+    assert.ok((await supervisor.beforeRequest(0)).ok, "supervisor recovers");
+    assert.ok((await repairGate.beforeRequest(0)).ok, "repair gate recovers");
+
     const unreadable = new HostedSupervisorCooldownGate({
       state: new FaultyReleaseStore(rig.release, "readFailure"),
       clock: rig.clock,
     });
+    assertUnavailable(await unreadable.beforeRequest(0));
+    // A fault that is still real after the window re-arms the refusal.
+    rig.clock.advance(61_000);
     assertUnavailable(await unreadable.beforeRequest(0));
 
     const unreadableForRepair = new HostedRepairCooldownGate({
@@ -541,6 +555,40 @@ Deno.test("hosted cooldown: absent or unreadable state latches and never reopens
       clock: rig.clock,
     });
     assertUnavailable(await unreadableForRepair.beforeRequest(0));
+  } finally {
+    await rig.cleanup();
+  }
+});
+
+Deno.test("hosted cooldown: the development switch never blocks and never writes", async () => {
+  const rig = await makeRig();
+  try {
+    await rig.seedRelease([]);
+    await rig.seedRepair([]);
+    const before = await readReleaseSnapshot(rig);
+    const supervisor = new HostedSupervisorCooldownGate({
+      state: rig.release,
+      clock: rig.clock,
+      mode: "off",
+    });
+    const repairGate = new HostedRepairCooldownGate({
+      state: rig.repair,
+      clock: rig.clock,
+      mode: "off",
+    });
+
+    // A real, currently-active hold is ignored while the switch is off.
+    await rig.seedRelease([scopeCooldown()]);
+    assert.ok((await supervisor.beforeRequest(0)).ok, "hold ignored");
+    assert.ok((await repairGate.beforeRequest(0)).ok, "hold ignored");
+
+    // Recording is a no-op too: no state is written at all.
+    const seeded = await readReleaseSnapshot(rig);
+    assert.ok((await supervisor.recordRateLimit(0, rate())).ok);
+    const after = await readReleaseSnapshot(rig);
+    assert.equal(after.sequence, seeded.sequence, "no release write");
+    assert.deepEqual(after.githubCooldowns, seeded.githubCooldowns);
+    assert.notEqual(before.sequence, seeded.sequence);
   } finally {
     await rig.cleanup();
   }
@@ -645,3 +693,70 @@ Deno.test("hosted cooldown: release state rejects dropping or weakening a cooldo
     await manual.cleanup();
   }
 });
+
+Deno.test(
+  "hosted cooldown: a foreign target's App scope is admitted and isolated from the self scope",
+  async () => {
+    const rig = await makeRig();
+    try {
+      // The repair gate reads BOTH refs: the release ref supplies the
+      // deployment-wide scope-0 hold, the repair ref the per-scope records.
+      await rig.seedRelease([], [releaseRecord("rel-1")]);
+      await rig.seedRepair([]);
+      const gate = rig.repairGate();
+      const appScope = 155_687_488;
+
+      // A committed foreign target is gated under its own App installation
+      // scope. Admitting it must NOT latch the deployment-wide gate, because a
+      // latch would stop every other target — the self-repair lane included.
+      assert.deepEqual(await gate.beforeRequest(appScope), portOk(undefined));
+      assert.deepEqual(await gate.beforeRequest(0), portOk(undefined));
+
+      // A hold recorded for the foreign scope blocks only that scope; the self
+      // scope stays admitted.
+      const limited = rig.repairGate();
+      assert.deepEqual(
+        await limited.recordRateLimit(
+          appScope,
+          rate({
+            retryNotBefore: T0 + 120_000,
+          }),
+        ),
+        portOk(undefined),
+      );
+      const blocked = await limited.beforeRequest(appScope);
+      assert.equal(blocked.ok, false);
+      if (blocked.ok) throw new Error("expected a denial");
+      assert.equal(blocked.error.kind, "rate_limited");
+      assert.deepEqual(await limited.beforeRequest(0), portOk(undefined));
+
+      // A hold on the self scope is a deployment-wide hold: it still blocks the
+      // foreign scope, so a self-path incident can never be routed around.
+      const selfHeld = rig.repairGate();
+      assert.deepEqual(
+        await selfHeld.recordRateLimit(
+          0,
+          rate({
+            retryNotBefore: T0 + 120_000,
+          }),
+        ),
+        portOk(undefined),
+      );
+      const heldSelf = await selfHeld.beforeRequest(0);
+      assert.equal(heldSelf.ok, false);
+      const heldForeign = await selfHeld.beforeRequest(appScope);
+      assert.equal(heldForeign.ok, false);
+      if (heldForeign.ok) throw new Error("expected a denial");
+      assert.equal(heldForeign.error.kind, "rate_limited");
+
+      // A malformed scope is still a refusal that never writes.
+      const malformed = rig.repairGate();
+      const refused = await malformed.beforeRequest(-1);
+      assert.equal(refused.ok, false);
+      if (refused.ok) throw new Error("expected a refusal");
+      assert.equal(refused.error.kind, "unavailable");
+    } finally {
+      await rig.cleanup();
+    }
+  },
+);
