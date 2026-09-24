@@ -28,6 +28,7 @@ import type {
 } from "../contracts/hosted-supervisor.ts";
 import type {
   Clock,
+  PortErrorV1,
   PortResultV1,
   ReleaseStateWriter,
   StateReadResultV1,
@@ -364,24 +365,80 @@ async function readSettlement(
   input: HostedSupervisorInputV1,
   savedIntent: HostedExecutionIntentV1,
 ): Promise<SettlementReadV1> {
-  let result: PortResultV1<HostedExecutionSettlementV1 | null>;
-  try {
-    result = await input.evidence.readExecution(savedIntent);
-  } catch {
-    return { ok: false, outcome: pending(STATIC_EVIDENCE) };
+  // The evidence read is idempotent and read-only, so a transport-shaped
+  // failure is retried a bounded number of times inside this job: one flaky
+  // HTTP window must never strand the pointer's saved execution (and with it
+  // the whole lane) until a human intervenes. A refusal a retry cannot change
+  // (auth, rate limit, invalid input) is reported immediately, and every
+  // reported failure carries its CLOSED identity so the job output names the
+  // cause instead of one static string.
+  let failure = STATIC_EVIDENCE;
+  for (let attempt = 1; attempt <= EVIDENCE_READ_ATTEMPTS; attempt++) {
+    let result: PortResultV1<HostedExecutionSettlementV1 | null>;
+    try {
+      result = await input.evidence.readExecution(savedIntent);
+    } catch {
+      failure = `${STATIC_EVIDENCE} (thrown)`;
+      if (attempt < EVIDENCE_READ_ATTEMPTS) {
+        await pause(EVIDENCE_RETRY_PAUSE_MS);
+        continue;
+      }
+      break;
+    }
+    if (!result.ok) {
+      failure = evidenceFailureDetail(STATIC_EVIDENCE, result.error);
+      if (
+        attempt < EVIDENCE_READ_ATTEMPTS &&
+        result.error.kind === "unavailable"
+      ) {
+        await pause(EVIDENCE_RETRY_PAUSE_MS);
+        continue;
+      }
+      break;
+    }
+    if (result.value === null) {
+      return { ok: false, outcome: pending(STATIC_SETTLEMENT_PENDING) };
+    }
+    const parsed = tryParse(parseHostedExecutionSettlementV1, result.value);
+    if (!parsed.ok) {
+      const issue = parsed.issues[0];
+      return {
+        ok: false,
+        outcome: pending(
+          `${STATIC_EVIDENCE_BINDING} (invalid settlement: ${
+            issue?.code ?? "unknown"
+          } at ${issue?.path ?? "?"})`,
+        ),
+      };
+    }
+    if (!sameCanonical(parsed.value.execution, savedIntent)) {
+      return { ok: false, outcome: pending(STATIC_EVIDENCE_BINDING) };
+    }
+    return { ok: true, settlement: parsed.value };
   }
-  if (!result.ok) return { ok: false, outcome: pending(STATIC_EVIDENCE) };
-  if (result.value === null) {
-    return { ok: false, outcome: pending(STATIC_SETTLEMENT_PENDING) };
-  }
-  const parsed = tryParse(parseHostedExecutionSettlementV1, result.value);
-  if (!parsed.ok) {
-    return { ok: false, outcome: pending(STATIC_EVIDENCE_BINDING) };
-  }
-  if (!sameCanonical(parsed.value.execution, savedIntent)) {
-    return { ok: false, outcome: pending(STATIC_EVIDENCE_BINDING) };
-  }
-  return { ok: true, settlement: parsed.value };
+  return { ok: false, outcome: pending(failure) };
+}
+
+/** Bounded attempts of one read-only evidence read inside a single job. */
+const EVIDENCE_READ_ATTEMPTS = 3;
+const EVIDENCE_RETRY_PAUSE_MS = 2_000;
+
+function pause(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Closed, sanitized evidence-failure identity: the port's closed error kind
+ * plus, only when the port itself supplied one of its own
+ * `hosted execution ...` constants, that constant. Arbitrary upstream text (a
+ * response body, a redirect URL or a credential) is never propagated into the
+ * job output.
+ */
+function evidenceFailureDetail(base: string, error: PortErrorV1): string {
+  const closed = /^hosted execution [a-z ]{1,64}$/.test(error.detail)
+    ? `: ${error.detail}`
+    : "";
+  return `${base} (${error.kind}${closed})`;
 }
 
 function sameCanonical(a: unknown, b: unknown): boolean {
