@@ -33,6 +33,7 @@ import {
   expectCount,
   expectEnum,
   expectExactKeys,
+  expectExactKeysWithOptional,
   expectGitSha,
   expectNonEmptyString,
   expectNullable,
@@ -89,6 +90,23 @@ export interface WorkBlockerV1 {
 }
 
 /**
+ * Bounded, durable record of the last failed execution of an incomplete
+ * operation. Only closed port failure identities are stored (never raw
+ * upstream text, request bodies or credentials), and `attempts` counts the
+ * consecutive failed executions of THIS exact intent so a livelock is visible
+ * and can be bounded instead of re-arming a silent wait forever.
+ */
+export interface OperationFailureV1 {
+  /** Closed port error kind (e.g. `unavailable`, `conflict`, `invalid`). */
+  kind: string;
+  /** Bounded port error detail constant for that kind. */
+  detail: string;
+  atMs: number;
+  /** Consecutive failed executions of this exact intent. */
+  attempts: number;
+}
+
+/**
  * Typed exact identity of an incomplete external operation. Recovery after a
  * push/review/merge needs the exact head, observed base, deterministic branch,
  * PR number and the external request/result identities — never a free-text
@@ -118,6 +136,14 @@ export interface IncompleteOperationV1 {
   requestId: string | null;
   /** External result id (e.g. review result, merge SHA); null before result. */
   resultId: string | null;
+  /**
+   * Last failed execution of this exact intent. ABSENT means no failed
+   * execution was ever recorded — the exact shape of every row written before
+   * this field existed — and a default is never injected, so legacy bytes
+   * round-trip exactly. A present key must carry the complete bounded record;
+   * clearing a failure deletes the key.
+   */
+  failure?: OperationFailureV1;
 }
 
 /** Explicit selection urgency attached to a work item at intake. */
@@ -296,6 +322,8 @@ const INTENT_KEYS = [
   "requestId",
   "resultId",
 ] as const;
+/** Additive intent keys absent from rows written before they existed. */
+const INTENT_OPTIONAL_KEYS = ["failure"] as const;
 
 export function parseWorkRecordV1(input: unknown): WorkRecordV1 {
   const obj = expectRecord(input, "$");
@@ -771,9 +799,25 @@ function parseCounters(input: unknown, path: string): WorkCountersV1 {
   };
 }
 
+const OPERATION_FAILURE_KEYS = ["kind", "detail", "atMs", "attempts"] as const;
+
+function parseOperationFailure(
+  input: unknown,
+  path: string,
+): OperationFailureV1 {
+  const obj = expectRecord(input, path);
+  expectExactKeys(obj, OPERATION_FAILURE_KEYS, path);
+  return {
+    kind: expectNonEmptyString(obj.kind, `${path}.kind`, MaxText.token),
+    detail: expectNonEmptyString(obj.detail, `${path}.detail`, MaxText.detail),
+    atMs: expectTimestamp(obj.atMs, `${path}.atMs`),
+    attempts: expectPositiveInt(obj.attempts, `${path}.attempts`),
+  };
+}
+
 function parseIntent(input: unknown, path: string): IncompleteOperationV1 {
   const obj = expectRecord(input, path);
-  expectExactKeys(obj, INTENT_KEYS, path);
+  expectExactKeysWithOptional(obj, INTENT_KEYS, INTENT_OPTIONAL_KEYS, path);
   const kind = expectEnum(
     obj.kind,
     [
@@ -983,6 +1027,9 @@ function parseIntent(input: unknown, path: string): IncompleteOperationV1 {
     pr,
     requestId,
     resultId,
+    ...(obj.failure === undefined ? {} : {
+      failure: parseOperationFailure(obj.failure, `${path}.failure`),
+    }),
   };
 }
 

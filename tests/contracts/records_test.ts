@@ -1600,3 +1600,122 @@ Deno.test("candidate state: the parking predicate ignores unrelated intents", as
   assert.equal(parsed.target.candidateState, undefined);
   assert.equal(hasCandidateState(parsed), false);
 });
+
+// --- additive intent failure record ------------------------------------------
+// `failure` is the only additive intent key: a row written before it existed
+// reads back without it (never as an injected default), a complete record
+// round-trips exactly, and every malformed shape is rejected.
+
+const INTENT_FAILURE_RECORD = {
+  kind: "unavailable",
+  detail: "base refresh port unavailable",
+  atMs: 1786000000000,
+  attempts: 3,
+};
+
+Deno.test("intent failure record: absent key is the exact legacy shape", async () => {
+  const raw = await preservationIntentRaw();
+  const parsed = parseWorkRecordV1(raw);
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(parsed.intent, "failure"),
+    false,
+    "a legacy intent must not gain a failure key",
+  );
+  assert.equal(canonicalStringify(parsed), canonicalStringify(raw));
+  assert.equal(parsed.intent?.failure, undefined);
+});
+
+Deno.test("intent failure record: a complete record parses and round-trips", async () => {
+  const raw = await preservationIntentRaw({
+    intent: {
+      ...validPreservationIntent(),
+      failure: INTENT_FAILURE_RECORD,
+    },
+  });
+  const parsed = parseWorkRecordV1(raw);
+  assert.deepEqual(parsed.intent?.failure, INTENT_FAILURE_RECORD);
+  assert.equal(parsed.intent?.failure?.attempts, 3);
+  assert.equal(canonicalStringify(parsed), canonicalStringify(raw));
+});
+
+Deno.test("intent failure record: malformed records reject", async () => {
+  const intentWith = (
+    failure: unknown,
+  ): Record<string, unknown> => ({
+    ...validPreservationIntent(),
+    failure,
+  });
+  const cases: {
+    name: string;
+    raw: Record<string, unknown>;
+    code: string;
+    path?: string;
+  }[] = [
+    {
+      name: "unknown nested key",
+      raw: await preservationIntentRaw({
+        intent: intentWith({ ...INTENT_FAILURE_RECORD, reason: "raw text" }),
+      }),
+      code: "unknown_key",
+      path: "$.intent.failure.reason",
+    },
+    {
+      name: "missing attempts",
+      raw: await preservationIntentRaw({
+        intent: intentWith({
+          kind: INTENT_FAILURE_RECORD.kind,
+          detail: INTENT_FAILURE_RECORD.detail,
+          atMs: INTENT_FAILURE_RECORD.atMs,
+        }),
+      }),
+      code: "missing_field",
+      path: "$.intent.failure.attempts",
+    },
+    {
+      name: "zero attempts",
+      raw: await preservationIntentRaw({
+        intent: intentWith({ ...INTENT_FAILURE_RECORD, attempts: 0 }),
+      }),
+      code: "invalid_count",
+      path: "$.intent.failure.attempts",
+    },
+    {
+      name: "empty kind",
+      raw: await preservationIntentRaw({
+        intent: intentWith({ ...INTENT_FAILURE_RECORD, kind: "" }),
+      }),
+      code: "invalid_pattern",
+      path: "$.intent.failure.kind",
+    },
+    {
+      name: "free-text detail over the bound",
+      raw: await preservationIntentRaw({
+        intent: intentWith({
+          ...INTENT_FAILURE_RECORD,
+          detail: "x".repeat(4097),
+        }),
+      }),
+      code: "bound_exceeded",
+      path: "$.intent.failure.detail",
+    },
+    {
+      name: "negative timestamp",
+      raw: await preservationIntentRaw({
+        intent: intentWith({ ...INTENT_FAILURE_RECORD, atMs: -1 }),
+      }),
+      code: "invalid_timestamp",
+      path: "$.intent.failure.atMs",
+    },
+    {
+      name: "explicit null failure",
+      raw: await preservationIntentRaw({
+        intent: intentWith(null),
+      }),
+      code: "wrong_type",
+      path: "$.intent.failure",
+    },
+  ];
+  for (const testCase of cases) {
+    expectRejected(testCase.raw, testCase.code, testCase.path, testCase.name);
+  }
+});
