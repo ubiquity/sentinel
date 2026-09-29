@@ -61,6 +61,7 @@ import { composeLocalReleaseReader } from "./local-release.ts";
 import type { ModelRouteV1 } from "./model-route.ts";
 import {
   DEFAULT_REVIEW_MODEL_ID,
+  GATEWAY_PROVIDER,
   resolveReviewModelId,
 } from "./model-route.ts";
 import {
@@ -1580,7 +1581,11 @@ export function composeLocalGitHub(input: LocalGitHubInputV1): GitHubPort {
     },
   };
   const reviewer = new CodexStructuredReviewer({
-    provider: input.route?.provider ?? DEFAULT_PROVIDER_NAME,
+    // The reviewer ALWAYS submits through the gateway provider, where the
+    // dedicated review model lives: it never follows the implementation
+    // route's provider, so a DeepSeek-direct implementation route cannot
+    // pair a gateway-only review model with the DeepSeek endpoint.
+    provider: GATEWAY_PROVIDER,
     // The dedicated review-model override selects the review model; it is
     // never the shared implementation route's model. An omitted override
     // falls back to the owner's preferred default; an explicitly invalid

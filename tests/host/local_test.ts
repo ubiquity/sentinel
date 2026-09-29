@@ -3199,11 +3199,14 @@ Deno.test(
 
       // The dedicated review model is forwarded, never the route's
       // implementation model: pointing reviews at codex-auto-review cannot
-      // hijack the implementation worker's model.
+      // hijack the implementation worker's model. The reviewer always
+      // submits through the gateway provider, never the route's provider,
+      // so a DeepSeek-direct implementation route cannot pair the
+      // gateway-only review model with the DeepSeek endpoint.
       const configured = reviewerOf(
         compose(configuredRoute, "codex-auto-review"),
       );
-      assert.equal(configured.provider, "deepseek");
+      assert.equal(configured.provider, "uos");
       assert.equal(
         configured.model,
         "codex-auto-review",
@@ -3214,7 +3217,7 @@ Deno.test(
       // never the route model: production configurations that never set the
       // variable still review on the preferred model instead of refusing.
       const unset = reviewerOf(compose(configuredRoute));
-      assert.equal(unset.provider, "deepseek");
+      assert.equal(unset.provider, "uos");
       assert.equal(
         unset.model,
         "codex-auto-review",

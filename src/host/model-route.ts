@@ -47,7 +47,7 @@ export const MODEL_ROUTE_INVALID =
   "sentinel model route rejected: environment input is not a mapping";
 
 /** The existing primary gateway route. */
-const GATEWAY_PROVIDER = "uos";
+export const GATEWAY_PROVIDER = "uos";
 const GATEWAY_BASE_URL = "https://ai.ubq.fi/v1";
 const GATEWAY_MODEL_ID = "gpt-reserve";
 /** The DeepSeek-direct fallback route. */
