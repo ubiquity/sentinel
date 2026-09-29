@@ -38,7 +38,6 @@ import {
   type RepairStateSnapshotV1,
 } from "../../src/contracts/state-snapshots.ts";
 import type { HttpTransportV1 } from "../../src/github/http.ts";
-import { REVIEW_MODEL } from "../../src/github/review-journal.ts";
 import type { ModelRouteV1 } from "../../src/host/model-route.ts";
 import { DurableGitHubCooldownGate } from "../../src/repair/github-cooldown.ts";
 import { LOOP_STOP_MARKER } from "../../src/repair/model-port.ts";
@@ -3129,7 +3128,7 @@ Deno.test(
 );
 
 Deno.test(
-  "local composition forwards the configured review model and provider to the reviewer",
+  "local composition forwards the dedicated review model (never the route model) to the reviewer",
   async () => {
     const configuredRoute: ModelRouteV1 = {
       provider: "deepseek",
@@ -3161,7 +3160,7 @@ Deno.test(
       };
       const http: HttpTransportV1 = () =>
         Promise.reject(new Error("no request in this composition test"));
-      const compose = (route?: ModelRouteV1) =>
+      const compose = (route?: ModelRouteV1, reviewModelId?: string) =>
         composeLocalGitHub({
           clock: new FakeClock(T0),
           state: new MemoryState(),
@@ -3181,6 +3180,7 @@ Deno.test(
           codexExecutable: "/usr/bin/false",
           tracker: new LocalSessionTracker(),
           route,
+          reviewModelId,
         });
       // The composed review service owns exactly the reviewer this composition
       // built; its trusted binding proves which provider/model were forwarded.
@@ -3197,46 +3197,53 @@ Deno.test(
           };
         }).reviewService.reviewer;
 
-      const configured = reviewerOf(compose(configuredRoute));
+      // The dedicated review model is forwarded, never the route's
+      // implementation model: pointing reviews at codex-auto-review cannot
+      // hijack the implementation worker's model.
+      const configured = reviewerOf(
+        compose(configuredRoute, "codex-auto-review"),
+      );
       assert.equal(configured.provider, "deepseek");
       assert.equal(
         configured.model,
-        "deepseek-flash",
-        "the route-selected model is forwarded, not the frozen default",
+        "codex-auto-review",
+        "the dedicated review model is forwarded, not the route model",
       );
 
-      // A present route whose runtime model is missing must NOT become the
-      // omitted-caller default: the reviewer is bound to a value its bounded
-      // model validation refuses at prepare, before any session opens.
-      const malformedRoute = {
-        ...configuredRoute,
-        model: undefined,
-      } as unknown as ModelRouteV1;
-      const malformed = reviewerOf(compose(malformedRoute));
-      assert.equal(malformed.provider, "deepseek");
+      // An unset review model must NOT become the route model or the frozen
+      // default: the reviewer is bound to a value its bounded model
+      // validation refuses at prepare, before any session opens.
+      const unset = reviewerOf(compose(configuredRoute));
+      assert.equal(unset.provider, "deepseek");
       assert.equal(
-        malformed.model,
+        unset.model,
         "",
-        "a present malformed route model is never replaced by the default",
+        "an unset review model is never replaced by the route model",
       );
-      const refused = await malformed.prepare({});
+      const refused = await unset.prepare({});
       assert.equal(refused.ok, false);
       if (!refused.ok) {
         assert.match(String(refused.error.detail), /review model/);
       }
 
-      // Omitted callers keep the frozen local provider and review model.
+      // An invalid review model is refused the same way.
+      const invalid = reviewerOf(compose(configuredRoute, " bad "));
+      assert.equal(invalid.model, " bad ");
+      const invalidRefused = await invalid.prepare({});
+      assert.equal(invalidRefused.ok, false);
+      if (!invalidRefused.ok) {
+        assert.match(String(invalidRefused.error.detail), /review model/);
+      }
+
+      // Omitted callers keep the gateway provider and still refuse without a
+      // review model: there is no silent review-model default.
       const fallback = reviewerOf(compose());
       assert.equal(fallback.provider, "uos");
-      assert.equal(fallback.model, REVIEW_MODEL);
+      assert.equal(fallback.model, "");
       const fallbackRefused = await fallback.prepare({});
-      assert.equal(
-        fallbackRefused.ok,
-        false,
-        "the omitted-caller default is not a malformed model refusal",
-      );
+      assert.equal(fallbackRefused.ok, false);
       if (!fallbackRefused.ok) {
-        assert.match(String(fallbackRefused.error.detail), /request identity/);
+        assert.match(String(fallbackRefused.error.detail), /review model/);
       }
     } finally {
       await Deno.remove(root, { recursive: true }).catch(() => {});

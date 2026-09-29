@@ -345,10 +345,11 @@ export interface CodexStructuredReviewerOptionsV1 {
   /** Selected provider; acknowledged by thread/start and receipt verification. */
   provider: string;
   /**
-   * Trusted route-selected review model id. Omitted callers keep the frozen
+   * Trusted dedicated review model id. Omitted callers keep the frozen
    * `REVIEW_MODEL`; when supplied it must be a bounded nonempty trimmed
    * control-free id (validated before any session opens) and every submitted,
-   * acknowledged and recorded runtime identity uses this exact value.
+   * acknowledged and recorded runtime identity uses this exact value. It is
+   * never the shared implementation route's model.
    */
   model?: string;
   /** Trusted host capability opening the app-server session for one cwd. */
@@ -1486,9 +1487,11 @@ class PreparedStructuredReview implements PreparedStructuredReviewV1 {
 export class CodexStructuredReviewer {
   private readonly provider: string;
   /**
-   * Trusted configured review model id: the trusted route's model when the
-   * caller supplies one, else the frozen `REVIEW_MODEL` default. Every
-   * submitted, acknowledged and recorded identity binds this exact value.
+   * Trusted configured review model id: the caller's dedicated review-model
+   * value (resolved from `SENTINEL_REVIEW_MODEL_ID`, never the shared
+   * implementation route's model), else the frozen `REVIEW_MODEL` default.
+   * Every submitted, acknowledged and recorded identity binds this exact
+   * value.
    */
   private readonly model: string;
   private readonly sessionCwd: string;

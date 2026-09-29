@@ -53,6 +53,16 @@ export type NextStepV1 = "work" | "review" | "delivery" | "blocked" | "done";
 export type WorkWaitReasonV1 =
   | "budget_cap"
   | "review_pending"
+  /**
+   * Explicit TRANSIENT quota-exhausted / review-unavailable state. Distinct
+   * from a terminal `blocked` record: the shared model-start quota (which also
+   * charges review requests) is exhausted, or the review transport is
+   * transiently unavailable. A record in this state keeps producing/updating
+   * its publication and is retroactively drained by the review pass when quota
+   * returns; it never terminally blocks by itself. A healthy review that has
+   * simply not posted yet keeps the ordinary bounded `review_pending` poll.
+   */
+  | "review_quota"
   | "backoff"
   | "unavailable"
   | "manual";
@@ -760,7 +770,14 @@ function parseWait(input: unknown, path: string): WorkWaitV1 {
   expectExactKeys(obj, WAIT_KEYS, path);
   const reason = expectEnum(
     obj.reason,
-    ["budget_cap", "review_pending", "backoff", "unavailable", "manual"],
+    [
+      "budget_cap",
+      "review_pending",
+      "review_quota",
+      "backoff",
+      "unavailable",
+      "manual",
+    ],
     `${path}.reason`,
   );
   const since = expectTimestamp(obj.since, `${path}.since`);

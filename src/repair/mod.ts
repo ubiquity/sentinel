@@ -13,6 +13,7 @@
 export * from "./keys.ts";
 export * from "./selection.ts";
 export * from "./transitions.ts";
+export * from "./review-gate.ts";
 export * from "./loop.ts";
 export * from "./codex-transport.ts";
 export * from "./model-port.ts";
