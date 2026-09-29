@@ -84,11 +84,17 @@ import {
 } from "./keys.ts";
 import {
   countUnfinishedPullRequests,
+  hasPublishedIdentity,
   isWaiting,
   MAX_UNFINISHED_PRS,
   rankEligibleWork,
+  rankReviewDrain,
   RETIRED_MERGED_MESSAGE,
 } from "./selection.ts";
+import {
+  authorizingReceipt,
+  MERGE_WITHOUT_REVIEW_DETAIL,
+} from "./review-gate.ts";
 import {
   advanceToCorrection,
   advanceToDelivery,
@@ -102,6 +108,7 @@ import {
   createIssueWork,
   markBlocked,
   markDone,
+  markTerminalBlocked,
   noteCandidate,
   noteExecution,
   setCandidateState,
@@ -153,16 +160,12 @@ const MAX_IMPLEMENTATION_ATTEMPTS = 4;
  */
 const MAX_REVIEW_ROUNDS = 3;
 /**
- * Total wall-clock a review may stay pending (or unobservable) for one exact
- * head before the task blocks. The baseline is the FIRST pending instant, so
- * the bound is never reset by re-arming the poll: a reviewer that never posts
- * a verdict becomes a durable classified blocker instead of an endless
- * fifteen-minute wait that also holds a capacity slot.
+ * Bounded review-drain attempts per run: the retroactive pass releases at most
+ * this many transient `review_quota` records, highest-priority/oldest first,
+ * once each per run. The shared model-start budget still bounds the actual
+ * starts; this only bounds the pass's own bookkeeping.
  */
-const REVIEW_PENDING_BUDGET_MS = 4 * 60 * 60_000;
-/** The one classified blocker for a review that spent the bounded wait. */
-const REVIEW_PENDING_BUDGET_MESSAGE =
-  "review produced no verdict within the bounded review wait";
+const MAX_REVIEW_DRAIN_PER_RUN = 8;
 const MAX_OUTPUT_LIMIT_BYTES = 4096;
 /**
  * Frozen gateway default model id. It is used ONLY when neither the trusted
@@ -418,6 +421,15 @@ export async function runRepairCycle(
   // One run-local attempt per task and legacy-loss phase: a phase is never
   // proved twice in the same run, even after a state reload.
   const legacyLossAttempted = new Set<string>();
+  // One run-local release per transient review-quota record: each iteration
+  // releases the next-highest-priority drain candidate and the ordinary
+  // lifecycle retries it, so the pass is bounded and never re-attempts the same
+  // record within one run.
+  const reviewDrainAttempted = new Set<string>();
+  // One run-local discovery per orphan publication record: an existing live PR
+  // is attached to its record BEFORE cap enforcement, so a real PR is never
+  // skipped as over-cap.
+  const orphanAttempted = new Set<string>();
   // Intake is polled exactly once per run. A deferred (cooldown or bound)
   // iteration must never re-poll the sources: subsequent loop iterations reuse
   // the run-local deferral tracking instead of repeating intake reads.
@@ -518,6 +530,54 @@ export async function runRepairCycle(
       continue;
     }
 
+    // Orphan-publication reconciliation (issue-141 / PR 433): a durable
+    // publication intent that names the deterministic branch but has not yet
+    // persisted its PR number must have the existing live PR discovered and
+    // attached BEFORE ranking so cap enforcement sees the real identity.
+    const orphan = await reconcileOrphanPublication(
+      deps,
+      context,
+      orphanAttempted,
+    );
+    if (orphan !== null) {
+      if (orphan.kind === "state_error") {
+        return { status: "state_error", detail: orphan.detail };
+      }
+      if (orphan.kind === "margin") {
+        return { status: "margin", detail: orphan.detail };
+      }
+      if (orphan.kind === "progress") {
+        didWork = true;
+        steps++;
+        continue;
+      }
+    }
+
+    // Review-drain pass (owner rule, 2026-09-29): a transient `review_quota`
+    // record keeps producing/updating its publication and must be retroactively
+    // reviewed when quota returns, oldest/highest-priority first. Releasing its
+    // wait makes the ordinary lifecycle attempt it on this iteration; if quota
+    // is still exhausted the step re-arms the same transient wait, so the pass
+    // is self-scheduling and never terminally blocks.
+    const drained = await releaseReviewQuotaWait(
+      deps,
+      context,
+      reviewDrainAttempted,
+    );
+    if (drained !== null) {
+      if (drained.kind === "state_error") {
+        return { status: "state_error", detail: drained.detail };
+      }
+      if (drained.kind === "margin") {
+        return { status: "margin", detail: drained.detail };
+      }
+      if (drained.kind === "progress") {
+        didWork = true;
+        steps++;
+        continue;
+      }
+    }
+
     const rank = rankEligibleWork(
       context.snapshot,
       deps.configs,
@@ -588,6 +648,77 @@ export async function runRepairCycle(
     didWork = true;
     steps++;
   }
+}
+
+/**
+ * Release the next transient review-quota record's wait so the ordinary
+ * ranking selects it on a following iteration. The drain order is highest
+ * priority first, then oldest first (pure `rankReviewDrain`), and each record is
+ * released at most once per run. Returns null when there is nothing left to
+ * drain or the next candidate cannot fit the remaining run bounds.
+ */
+async function releaseReviewQuotaWait(
+  deps: RepairCycleDepsV1,
+  context: LoopContextV1,
+  attempted: Set<string>,
+): Promise<StepResultV1 | null> {
+  if (attempted.size >= MAX_REVIEW_DRAIN_PER_RUN) return null;
+  for (const id of rankReviewDrain(context.snapshot)) {
+    if (attempted.has(id)) continue;
+    attempted.add(id);
+    const record = context.snapshot.work.find((work) => work.id === id);
+    if (record === undefined) continue;
+    const released = clearWait(record, deps.clock.now());
+    if (!declaredOperationFits(deps, context, released)) continue;
+    const persisted = await persistWork(deps, context, released);
+    return persisted;
+  }
+  return null;
+}
+
+/**
+ * Attach an existing live PR to a record that has a durable publication intent
+ * naming its deterministic branch but no persisted `target.pr` yet. The PR is
+ * adopted only when it is OPEN, its head is the record's exact candidate
+ * head, and its base is the configured base branch; a foreign or divergent PR
+ * is never adopted. This runs before ranking, so discovery precedes cap
+ * enforcement (issue-141 / PR 433).
+ */
+async function reconcileOrphanPublication(
+  deps: RepairCycleDepsV1,
+  context: LoopContextV1,
+  attempted: Set<string>,
+): Promise<StepResultV1 | null> {
+  for (const record of context.snapshot.work) {
+    if (record.nextStep !== "work") continue;
+    if (record.target.pr !== null) continue;
+    if (!hasPublishedIdentity(record)) continue;
+    const branch = record.target.branch;
+    const head = record.target.head;
+    if (branch === null || head === null) continue;
+    if (attempted.has(record.id)) continue;
+    attempted.add(record.id);
+    const config = configFor(deps, record.repository);
+    if (config === null) continue;
+    const found = await deps.github.findPullRequestByHeadRef(branch);
+    if (!found.ok) {
+      return { kind: "deferred", detail: "orphan PR discovery unavailable" };
+    }
+    if (
+      found.value === null || found.value.head !== head ||
+      found.value.state !== "open" ||
+      found.value.baseRef !== config.baseBranch
+    ) {
+      continue;
+    }
+    const adopted = {
+      ...record,
+      target: { ...record.target, pr: found.value.number },
+      updatedAt: deps.clock.now(),
+    };
+    return persistWork(deps, context, adopted);
+  }
+  return null;
 }
 
 /**
@@ -3201,8 +3332,12 @@ async function executePublishStep(
   // an existing PR does not open another unfinished PR — it updates the branch
   // this task already owns — so it must never be blocked by the cap (matching
   // the selection rule, which caps only records with target.pr === null).
+  // The unfinished-PR cap applies only to FRESH publications, and it MUST see
+  // the same identity the selection gate sees. A record that already holds a
+  // PR (or an in-flight publication intent that names one) is a correction or
+  // recovery of its own existing publication and never counts as a new one.
   const openPrs = countUnfinishedPullRequests(context.snapshot.work);
-  if (record.target.pr === null && openPrs >= MAX_UNFINISHED_PRS) {
+  if (!hasPublishedIdentity(record) && openPrs >= MAX_UNFINISHED_PRS) {
     return persistWork(
       deps,
       context,
@@ -3247,7 +3382,7 @@ async function executePublishStep(
       return persistWork(
         deps,
         context,
-        markBlocked(
+        markTerminalBlocked(
           record,
           "other",
           "candidate branch ref identity mismatch",
@@ -3259,7 +3394,7 @@ async function executePublishStep(
       return persistWork(
         deps,
         context,
-        markBlocked(
+        markTerminalBlocked(
           record,
           "other",
           "published candidate ref is missing",
@@ -3487,7 +3622,7 @@ async function createPullRequestFor(
     return persistWork(
       deps,
       context,
-      markBlocked(
+      markTerminalBlocked(
         record,
         "other",
         "PR publication identity mismatch",
@@ -3744,12 +3879,15 @@ async function requestReviewFor(
     purpose: "review_request",
   });
   if (reservation.status === "deferred") {
+    // Quota exhaustion is the explicit TRANSIENT state, never a terminal
+    // block: the record keeps its publication and the review-drain pass
+    // retries it (oldest/highest-priority first) when the budget returns.
     return persistWork(
       deps,
       context,
       setWait(
         record,
-        { reason: "budget_cap", since: now, until: reservation.retryAt },
+        { reason: "review_quota", since: now, until: reservation.retryAt },
         now,
       ),
     );
@@ -3760,10 +3898,11 @@ async function requestReviewFor(
   ) {
     // The same review identity was already admitted and settled, but its
     // operation intent is gone: a state contradiction, never a re-invocation.
+    // The publication identity is dead, so the block clears it.
     return persistWork(
       deps,
       context,
-      markBlocked(
+      markTerminalBlocked(
         record,
         "unavailable",
         "review admission already settled without an intent",
@@ -3775,7 +3914,7 @@ async function requestReviewFor(
     return persistWork(
       deps,
       context,
-      markBlocked(
+      markTerminalBlocked(
         record,
         "unavailable",
         `review admission refused: ${reservation.status}`,
@@ -3793,7 +3932,11 @@ async function requestReviewFor(
       context,
       setWait(
         record,
-        { reason: "unavailable", since: now, until: null },
+        {
+          reason: "review_quota",
+          since: now,
+          until: now + REVIEW_POLL_MS,
+        },
         now,
       ),
     );
@@ -4066,7 +4209,7 @@ async function reconcilePublishIntent(
         return persistWork(
           deps,
           context,
-          markBlocked(
+          markTerminalBlocked(
             record,
             "other",
             "published candidate ref is missing",
@@ -4092,7 +4235,7 @@ async function reconcilePublishIntent(
       return persistWork(
         deps,
         context,
-        markBlocked(
+        markTerminalBlocked(
           record,
           "other",
           "candidate branch ref identity mismatch",
@@ -4142,6 +4285,18 @@ async function reconcilePublishIntent(
       );
     }
     if (pr.value !== null && pr.value.head === intent.expectedHead) {
+      if (pr.value.baseRef !== config.baseBranch) {
+        return persistWork(
+          deps,
+          context,
+          markTerminalBlocked(
+            record,
+            "other",
+            "PR base identity mismatch",
+            now,
+          ),
+        );
+      }
       const updated = clearIntent(
         { ...record, target: { ...record.target, pr: pr.value.number } },
         now,
@@ -4152,7 +4307,7 @@ async function reconcilePublishIntent(
       return persistWork(
         deps,
         context,
-        markBlocked(
+        markTerminalBlocked(
           record,
           "other",
           "PR head identity mismatch",
@@ -4206,6 +4361,25 @@ async function reconcilePublishIntent(
         kind: "state_error",
         detail: "work record missing after review reconciliation",
       };
+    }
+    // The exact PR this review intent names is observed BEFORE the identity is
+    // resurrected. A closed-unmerged own PR can never produce a verdict, so the
+    // intent is cleared and the publication retired in ONE transition: the next
+    // run re-publishes the preserved candidate instead of re-arming the dead PR
+    // (the issue-140 livelock, where a closed PR recorded only in intent.pr was
+    // re-adopted on every run).
+    const dead = await deps.github.readPullRequest(prNumber);
+    if (
+      dead.ok && dead.value !== null &&
+      dead.value.headRef === candidateBranch(current.id) &&
+      dead.value.head === head &&
+      dead.value.state === "closed" && dead.value.mergeSha === null
+    ) {
+      return persistWork(
+        deps,
+        afterSettlement,
+        clearIntent(retireClosedPublication(current, now, "work"), now),
+      );
     }
     const withPr = {
       ...current,
@@ -4271,61 +4445,47 @@ async function observeReview(
     if (pull.value.state === "closed" && pull.value.mergeSha === null) {
       // The review phase has no pull request to review: the record returns to
       // work so the next publish step creates the replacement for the same
-      // preserved candidate.
+      // preserved candidate. The dead review intent is cleared IN THE SAME
+      // transition: without it, intent.pr would resurrect the closed PR on the
+      // next run and the reconcile -> review -> retire cycle would spin (the
+      // issue-140 livelock).
       return persistWork(
         deps,
         context,
-        retireClosedPublication(record, now, "work"),
+        clearIntent(retireClosedPublication(record, now, "work"), now),
       );
     }
     if (pull.value.state === "merged") {
       return persistWork(
         deps,
         context,
-        markBlocked(record, "other", RETIRED_MERGED_MESSAGE, now),
+        markTerminalBlocked(record, "other", RETIRED_MERGED_MESSAGE, now),
       );
     }
   }
   const observed = await observeStandingReview(deps, record, pr, head);
   if (!observed.ok) {
+    // A failed observation is TRANSIENT review unavailability (transport
+    // hiccup, rate limit, quota), never a terminal failure: it re-arms the
+    // explicit review-quota wait and is retroactively drained later. Only a
+    // bound terminal disposition WITHOUT an accepted verdict (below) may
+    // terminally block.
     const since = reviewWaitSince(record, now);
-    if (now - since >= REVIEW_PENDING_BUDGET_MS) {
-      return persistWork(
-        deps,
-        context,
-        markBlocked(
-          record,
-          "unavailable",
-          REVIEW_PENDING_BUDGET_MESSAGE,
-          now,
-        ),
-      );
-    }
     return persistWork(
       deps,
       context,
       setWait(
         record,
-        { reason: "unavailable", since, until: now + REVIEW_POLL_MS },
+        { reason: "review_quota", since, until: now + REVIEW_POLL_MS },
         now,
       ),
     );
   }
   const value = observed.value.observation;
   if (value.status === "pending") {
+    // A healthy review that simply has not posted yet stays on the ordinary
+    // bounded poll; it is transient and never blocks by itself.
     const since = reviewWaitSince(record, now);
-    if (now - since >= REVIEW_PENDING_BUDGET_MS) {
-      return persistWork(
-        deps,
-        context,
-        markBlocked(
-          record,
-          "unavailable",
-          REVIEW_PENDING_BUDGET_MESSAGE,
-          now,
-        ),
-      );
-    }
     return persistWork(
       deps,
       context,
@@ -4346,26 +4506,16 @@ async function observeReview(
     // previously indistinguishable here, so a terminal disposition was polled
     // forever and the task could never move again.
     if (value.completedAt === null) {
+      // Non-terminal unavailability is transient: keep the explicit
+      // review-quota state and let the drain pass retry it when quota returns.
       const since = reviewWaitSince(record, now);
-      if (now - since >= REVIEW_PENDING_BUDGET_MS) {
-        return persistWork(
-          deps,
-          context,
-          markBlocked(
-            record,
-            "unavailable",
-            REVIEW_PENDING_BUDGET_MESSAGE,
-            now,
-          ),
-        );
-      }
       return persistWork(
         deps,
         context,
         setWait(
           record,
           {
-            reason: "review_pending",
+            reason: "review_quota",
             since,
             until: Math.max(now, since) + REVIEW_POLL_MS,
           },
@@ -4480,7 +4630,11 @@ async function recoverFromNoVerdictReview(
     deps,
     context,
     markBlocked(
-      record,
+      // The exhausted review request is dead, so its residual intent is
+      // cleared; the published PR identity is deliberately retained because a
+      // trusted supervisor can still deliver the retained receipt or grant one
+      // fresh review round, and the cap no longer counts any blocked record.
+      clearIntent(record, now),
       "review_quota",
       `review rounds exhausted without an accepted verdict (${
         boundedReviewReason(value.summary)
@@ -4803,7 +4957,7 @@ function failBaseRefresh(
       deps,
       context,
       clearIntent(
-        markBlocked(
+        markTerminalBlocked(
           record,
           "other",
           `base refresh failed ${attempts} consecutive times: ${failure.kind} ${failure.detail}`,
@@ -4920,7 +5074,7 @@ async function executeBaseRefreshIntent(
         deps,
         context,
         clearIntent(
-          markBlocked(record, "other", RETIRED_MERGED_MESSAGE, at),
+          markTerminalBlocked(record, "other", RETIRED_MERGED_MESSAGE, at),
           at,
         ),
       );
@@ -4967,7 +5121,7 @@ async function executeBaseRefreshIntent(
       return persistWork(
         deps,
         context,
-        markBlocked(
+        markTerminalBlocked(
           clearIntent(record, at),
           "other",
           "base refresh has conflicts",
@@ -5232,13 +5386,29 @@ async function executeMerge(
     return { kind: "deferred", detail: cooling.detail };
   }
   const config = configFor(deps, record.repository);
-  const receipt = context.snapshot.reviews.find((review) =>
+  // HARD INVARIANT: nothing merges without a passing review. Find a durable
+  // completed receipt for this exact PR/head, then require the strict
+  // authorization predicate (exact repository/PR/head/base, trusted reviewer,
+  // zero uncounted findings, no unresolved P0/P1). A completed-but-unclean
+  // receipt is authoritative disposition, never a blind resubmission.
+  const completed = context.snapshot.reviews.find((review) =>
     review.pullRequest.number === record.target.pr &&
     review.pullRequest.head === record.target.head &&
     review.outcome === "completed"
   );
-  if (config === null || receipt === undefined || receipt === null) {
-    return { kind: "state_error", detail: "merge without accepted review" };
+  if (config === null || completed === undefined) {
+    return { kind: "state_error", detail: MERGE_WITHOUT_REVIEW_DETAIL };
+  }
+  const receipt = authorizingReceipt(
+    [completed],
+    record,
+    deps.github.reviewerIdentity,
+  );
+  if (receipt === null) {
+    // A durable completed verdict exists but does not authorize this exact
+    // merge (base drift, unresolved P0/P1, uncounted findings, untrusted
+    // reviewer). Never resubmit or merge: surface the state contradiction.
+    return { kind: "state_error", detail: MERGE_WITHOUT_REVIEW_DETAIL };
   }
   let mergeRequest;
   try {
@@ -5326,7 +5496,7 @@ async function handleMergeOutcome(
       return persistWork(
         deps,
         context,
-        markBlocked(
+        markTerminalBlocked(
           cleared,
           "other",
           "release request identity invalid",
@@ -5431,7 +5601,7 @@ async function reconcileMergeIntent(
       return persistWork(
         deps,
         context,
-        markBlocked(
+        markTerminalBlocked(
           record,
           "other",
           "observed merged head identity mismatch",
@@ -5449,7 +5619,7 @@ async function reconcileMergeIntent(
     return persistWork(
       deps,
       context,
-      markBlocked(
+      markTerminalBlocked(
         record,
         "other",
         "pull request closed before merge",
@@ -5692,7 +5862,7 @@ function blockRelease(
   return persistWork(
     deps,
     context,
-    markBlocked(record, "other", `release ${phase}`, now),
+    markTerminalBlocked(record, "other", `release ${phase}`, now),
   );
 }
 

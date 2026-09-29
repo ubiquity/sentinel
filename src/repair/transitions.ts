@@ -474,6 +474,30 @@ export function markBlocked(
   });
 }
 
+/**
+ * Terminal block with a dead publication identity. Exactly like `markBlocked`
+ * but additionally clears the stale `target.pr`, so a parked record no longer
+ * looks like an unfinished pull request to any capacity view. The candidate
+ * head/base/branch, counters, evidence and reviews are preserved for audit.
+ */
+export function markTerminalBlocked(
+  record: WorkRecordV1,
+  kind: BlockerKindV1,
+  message: string,
+  now: number,
+): WorkRecordV1 {
+  const blocker: WorkBlockerV1 = { kind, message, since: now };
+  return expectWork({
+    ...record,
+    nextStep: "blocked",
+    blocker,
+    wait: null,
+    intent: null,
+    target: { ...record.target, pr: null },
+    updatedAt: now,
+  });
+}
+
 /** Terminal. A done record never moves again; all transitions reject it. */
 export function markDone(record: WorkRecordV1, now: number): WorkRecordV1 {
   return expectWork({

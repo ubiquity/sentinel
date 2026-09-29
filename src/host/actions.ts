@@ -15,7 +15,10 @@
  * ONCE here through the trusted route resolver: the UOS gateway stays primary
  * and the DeepSeek-direct route is used only when an explicit override or the
  * explicit fallback selector (with its key present) selects it. The route's
- * model id is what the runtime requests and records.
+ * model id is what the runtime requests and records. The structured-review
+ * model is resolved EXACTLY ONCE alongside it through the dedicated review
+ * override (`SENTINEL_REVIEW_MODEL_ID`): it is never the route's model, so
+ * reviews cannot hijack the implementation worker's model.
  */
 
 import { isGitSha } from "../contracts/brands.ts";
@@ -66,7 +69,7 @@ import {
   STATIC_TARGETS_EMPTY,
 } from "./targets.ts";
 import { createRepairStateStore, DenoGitRunner } from "../state/mod.ts";
-import { resolveModelRoute } from "./model-route.ts";
+import { resolveModelRoute, resolveReviewModelId } from "./model-route.ts";
 import {
   composeLocalGitHub,
   createLocalRepositoryConfig,
@@ -343,11 +346,17 @@ export async function runActionsRepairHost(): Promise<
   // its key present, else the primary gateway); it is never a per-request
   // swap, and the resolved model id is the id the runtime requests and records.
   const modelRoute = resolveModelRoute(Deno.env.toObject());
+  // The dedicated structured-review model override is resolved EXACTLY ONCE
+  // here alongside the route: an unset or blank value yields the owner's
+  // preferred default (`codex-auto-review`); a declared-but-invalid value
+  // yields the invalid empty sentinel, which the reviewer refuses at prepare.
+  const reviewModelId = resolveReviewModelId(Deno.env.toObject());
   console.log(JSON.stringify({
     kind: "sentinel_model_route",
     provider: modelRoute.provider,
     model: modelRoute.model,
     baseUrl: modelRoute.baseUrl,
+    reviewModel: reviewModelId,
   }));
 
   const githubToken = requireEnv("GITHUB_TOKEN");
@@ -588,6 +597,7 @@ export async function runActionsRepairHost(): Promise<
       ensureCandidateObjects: candidatesFor(config).ensure,
       modelBaseUrl: modelRoute.baseUrl,
       route: modelRoute,
+      reviewModelId,
       repository: config.repository,
       baseBranch: config.baseBranch,
     }));

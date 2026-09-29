@@ -77,6 +77,7 @@ export const HOSTED_RUNTIME_CHILD_ENV_KEYS = [
   "SENTINEL_MODEL_BASE_URL",
   "SENTINEL_MODEL_ID",
   "SENTINEL_MODEL_FALLBACK",
+  "SENTINEL_REVIEW_MODEL_ID",
   "SENTINEL_DEEPSEEK_API_KEY",
   // Explicit development switch for the durable GitHub cooldown gates; it
   // crosses only when the launcher was given a non-empty value.
@@ -682,6 +683,7 @@ function buildChildEnvironment(
     "SENTINEL_MODEL_BASE_URL",
     "SENTINEL_MODEL_ID",
     "SENTINEL_MODEL_FALLBACK",
+    "SENTINEL_REVIEW_MODEL_ID",
     "SENTINEL_DEEPSEEK_API_KEY",
     "SENTINEL_COOLDOWN_MODE",
   ] as const;
@@ -862,6 +864,7 @@ export async function runHostedRuntimeMain(): Promise<
       SENTINEL_MODEL_BASE_URL: Deno.env.get("SENTINEL_MODEL_BASE_URL"),
       SENTINEL_MODEL_ID: Deno.env.get("SENTINEL_MODEL_ID"),
       SENTINEL_MODEL_FALLBACK: Deno.env.get("SENTINEL_MODEL_FALLBACK"),
+      SENTINEL_REVIEW_MODEL_ID: Deno.env.get("SENTINEL_REVIEW_MODEL_ID"),
       SENTINEL_DEEPSEEK_API_KEY: Deno.env.get("SENTINEL_DEEPSEEK_API_KEY"),
       UOS_AI_TOKEN: Deno.env.get("UOS_AI_TOKEN"),
     };
