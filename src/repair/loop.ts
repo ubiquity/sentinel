@@ -679,9 +679,10 @@ async function releaseReviewQuotaWait(
 /**
  * Attach an existing live PR to a record that has a durable publication intent
  * naming its deterministic branch but no persisted `target.pr` yet. The PR is
- * adopted only when it is OPEN and its head is the record's exact candidate
- * head; a foreign or divergent PR is never adopted. This runs before ranking,
- * so discovery precedes cap enforcement (issue-141 / PR 433).
+ * adopted only when it is OPEN, its head is the record's exact candidate
+ * head, and its base is the configured base branch; a foreign or divergent PR
+ * is never adopted. This runs before ranking, so discovery precedes cap
+ * enforcement (issue-141 / PR 433).
  */
 async function reconcileOrphanPublication(
   deps: RepairCycleDepsV1,
@@ -697,13 +698,16 @@ async function reconcileOrphanPublication(
     if (branch === null || head === null) continue;
     if (attempted.has(record.id)) continue;
     attempted.add(record.id);
+    const config = configFor(deps, record.repository);
+    if (config === null) continue;
     const found = await deps.github.findPullRequestByHeadRef(branch);
     if (!found.ok) {
       return { kind: "deferred", detail: "orphan PR discovery unavailable" };
     }
     if (
       found.value === null || found.value.head !== head ||
-      found.value.state !== "open"
+      found.value.state !== "open" ||
+      found.value.baseRef !== config.baseBranch
     ) {
       continue;
     }
@@ -4281,6 +4285,18 @@ async function reconcilePublishIntent(
       );
     }
     if (pr.value !== null && pr.value.head === intent.expectedHead) {
+      if (pr.value.baseRef !== config.baseBranch) {
+        return persistWork(
+          deps,
+          context,
+          markTerminalBlocked(
+            record,
+            "other",
+            "PR base identity mismatch",
+            now,
+          ),
+        );
+      }
       const updated = clearIntent(
         { ...record, target: { ...record.target, pr: pr.value.number } },
         now,

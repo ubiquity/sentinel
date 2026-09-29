@@ -6963,3 +6963,77 @@ Deno.test(
     }
   },
 );
+
+Deno.test(
+  "orphan PR with a foreign base is not adopted even at the exact head",
+  async () => {
+    const taskId = asWorkItemId("issue-142");
+    const branch = candidateBranch(taskId);
+    const foreignPr = {
+      ...exactOpenPr(9, SHA3, branch),
+      baseRef: "main",
+    };
+    const rig = await makeRig("orphan-foreign-base", {
+      summaries: false,
+      github: {
+        candidateLifecycle: {
+          ...positiveLifecycle(),
+          refs: { [`refs/heads/${branch}`]: SHA3 },
+          pullRequests: [foreignPr],
+        },
+      },
+    });
+    try {
+      const orphan = workRecord("issue-142", {
+        source: { kind: "issue", id: "142", revision: SHA1 },
+        related: { incidentId: null, issueNumber: 142 },
+        target: {
+          base: SHA1,
+          branch,
+          checkpoint: null,
+          head: SHA3,
+          pr: null,
+        },
+        nextStep: "work",
+        intent: {
+          kind: "pull_request",
+          key: `pr:${SHA3}`,
+          startedAt: T0,
+          branch,
+          expectedHead: SHA3,
+          observedBase: SHA1,
+          pr: null,
+          requestId: null,
+          resultId: null,
+        },
+      });
+      const seeded = await rig.store.writeRepair(
+        seededSnapshot([orphan]),
+        null,
+      );
+      assert.ok(seeded.ok && seeded.value.status === "applied");
+
+      await rig.run();
+      const state = await rig.snapshot();
+      const record = state.work.find((work) => work.id === "issue-142");
+      assert.ok(record, "the orphan record still exists");
+      assert.equal(
+        record?.target.pr,
+        null,
+        "the foreign-base PR is never adopted at the exact head",
+      );
+      assert.equal(
+        record?.nextStep,
+        "blocked",
+        "the foreign publication terminally blocks instead of cycling",
+      );
+      assert.equal(
+        record?.blocker?.message,
+        "PR base identity mismatch",
+        "the blocker names the base identity mismatch",
+      );
+    } finally {
+      await rig.ctx.cleanup();
+    }
+  },
+);
