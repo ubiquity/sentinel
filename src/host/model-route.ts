@@ -182,6 +182,9 @@ export function resolveModelRoute(
   return gatewayRoute();
 }
 
+/** The review model used when `SENTINEL_REVIEW_MODEL_ID` is unset or blank. */
+export const DEFAULT_REVIEW_MODEL_ID = "codex-auto-review";
+
 /**
  * Resolve the dedicated structured-review model id from the trusted
  * environment mapping.
@@ -191,9 +194,13 @@ export function resolveModelRoute(
  * submits (the owner's preferred review route, `codex-auto-review` on the
  * gateway endpoint) while implementation keeps its own route-selected model.
  * A declared value must satisfy the same bounded model-id contract as the
- * route resolver; an unset, empty or invalid value yields the invalid empty
- * sentinel, which the structured reviewer refuses at prepare before any
- * session opens — reviews never silently run on the implementation model.
+ * route resolver. An unset, empty or blank value yields the owner's preferred
+ * default (`codex-auto-review`), so a production configuration that never
+ * sets the variable still reviews on the preferred model instead of
+ * refusing; a declared-but-invalid value (padded, over-long or carrying
+ * control characters) yields the invalid empty sentinel, which the
+ * structured reviewer refuses at prepare before any session opens — reviews
+ * never silently run on the implementation model.
  *
  * Pure and total like `resolveModelRoute`: a malformed mapping (not an
  * object) is the one fail-closed refusal.
@@ -205,7 +212,10 @@ export function resolveReviewModelId(
     throw new Error(MODEL_ROUTE_INVALID);
   }
   const declaredModelId = declared(env, REVIEW_MODEL_ID_ENV);
-  if (declaredModelId === null || !isBoundedModelId(declaredModelId)) {
+  if (declaredModelId === null || declaredModelId.trim().length === 0) {
+    return DEFAULT_REVIEW_MODEL_ID;
+  }
+  if (!isBoundedModelId(declaredModelId)) {
     return "";
   }
   return declaredModelId;

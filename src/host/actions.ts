@@ -347,8 +347,9 @@ export async function runActionsRepairHost(): Promise<
   // swap, and the resolved model id is the id the runtime requests and records.
   const modelRoute = resolveModelRoute(Deno.env.toObject());
   // The dedicated structured-review model override is resolved EXACTLY ONCE
-  // here alongside the route: an unset or invalid value yields the invalid
-  // empty sentinel, which the reviewer refuses at prepare.
+  // here alongside the route: an unset or blank value yields the owner's
+  // preferred default (`codex-auto-review`); a declared-but-invalid value
+  // yields the invalid empty sentinel, which the reviewer refuses at prepare.
   const reviewModelId = resolveReviewModelId(Deno.env.toObject());
   console.log(JSON.stringify({
     kind: "sentinel_model_route",

@@ -3210,21 +3210,16 @@ Deno.test(
         "the dedicated review model is forwarded, not the route model",
       );
 
-      // An unset review model must NOT become the route model or the frozen
-      // default: the reviewer is bound to a value its bounded model
-      // validation refuses at prepare, before any session opens.
+      // An unset review model falls back to the owner's preferred default,
+      // never the route model: production configurations that never set the
+      // variable still review on the preferred model instead of refusing.
       const unset = reviewerOf(compose(configuredRoute));
       assert.equal(unset.provider, "deepseek");
       assert.equal(
         unset.model,
-        "",
-        "an unset review model is never replaced by the route model",
+        "codex-auto-review",
+        "an unset review model uses the preferred default, not the route model",
       );
-      const refused = await unset.prepare({});
-      assert.equal(refused.ok, false);
-      if (!refused.ok) {
-        assert.match(String(refused.error.detail), /review model/);
-      }
 
       // An invalid review model is refused the same way.
       const invalid = reviewerOf(compose(configuredRoute, " bad "));
@@ -3235,16 +3230,12 @@ Deno.test(
         assert.match(String(invalidRefused.error.detail), /review model/);
       }
 
-      // Omitted callers keep the gateway provider and still refuse without a
-      // review model: there is no silent review-model default.
+      // Omitted callers keep the gateway provider and the owner's preferred
+      // review default: the reviewer never runs on the implementation model
+      // and never refuses for lack of an explicit review model.
       const fallback = reviewerOf(compose());
       assert.equal(fallback.provider, "uos");
-      assert.equal(fallback.model, "");
-      const fallbackRefused = await fallback.prepare({});
-      assert.equal(fallbackRefused.ok, false);
-      if (!fallbackRefused.ok) {
-        assert.match(String(fallbackRefused.error.detail), /review model/);
-      }
+      assert.equal(fallback.model, "codex-auto-review");
     } finally {
       await Deno.remove(root, { recursive: true }).catch(() => {});
     }

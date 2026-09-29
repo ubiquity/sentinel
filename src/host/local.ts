@@ -59,7 +59,10 @@ import type { WorkRecordV1 } from "../contracts/work-record.ts";
 import { createRepairStateStore } from "../state/mod.ts";
 import { composeLocalReleaseReader } from "./local-release.ts";
 import type { ModelRouteV1 } from "./model-route.ts";
-import { resolveReviewModelId } from "./model-route.ts";
+import {
+  DEFAULT_REVIEW_MODEL_ID,
+  resolveReviewModelId,
+} from "./model-route.ts";
 import {
   earliestRetryAt,
   HOUR_WINDOW_MS,
@@ -181,9 +184,10 @@ export interface LocalRepairHostOptionsV1 {
   modelId?: string;
   /**
    * Dedicated structured-review model id for this run. It is never the
-   * implementation model: an absent or malformed value yields the invalid
-   * empty sentinel, which the reviewer refuses at prepare before any session
-   * opens.
+   * implementation model: an absent value falls back to the owner's
+   * preferred default (`codex-auto-review`); a malformed value yields the
+   * invalid empty sentinel, which the reviewer refuses at prepare before
+   * any session opens.
    */
   reviewModelId?: string;
 }
@@ -1578,10 +1582,11 @@ export function composeLocalGitHub(input: LocalGitHubInputV1): GitHubPort {
   const reviewer = new CodexStructuredReviewer({
     provider: input.route?.provider ?? DEFAULT_PROVIDER_NAME,
     // The dedicated review-model override selects the review model; it is
-    // never the shared implementation route's model. An unset or invalid
-    // override is the invalid empty sentinel the reviewer refuses at prepare,
+    // never the shared implementation route's model. An omitted override
+    // falls back to the owner's preferred default; an explicitly invalid
+    // value is the invalid empty sentinel the reviewer refuses at prepare,
     // never silently replaced by the route model or the frozen default.
-    model: input.reviewModelId ?? "",
+    model: input.reviewModelId ?? DEFAULT_REVIEW_MODEL_ID,
     sessionCwd: input.reviewCheckout,
     permissionProfile: "sentinel-review",
     openSession: ({ cwd }) =>

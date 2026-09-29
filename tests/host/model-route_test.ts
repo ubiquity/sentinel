@@ -256,24 +256,34 @@ Deno.test("review model: a declared override is used verbatim", () => {
     }),
     "codex-auto-review",
   );
-  // Unrelated environment changes nothing.
+  // Unrelated environment changes nothing: the owner's preferred default.
   assert.equal(
     resolveReviewModelId({ PATH: "/usr/bin", UOS_AI_TOKEN: "gateway-token" }),
-    "",
+    "codex-auto-review",
   );
 });
 
-Deno.test("review model: unset or invalid yields the empty refusal sentinel", () => {
-  // Unset and completely empty count as unset.
-  assert.equal(resolveReviewModelId({}), "");
-  assert.equal(resolveReviewModelId({ SENTINEL_REVIEW_MODEL_ID: "" }), "");
-  // A padded, blank, over-long or control-character value is invalid: it
-  // never fabricates a review model.
+Deno.test("review model: unset or blank yields the preferred default", () => {
+  // Unset, completely empty and blank count as unset: the reviewer runs on
+  // the owner's preferred model instead of refusing.
+  assert.equal(resolveReviewModelId({}), "codex-auto-review");
+  assert.equal(
+    resolveReviewModelId({ SENTINEL_REVIEW_MODEL_ID: "" }),
+    "codex-auto-review",
+  );
+  assert.equal(
+    resolveReviewModelId({ SENTINEL_REVIEW_MODEL_ID: "   " }),
+    "codex-auto-review",
+  );
+});
+
+Deno.test("review model: a declared-but-invalid value refuses", () => {
+  // A padded, over-long or control-character value is invalid: it never
+  // fabricates a review model.
   for (
     const modelId of [
       " codex-auto-review",
       "codex-auto-review ",
-      "   ",
       "codex\nreview",
       `codex_${"x".repeat(300)}`,
     ]
