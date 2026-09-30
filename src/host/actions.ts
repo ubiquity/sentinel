@@ -69,7 +69,11 @@ import {
   STATIC_TARGETS_EMPTY,
 } from "./targets.ts";
 import { createRepairStateStore, DenoGitRunner } from "../state/mod.ts";
-import { resolveModelRoute, resolveReviewModelId } from "./model-route.ts";
+import {
+  GATEWAY_BASE_URL,
+  resolveModelRoute,
+  resolveReviewModelId,
+} from "./model-route.ts";
 import {
   composeLocalGitHub,
   createLocalRepositoryConfig,
@@ -363,9 +367,13 @@ export async function runActionsRepairHost(): Promise<
   const appToken = optionalEnv("SENTINEL_SUPERVISOR_TOKEN");
   // The model token is the route's key when the route names a key environment
   // (read through the existing --allow-env mechanism), else the existing
-  // gateway token.
+  // gateway token. The review client ALWAYS uses the gateway token: it is
+  // gateway-bound independently of the implementation route, so a
+  // DeepSeek-direct implementation route never pairs the gateway-only review
+  // model with the DeepSeek endpoint or key.
+  const gatewayToken = requireEnv("UOS_AI_TOKEN");
   const modelToken = modelRoute.apiKeyEnv === null
-    ? requireEnv("UOS_AI_TOKEN")
+    ? gatewayToken
     : requireEnv(modelRoute.apiKeyEnv);
   const trustedPath = requireEnv("PATH");
   // Every code-change write goes through the App token when the workflow
@@ -475,16 +483,21 @@ export async function runActionsRepairHost(): Promise<
         `${config.repository.owner}-${config.repository.name}`,
       );
 
+  // The review client is configured independently of the implementation
+  // route: always the gateway provider and endpoint with the gateway token,
+  // so the gateway-bound structured reviewer never meets a DeepSeek-direct
+  // client config on the fallback path. The implementation route above is
+  // untouched.
   await ensureReviewClient({
     reviewCheckout,
     reviewClientHome,
     reviewTmpDir,
     reviewDenoDir,
-    token: modelToken,
+    token: gatewayToken,
     codexExecutable,
     denoExecutable,
     trustedPath,
-    route: modelRoute,
+    baseUrl: GATEWAY_BASE_URL,
   });
 
   const tracker = new LocalSessionTracker();

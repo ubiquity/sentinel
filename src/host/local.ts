@@ -2759,24 +2759,28 @@ export async function ensureTaskClient(input: {
   );
 }
 
-/** Isolated read-only review client home, token file and profile config. */
+/**
+ * Isolated read-only review client home, token file and profile config.
+ *
+ * The review client is ALWAYS bound to the gateway provider: the structured
+ * reviewer submits through `GATEWAY_PROVIDER` with the dedicated review model,
+ * so the generated config names the gateway provider and never follows the
+ * implementation route (a DeepSeek-direct implementation route must not pair
+ * the gateway-only review model with the DeepSeek endpoint). Callers pass the
+ * gateway token and, for the hosted path, the gateway endpoint override;
+ * omitted callers keep the local loopback gateway default.
+ */
 export async function ensureReviewClient(input: {
   reviewCheckout: string;
   reviewClientHome: string;
   reviewTmpDir: string;
   reviewDenoDir: string;
-  /** The route's key, written to the private client token file. */
+  /** The gateway token, written to the private client token file. */
   token: string;
   codexExecutable: string;
   denoExecutable: string;
   trustedPath: string;
-  /**
-   * Trusted route selection: the generated review client config names this
-   * route's provider and endpoint (the reviewer submits the same provider).
-   * Omitted callers keep the local gateway default.
-   */
-  route?: ModelRouteV1;
-  /** Explicit endpoint override; omitted callers use the route's base URL. */
+  /** Explicit endpoint override; omitted callers keep the loopback default. */
   baseUrl?: string;
 }): Promise<void> {
   await ensurePrivateDir(input.reviewCheckout);
@@ -2798,8 +2802,8 @@ export async function ensureReviewClient(input: {
       codexDistributionDir: codexDistributionDir(input.codexExecutable),
       denoExecutable: input.denoExecutable,
       writeGrants: [],
-      baseUrl: input.baseUrl ?? input.route?.baseUrl,
-      providerName: input.route?.provider,
+      baseUrl: input.baseUrl,
+      providerName: GATEWAY_PROVIDER,
     }),
   );
 }
