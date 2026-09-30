@@ -7,6 +7,7 @@ import {
   createLocalCandidateLoader,
   createLocalRepositoryConfig,
   ensureBareStateRepository,
+  ensureReviewClient,
   ensureTaskCheckout,
   finalizeLocalModelResult,
   localCheckoutKey,
@@ -39,6 +40,7 @@ import {
 } from "../../src/contracts/state-snapshots.ts";
 import type { HttpTransportV1 } from "../../src/github/http.ts";
 import type { ModelRouteV1 } from "../../src/host/model-route.ts";
+import { GATEWAY_BASE_URL } from "../../src/host/model-route.ts";
 import { DurableGitHubCooldownGate } from "../../src/repair/github-cooldown.ts";
 import { LOOP_STOP_MARKER } from "../../src/repair/model-port.ts";
 import { FakeClock, FakeGithub, MemoryState } from "../repair/helpers.ts";
@@ -3239,6 +3241,57 @@ Deno.test(
       const fallback = reviewerOf(compose());
       assert.equal(fallback.provider, "uos");
       assert.equal(fallback.model, "codex-auto-review");
+    } finally {
+      await Deno.remove(root, { recursive: true }).catch(() => {});
+    }
+  },
+);
+
+Deno.test(
+  "review client is always gateway-bound, independent of the implementation route",
+  async () => {
+    const root = await Deno.makeTempDir({ prefix: "sentinel-review-client-" });
+    try {
+      // The hosted call site binds the review client to the gateway endpoint
+      // with the gateway token; the implementation route is never passed.
+      await ensureReviewClient({
+        reviewCheckout: `${root}/checkout`,
+        reviewClientHome: `${root}/home`,
+        reviewTmpDir: `${root}/tmp`,
+        reviewDenoDir: `${root}/deno`,
+        token: "gateway-token",
+        codexExecutable: "/usr/local/bin/codex",
+        denoExecutable: "/usr/local/bin/deno",
+        trustedPath: "/usr/bin:/bin",
+        baseUrl: GATEWAY_BASE_URL,
+      });
+      const config = await Deno.readTextFile(`${root}/home/config.toml`);
+      assert.match(config, /model_provider = "uos"/);
+      assert.match(config, /\[model_providers\.uos\]/);
+      assert.ok(
+        config.includes(`base_url = "${GATEWAY_BASE_URL}"`),
+        "review client points at the gateway endpoint",
+      );
+      // No implementation-route provider can leak into the review config.
+      assert.doesNotMatch(config, /deepseek/);
+      const token = await Deno.readTextFile(`${root}/home/model.token`);
+      assert.equal(token, "gateway-token");
+
+      // Omitted callers keep the loopback gateway default with the gateway
+      // provider: the local path never inherits a foreign route either.
+      await ensureReviewClient({
+        reviewCheckout: `${root}/checkout2`,
+        reviewClientHome: `${root}/home2`,
+        reviewTmpDir: `${root}/tmp2`,
+        reviewDenoDir: `${root}/deno2`,
+        token: "gateway-token",
+        codexExecutable: "/usr/local/bin/codex",
+        denoExecutable: "/usr/local/bin/deno",
+        trustedPath: "/usr/bin:/bin",
+      });
+      const localConfig = await Deno.readTextFile(`${root}/home2/config.toml`);
+      assert.match(localConfig, /model_provider = "uos"/);
+      assert.doesNotMatch(localConfig, /deepseek/);
     } finally {
       await Deno.remove(root, { recursive: true }).catch(() => {});
     }

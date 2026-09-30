@@ -48,7 +48,7 @@ export const MODEL_ROUTE_INVALID =
 
 /** The existing primary gateway route. */
 export const GATEWAY_PROVIDER = "uos";
-const GATEWAY_BASE_URL = "https://ai.ubq.fi/v1";
+export const GATEWAY_BASE_URL = "https://ai.ubq.fi/v1";
 const GATEWAY_MODEL_ID = "gpt-reserve";
 /** The DeepSeek-direct fallback route. */
 const DEEPSEEK_PROVIDER = "deepseek";
