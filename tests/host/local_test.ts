@@ -3250,7 +3250,13 @@ Deno.test(
 Deno.test(
   "review client is always gateway-bound, independent of the implementation route",
   async () => {
-    const root = await Deno.makeTempDir({ prefix: "sentinel-review-client-" });
+    // The CI harness grants read access to the repo directory (and a few
+    // system paths) but not to the system temp dir, so the fixture lives
+    // under the working directory like the other tests in this file.
+    const root = await Deno.makeTempDir({
+      dir: ".",
+      prefix: "sentinel-review-client-",
+    });
     try {
       // The hosted call site binds the review client to the gateway endpoint
       // with the gateway token; the implementation route is never passed.
