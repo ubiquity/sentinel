@@ -1659,6 +1659,89 @@ function executeStep(
 // Work phase: deterministic evidence, reproduction, implementation, replay.
 // ---------------------------------------------------------------------------
 
+/**
+ * Recovery for a review wait parked on a closed-unmerged PR. A closed PR can
+ * never produce a review verdict, so a `review_pending` wait paired with a
+ * `review_request` intent that names a closed-unmerged PR is dead: the wait
+ * and the intent are cleared in ONE transition and the record returns to
+ * work, where the ordinary lifecycle republishes the preserved candidate.
+ * Any other PR state (open, merged, unreadable, or no PR named) changes
+ * nothing, so the ordinary lifecycle keeps the record. This runs before any
+ * intent dispatch in the work phase because the parked wait otherwise pins
+ * the record ahead of the publish reconciliation that could clear it (the
+ * issue-140 stall, where the wait outlived its PR by a week). A cooling
+ * installation defers the recovery instead of issuing GitHub reads.
+ */
+async function recoverClosedReviewWait(
+  deps: RepairCycleDepsV1,
+  context: LoopContextV1,
+  record: WorkRecordV1,
+): Promise<StepResultV1 | null> {
+  if (record.wait?.reason !== "review_pending") return null;
+  const intent = record.intent;
+  if (intent === null || intent.kind !== "review_request") return null;
+  const prNumber = intent.pr;
+  if (prNumber === null) return null;
+  // A cooling installation performs no GitHub calls: the recovery defers
+  // instead of issuing a PR read during cooldown.
+  const cooling = await checkGithubCooldown(
+    deps,
+    record.repository,
+    context.bounds,
+  );
+  if (cooling.kind === "state_error") {
+    return { kind: "state_error", detail: cooling.detail };
+  }
+  if (cooling.kind === "deferred") {
+    return { kind: "deferred", detail: cooling.detail };
+  }
+  const now = deps.clock.now();
+  const observed = await deps.github.readPullRequest(prNumber);
+  if (!observed.ok || observed.value === null) return null;
+  if (observed.value.state !== "closed" || observed.value.mergeSha !== null) {
+    return null;
+  }
+  // The PR is dead: preserve the admission charge as ambiguous (the review
+  // request may have been submitted). Settlement advances the repair-state
+  // head, so the cleared record is persisted against the RELOADED snapshot:
+  // persisting against the pre-settlement context would trip the transition
+  // conflict check and leave the dead wait parked.
+  let freshContext = context;
+  let fresh = record;
+  if (intent.requestId !== null) {
+    const settled = await settleReviewCharge(
+      deps,
+      context,
+      intent.requestId,
+      "ambiguous",
+    );
+    if (settled.kind !== "progress") return settled;
+    const afterSettlement = await loadSnapshot(deps, context.bounds);
+    if (afterSettlement === null) {
+      return { kind: "state_error", detail: "repair state unavailable" };
+    }
+    const current = afterSettlement.snapshot.work.find(
+      (work) => work.id === record.id,
+    );
+    if (current === undefined) {
+      return {
+        kind: "state_error",
+        detail: "work record missing after review reconciliation",
+      };
+    }
+    freshContext = afterSettlement;
+    fresh = current;
+  }
+  // The dead wait and the dead intent are cleared in ONE transition and the
+  // record returns to work, where the ordinary lifecycle republishes the
+  // preserved candidate.
+  const cleared = clearWait(
+    clearIntent(retireClosedPublication(fresh, now, "work"), now),
+    now,
+  );
+  return persistWork(deps, freshContext, cleared);
+}
+
 interface CarryV1 {
   beforeRun: IsolatedReplayResultV1 | null;
   fixtureRef: string | null;
@@ -1686,6 +1769,12 @@ async function executeWorkStep(
       ),
     );
   }
+
+  // A review wait parked on a closed-unmerged PR is recovered BEFORE any
+  // intent dispatch: the dead wait pins the record ahead of the publish
+  // reconciliation that could otherwise clear it.
+  const recovered = await recoverClosedReviewWait(deps, context, record);
+  if (recovered !== null) return recovered;
 
   // A pending candidate-preservation intent is reconciled BEFORE any other
   // work: the exact produced candidate is made durable through the real

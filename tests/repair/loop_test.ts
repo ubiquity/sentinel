@@ -6692,6 +6692,103 @@ Deno.test(
 );
 
 Deno.test(
+  "issue-140: a review_pending wait parked on a closed-unmerged PR is released with the dead intent",
+  async () => {
+    const taskId = asWorkItemId("issue-140-wait");
+    const branch = candidateBranch(taskId);
+    const requestId = "review-req-140-wait";
+    // The closed PR is NOT the sentinel-owned candidate branch (a foreign or
+    // older PR): the #85 retirement requires headRef === candidateBranch, so
+    // it never fires and the parked wait pins the record forever.
+    const foreignRef = "someone-else/stale-feature";
+    const rig = await makeRig("closed-review-wait", {
+      summaries: false,
+      github: {
+        candidateLifecycle: {
+          ...positiveLifecycle(),
+          refs: { [`refs/heads/${branch}`]: SHA3 },
+          pullRequests: [exactClosedPr(7, SHA3, foreignRef)],
+        },
+      },
+    });
+    try {
+      // The live stall shape: an EXPIRED review_pending wait paired with a
+      // review_request intent that names a closed-unmerged PR, with a settled
+      // (submitted) admission charge for the dead request.
+      const seeded = await rig.store.writeRepair(
+        seededSnapshot(
+          [
+            workRecord("issue-140-wait", {
+              source: { kind: "issue", id: "140", revision: SHA1 },
+              related: { incidentId: null, issueNumber: 140 },
+              target: {
+                base: SHA1,
+                branch,
+                checkpoint: null,
+                head: SHA3,
+                pr: null,
+              },
+              nextStep: "work",
+              wait: {
+                reason: "review_pending",
+                since: T0 - 100_000,
+                until: T0 - 50_000,
+              },
+              intent: {
+                kind: "review_request",
+                key: `review:7:${SHA3}`,
+                startedAt: T0 - 100_000,
+                branch,
+                expectedHead: SHA3,
+                observedBase: SHA1,
+                pr: 7,
+                requestId,
+                resultId: null,
+              },
+            }),
+          ],
+          {
+            reservations: [
+              reservation(requestId, {
+                taskId,
+                attempt: 1,
+                head: SHA3,
+                purpose: "review_request",
+                outcome: "submitted",
+                createdAt: T0 - 95_000,
+                settledAt: T0 - 90_000,
+              }),
+            ],
+          },
+        ),
+        null,
+      );
+      assert.ok(seeded.ok && seeded.value.status === "applied");
+
+      const outcome = await rig.run();
+      assert.equal(outcome.status, "idle", JSON.stringify(outcome));
+      const state = await rig.snapshot();
+      const record = state.work[0];
+      // The dead wait and the dead intent are both gone: the record is no
+      // longer pinned ahead of the publish reconciliation.
+      assert.equal(record.wait, null, "the dead review wait is cleared");
+      assert.ok(
+        record.intent === null || record.intent.key !== `review:7:${SHA3}`,
+        "the dead review intent is cleared",
+      );
+      assert.notEqual(record.target.pr, 7, "the closed PR is not re-adopted");
+      // The settled charge for the dead request is preserved, never
+      // resubmitted or dropped.
+      const charge = state.reservations.find((r) => r.id === requestId);
+      assert.ok(charge !== undefined, "the dead request charge is retained");
+      assert.equal(charge.outcome, "submitted");
+    } finally {
+      await rig.ctx.cleanup();
+    }
+  },
+);
+
+Deno.test(
   "transient review transport failure is re-armed as review_quota and never terminally blocks",
   async () => {
     const taskId = asWorkItemId("issue-quota");
