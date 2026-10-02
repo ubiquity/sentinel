@@ -1,8 +1,19 @@
 # Deterministic dispatcher for the protected hosted supervisor.
 #
 # Scheduled runs execute from the default branch, so they dispatch the fixed
-# supervisor workflow explicitly at its protected source ref. This job has no
-# App key and cannot read the supervisor environment secret.
+# supervisor workflow explicitly at its protected source ref. Before that
+# dispatch, one bounded recovery pass (src/host/supervisor-dispatch.ts) may
+# force-cancel at most one stale owner of the run-level `sentinel-supervisor`
+# group: a `queued`/`in_progress` run of the exact `supervisor.yml` workflow on
+# exactly the `sentinel-supervisor` ref with no active job or runner, no
+# protected pending deployment, and no useful transition for at least 30
+# minutes. Without that pass one wedged run turns every five-minute dispatch
+# into a pending successor forever (observed 2026-10-01, run 36862385999:
+# `finalize` queued with no runner held the group for ~20 hours; normal
+# cancellation left the `always()` finalizer queued). Any incomplete, malformed
+# or failed read fails closed and never authorizes a cancellation, and the
+# ordinary fixed-ref dispatch still runs. This job has no App key and cannot
+# read the supervisor environment secret.
 name: sentinel-supervisor-dispatch
 
 on:
@@ -11,7 +22,10 @@ on:
   workflow_dispatch:
 
 permissions:
+  # actions: write covers both the fixed-ref dispatch and the bounded
+  # force-cancel; contents: read is required only to check out the dispatcher.
   actions: write
+  contents: read
 
 concurrency:
   group: sentinel-supervisor-dispatch
@@ -22,11 +36,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Dispatch the exact protected supervisor ref
+      - name: Check out the dispatcher source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        with:
+          deno-version: v2.x
+      - name: Recover one bounded stale run, then dispatch the exact protected ref
         env:
           GH_TOKEN: ${{ github.token }}
         run: >-
-          gh api
-          --method POST
-          repos/ubiquity/sentinel/actions/workflows/supervisor.yml/dispatches
-          -f ref=sentinel-supervisor
+          deno run
+          --allow-net=api.github.com
+          --allow-env=GH_TOKEN
+          src/host/supervisor-dispatch.ts
