@@ -344,6 +344,8 @@ async function main(): Promise<void> {
       storeRoot: STORE_ROOT,
     });
     if (!result.ok) {
+      // Preserve auth_failed: this result has no expiry evidence and can
+      // represent malformed local headers or a permission-related response.
       // The typed detail is a fixed adapter/observer literal (never a payload,
       // credential or key-derived value). Without it a CI-only failure reports
       // only a bare kind and cannot be diagnosed from the run log.
