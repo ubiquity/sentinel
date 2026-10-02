@@ -26,7 +26,11 @@ import type {
 } from "../../src/contracts/state-snapshots.ts";
 import { parseWorkRecordV1 } from "../../src/contracts/work-record.ts";
 import type { WorkRecordV1 } from "../../src/contracts/work-record.ts";
-import { releaseRequestId } from "../../src/repair/keys.ts";
+import {
+  candidateBranch,
+  releaseRequestId,
+  reviewOperationKey,
+} from "../../src/repair/keys.ts";
 import {
   createReleaseStateStore,
   createRepairStateStore,
@@ -38,6 +42,7 @@ import {
   buildHostedReleaseRequest,
   createHostedAutonomyGitHub,
   HOSTED_AUTONOMY_MAX_RETRIES,
+  HOSTED_AUTONOMY_MAX_REVIEW_ROUNDS,
   HOSTED_AUTONOMY_RETIRED,
   hostedDeliveryKey,
   hostedIssueKey,
@@ -323,14 +328,22 @@ function selfClosed(...numbers: number[]): ReadonlySet<string> {
 }
 
 /** One check-run payload as the GitHub check-runs endpoint reports it. */
+let nextCheckRunId = 1000;
 function checkRun(name: string, overrides: Record<string, unknown> = {}) {
+  nextCheckRunId++;
   return {
+    id: nextCheckRunId,
     name,
     head_sha: HEAD,
     status: "completed",
     conclusion: "success",
     ...overrides,
   };
+}
+
+/** One complete check-runs page: the endpoint reports both fields. */
+function checkRunPage(runs: unknown[], totalCount: number) {
+  return { total_count: totalCount, check_runs: runs };
 }
 
 function jsonResponse(payload: unknown): Response {
@@ -794,7 +807,7 @@ Deno.test(
     assert.equal(plans.length, 1);
     assert.equal(plans[0].id, TARGET);
     assert.equal(plans[0].nextStep, "work");
-    assert.equal(plans[0].resetReviewRounds, false);
+    assert.equal(plans[0].reviewRounds, null);
     const next = applyHostedRetries(snapshot, SHA1, plans, T0 + 5000);
     const applied = next.work[0];
     assert.equal(applied.nextStep, "work");
@@ -857,16 +870,19 @@ Deno.test(
         counters: { attempts: 1, retries: 0, reviewRounds: 14 },
       }),
     ]);
-    const plans = planHostedRetries(
-      reviewRounds,
-      T0 + 5000,
-    );
+    // Every review identity inside the runtime's own round allowance is spent
+    // at this head, and the preserved counter is history: without a newer base
+    // this pass fails closed instead of zeroing a charged counter or re-using
+    // an identity the runtime would refuse as a duplicate.
+    assert.equal(planHostedRetries(reviewRounds, T0 + 5000).length, 0);
+    const plans = planHostedRetries(reviewRounds, T0 + 5000, selfTips(SHA1));
     assert.equal(plans.length, 1);
     assert.equal(plans[0].nextStep, "review");
-    assert.equal(plans[0].resetReviewRounds, true);
+    assert.equal(plans[0].advanceBase, true);
+    assert.equal(plans[0].reviewRounds, 14);
     const next = applyHostedRetries(reviewRounds, SHA1, plans, T0 + 5000);
     assert.equal(next.work[0].nextStep, "review");
-    assert.equal(next.work[0].counters.reviewRounds, 0);
+    assert.equal(next.work[0].counters.reviewRounds, 14);
 
     const budget = repairSnapshot([
       blockedRecord({
@@ -1048,6 +1064,368 @@ Deno.test(
       ).length,
       1,
     );
+  },
+);
+
+Deno.test(
+  "hosted autonomy: a settled three-round review record advances the base instead of re-using a charged identity",
+  () => {
+    // The live shape: review admissions 1-3 are durably settled at the current
+    // candidate head and the review-round counter was reset to 0, so re-entry
+    // at the same head can only collide with attempt 1 again.
+    const record = blockedRecord({
+      blocker: {
+        kind: "unavailable",
+        message: "review admission already settled without an intent",
+        since: T0 + 3000,
+      },
+      counters: { attempts: 1, retries: 0, reviewRounds: 0 },
+      target: {
+        base: BASE,
+        branch: "sentinel/repair/issue-ubiquity-sentinel-48",
+        checkpoint: null,
+        head: HEAD,
+        pr: 51,
+      },
+    });
+    const charges = [1, 2, 3].map((attempt) =>
+      reservation(`review-${attempt}`, {
+        taskId: TARGET,
+        repository: SELF_REPO,
+        head: HEAD,
+        attempt,
+        purpose: "review_request",
+        outcome: "submitted",
+        settledAt: T0 + 2000,
+      })
+    );
+    const snapshot = repairSnapshot(
+      [record],
+      [authorizingReceipt()],
+      [],
+      charges,
+    );
+    const now = T0 + 5000;
+    // Three charged identities are the whole space at this head and the base
+    // has not moved: nothing may invent a fourth round at the same head.
+    assert.equal(planHostedRetries(snapshot, now, selfTips(BASE)).length, 0);
+    const newerBase = SHA1;
+    const plans = planHostedRetries(snapshot, now, selfTips(newerBase));
+    assert.equal(plans.length, 1);
+    assert.equal(plans[0].nextStep, "review");
+    assert.equal(plans[0].advanceBase, true);
+    assert.equal(plans[0].observedBase, newerBase);
+    // The floor is the highest settled review attempt at the current head,
+    // never 0: a charged counter is history and is only ever raised.
+    assert.equal(plans[0].reviewRounds, HOSTED_AUTONOMY_MAX_REVIEW_ROUNDS);
+    assert.equal(plans[0].grant, 0);
+    const next = applyHostedRetries(snapshot, SHA1, plans, now);
+    const applied = next.work[0];
+    assert.equal(applied.nextStep, "review");
+    assert.equal(applied.blocker, null);
+    assert.equal(applied.counters.reviewRounds, 3);
+    assert.equal(applied.counters.attempts, 1);
+    assert.equal(applied.counters.retries, 0);
+    // The runtime's own base-refresh intent is persisted against the newer base
+    // and the exact publication identity: the refresh supplies the new head and
+    // with it the unused review identity.
+    assert.ok(
+      applied.intent !== null && applied.intent.kind === "base_refresh",
+    );
+    assert.equal(applied.intent?.key, `base_refresh:51:${HEAD}:${newerBase}`);
+    assert.equal(applied.intent?.pr, 51);
+    assert.equal(applied.intent?.expectedHead, HEAD);
+    assert.equal(applied.intent?.observedBase, newerBase);
+    // Charged history is untouched: every reservation, receipt and the target
+    // identity stay exactly as they were.
+    assert.deepEqual(next.reservations, snapshot.reservations);
+    assert.deepEqual(next.reviews, snapshot.reviews);
+    assert.deepEqual(applied.target, record.target);
+    assert.equal(next.reservations.length, 3);
+  },
+);
+
+Deno.test(
+  "hosted autonomy: a settled ambiguous review intent restores its floor and continues at an unused identity",
+  () => {
+    // The live shape: one review request was admitted and settled `ambiguous`
+    // (charge preserved), its intent is still preserved and the round counter
+    // is 0. The floor restored from the settled charge makes the next
+    // admission attempt 2, an identity nothing has charged yet.
+    const record = blockedRecord({
+      blocker: {
+        kind: "unavailable",
+        message: "review produced no verdict within the bounded review wait",
+        since: T0 + 3000,
+      },
+      counters: { attempts: 1, retries: 0, reviewRounds: 0 },
+      target: {
+        base: BASE,
+        branch: candidateBranch(TARGET),
+        checkpoint: null,
+        head: HEAD,
+        pr: 51,
+      },
+      intent: {
+        kind: "review_request",
+        // The canonical production key for the first review round of this
+        // exact PR/head, exactly as the runtime persisted it.
+        key: reviewOperationKey(51, HEAD),
+        startedAt: T0 + 1000,
+        branch: candidateBranch(TARGET),
+        expectedHead: HEAD,
+        // The actual base the production loop observed when it requested this
+        // review: the record's own non-null target base.
+        observedBase: BASE,
+        pr: 51,
+        requestId: "review-charge-1",
+        resultId: null,
+      },
+    });
+    const charge = reservation("review-charge-1", {
+      taskId: TARGET,
+      repository: SELF_REPO,
+      head: HEAD,
+      attempt: 1,
+      purpose: "review_request",
+      outcome: "ambiguous",
+      settledAt: T0 + 2000,
+    });
+    const snapshot = repairSnapshot(
+      [record],
+      [authorizingReceipt()],
+      [],
+      [charge],
+    );
+    const now = T0 + 5000;
+    const plans = planHostedRetries(snapshot, now, selfTips(BASE));
+    assert.equal(plans.length, 1);
+    assert.equal(plans[0].nextStep, "review");
+    assert.equal(plans[0].advanceBase, false);
+    assert.equal(plans[0].reviewRounds, 1);
+    assert.equal(plans[0].grant, 0);
+    const next = applyHostedRetries(snapshot, SHA1, plans, now);
+    const applied = next.work[0];
+    assert.equal(applied.nextStep, "review");
+    assert.equal(applied.blocker, null);
+    // The settled intent is closed only because its exact request charge is
+    // proven settled; the charge itself stays exactly as it was.
+    assert.equal(applied.intent, null);
+    assert.equal(applied.counters.reviewRounds, 1);
+    assert.equal(applied.counters.attempts, 1);
+    assert.deepEqual(next.reservations, snapshot.reservations);
+    // Identity 2 at this exact head is unused: the next request is a genuine
+    // new admission, never a duplicate of the settled attempt 1.
+    assert.ok(
+      !next.reservations.some((entry) =>
+        entry.taskId === TARGET && entry.head === HEAD &&
+        entry.purpose === "review_request" && entry.attempt === 2
+      ),
+    );
+  },
+);
+
+Deno.test(
+  "hosted autonomy: a review intent is cleared only by its exact publication identity and canonical round key",
+  () => {
+    const reviewIntent = (overrides: Record<string, unknown> = {}) => ({
+      kind: "review_request",
+      // The canonical production key for round 1 of this exact PR/head.
+      key: reviewOperationKey(51, HEAD),
+      startedAt: T0 + 1000,
+      branch: candidateBranch(TARGET),
+      expectedHead: HEAD,
+      observedBase: BASE,
+      pr: 51,
+      requestId: "review-charge-1",
+      resultId: null,
+      ...overrides,
+    });
+    const record = (
+      intent: unknown,
+      branch = candidateBranch(TARGET),
+    ) =>
+      blockedRecord({
+        blocker: {
+          kind: "unavailable",
+          message: "review admission already settled without an intent",
+          since: T0 + 3000,
+        },
+        counters: { attempts: 1, retries: 0, reviewRounds: 0 },
+        target: {
+          base: BASE,
+          branch,
+          checkpoint: null,
+          head: HEAD,
+          pr: 51,
+        },
+        intent,
+      });
+    const plan = (
+      intent: unknown,
+      charges: unknown[],
+      branch?: string,
+    ): number =>
+      planHostedRetries(
+        repairSnapshot(
+          [record(intent, branch)],
+          [authorizingReceipt()],
+          [],
+          charges,
+        ),
+        T0 + 5000,
+        selfTips(BASE),
+      ).length;
+    /** The exact review charge of one round, settled and still charged. */
+    const settledCharge = (attempt = 1) =>
+      reservation("review-charge-1", {
+        taskId: TARGET,
+        repository: SELF_REPO,
+        head: HEAD,
+        attempt,
+        purpose: "review_request",
+        outcome: "submitted",
+        settledAt: T0 + 2000,
+      });
+
+    // Baseline: the exact publication identity the record currently carries and
+    // the canonical key of the settled round are closable.
+    assert.equal(plan(reviewIntent(), [settledCharge()]), 1);
+    // The same binding at a later round stays closable: the key is derived from
+    // the settled reservation's own attempt, not from a fixed round.
+    assert.equal(
+      plan(reviewIntent({ key: reviewOperationKey(51, HEAD, 2) }), [
+        settledCharge(2),
+      ]),
+      1,
+    );
+
+    // Still `reserved`: the runtime's uncertainty handler owns that in-flight
+    // admission and it must never be cleared or re-planned here.
+    assert.equal(
+      plan(reviewIntent(), [
+        reservation("review-charge-1", {
+          taskId: TARGET,
+          repository: SELF_REPO,
+          head: HEAD,
+          attempt: 1,
+          purpose: "review_request",
+          outcome: "reserved",
+        }),
+      ]),
+      0,
+    );
+    // The intent's expected head must be the record's current head: a stale
+    // intent for another publication is never cleared by a current-head charge.
+    assert.equal(
+      plan(reviewIntent({ expectedHead: SHA1 }), [settledCharge()]),
+      0,
+    );
+    // The intent's PR must be the record's PR.
+    assert.equal(plan(reviewIntent({ pr: 52 }), [settledCharge()]), 0);
+    // The intent's branch must be this task's deterministic candidate branch.
+    assert.equal(
+      plan(reviewIntent({ branch: candidateBranch(ZOMBIE) }), [
+        settledCharge(),
+      ]),
+      0,
+    );
+    // ...and the record's own branch must be the branch the intent names.
+    assert.equal(
+      plan(reviewIntent(), [settledCharge()], candidateBranch(ZOMBIE)),
+      0,
+    );
+    // The intent's observed base must be the record's non-null target base: a
+    // null or moved base is never cleared by an otherwise matching charge.
+    assert.equal(
+      plan(reviewIntent({ observedBase: null }), [settledCharge()]),
+      0,
+    );
+    assert.equal(
+      plan(reviewIntent({ observedBase: SHA1 }), [settledCharge()]),
+      0,
+    );
+    // The intent key must be the canonical key of the settled round: another
+    // round's key (or an unknown key) never proves this admission settled.
+    assert.equal(
+      plan(reviewIntent({ key: reviewOperationKey(51, HEAD, 2) }), [
+        settledCharge(),
+      ]),
+      0,
+    );
+    assert.equal(
+      plan(reviewIntent({ key: `review:51:${HEAD}:attempt-9` }), [
+        settledCharge(),
+      ]),
+      0,
+    );
+    // A settled reservation for another round than the key names is a
+    // different identity and never settles this intent.
+    assert.equal(plan(reviewIntent(), [settledCharge(2)]), 0);
+    // A settled reservation bound to a different head proves nothing about
+    // THIS head.
+    assert.equal(
+      plan(reviewIntent(), [
+        reservation("review-charge-1", {
+          taskId: TARGET,
+          repository: SELF_REPO,
+          head: SHA1,
+          attempt: 1,
+          purpose: "review_request",
+          outcome: "submitted",
+          settledAt: T0 + 2000,
+        }),
+      ]),
+      0,
+    );
+    // A settled reservation in another repository is never borrowed.
+    assert.equal(
+      plan(reviewIntent(), [
+        reservation("review-charge-1", {
+          taskId: TARGET,
+          repository: FOREIGN_REPO,
+          head: HEAD,
+          attempt: 1,
+          purpose: "review_request",
+          outcome: "submitted",
+          settledAt: T0 + 2000,
+        }),
+      ]),
+      0,
+    );
+    // A settled reservation under a different purpose is not a review charge.
+    assert.equal(
+      plan(reviewIntent(), [
+        reservation("review-charge-1", {
+          taskId: TARGET,
+          repository: SELF_REPO,
+          head: HEAD,
+          attempt: 1,
+          purpose: "implementation",
+          outcome: "submitted",
+          settledAt: T0 + 2000,
+        }),
+      ]),
+      0,
+    );
+    // A settled reservation for another task is never borrowed.
+    assert.equal(
+      plan(reviewIntent(), [
+        reservation("review-charge-1", {
+          taskId: ZOMBIE,
+          repository: SELF_REPO,
+          head: HEAD,
+          attempt: 1,
+          purpose: "review_request",
+          outcome: "submitted",
+          settledAt: T0 + 2000,
+        }),
+      ]),
+      0,
+    );
+    // No matching reservation at all is unknown, not settled.
+    assert.equal(plan(reviewIntent({ requestId: "review-charge-9" }), []), 0);
+    assert.equal(plan(reviewIntent({ requestId: null }), []), 0);
   },
 );
 
@@ -2086,8 +2464,9 @@ Deno.test(
       ),
     );
 
-    // A reserved review_request is the one identity the review step still
-    // reconciles, so it stays eligible exactly as before.
+    // Review rounds are spent and the only review admission at this head is
+    // still `reserved`: the in-flight identity and its charge stay protected,
+    // and only the runtime's own base refresh may continue the record.
     const reviewRecord = blockedRecord({
       blocker: {
         kind: "review_quota",
@@ -2109,18 +2488,24 @@ Deno.test(
       [],
       [reservedReview],
     );
-    const reviewPlans = planHostedRetries(reviewSnapshot, T0 + 5000);
+    assert.equal(planHostedRetries(reviewSnapshot, T0 + 5000).length, 0);
+    const reviewPlans = planHostedRetries(
+      reviewSnapshot,
+      T0 + 5000,
+      selfTips(SHA1),
+    );
     assert.equal(reviewPlans.length, 1);
     assert.equal(reviewPlans[0].nextStep, "review");
+    assert.equal(reviewPlans[0].advanceBase, true);
+    assert.equal(reviewPlans[0].reviewRounds, 3);
     assert.equal(reviewPlans[0].grant, 0);
-    assert.equal(reviewPlans[0].resetReviewRounds, true);
     const reviewNext = applyHostedRetries(
       reviewSnapshot,
       SHA1,
       reviewPlans,
       T0 + 5000,
     ).work[0];
-    assert.equal(reviewNext.counters.reviewRounds, 0);
+    assert.equal(reviewNext.counters.reviewRounds, 3);
     assert.equal(reviewNext.counters.attempts, 1);
     assert.equal(reviewNext.counters.retries, 0);
   },
@@ -2177,7 +2562,10 @@ Deno.test(
           number: FOREIGN_PR,
         }
         : url.includes("/check-runs")
-        ? { check_runs: [checkRun("validate"), checkRun("verify-artifact")] }
+        ? checkRunPage([
+          checkRun("validate"),
+          checkRun("verify-artifact"),
+        ], 2)
         : url.includes("/git/ref/")
         ? { object: { sha: BASE } }
         : url.includes("/issues/")
@@ -2254,7 +2642,10 @@ Deno.test(
         ));
       }
       const payload = url.includes("/check-runs")
-        ? { check_runs: [checkRun("validate"), checkRun("verify-artifact")] }
+        ? checkRunPage([
+          checkRun("validate"),
+          checkRun("verify-artifact"),
+        ], 2)
         : url.includes("/commits/")
         ? { parents: [{ sha: BASE }, { sha: HEAD }] }
         : url.includes("/compare/")
@@ -2322,7 +2713,7 @@ Deno.test(
       const original = globalThis.fetch;
       globalThis.fetch = (() =>
         Promise.resolve(
-          jsonResponse({ check_runs: checkRuns }),
+          jsonResponse(checkRunPage(checkRuns, checkRuns.length)),
         )) as typeof fetch;
       try {
         return await createHostedAutonomyGitHub("fixture-token", FOREIGN_REPO)
@@ -2558,6 +2949,216 @@ Deno.test(
 );
 
 Deno.test(
+  "hosted autonomy: the check gate reads every page and refuses an incomplete, drifted, duplicated or malformed listing",
+  async () => {
+    const withFetch = async (
+      handler: (url: string) => unknown,
+      check: () => Promise<boolean>,
+    ): Promise<boolean> => {
+      const original = globalThis.fetch;
+      globalThis.fetch = ((input: string | URL | Request) =>
+        Promise.resolve(
+          jsonResponse(handler(String(input))),
+        )) as typeof fetch;
+      try {
+        return await check();
+      } finally {
+        globalThis.fetch = original;
+      }
+    };
+    const self = () => createHostedAutonomyGitHub("fixture-token", SELF_REPO);
+    const foreign = () =>
+      createHostedAutonomyGitHub("fixture-token", FOREIGN_REPO);
+    const pageOf = (offset: number) =>
+      Array.from(
+        { length: 100 },
+        (_, index) => checkRun(`run-${offset + index}`),
+      );
+    const pageNumber = (url: string) =>
+      Number(new URL(url).searchParams.get("page"));
+
+    // The named self check is on the SECOND page: only a complete listing finds
+    // it, and the read must actually ask for that page.
+    const requested: number[] = [];
+    const selfFound = await withFetch((url) => {
+      const page = pageNumber(url);
+      requested.push(page);
+      return page === 1
+        ? checkRunPage(pageOf(0), 101)
+        : checkRunPage([checkRun("test-local")], 101);
+    }, () => self().hasSuccessfulCheck(HEAD));
+    assert.equal(selfFound, true);
+    assert.deepEqual(requested, [1, 2]);
+
+    // A later-page failure makes the whole foreign head not green even when the
+    // first page is entirely green.
+    assert.equal(
+      await withFetch(
+        (url) =>
+          pageNumber(url) === 1 ? checkRunPage(pageOf(0), 101) : checkRunPage(
+            [checkRun("verify-artifact", { conclusion: "failure" })],
+            101,
+          ),
+        () => foreign().hasAllChecksGreen(HEAD),
+      ),
+      false,
+    );
+    // Count drift between pages is an unproven listing, never green.
+    assert.equal(
+      await withFetch(
+        (url) =>
+          pageNumber(url) === 1
+            ? checkRunPage(pageOf(0), 101)
+            : checkRunPage([checkRun("validate")], 102),
+        () => foreign().hasAllChecksGreen(HEAD),
+      ),
+      false,
+    );
+    // A duplicated run id across pages is an unproven listing, never green.
+    const duplicate = checkRun("validate");
+    assert.equal(
+      await withFetch(
+        (url) =>
+          pageNumber(url) === 1
+            ? checkRunPage([...pageOf(0).slice(0, 99), duplicate], 101)
+            : checkRunPage([duplicate], 101),
+        () => foreign().hasAllChecksGreen(HEAD),
+      ),
+      false,
+    );
+    // A listing that promises more runs than it ever returns is incomplete.
+    assert.equal(
+      await withFetch(
+        (url) => checkRunPage(pageNumber(url) === 1 ? pageOf(0) : [], 150),
+        () => foreign().hasAllChecksGreen(HEAD),
+      ),
+      false,
+    );
+    // A run without a usable id is malformed: the listing is not evidence.
+    assert.equal(
+      await withFetch(() =>
+        checkRunPage([{
+          name: "validate",
+          head_sha: HEAD,
+          status: "completed",
+          conclusion: "success",
+        }], 1), () => foreign().hasAllChecksGreen(HEAD)),
+      false,
+    );
+    // A missing page count cannot prove completeness: never green.
+    assert.equal(
+      await withFetch(
+        () => ({ check_runs: [checkRun("validate")] }),
+        () => foreign().hasAllChecksGreen(HEAD),
+      ),
+      false,
+    );
+  },
+);
+
+Deno.test(
+  "hosted autonomy: a parked approval run on a later page is still listed",
+  async () => {
+    const runs = (offset: number) =>
+      Array.from({ length: 50 }, (_, index) => ({
+        id: 10_000 + offset + index,
+        head_sha: HEAD,
+        conclusion: "success",
+      }));
+    const parked = {
+      id: 20_001,
+      head_sha: HEAD,
+      conclusion: "action_required",
+    };
+    const pages: number[] = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = ((input: string | URL | Request) => {
+      const page = Number(new URL(String(input)).searchParams.get("page"));
+      pages.push(page);
+      return Promise.resolve(jsonResponse({
+        total_count: 51,
+        workflow_runs: page === 1 ? runs(0) : [parked],
+      }));
+    }) as typeof fetch;
+    try {
+      const listed = await createHostedAutonomyGitHub(
+        "fixture-token",
+        SELF_REPO,
+      ).listParkedRuns(HEAD);
+      assert.deepEqual(listed, [parked.id]);
+      assert.deepEqual(pages, [1, 2]);
+    } finally {
+      globalThis.fetch = original;
+    }
+  },
+);
+
+Deno.test(
+  "hosted autonomy: a later-page failed check-run prevents the merge",
+  async () => {
+    const runs = (offset: number) =>
+      Array.from(
+        { length: 100 },
+        (_, index) => checkRun(`validate-${offset + index}`),
+      );
+    const pages: number[] = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = ((input: string | URL | Request) => {
+      const url = String(input);
+      if (!isForeignPath(url)) {
+        return Promise.resolve(new Response("{}", { status: 404 }));
+      }
+      if (url.includes("/check-runs")) {
+        const page = Number(new URL(url).searchParams.get("page"));
+        pages.push(page);
+        return Promise.resolve(jsonResponse(
+          page === 1 ? checkRunPage(runs(0), 101) : checkRunPage(
+            [checkRun("verify-artifact", { conclusion: "failure" })],
+            101,
+          ),
+        ));
+      }
+      if (url.includes("/actions/runs")) {
+        return Promise.resolve(jsonResponse({
+          total_count: 0,
+          workflow_runs: [],
+        }));
+      }
+      const payload = url.includes(`/pulls/${FOREIGN_PR}`)
+        ? {
+          state: "open",
+          merged: false,
+          merge_commit_sha: null,
+          head: { sha: HEAD },
+          base: { ref: FOREIGN_BRANCH },
+          user: { login: "github-actions[bot]" },
+          number: FOREIGN_PR,
+        }
+        : url.includes("/git/ref/")
+        ? { object: { sha: BASE } }
+        : url.includes("/issues/")
+        ? { state: "open" }
+        : { default_branch: FOREIGN_BRANCH };
+      return Promise.resolve(jsonResponse(payload));
+    }) as typeof fetch;
+    try {
+      const { rig } = await makeRig("autonomy-foreign-paged", {
+        repair: repairSnapshot([foreignRecord()], [foreignReceipt()]),
+        resolver: (repository) =>
+          createHostedAutonomyGitHub("fixture-token", repository),
+      });
+      const result = await run(rig);
+      assert.equal(result.reason, "checks_pending", JSON.stringify(result));
+      assert.equal(rig.merges, 0);
+      assert.deepEqual(pages, [1, 2]);
+      await Deno.remove(rig.tmp, { recursive: true });
+    } finally {
+      globalThis.fetch = original;
+    }
+  },
+);
+
+Deno.test(
   "hosted autonomy: the self target still requires its named check and an accepted release",
   async () => {
     // The self deterministic gate is the named `test-local` check-run: a head
@@ -2572,7 +3173,9 @@ Deno.test(
         if (!isSelfPath(url)) {
           return Promise.resolve(new Response("{}", { status: 404 }));
         }
-        return Promise.resolve(jsonResponse({ check_runs: checkRuns }));
+        return Promise.resolve(
+          jsonResponse(checkRunPage(checkRuns, checkRuns.length)),
+        );
       }) as typeof fetch;
       try {
         return await createHostedAutonomyGitHub("fixture-token", SELF_REPO)
