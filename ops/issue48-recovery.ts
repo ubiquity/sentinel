@@ -80,7 +80,14 @@ export interface Issue48RecoveryBindingV1 {
   /** Exact open PR identity required before the transition. */
   pullRequestNumber: number;
   pullRequestHead: GitSha;
+  /**
+   * Exact HISTORICAL base recorded by the reviewed snapshot. The live base
+   * head legitimately advances as the target branch moves, so this pin is
+   * enforced against `record.target.base` and never against the live view.
+   */
   pullRequestBase: GitSha;
+  /** Stable base BRANCH the reviewed PR must still target; a retarget changes it. */
+  pullRequestBaseRef: string;
   pullRequestRepository: string;
   /** Exact target work item id. */
   targetId: WorkItemId;
@@ -98,6 +105,7 @@ export const ISSUE48_PRODUCTION_BINDING: Issue48RecoveryBindingV1 = {
   pullRequestNumber: 51,
   pullRequestHead: "0e689889b9486f020b7e6a7638e6c81fe181bd0d" as GitSha,
   pullRequestBase: "1d618965c2cb8d0bcaa4fc298ed0973c4b9fa9ca" as GitSha,
+  pullRequestBaseRef: "development",
   pullRequestRepository: ISSUE48_REPOSITORY,
   targetId: "issue-ubiquity-sentinel-48" as WorkItemId,
 };
@@ -107,7 +115,10 @@ export interface Issue48PullRequestViewV1 {
   number: number;
   state: "open" | "closed" | "merged";
   head: GitSha;
+  /** Live base head; it legitimately advances as the base branch moves. */
   base: GitSha;
+  /** Stable base BRANCH identity; only a PR retarget changes it. */
+  baseRef: string;
   repository: string;
 }
 
@@ -220,10 +231,13 @@ function pullRequestMatches(
   view: Issue48PullRequestViewV1,
   binding: Issue48RecoveryBindingV1,
 ): boolean {
+  // The live base head may advance while the target branch stays the same, so
+  // the LIVE identity check uses the stable base BRANCH; the exact historical
+  // base stays pinned to the durable record by targetPreconditionHolds.
   return view.number === binding.pullRequestNumber &&
     view.state === "open" &&
     view.head === binding.pullRequestHead &&
-    view.base === binding.pullRequestBase &&
+    view.baseRef === binding.pullRequestBaseRef &&
     view.repository === binding.pullRequestRepository;
 }
 
@@ -588,6 +602,13 @@ function readNested(
   return isRecord(value) ? value : null;
 }
 
+/** Bounded branch-name shape, matching the shared wire reader's bound. */
+const BRANCH_REF_MAX_LENGTH = 256;
+
+function isBranchRef(value: string): boolean {
+  return value.length > 0 && value.length <= BRANCH_REF_MAX_LENGTH;
+}
+
 /** Bounded strict extraction; any missing/malformed part is a static failure. */
 function parsePullRequestView(
   input: unknown,
@@ -603,14 +624,15 @@ function parsePullRequestView(
   }
   const headSha = readString(head, "sha");
   const baseSha = readString(base, "sha");
+  const baseRef = readString(base, "ref");
   const headRepo = readNested(head, "repo");
   const baseRepo = readNested(base, "repo");
   const headName = headRepo === null ? null : readString(headRepo, "full_name");
   const baseName = baseRepo === null ? null : readString(baseRepo, "full_name");
   if (
-    headSha === null || baseSha === null || headName === null ||
-    baseName === null || !GIT_SHA_PATTERN.test(headSha) ||
-    !GIT_SHA_PATTERN.test(baseSha)
+    headSha === null || baseSha === null || baseRef === null ||
+    headName === null || baseName === null || !GIT_SHA_PATTERN.test(headSha) ||
+    !GIT_SHA_PATTERN.test(baseSha) || !isBranchRef(baseRef)
   ) {
     return null;
   }
@@ -629,6 +651,7 @@ function parsePullRequestView(
     state: viewState,
     head: headSha as GitSha,
     base: baseSha as GitSha,
+    baseRef,
     repository: baseName,
   };
 }
