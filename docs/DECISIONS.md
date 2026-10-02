@@ -100,3 +100,7 @@ Repair every repository in `sentinel.targets.json` under the one
    foreign request explicitly.
 
 Keep targets sequential, not concurrent: the design is one production writer.
+
+## Task-local execution model exception - 2026-10-02 21:25 UTC
+
+After the required local LithosAI DeepSeek Ultra route returned HTTP402 insufficient_quota before tools, the owner explicitly directed: "Use gpt sol 6.1 to finish". For the current Sentinel autonomous-recovery task only, GPT-6.1 Sol may perform remaining local implementation, fixture corrections and focused validation in the already-recorded isolated owned lanes. This supersedes the global local-execution model default solely for this task. It does not change deployed runtime model/provider policy, credentials, shared admission charges, review/CI/merge/promotion/rollback controls, single-writer ownership, personal-script authority or hosted acceptance evidence requirements. Preserve failed calls and completed work; do not retry the exhausted DeepSeek route or broaden this exception into shared configuration.
