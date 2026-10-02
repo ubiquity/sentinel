@@ -68,12 +68,14 @@ import {
   loadTargetConfigsV1,
   STATIC_TARGETS_EMPTY,
 } from "./targets.ts";
+import type { TargetSlugV1 } from "./targets.ts";
 import { createRepairStateStore, DenoGitRunner } from "../state/mod.ts";
 import {
   GATEWAY_BASE_URL,
   resolveModelRoute,
   resolveReviewModelId,
 } from "./model-route.ts";
+import type { ModelRouteV1 } from "./model-route.ts";
 import {
   composeLocalGitHub,
   createLocalRepositoryConfig,
@@ -274,16 +276,20 @@ export async function runActionsTargetCycles(
   const skipped: string[] = [];
   const failed: string[] = [];
   let outcome: RepairCycleOutcomeV1 | null = null;
+  /** Report every target not attempted because the absolute deadline ran out. */
+  const skipFrom = (index: number): void => {
+    for (const remaining of input.configs.slice(index)) {
+      skipped.push(
+        `${remaining.repository.owner}/${remaining.repository.name}`,
+      );
+    }
+  };
   try {
     for (const [index, config] of input.configs.entries()) {
       if (!(input.clock.now() < input.deadline)) {
         // The deadline is absolute and the clock only moves forward: every
         // remaining target is reported as not attempted, and none is started.
-        for (const remaining of input.configs.slice(index)) {
-          skipped.push(
-            `${remaining.repository.owner}/${remaining.repository.name}`,
-          );
-        }
+        skipFrom(index);
         break;
       }
       const slug = `${config.repository.owner}/${config.repository.name}`;
@@ -300,6 +306,16 @@ export async function runActionsTargetCycles(
             : "target preparation failed";
           failed.push(`${slug}: ${reason}`);
           continue;
+        }
+        // A target's own preparation (its source mirror seed and that mirror's
+        // base refresh) is setup time charged against the SAME absolute
+        // deadline. A preparation that reached the deadline leaves no bounded
+        // work to start, so neither this target nor any remaining target is
+        // attempted instead of spending the run's remaining budget on a doomed
+        // cycle.
+        if (!(input.clock.now() < input.deadline)) {
+          skipFrom(index);
+          break;
         }
       }
       addressed.push(slug);
@@ -333,14 +349,83 @@ export async function runActionsTargetCycles(
   return { outcome, addressed, skipped, failed };
 }
 
+/**
+ * The ONE absolute deadline for one child run: the earliest origin this child
+ * can observe for itself plus the unchanged 110-minute budget. It is the only
+ * place that arithmetic exists, so no cycle can ever receive a deadline
+ * anchored anywhere else.
+ */
+export function childRunDeadlineV1(runOrigin: number): number {
+  return runOrigin + RUN_DEADLINE_MS;
+}
+
+/**
+ * Optional deterministic wiring for one hosted pass. Every field defaults to
+ * the exact production behavior, so the production entrypoint, the launcher and
+ * the workflow call `runActionsRepairHost()` with no arguments and unchanged
+ * semantics. A field exists only where a deterministic test must replace an
+ * external boundary (clock, environment, state remote, remote fetch, GitHub
+ * default-branch read, Codex startup probe) or observe the production
+ * multi-target call itself.
+ */
+export interface ActionsRepairHostDepsV1 {
+  /** The run clock; defaults to the system clock. */
+  clock?: Clock;
+  /** The run environment (identity, credentials, PATH, route); defaults to the process environment. */
+  env?: Readonly<Record<string, string | undefined>>;
+  /** The run's own checkout directory; defaults to the process working directory. */
+  workDir?: string;
+  /** Release/repair state remote; defaults to the committed production remote. */
+  stateRemoteUrl?: string;
+  /** Refresh the sentinel self mirror and return its base SHA; defaults to the production fetch. */
+  refreshSelf?: (sourcePath: string) => Promise<string>;
+  /** Resolve one target's default branch; defaults to the trusted GitHub read. */
+  resolveDefaultBranch?: (
+    target: TargetSlugV1,
+  ) => Promise<string | null>;
+  /** Prove model startup; defaults to the production Codex diagnostic. */
+  preflight?: (route: ModelRouteV1) => Promise<void>;
+  /** The production multi-target loop; overridable so a test can observe its exact input. */
+  runTargetCycles?: typeof runActionsTargetCycles;
+}
+
 /** Run one hosted repair pass through the actual production entrypoint. */
-export async function runActionsRepairHost(): Promise<
+export async function runActionsRepairHost(
+  deps: ActionsRepairHostDepsV1 = {},
+): Promise<
   ActionsRepairHostResultV1
 > {
+  // The ONE absolute run deadline for this child run is anchored at the
+  // earliest instant this process can observe for itself, BEFORE any identity,
+  // credential, state, source or target preparation. The launcher spawned this
+  // process and its own 112-minute bound is already ticking, so this origin is
+  // later than the launcher's by the child startup and module load already
+  // spent: the unchanged 110-minute budget is measured from HERE, which charges
+  // every setup step to the child's own work window instead of to the
+  // launcher's drain cushion (two minutes minus that unmeasured startup).
+  const clock = deps.clock ?? new SystemClock();
+  /** One run-environment key: the injected environment, else the process. */
+  const readEnv = (name: string): string | undefined =>
+    deps.env === undefined ? Deno.env.get(name) : deps.env[name];
+  const runOrigin = clock.now();
+  const deadline = childRunDeadlineV1(runOrigin);
+  // One bounded advisory line, emitted before any setup or credential read, so
+  // the hosted log records the exact window this run works on even when the
+  // setup that follows fails. It carries no `status` property, so the
+  // launcher's child-status scan can never read it as a child result.
+  console.log(JSON.stringify({
+    kind: "sentinel_run_window",
+    originAt: runOrigin,
+    deadlineAt: deadline,
+  }));
+
   // The protected native identity is validated before any credential, state,
   // executable or network work: a malformed job identity fails with no request
   // and no durable write.
-  const identity = parseHostedEnvironment(readHostedIdentityEnv(), "repair");
+  const identity = parseHostedEnvironment(
+    deps.env ?? readHostedIdentityEnv(),
+    "repair",
+  );
 
   // The trusted model route is resolved EXACTLY ONCE at host start, before any
   // credential read or client composition, and recorded as one bounded
@@ -349,12 +434,15 @@ export async function runActionsRepairHost(): Promise<
   // deterministic (owner override, then the explicit DeepSeek fallback with
   // its key present, else the primary gateway); it is never a per-request
   // swap, and the resolved model id is the id the runtime requests and records.
-  const modelRoute = resolveModelRoute(Deno.env.toObject());
+  // The route environment is the injected one when the caller supplies it;
+  // otherwise it is exactly the process environment read as before.
+  const routeEnv = deps.env ?? Deno.env.toObject();
+  const modelRoute = resolveModelRoute(routeEnv);
   // The dedicated structured-review model override is resolved EXACTLY ONCE
   // here alongside the route: an unset or blank value yields the owner's
   // preferred default (`codex-auto-review`); a declared-but-invalid value
   // yields the invalid empty sentinel, which the reviewer refuses at prepare.
-  const reviewModelId = resolveReviewModelId(Deno.env.toObject());
+  const reviewModelId = resolveReviewModelId(routeEnv);
   console.log(JSON.stringify({
     kind: "sentinel_model_route",
     provider: modelRoute.provider,
@@ -363,25 +451,25 @@ export async function runActionsRepairHost(): Promise<
     reviewModel: reviewModelId,
   }));
 
-  const githubToken = requireEnv("GITHUB_TOKEN");
-  const appToken = optionalEnv("SENTINEL_SUPERVISOR_TOKEN");
+  const githubToken = requireEnv(readEnv, "GITHUB_TOKEN");
+  const appToken = optionalEnv(readEnv, "SENTINEL_SUPERVISOR_TOKEN");
   // The model token is the route's key when the route names a key environment
   // (read through the existing --allow-env mechanism), else the existing
   // gateway token. The review client ALWAYS uses the gateway token: it is
   // gateway-bound independently of the implementation route, so a
   // DeepSeek-direct implementation route never pairs the gateway-only review
   // model with the DeepSeek endpoint or key.
-  const gatewayToken = requireEnv("UOS_AI_TOKEN");
+  const gatewayToken = requireEnv(readEnv, "UOS_AI_TOKEN");
   const modelToken = modelRoute.apiKeyEnv === null
     ? gatewayToken
-    : requireEnv(modelRoute.apiKeyEnv);
-  const trustedPath = requireEnv("PATH");
+    : requireEnv(readEnv, modelRoute.apiKeyEnv);
+  const trustedPath = requireEnv(readEnv, "PATH");
   // Every code-change write goes through the App token when the workflow
   // minted one; the native token keeps the state store and Actions metadata.
   // An older installed revision has no App credential at all and still runs.
   const writeToken = appToken ?? githubToken;
   const login = appToken === undefined ? ACTIONS_LOGIN : APP_LOGIN;
-  const sourceDir = Deno.cwd();
+  const sourceDir = deps.workDir ?? Deno.cwd();
   const denoExecutable = Deno.execPath();
   const codexExecutable = await resolveExecutable("codex", trustedPath);
   const stateRoot = joinPath(sourceDir, ".sentinel-actions-state");
@@ -401,13 +489,12 @@ export async function runActionsRepairHost(): Promise<
   // checkout with the source repository.
   const state = createRepairStateStore({
     scratchDir: scratch,
-    remoteUrl: REMOTE_URL,
+    remoteUrl: deps.stateRemoteUrl ?? REMOTE_URL,
     runner: new DenoGitRunner(
       joinPath(scratch, "state-git-home"),
       githubGitAuthEnv(githubToken),
     ),
   });
-  const clock = new SystemClock();
   // The saved supervisor pointer must bind exactly this run, attempt, launcher
   // and controller revision BEFORE any repair seed, source, model, preflight or
   // review-client preparation. A stale or foreign pointer never runs.
@@ -420,7 +507,9 @@ export async function runActionsRepairHost(): Promise<
   // The enforcement mode is injected through the environment and parsed
   // strictly: an absent or empty setting enforces, a typo fails the run before
   // any request, and `off` is the explicit development switch.
-  const cooldownMode = parseCooldownModeV1(optionalEnv(COOLDOWN_MODE_ENV));
+  const cooldownMode = parseCooldownModeV1(
+    optionalEnv(readEnv, COOLDOWN_MODE_ENV),
+  );
   const gate = new HostedRepairCooldownGate({
     state,
     clock,
@@ -445,12 +534,9 @@ export async function runActionsRepairHost(): Promise<
   // fetched at its own base branch. The shared cooldown gate still governs
   // every fetch.
   await prepareSourceRepository(sourcePath, hostInput, scratch);
-  const baseSha = await refreshDevelopment(
-    sourcePath,
-    hostInput,
-    scratch,
-    gate,
-  );
+  const baseSha = deps.refreshSelf === undefined
+    ? await refreshDevelopment(sourcePath, hostInput, scratch, gate)
+    : await deps.refreshSelf(sourcePath);
   /**
    * Exact private mirror directory for one committed target. The sentinel
    * self-target keeps the original single `source` mirror so every existing
@@ -513,10 +599,13 @@ export async function runActionsRepairHost(): Promise<
   const templateConfig = createLocalRepositoryConfig();
   const targets = await loadTargetConfigsV1({
     template: templateConfig,
-    resolveDefaultBranch: createDefaultBranchResolver({
-      http,
-      token: githubToken,
-    }),
+    // The setting lives in this run's own checkout, exactly as before.
+    root: sourceDir,
+    resolveDefaultBranch: deps.resolveDefaultBranch ??
+      createDefaultBranchResolver({
+        http,
+        token: githubToken,
+      }),
   });
   if (targets.configs.length === 0) throw new Error(STATIC_TARGETS_EMPTY);
   // EVERY usable target is addressed, one separately targeted cycle each. The
@@ -529,7 +618,7 @@ export async function runActionsRepairHost(): Promise<
     candidate.repository.name !== selfRepository.name
   );
   const appInstallationId = needsAppScope
-    ? parseAppInstallationId(optionalEnv(APP_INSTALLATION_ENV))
+    ? parseAppInstallationId(optionalEnv(readEnv, APP_INSTALLATION_ENV))
     : DEFAULT_APP_INSTALLATION_ID;
   const targetConfigs = targets.configs.map((candidate) =>
     scopeTargetConfigV1(candidate, selfRepository, appInstallationId)
@@ -583,9 +672,8 @@ export async function runActionsRepairHost(): Promise<
     state,
     configs: targetConfigs,
   });
-  // ONE absolute run deadline for the whole run: it is computed once here and
-  // never restarted between target cycles.
-  const deadline = clock.now() + RUN_DEADLINE_MS;
+  // The SAME absolute run deadline captured before every setup step above is
+  // handed to every target cycle unchanged; it is never recomputed.
   // The port is composed per target: the REST client, review service, trusted
   // git remote and cooldown scope all address exactly that repository.
   const composeTargetGithub = (config: RepositoryConfigV1): GitHubPort =>
@@ -706,7 +794,7 @@ export async function runActionsRepairHost(): Promise<
   // new model starts for this run.
   let startupReady = false;
   try {
-    await runActionsPreflight(modelRoute);
+    await (deps.preflight ?? runActionsPreflight)(modelRoute);
     startupReady = true;
   } catch {
     startupReady = false;
@@ -752,7 +840,7 @@ export async function runActionsRepairHost(): Promise<
   let outcome: RepairCycleOutcomeV1 | null = null;
   let failure: unknown = null;
   try {
-    const cycles = await runActionsTargetCycles({
+    const cycles = await (deps.runTargetCycles ?? runActionsTargetCycles)({
       clock,
       state,
       configs: targetConfigs,
@@ -860,15 +948,21 @@ async function ensureRepairStateSeed(
   }
 }
 
-function requireEnv(name: string): string {
-  const value = Deno.env.get(name);
+function requireEnv(
+  read: (name: string) => string | undefined,
+  name: string,
+): string {
+  const value = read(name);
   if (value === undefined || value.length === 0) throw new Error(STATIC_ENV);
   return value;
 }
 
 /** An optional credential: absent and empty both mean "not supplied". */
-function optionalEnv(name: string): string | undefined {
-  const value = Deno.env.get(name);
+function optionalEnv(
+  read: (name: string) => string | undefined,
+  name: string,
+): string | undefined {
+  const value = read(name);
   return value === undefined || value.length === 0 ? undefined : value;
 }
 
