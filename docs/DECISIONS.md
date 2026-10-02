@@ -4,6 +4,8 @@ Read before changing Sentinel runtime or delivery. These are scoped user excepti
 
 ## Owner-directed autonomous recovery - 2026-10-02
 
+At 2026-10-02 14:23 UTC, after the integration owner requested permission to publish the tested queue-recovery workflow using the existing GitHub owner account because the Sentinel App lacks Workflows write, the owner directed: "You can start writing workflow changes now hurry up and fix everything". This authorizes the existing owner account for this narrowly scoped workflow-recovery publication without expanding App permissions or adding credentials. All subsequent ordinary Sentinel code/runtime/review/issue activity retains the existing App identity and trusted acceptance/admission/promotion gates.
+
 The owner directed: "fix the fucking sentinel and don’t stop until it’s guaranteed working autonomously". For this current Sentinel recovery task, the integration owner may complete necessary source delivery, guarded runtime installation, bounded queue intervention, and hosted acceptance without repeated per-attempt approval questions. Keep local deterministic checks as the edit loop, preserve App identity, runtime review/CI/merge/promotion gates, durable charged admission history and one production implementation writer, and never fabricate health or delivery receipts. A new credential permission or an exception to the App publication identity remains an explicit owner decision. Completion requires live autonomous delivery and continued operation, not a scheduled heartbeat or an uncommitted passing candidate.
 
 ## Closing keywords in repair pull requests - 2026-09-23
