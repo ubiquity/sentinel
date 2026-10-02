@@ -198,6 +198,12 @@ const COOLDOWN_BOUND_GENERATION = 50;
 const CHILD_DEADLINE_REVISION =
   "1f90f0a0b122bdcd424eb8fa6016a509bd3f6ed5" as GitSha;
 const CHILD_DEADLINE_GENERATION = 51;
+// The generation 52 rung pin stays a test-local exact literal: this suite must
+// also compile against pre-rung production source, where the new constant does
+// not exist, so the expected red is a semantic plan mismatch and never a
+// missing import.
+const RUNTIME52_REVISION = "80cc73a4a38d58a53e215b1b8daaccb8e6fe97b1" as GitSha;
+const RUNTIME52_GENERATION = 52;
 const ROLLBACK_TARGET_GENERATION = 46;
 
 function hostedProof(input: {
@@ -3094,25 +3100,32 @@ Deno.test(
       canonicalStringify(failedChildDeadline.move.priorHealthyProof),
       canonicalStringify(cooldownHealthy),
     );
-    // The installed child-deadline pointer is terminal only with its own bound
-    // healthy proof; a missing retained prior and an unbound failure never roll
-    // back.
-    assert.equal(
-      planOwnerDevelopmentInstall(
-        releaseSnapshot({
-          runtime: runtimeRecord({
-            revision: CHILD_DEADLINE_REVISION,
-            generation: CHILD_DEADLINE_GENERATION,
-            healthyProof: healthyProof(
-              CHILD_DEADLINE_REVISION,
-              CHILD_DEADLINE_GENERATION,
-              204,
-            ),
-          }),
+    // The installed child-deadline pointer's own bound healthy proof authorizes
+    // exactly one further movement: the runtime-source rung at generation 52.
+    // A missing retained prior and an unbound failure never roll back.
+    const runtimeSourcePlan = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: CHILD_DEADLINE_REVISION,
+          generation: CHILD_DEADLINE_GENERATION,
+          healthyProof: healthyProof(
+            CHILD_DEADLINE_REVISION,
+            CHILD_DEADLINE_GENERATION,
+            204,
+          ),
         }),
-        NOW,
-      ).status,
-      "no_change",
+      }),
+      NOW,
+    );
+    assert.equal(runtimeSourcePlan.status, "install");
+    if (runtimeSourcePlan.status !== "install") {
+      throw new Error("expected install");
+    }
+    assert.equal(runtimeSourcePlan.move.nextRevision, RUNTIME52_REVISION);
+    assert.equal(runtimeSourcePlan.move.nextGeneration, RUNTIME52_GENERATION);
+    assert.equal(
+      runtimeSourcePlan.move.nextGeneration,
+      runtimeSourcePlan.move.priorGeneration + 1,
     );
     for (
       const state of [
@@ -4408,5 +4421,234 @@ Deno.test(
       canonicalStringify(committed.priorHealthyProof),
       canonicalStringify(priorHealthy),
     );
+  },
+);
+
+Deno.test(
+  "owner install runtime52: a healthy generation 51 plans the exact one-generation install of the 80cc rung",
+  () => {
+    const childDeadlineHealthy = healthyProof(
+      CHILD_DEADLINE_REVISION,
+      CHILD_DEADLINE_GENERATION,
+      501,
+    );
+    const state = releaseSnapshot({
+      runtime: runtimeRecord({
+        revision: CHILD_DEADLINE_REVISION,
+        generation: CHILD_DEADLINE_GENERATION,
+        healthyProof: childDeadlineHealthy,
+        executionProof: childDeadlineHealthy,
+      }),
+      hostedReleases: [acceptedRelease()],
+      cooldowns: [cooldown(NOW - 1)],
+    });
+    const before = canonicalStringify(state);
+    const plan = planOwnerDevelopmentInstall(state, NOW);
+    assert.equal(plan.status, "install");
+    if (plan.status !== "install") throw new Error("expected install");
+    assert.equal(plan.move.action, "install");
+    assert.equal(plan.move.priorRevision, CHILD_DEADLINE_REVISION);
+    assert.equal(plan.move.priorGeneration, CHILD_DEADLINE_GENERATION);
+    assert.equal(plan.move.nextRevision, RUNTIME52_REVISION);
+    assert.equal(plan.move.nextGeneration, RUNTIME52_GENERATION);
+    assert.equal(plan.move.nextGeneration, plan.move.priorGeneration + 1);
+    assert.equal(
+      canonicalStringify(plan.move.priorHealthyProof),
+      canonicalStringify(childDeadlineHealthy),
+    );
+    // The planned install applies as exactly one generation movement and
+    // leaves every release, cooldown and history record unchanged.
+    const planned = buildOwnerDevelopmentInstallSnapshot(
+      state,
+      STATE_HEAD,
+      plan.move,
+      NOW,
+    );
+    const priorRuntime = state.hostedRuntimes[0];
+    const nextRuntime = planned.hostedRuntimes[0];
+    assert.equal(planned.sequence, state.sequence + 1);
+    assert.equal(planned.stateHead, STATE_HEAD);
+    assert.equal(planned.updatedAt, NOW);
+    assert.equal(
+      canonicalStringify(planned.releases),
+      canonicalStringify(state.releases),
+    );
+    assert.equal(
+      canonicalStringify(planned.hostedReleases),
+      canonicalStringify(state.hostedReleases),
+    );
+    assert.equal(
+      canonicalStringify(planned.githubCooldowns),
+      canonicalStringify(state.githubCooldowns),
+    );
+    assert.equal(nextRuntime.id, priorRuntime.id);
+    assert.equal(nextRuntime.activeRevision, RUNTIME52_REVISION);
+    assert.equal(nextRuntime.generation, RUNTIME52_GENERATION);
+    assert.equal(
+      canonicalStringify(nextRuntime.lastHealthyProof),
+      canonicalStringify(priorRuntime.lastHealthyProof),
+    );
+    assert.equal(
+      canonicalStringify(nextRuntime.lastExecutionProof),
+      canonicalStringify(priorRuntime.lastExecutionProof),
+    );
+    assert.equal(canonicalStringify(state), before);
+
+    // No proof, or a proof bound to another revision or generation, never
+    // authorizes the new rung.
+    for (
+      const healthy of [
+        healthyProof(CHILD_DEADLINE_REVISION, 50, 502),
+        healthyProof(UNRELATED, 51, 503),
+        null,
+      ]
+    ) {
+      assert.equal(
+        planOwnerDevelopmentInstall(
+          releaseSnapshot({
+            runtime: runtimeRecord({
+              revision: CHILD_DEADLINE_REVISION,
+              generation: CHILD_DEADLINE_GENERATION,
+              healthyProof: healthy,
+            }),
+          }),
+          NOW,
+        ).status,
+        "waiting",
+      );
+    }
+  },
+);
+
+Deno.test(
+  "owner install runtime52: an exact failed generation 52 rolls back to the recorded 1f90 generation 51 predecessor",
+  () => {
+    const childDeadlineHealthy = healthyProof(
+      CHILD_DEADLINE_REVISION,
+      CHILD_DEADLINE_GENERATION,
+      511,
+    );
+    const state = releaseSnapshot({
+      runtime: runtimeRecord({
+        revision: RUNTIME52_REVISION,
+        generation: RUNTIME52_GENERATION,
+        healthyProof: childDeadlineHealthy,
+        executionProof: failedProof(
+          RUNTIME52_REVISION,
+          RUNTIME52_GENERATION,
+          512,
+        ),
+      }),
+      hostedReleases: [acceptedRelease()],
+      cooldowns: [cooldown(NOW - 1)],
+    });
+    const before = canonicalStringify(state);
+    const plan = planOwnerDevelopmentInstall(state, NOW);
+    assert.equal(plan.status, "rollback");
+    if (plan.status !== "rollback") throw new Error("expected rollback");
+    assert.equal(plan.move.action, "rollback");
+    assert.equal(plan.move.priorRevision, RUNTIME52_REVISION);
+    assert.equal(plan.move.priorGeneration, RUNTIME52_GENERATION);
+    assert.equal(plan.move.nextRevision, CHILD_DEADLINE_REVISION);
+    assert.equal(plan.move.nextGeneration, RUNTIME52_GENERATION + 1);
+    assert.equal(plan.move.nextGeneration, plan.move.priorGeneration + 1);
+    assert.equal(
+      canonicalStringify(plan.move.priorHealthyProof),
+      canonicalStringify(childDeadlineHealthy),
+    );
+    // The rollback applies as exactly one generation movement to the recorded
+    // healthy predecessor and leaves every unrelated record unchanged.
+    const planned = buildOwnerDevelopmentInstallSnapshot(
+      state,
+      STATE_HEAD,
+      plan.move,
+      NOW,
+    );
+    const priorRuntime = state.hostedRuntimes[0];
+    const nextRuntime = planned.hostedRuntimes[0];
+    assert.equal(planned.sequence, state.sequence + 1);
+    assert.equal(planned.stateHead, STATE_HEAD);
+    assert.equal(planned.updatedAt, NOW);
+    assert.equal(
+      canonicalStringify(planned.releases),
+      canonicalStringify(state.releases),
+    );
+    assert.equal(
+      canonicalStringify(planned.hostedReleases),
+      canonicalStringify(state.hostedReleases),
+    );
+    assert.equal(
+      canonicalStringify(planned.githubCooldowns),
+      canonicalStringify(state.githubCooldowns),
+    );
+    assert.equal(nextRuntime.id, priorRuntime.id);
+    assert.equal(nextRuntime.activeRevision, CHILD_DEADLINE_REVISION);
+    assert.equal(
+      nextRuntime.generation,
+      RUNTIME52_GENERATION + 1,
+    );
+    assert.equal(
+      canonicalStringify(nextRuntime.lastHealthyProof),
+      canonicalStringify(priorRuntime.lastHealthyProof),
+    );
+    assert.equal(
+      canonicalStringify(nextRuntime.lastExecutionProof),
+      canonicalStringify(priorRuntime.lastExecutionProof),
+    );
+    assert.equal(canonicalStringify(state), before);
+
+    // A missing predecessor proof, a proof of the failed pointer itself and a
+    // wrong-generation predecessor proof never authorize the rollback.
+    const refusals = [
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: RUNTIME52_REVISION,
+          generation: RUNTIME52_GENERATION,
+          executionProof: failedProof(
+            RUNTIME52_REVISION,
+            RUNTIME52_GENERATION,
+            513,
+          ),
+        }),
+      }),
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: RUNTIME52_REVISION,
+          generation: RUNTIME52_GENERATION,
+          healthyProof: healthyProof(
+            RUNTIME52_REVISION,
+            RUNTIME52_GENERATION,
+            514,
+          ),
+          executionProof: failedProof(
+            RUNTIME52_REVISION,
+            RUNTIME52_GENERATION,
+            515,
+          ),
+        }),
+      }),
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: RUNTIME52_REVISION,
+          generation: RUNTIME52_GENERATION,
+          healthyProof: healthyProof(
+            CHILD_DEADLINE_REVISION,
+            RUNTIME52_GENERATION,
+            516,
+          ),
+          executionProof: failedProof(
+            RUNTIME52_REVISION,
+            RUNTIME52_GENERATION,
+            517,
+          ),
+        }),
+      }),
+    ];
+    for (const refusal of refusals) {
+      assert.equal(
+        planOwnerDevelopmentInstall(refusal, NOW).status,
+        "waiting",
+      );
+    }
   },
 );

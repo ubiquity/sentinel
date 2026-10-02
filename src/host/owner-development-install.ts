@@ -471,6 +471,17 @@ export const OWNER_DEVELOPMENT_INSTALL_COOLDOWN_BOUND_GENERATION = 50;
 export const OWNER_DEVELOPMENT_INSTALL_CHILD_DEADLINE_REVISION =
   "1f90f0a0b122bdcd424eb8fa6016a509bd3f6ed5" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_CHILD_DEADLINE_GENERATION = 51;
+/**
+ * Exact owner-approved runtime-source revision shipping the accepted
+ * candidate-handoff and execution-provider tips; installed only after the
+ * child-deadline generation 51 healthy proof. A failed generation 52 candidate
+ * settles exactly once by rolling back to the recorded child-deadline
+ * generation 51 revision with a monotonic generation 53; that post-rollback
+ * pointer is terminal.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_RUNTIME_SOURCE_REVISION =
+  "80cc73a4a38d58a53e215b1b8daaccb8e6fe97b1" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_RUNTIME_SOURCE_GENERATION = 52;
 /** Monotonic rollback target the failed generation 45 candidate rolled to. */
 export const OWNER_DEVELOPMENT_INSTALL_ROLLBACK_TARGET_GENERATION =
   OWNER_DEVELOPMENT_INSTALL_ASSIGN_FIRST_GENERATION + 2;
@@ -2408,10 +2419,53 @@ export function planOwnerDevelopmentInstall(
       );
     }
     if (healthy !== null) {
-      return noChange("the owner development installation is complete");
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_RUNTIME_SOURCE_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_RUNTIME_SOURCE_GENERATION,
+        healthy,
+        "install the runtime-source revision after the child-deadline healthy proof",
+      );
     }
     return waiting(
       "the child-deadline generation 51 healthy proof is not recorded",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_RUNTIME_SOURCE_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_RUNTIME_SOURCE_GENERATION
+  ) {
+    // An exact failed settlement of this pointer is candidate failure evidence
+    // even when an older healthy proof exists; the rollback still requires the
+    // recorded healthy proof of the exact prior revision, so a missing or
+    // unrelated proof stays a zero-write waiting outcome.
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_CHILD_DEADLINE_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_CHILD_DEADLINE_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded child-deadline healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_CHILD_DEADLINE_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed runtime-source candidate to its recorded prior",
+      );
+    }
+    if (healthy !== null) {
+      return noChange("the owner development installation is complete");
+    }
+    return waiting(
+      "the runtime-source generation 52 healthy proof is not recorded",
     );
   }
 
