@@ -463,6 +463,14 @@ export const OWNER_DEVELOPMENT_INSTALL_REVIEW_WAIT_BOUND_GENERATION = 49;
 export const OWNER_DEVELOPMENT_INSTALL_COOLDOWN_BOUND_REVISION =
   "46a182b0713f60279b3f1a521849e745ab3432b4" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_COOLDOWN_BOUND_GENERATION = 50;
+/**
+ * Exact revision that charges child setup to its absolute repair deadline and
+ * carries the September 30 review/capacity fixes; installed only after the
+ * cooldown-bound generation 50 healthy proof.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_CHILD_DEADLINE_REVISION =
+  "1f90f0a0b122bdcd424eb8fa6016a509bd3f6ed5" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_CHILD_DEADLINE_GENERATION = 51;
 /** Monotonic rollback target the failed generation 45 candidate rolled to. */
 export const OWNER_DEVELOPMENT_INSTALL_ROLLBACK_TARGET_GENERATION =
   OWNER_DEVELOPMENT_INSTALL_ASSIGN_FIRST_GENERATION + 2;
@@ -2135,10 +2143,52 @@ export function planOwnerDevelopmentInstall(
       );
     }
     if (healthy !== null) {
-      return noChange("the owner development installation is complete");
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_CHILD_DEADLINE_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_CHILD_DEADLINE_GENERATION,
+        healthy,
+        "install the child-deadline revision after the cooldown-bound healthy proof",
+      );
     }
     return waiting(
       "the cooldown-bound generation 50 healthy proof is not recorded",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_CHILD_DEADLINE_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_CHILD_DEADLINE_GENERATION
+  ) {
+    // A failed candidate settles exactly once by rolling back to the recorded
+    // prior — the proven cooldown-bound revision — at a monotonic generation,
+    // authorized by its retained healthy proof.
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_COOLDOWN_BOUND_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_COOLDOWN_BOUND_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded cooldown-bound healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_COOLDOWN_BOUND_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed child-deadline candidate to its recorded prior",
+      );
+    }
+    if (healthy !== null) {
+      return noChange("the owner development installation is complete");
+    }
+    return waiting(
+      "the child-deadline generation 51 healthy proof is not recorded",
     );
   }
 

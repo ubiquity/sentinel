@@ -192,6 +192,12 @@ const REVIEW_WAIT_BOUND_GENERATION = 49;
 const COOLDOWN_BOUND_REVISION =
   "46a182b0713f60279b3f1a521849e745ab3432b4" as GitSha;
 const COOLDOWN_BOUND_GENERATION = 50;
+// The child-deadline install pin stays a test-local exact literal: this suite
+// must compile against pre-rung production source, so the expected red is a
+// semantic plan mismatch and never a missing import.
+const CHILD_DEADLINE_REVISION =
+  "1f90f0a0b122bdcd424eb8fa6016a509bd3f6ed5" as GitSha;
+const CHILD_DEADLINE_GENERATION = 51;
 const ROLLBACK_TARGET_GENERATION = 46;
 
 function hostedProof(input: {
@@ -2874,25 +2880,135 @@ Deno.test(
       canonicalStringify(cooldownInstall.move.priorHealthyProof),
       canonicalStringify(reviewWaitHealthy),
     );
-    // The installed generation 50 pointer is terminal only with its own bound
+    // The installed generation 50 pointer is stable only with its own bound
     // healthy proof; without it the plan waits, and a failed candidate rolls
-    // back exactly once to the recorded review-wait-bound prior.
+    // back exactly once to the recorded review-wait-bound prior. Its own
+    // healthy proof authorizes exactly one further, final move: the
+    // child-deadline revision at generation 51.
+    const cooldownHealthy = healthyProof(
+      COOLDOWN_BOUND_REVISION,
+      COOLDOWN_BOUND_GENERATION,
+      201,
+    );
+    const childDeadlineState = releaseSnapshot({
+      runtime: runtimeRecord({
+        revision: COOLDOWN_BOUND_REVISION,
+        generation: COOLDOWN_BOUND_GENERATION,
+        healthyProof: cooldownHealthy,
+        executionProof: cooldownHealthy,
+      }),
+      hostedReleases: [acceptedRelease()],
+      cooldowns: [cooldown(NOW - 1)],
+    });
+    const childDeadlineInstall = planOwnerDevelopmentInstall(
+      childDeadlineState,
+      NOW,
+    );
+    assert.equal(childDeadlineInstall.status, "install");
+    if (childDeadlineInstall.status !== "install") {
+      throw new Error("expected child-deadline install");
+    }
+    assert.equal(childDeadlineInstall.move.action, "install");
+    assert.equal(
+      childDeadlineInstall.move.priorRevision,
+      COOLDOWN_BOUND_REVISION,
+    );
+    assert.equal(
+      childDeadlineInstall.move.priorGeneration,
+      COOLDOWN_BOUND_GENERATION,
+    );
+    assert.equal(
+      childDeadlineInstall.move.nextRevision,
+      CHILD_DEADLINE_REVISION,
+    );
+    assert.equal(
+      childDeadlineInstall.move.nextGeneration,
+      CHILD_DEADLINE_GENERATION,
+    );
+    assert.equal(
+      childDeadlineInstall.move.nextGeneration,
+      childDeadlineInstall.move.priorGeneration + 1,
+    );
+    assert.equal(
+      canonicalStringify(childDeadlineInstall.move.priorHealthyProof),
+      canonicalStringify(cooldownHealthy),
+    );
+    // The planned move builds the exact intended snapshot: only the pointer,
+    // generation and timestamps change and every historical proof is preserved.
+    const childDeadlinePlanned = buildOwnerDevelopmentInstallSnapshot(
+      childDeadlineState,
+      STATE_HEAD,
+      childDeadlineInstall.move,
+      NOW,
+    );
+    assert.equal(
+      childDeadlinePlanned.sequence,
+      childDeadlineState.sequence + 1,
+    );
+    assert.equal(childDeadlinePlanned.stateHead, STATE_HEAD);
+    assert.equal(
+      childDeadlinePlanned.hostedRuntimes[0].activeRevision,
+      CHILD_DEADLINE_REVISION,
+    );
+    assert.equal(
+      childDeadlinePlanned.hostedRuntimes[0].generation,
+      CHILD_DEADLINE_GENERATION,
+    );
+    assert.equal(
+      canonicalStringify(
+        childDeadlinePlanned.hostedRuntimes[0].lastHealthyProof,
+      ),
+      canonicalStringify(cooldownHealthy),
+    );
+    // A healthy proof bound to another revision or generation, and no recorded
+    // proof at all, never authorize the fixed child-deadline pin.
+    for (
+      const healthy of [
+        healthyProof(
+          COOLDOWN_BOUND_REVISION,
+          COOLDOWN_BOUND_GENERATION - 1,
+          208,
+        ),
+        healthyProof(
+          REVIEW_WAIT_BOUND_REVISION,
+          COOLDOWN_BOUND_GENERATION,
+          209,
+        ),
+        null,
+      ]
+    ) {
+      assert.equal(
+        planOwnerDevelopmentInstall(
+          releaseSnapshot({
+            runtime: runtimeRecord({
+              revision: COOLDOWN_BOUND_REVISION,
+              generation: COOLDOWN_BOUND_GENERATION,
+              healthyProof: healthy,
+            }),
+          }),
+          NOW,
+        ).status,
+        "waiting",
+      );
+    }
+    // A running generation 50 execution blocks the child-deadline install until
+    // it settles.
     assert.equal(
       planOwnerDevelopmentInstall(
         releaseSnapshot({
           runtime: runtimeRecord({
             revision: COOLDOWN_BOUND_REVISION,
             generation: COOLDOWN_BOUND_GENERATION,
-            healthyProof: healthyProof(
+            healthyProof: cooldownHealthy,
+            execution: executionIntent(
               COOLDOWN_BOUND_REVISION,
               COOLDOWN_BOUND_GENERATION,
-              201,
             ),
           }),
         }),
         NOW,
       ).status,
-      "no_change",
+      "waiting",
     );
     assert.equal(
       planOwnerDevelopmentInstall(
@@ -2930,6 +3046,103 @@ Deno.test(
       failedCooldown.move.nextGeneration,
       COOLDOWN_BOUND_GENERATION + 1,
     );
+
+    // A failed child-deadline generation 51 candidate settles exactly once by
+    // rolling back only to the exact previously proven cooldown-bound revision
+    // with a monotonic generation 52, authorized by its retained healthy proof.
+    const failedChildDeadline = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: CHILD_DEADLINE_REVISION,
+          generation: CHILD_DEADLINE_GENERATION,
+          healthyProof: cooldownHealthy,
+          executionProof: failedProof(
+            CHILD_DEADLINE_REVISION,
+            CHILD_DEADLINE_GENERATION,
+            203,
+          ),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(failedChildDeadline.status, "rollback");
+    if (failedChildDeadline.status !== "rollback") {
+      throw new Error("expected child-deadline rollback");
+    }
+    assert.equal(failedChildDeadline.move.action, "rollback");
+    assert.equal(
+      failedChildDeadline.move.priorRevision,
+      CHILD_DEADLINE_REVISION,
+    );
+    assert.equal(
+      failedChildDeadline.move.priorGeneration,
+      CHILD_DEADLINE_GENERATION,
+    );
+    assert.equal(
+      failedChildDeadline.move.nextRevision,
+      COOLDOWN_BOUND_REVISION,
+    );
+    assert.equal(
+      failedChildDeadline.move.nextGeneration,
+      CHILD_DEADLINE_GENERATION + 1,
+    );
+    assert.equal(
+      failedChildDeadline.move.nextGeneration,
+      failedChildDeadline.move.priorGeneration + 1,
+    );
+    assert.equal(
+      canonicalStringify(failedChildDeadline.move.priorHealthyProof),
+      canonicalStringify(cooldownHealthy),
+    );
+    // The installed child-deadline pointer is terminal only with its own bound
+    // healthy proof; a missing retained prior and an unbound failure never roll
+    // back.
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: CHILD_DEADLINE_REVISION,
+            generation: CHILD_DEADLINE_GENERATION,
+            healthyProof: healthyProof(
+              CHILD_DEADLINE_REVISION,
+              CHILD_DEADLINE_GENERATION,
+              204,
+            ),
+          }),
+        }),
+        NOW,
+      ).status,
+      "no_change",
+    );
+    for (
+      const state of [
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: CHILD_DEADLINE_REVISION,
+            generation: CHILD_DEADLINE_GENERATION,
+            executionProof: failedProof(
+              CHILD_DEADLINE_REVISION,
+              CHILD_DEADLINE_GENERATION,
+              206,
+            ),
+          }),
+        }),
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: CHILD_DEADLINE_REVISION,
+            generation: CHILD_DEADLINE_GENERATION,
+            healthyProof: cooldownHealthy,
+            executionProof: failedProof(
+              CHILD_DEADLINE_REVISION,
+              CHILD_DEADLINE_GENERATION - 1,
+              207,
+            ),
+          }),
+        }),
+      ]
+    ) {
+      assert.equal(planOwnerDevelopmentInstall(state, NOW).status, "waiting");
+    }
     assert.equal(
       planOwnerDevelopmentInstall(
         releaseSnapshot({
