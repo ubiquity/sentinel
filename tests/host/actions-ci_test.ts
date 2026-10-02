@@ -1154,6 +1154,29 @@ Deno.test(
 );
 
 Deno.test(
+  "actions host: the dedicated review-model override is allowlisted where the runtime reads it",
+  async () => {
+    const manifest = JSON.parse(
+      await Deno.readTextFile(new URL("../../deno.json", import.meta.url)),
+    ) as { tasks: Record<string, string> };
+    for (const task of ["repair:run", "repair:actions"]) {
+      assert.ok(
+        manifest.tasks[task].includes("SENTINEL_REVIEW_MODEL_ID"),
+        `${task} may read the dedicated review-model override`,
+      );
+    }
+    const workflow = await Deno.readTextFile(
+      new URL("../../.github/workflows/supervisor.yml", import.meta.url),
+    );
+    const repairJob = workflow.split("Run selected Sentinel runtime")[1] ?? "";
+    assert.ok(
+      /--allow-env=\S*SENTINEL_REVIEW_MODEL_ID/.test(repairJob),
+      "the hosted repair launcher may read the dedicated review-model override",
+    );
+  },
+);
+
+Deno.test(
   "actions host: a target whose own preparation fails is recorded and never reported as addressed",
   async () => {
     const rig = makeTargetHostRig(["sentinel", FOREIGN_REPO]);
