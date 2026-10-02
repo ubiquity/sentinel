@@ -6,6 +6,7 @@
 
 import assert from "node:assert/strict";
 import { asGitSha, type GitSha } from "../../src/contracts/brands.ts";
+import { reviewTaskStatementDigest } from "../../src/contracts/review-receipt.ts";
 import {
   CodexStructuredReviewer,
   type CodexStructuredReviewerOptionsV1,
@@ -469,6 +470,151 @@ Deno.test(
     const afterClose = await review.start();
     assert.equal(afterClose.ok, false, "start after close must reject");
     assert.equal(session.turnStarts(), 1);
+  },
+);
+
+Deno.test(
+  "reviewer: a supplied task statement requires the exact bound acceptance",
+  async () => {
+    const task = {
+      issueNumber: 263,
+      title: "Start the VPS service with the selected release configuration",
+      body: "Load the immutable selected-release config/import map/lockfile " +
+        "and prove a rollback fixture.",
+      // The digest must actually bind THIS text: an arbitrary 64-hex value is
+      // refused before any session opens (proved below).
+      digest: await reviewTaskStatementDigest({
+        issueNumber: 263,
+        title: "Start the VPS service with the selected release configuration",
+        body:
+          "Load the immutable selected-release config/import map/lockfile " +
+          "and prove a rollback fixture.",
+      }),
+    };
+    const acceptance = {
+      issueNumber: task.issueNumber,
+      taskDigest: task.digest,
+      verdict: "fulfilled",
+      evidence: ["the launcher loads the exact selected release configuration"],
+    };
+    const cases: [string, unknown, string | null][] = [
+      [
+        "missing acceptance",
+        CLEAN_RESULT,
+        "structured review unavailable: the result omitted the required task acceptance for a supplied task statement",
+      ],
+      [
+        "acceptance for another task",
+        {
+          ...CLEAN_RESULT,
+          taskAcceptance: { ...acceptance, issueNumber: 999 },
+        },
+        "structured review unavailable: the task acceptance is not bound to the supplied task statement",
+      ],
+      [
+        "acceptance digest not bound",
+        {
+          ...CLEAN_RESULT,
+          taskAcceptance: { ...acceptance, taskDigest: "d".repeat(64) },
+        },
+        "structured review unavailable: the task acceptance is not bound to the supplied task statement",
+      ],
+      ["exactly bound acceptance", {
+        ...CLEAN_RESULT,
+        taskAcceptance: acceptance,
+      }, null],
+    ];
+    for (const [label, result, detail] of cases) {
+      const session = new ScriptedCodexSession();
+      session.live = (scripted) => {
+        scripted.emit(
+          "item/started",
+          agentMessage(scripted.turnId, "item-1", ""),
+        );
+        scripted.emit(
+          "item/completed",
+          agentMessage(scripted.turnId, "item-1", JSON.stringify(result)),
+        );
+        scripted.emit("turn/completed", turnCompleted(scripted.turnId));
+      };
+      const snapshot = await snapshotFixture();
+      const reviewer = makeReviewer(session);
+      const prepared = await reviewer.prepare(
+        prepareRequest(snapshot, { task }),
+      );
+      if (!prepared.ok) assert.fail(prepared.error.detail);
+      const outcome = await prepared.value.start();
+      if (!outcome.ok) assert.fail(outcome.error.detail);
+      // The single turn/start carries the bound task statement as data.
+      const prompt = (session.params[2] as { input: { text: string }[] })
+        .input[0].text;
+      contains(prompt, "TASK STATEMENT");
+      contains(prompt, `Source issue: #${task.issueNumber}`);
+      contains(prompt, `Task digest: ${task.digest}`);
+      contains(prompt, task.body);
+      if (detail === null) {
+        assert.equal(outcome.value.status, "clean", label);
+        assert.deepEqual(outcome.value.result?.taskAcceptance, acceptance);
+      } else {
+        assert.equal(outcome.value.status, "unavailable", label);
+        assert.equal(outcome.value.detail, detail, label);
+      }
+      await prepared.value.close();
+    }
+
+    // A task statement that does not bind its own text opens no session.
+    const session = new ScriptedCodexSession();
+    const reviewer = makeReviewer(session);
+    const snapshot = await snapshotFixture();
+    const invalid = await reviewer.prepare(
+      prepareRequest(snapshot, {
+        task: { ...task, digest: "e".repeat(64) },
+      }),
+    );
+    assert.equal(invalid.ok, false);
+    assert.equal(session.opened, 0, "no session opens for a malformed task");
+  },
+);
+
+Deno.test(
+  "reviewer: a result cannot invent an acceptance without a task statement",
+  async () => {
+    const session = new ScriptedCodexSession();
+    session.live = (scripted) => {
+      scripted.emit(
+        "item/started",
+        agentMessage(scripted.turnId, "item-1", ""),
+      );
+      scripted.emit(
+        "item/completed",
+        agentMessage(
+          scripted.turnId,
+          "item-1",
+          JSON.stringify({
+            ...CLEAN_RESULT,
+            taskAcceptance: {
+              issueNumber: 263,
+              taskDigest: "c".repeat(64),
+              verdict: "fulfilled",
+              evidence: ["invented"],
+            },
+          }),
+        ),
+      );
+      scripted.emit("turn/completed", turnCompleted(scripted.turnId));
+    };
+    const snapshot = await snapshotFixture();
+    const reviewer = makeReviewer(session);
+    const prepared = await reviewer.prepare(prepareRequest(snapshot));
+    if (!prepared.ok) assert.fail(prepared.error.detail);
+    const outcome = await prepared.value.start();
+    if (!outcome.ok) assert.fail(outcome.error.detail);
+    assert.equal(outcome.value.status, "unavailable");
+    assert.equal(
+      outcome.value.detail,
+      "structured review unavailable: the result carried a task acceptance without a supplied task statement",
+    );
+    await prepared.value.close();
   },
 );
 

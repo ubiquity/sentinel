@@ -28,7 +28,15 @@
 import type { GitSha } from "../contracts/brands.ts";
 import { asFindingFingerprint } from "../contracts/brands.ts";
 import { canonicalStringifySha256 } from "../contracts/canonical.ts";
-import { parseMergeRequestV1 } from "../contracts/merge-request.ts";
+import {
+  mergeSemanticRefusal,
+  parseMergeRequestV1,
+} from "../contracts/merge-request.ts";
+import {
+  checkReviewTaskStatement,
+  reviewTaskStatementDigest,
+  type ReviewTaskStatementV1,
+} from "../contracts/review-receipt.ts";
 import type {
   CandidatePreservationRequestV1,
   Clock,
@@ -540,6 +548,7 @@ export class GitHubPortImpl implements GitHubPort {
         expectedReviewer: request.expectedReviewer,
         latestStartAt: request.latestStartAt,
         settleBy: request.settleBy,
+        task: request.task ?? null,
       })
     );
     if (!submitted.ok) return submitted;
@@ -775,6 +784,45 @@ export class GitHubPortImpl implements GitHubPort {
     if (!ancestor.ok) return ancestor;
     if (!ancestor.value) {
       return blocked("base_mismatch", pull.value.head);
+    }
+    // 7b. Semantic task authorization, immediately before the merge mutation.
+    // A receipt copy is never fulfillment evidence: the adapter independently
+    // reads the live source issue named by the PR's OWN published closing link
+    // ("Resolves #N"), rebuilds the bounded canonical statement and requires
+    // the receipt's acceptance to be the same positive, exactly bound verdict.
+    // An acceptance present without a closing link is verified against its own
+    // issue number; incident PRs (no link, no acceptance) keep the change-only
+    // contract. A transient issue read failure is a retryable typed error
+    // (never a merge); a missing/malformed context or any semantic refusal is
+    // a typed refusal.
+    const closingIssue = closingIssueNumber(pull.value.body);
+    const acceptance = merge.review.taskAcceptance;
+    const contextIssueNumber = closingIssue ?? acceptance?.issueNumber ?? null;
+    let semanticTask: ReviewTaskStatementV1 | null | "unavailable" = null;
+    if (contextIssueNumber !== null) {
+      const issue = await this.client.readIssue(contextIssueNumber);
+      if (!issue.ok) return issue;
+      if (issue.value === null || issue.value.number !== contextIssueNumber) {
+        return blocked("review_required", pull.value.head);
+      }
+      const text = {
+        issueNumber: contextIssueNumber,
+        title: issue.value.title,
+        body: issue.value.body,
+      };
+      const checked = await checkReviewTaskStatement({
+        ...text,
+        digest: await reviewTaskStatementDigest(text),
+      });
+      semanticTask = checked.ok ? checked.statement : "unavailable";
+    }
+    if (
+      mergeSemanticRefusal(merge, {
+        issueNumber: contextIssueNumber,
+        task: semanticTask,
+      }) !== null
+    ) {
+      return blocked("review_required", pull.value.head);
     }
     // 8. Expected-head merge. REST has no atomic base CAS: the strict
     // up-to-date protection is what rejects a base movement after this last
@@ -1048,6 +1096,10 @@ export class GitHubPortImpl implements GitHubPort {
         // Completed normalization is only reachable with a complete finding
         // set; the residual unknown count is a per-observation value.
         findingsUncounted: 0,
+        // The merge re-observation carries the SAME task acceptance the freshly
+        // read durable journal reports, so a receipt can never be authorized by
+        // a differently-bound semantic verdict.
+        taskAcceptance: observation.value.taskAcceptance,
       },
     };
   }
@@ -1432,6 +1484,21 @@ function latestChecksByName(
 
 function checkObservationTime(check: GitHubCheckV1): number {
   return check.completedAt ?? check.startedAt ?? -1;
+}
+
+/**
+ * The exact published closing link of one pull request body: the single line
+ * `Resolves #N` the trusted publisher writes for issue-backed work. A body
+ * without that exact line (incident work, legacy or edited text) binds no
+ * issue here; the link is evidence of WHICH issue to read, never fulfillment
+ * evidence itself.
+ */
+export function closingIssueNumber(body: string | null): number | null {
+  if (body === null) return null;
+  const match = /^Resolves #([0-9]{1,10})$/m.exec(body);
+  if (match === null) return null;
+  const value = Number(match[1]);
+  return Number.isSafeInteger(value) && value >= 1 ? value : null;
 }
 
 function blocked(

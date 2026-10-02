@@ -20,7 +20,11 @@
  */
 
 import type { MergeRequestV1 } from "./ports.ts";
-import { parseReviewReceiptV1 } from "./review-receipt.ts";
+import {
+  parseReviewReceiptV1,
+  reviewTaskAcceptanceRefusal,
+  type ReviewTaskStatementV1,
+} from "./review-receipt.ts";
 import { parseRepositoryIdentity } from "./shared.ts";
 import type { RepositoryIdentityV1, SeverityV1 } from "./shared.ts";
 import {
@@ -157,6 +161,35 @@ export function parseMergeRequestV1(
 
 function hasUnresolvedP0P1(severities: readonly SeverityV1[]): boolean {
   return severities.includes("P0") || severities.includes("P1");
+}
+
+/**
+ * The merge request's semantic acceptance refusal, evaluated against the
+ * TRUSTED source-issue context the adapter independently read at authorization
+ * time (`context.issueNumber` from the published "Resolves #N" link, and
+ * `context.task` from the live issue read). Returns the shared static refusal
+ * detail, or null only for a positive acceptance exactly bound to that live
+ * text. A caller-supplied receipt copy can never satisfy this by itself, and
+ * `"unavailable"` context always fails closed.
+ *
+ * This is the same predicate as `taskAcceptanceRefusal` in the repair gate and
+ * `reviewTaskAcceptanceRefusal` in the review contract: every authorization
+ * surface must refuse with identical bytes.
+ */
+export function mergeSemanticRefusal(
+  merge: MergeRequestV1,
+  context: {
+    /** Issue number named by the PR's own published closing link, or null. */
+    issueNumber: number | null;
+    /** Trusted live task statement, or "unavailable" when unreadable. */
+    task: ReviewTaskStatementV1 | null | "unavailable";
+  },
+): string | null {
+  return reviewTaskAcceptanceRefusal({
+    issueNumber: context.issueNumber,
+    task: context.task,
+    acceptance: merge.review.taskAcceptance,
+  });
 }
 
 export type { MergeRequestV1 };

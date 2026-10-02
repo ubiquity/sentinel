@@ -35,6 +35,13 @@ import { BASE_REFRESH_CONFLICT_DETAIL, portOk } from "../contracts/ports.ts";
 import type { RepositoryConfigV1 } from "../contracts/repository-config.ts";
 import type { IncidentEvidenceV1 } from "../contracts/incident.ts";
 import { parseMergeRequestV1 } from "../contracts/merge-request.ts";
+import {
+  checkReviewTaskStatement,
+  REVIEW_TASK_SHAPE_DETAIL,
+  reviewTaskStatementDigest,
+  type ReviewTaskStatementV1,
+} from "../contracts/review-receipt.ts";
+import { generatedArtifactOnly } from "../github/review-snapshot.ts";
 import { parseReleaseRequestV1 } from "../contracts/release.ts";
 import type { ReleaseRequestV1 } from "../contracts/release.ts";
 import {
@@ -94,6 +101,11 @@ import {
 import {
   authorizingReceipt,
   MERGE_WITHOUT_REVIEW_DETAIL,
+  TASK_ACCEPTANCE_CONTEXT_DETAIL,
+  TASK_ACCEPTANCE_DIGEST_DETAIL,
+  TASK_ACCEPTANCE_MISMATCH_DETAIL,
+  TASK_ACCEPTANCE_MISSING_DETAIL,
+  taskAcceptanceRefusal,
 } from "./review-gate.ts";
 import {
   advanceToCorrection,
@@ -3064,21 +3076,35 @@ async function handleModelReceipt(
   const candidate = receipt.candidate;
   const completed = receipt.outcome === "completed" && candidate !== null &&
     candidate.head !== null && candidate.head !== record.target.base &&
-    candidate.changedPaths.length > 0;
+    candidate.changedPaths.length > 0 &&
+    // A nonempty diff is not a repair: a candidate whose ENTIRE change set is
+    // obvious generated/cache output (build products, logs, caches, OS junk)
+    // can never establish task completion — however clean a downstream
+    // code-quality review is — so it is refused here, before publication.
+    !generatedArtifactOnly(candidate.changedPaths);
   if (!completed) {
     // Only OUR sanitized loop-stop marker gets the exact failed_command_loop
     // blocker message; every other incomplete receipt keeps the generic
     // message. The settlement write moved the authoritative head, so the
     // block is persisted against the reloaded state (never a stale CAS).
     const loopStopped = receipt.error === "failed_command_loop";
+    const artifactOnly = receipt.outcome === "completed" &&
+      candidate !== null &&
+      candidate.changedPaths.length > 0 &&
+      generatedArtifactOnly(candidate.changedPaths);
+    let incompleteMessage =
+      "model run did not complete with a trusted candidate";
+    if (loopStopped) incompleteMessage = "failed_command_loop";
+    if (artifactOnly) {
+      incompleteMessage =
+        "model candidate changed only generated/cache artifacts";
+    }
     const blocked = await settleAndBlock(
       deps,
       reservationId,
       "ambiguous",
       record,
-      loopStopped
-        ? "failed_command_loop"
-        : "model run did not complete with a trusted candidate",
+      incompleteMessage,
       now,
     );
     return persistAfterSettlement(
@@ -3955,6 +3981,47 @@ async function requestReviewFor(
     };
   }
 
+  // The independent review must judge the EXACT live source-issue task, not
+  // only the change. The bounded, digest-bound statement is read BEFORE any
+  // admission, so an issue-backed request is never submitted without the
+  // criterion its acceptance will be bound to (and never charged for a review
+  // that could not establish task completion). Work without a source issue
+  // carries no statement and keeps the unchanged change-only review contract.
+  const task = await readReviewTaskStatement(deps, record);
+  if (task === "read_failed") {
+    return {
+      kind: "deferred",
+      detail: "review task statement read is unavailable",
+    };
+  }
+  if (task === "not_open") {
+    // There is no live task to deliver against: the issue is closed or gone.
+    // No task-bound review can be requested, so the record is parked with an
+    // explicit stale-source blocker instead of spending a review or merging.
+    return persistWork(
+      deps,
+      context,
+      markBlocked(
+        record,
+        "stale_source",
+        "source issue is not open: no task-bound review can be requested",
+        deps.clock.now(),
+      ),
+    );
+  }
+  if (task === "malformed") {
+    return persistWork(
+      deps,
+      context,
+      markBlocked(
+        record,
+        "missing_evidence",
+        REVIEW_TASK_SHAPE_DETAIL,
+        deps.clock.now(),
+      ),
+    );
+  }
+
   // Review requests share the one rolling model-start budget: durable
   // admission precedes invocation, with a deterministic task/head/round
   // identity, so observation/recovery never resubmits or adds a second
@@ -4158,6 +4225,7 @@ async function requestReviewFor(
     operationKey,
     latestStartAt,
     settleBy,
+    task,
   });
   if (!submitted.ok) {
     // The response may have been lost after submission: the start stays
@@ -4812,6 +4880,7 @@ async function applyObservedReview(
       // may report several findings at one severity; passing duplicates makes
       // the strict receipt parser reject an otherwise valid result.
       unresolvedSeverities: deriveUnresolvedSeverities(value.findings),
+      taskAcceptance: value.taskAcceptance,
       submittedAt: reviewSubmittedAt(record, value.completedAt, now),
       completedAt: value.completedAt,
       observedAt: value.receivedAt,
@@ -4829,6 +4898,48 @@ async function applyObservedReview(
     );
   }
   const unresolved = receipt.unresolvedSeverities.length > 0;
+  // A completed code-quality verdict is still not a delivery. For an
+  // issue-backed record the receipt must also carry the reviewer's POSITIVE
+  // task acceptance bound to this exact source issue AND to the TRUSTED live
+  // task text, independently re-read here: the model's echoed digest and
+  // equality between two copied receipts are never fulfillment proof. A legacy
+  // change-only receipt, a changed digest, a mismatch, an explicit
+  // not_fulfilled/already_satisfied_at_base or an uncertain verdict is an
+  // honest NO-DELIVERY disposition persisted with its static reason. Nothing
+  // is merged, no issue is closed and the unrelated PR never becomes repair
+  // evidence.
+  if (!unresolved) {
+    // Missing context (transient read failure, vanished issue, over-bound
+    // text) fails closed as a bounded wait: no delivery is ever authorized
+    // against an unverifiable task.
+    const task = await readDeliveryTaskContext(deps, record);
+    if (task === "unavailable") {
+      const since = reviewWaitSince(record, now);
+      return persistWork(
+        deps,
+        context,
+        setWait(
+          record,
+          {
+            reason: "review_quota",
+            since,
+            until: Math.max(now, since) + REVIEW_POLL_MS,
+          },
+          now,
+        ),
+      );
+    }
+    const refusal = taskAcceptanceRefusal(receipt, record, task);
+    if (refusal !== null) {
+      return persistWork(
+        deps,
+        context,
+        // Blocked, not retired: the publication identity is preserved for
+        // audit and nothing is merged or closed for the issue.
+        markBlocked(record, semanticRefusalKind(refusal), refusal, now),
+      );
+    }
+  }
   const withEvidence: WorkRecordV1 = {
     ...record,
     evidence: mergeEvidence(record.evidence, [{
@@ -5488,10 +5599,27 @@ async function executeMerge(
   if (config === null || completed === undefined) {
     return { kind: "state_error", detail: MERGE_WITHOUT_REVIEW_DETAIL };
   }
+  // The merge authorization additionally binds the receipt's task acceptance
+  // to the TRUSTED live source-issue context, independently re-read here (the
+  // adapter re-reads it again immediately before the mutation). A transient
+  // read failure defers without a merge intent; different or unreadable
+  // context fails the strict authorization below.
+  const mergeTask = await readDeliveryTaskContext(deps, record);
+  if (mergeTask === "unavailable") {
+    return { kind: "deferred", detail: "merge task context is unavailable" };
+  }
+  // Surface the exact static semantic refusal (missing acceptance, changed
+  // digest, wrong issue, non-fulfilled verdict) instead of the generic
+  // contradiction detail: the owner sees why this candidate must not merge.
+  const semanticDetail = taskAcceptanceRefusal(completed, record, mergeTask);
+  if (semanticDetail !== null) {
+    return { kind: "state_error", detail: semanticDetail };
+  }
   const receipt = authorizingReceipt(
     [completed],
     record,
     deps.github.reviewerIdentity,
+    mergeTask,
   );
   if (receipt === null) {
     // A durable completed verdict exists but does not authorize this exact
@@ -5563,23 +5691,44 @@ async function executeMerge(
       ),
     );
   }
-  return handleMergeOutcome(deps, context, record, merged.value);
+  return handleMergeOutcome(deps, context, record, merged.value, receipt);
 }
 
+/**
+ * `receipt` is the EXACT review receipt that authorized this merge: the one the
+ * caller just validated with the strict predicate (the fresh merge) or the one
+ * the durable merge intent references by its review request/result identity
+ * (reconciliation). A receipt that merely shares PR/head never carries the
+ * delivery proof, and the release request published below must reference this
+ * exact record so a later acceptance can revalidate the same proof.
+ */
 async function handleMergeOutcome(
   deps: RepairCycleDepsV1,
   context: LoopContextV1,
   record: WorkRecordV1,
   outcome: MergeOutcomeV1,
+  receipt: ReviewReceiptV1 | null,
 ): Promise<StepResultV1> {
   const now = deps.clock.now();
   if (outcome.outcome === "merged") {
     const cleared = clearIntent(record, now);
-    const receipt = context.snapshot.reviews.find((review) =>
-      review.pullRequest.number === record.target.pr &&
-      review.pullRequest.head === record.target.head &&
-      review.outcome === "completed"
-    ) ?? null;
+    // GitHub may already have auto-closed the issue through the published
+    // "Resolves #N" link. The trusted read-only context still yields the same
+    // canonical title/body digest, so a successful merge is never left
+    // unreleasable; a changed digest or a non-positive verdict is an honest
+    // no-delivery: no release request is published and the task is never
+    // counted as a newly delivered repair.
+    const semantic = await deliveryTaskRefusal(deps, record, receipt);
+    if (semantic === "wait") {
+      return waitRelease(deps, context, cleared, now);
+    }
+    if (semantic !== null) {
+      return persistWork(
+        deps,
+        context,
+        markBlocked(cleared, semanticRefusalKind(semantic), semantic, now),
+      );
+    }
     const request = await buildReleaseRequest(deps, record, outcome, receipt);
     if (request === null) {
       return persistWork(
@@ -5594,9 +5743,7 @@ async function handleMergeOutcome(
       );
     }
     return persistTransition(deps, context, (draft) => {
-      const index = draft.work.findIndex((work) =>
-        work.id === record.id
-      );
+      const index = draft.work.findIndex((work) => work.id === record.id);
       draft.work[index] = { ...cleared, updatedAt: now };
       if (!draft.releaseRequests.some((item) => item.id === request.id)) {
         draft.releaseRequests.push(request);
@@ -5702,7 +5849,7 @@ async function reconcileMergeIntent(
       outcome: "merged",
       head: pull.head,
       mergeSha: pull.mergeSha,
-    });
+    }, mergeIntentReceipt(context.snapshot.reviews, record));
   }
   if (pull.state === "closed") {
     return persistWork(
@@ -5856,7 +6003,7 @@ async function observeLocalReleaseAcceptance(
     return waitRelease(deps, context, record, now);
   }
   if (receipt.phase === "accepted") {
-    return await acceptRelease(deps, context, record, request.id, now);
+    return await acceptRelease(deps, context, record, request, now);
   }
   if (receipt.phase === "failed" || receipt.phase === "rolled_back") {
     return blockRelease(deps, context, record, receipt.phase, now);
@@ -5902,7 +6049,7 @@ async function observeHostedReleaseAcceptance(
     return waitRelease(deps, context, record, now);
   }
   if (receipt.phase === "accepted") {
-    return await acceptRelease(deps, context, record, request.id, now);
+    return await acceptRelease(deps, context, record, request, now);
   }
   if (receipt.phase === "rolled_back") {
     return blockRelease(deps, context, record, "rolled_back", now);
@@ -5917,11 +6064,36 @@ async function acceptRelease(
   deps: RepairCycleDepsV1,
   context: LoopContextV1,
   record: WorkRecordV1,
-  requestId: string,
+  request: ReleaseRequestV1,
   now: number,
 ): Promise<StepResultV1> {
   if (record.related.issueNumber === null) {
     return persistWork(deps, context, markDone(record, now));
+  }
+  // The release controller accepted the deployment, but the issue is closed
+  // only while the RECORDED acceptance still binds the trusted live task
+  // context. GitHub may have auto-closed the issue already through the
+  // published "Resolves #N" link; the read-only reader returns that exact
+  // canonical title/body digest, so a real delivery stays closable. Changed
+  // text, a missing acceptance or an already-satisfied base never closes as a
+  // newly delivered repair.
+  //
+  // Issue-backed acceptance is UNCONDITIONAL: the exact receipt the release
+  // request references must still be the one full authorization for this
+  // delivery (exact repository/base/reviewer/cleanliness AND the positive task
+  // acceptance bound to the trusted live text). Release bookkeeping alone — a
+  // durable intent, a completed PR or a missing receipt — never proves
+  // delivery, so a missing or non-authorizing reference fails closed instead
+  // of persisting a closure intent.
+  const referenced = releaseRequestReceipt(context.snapshot.reviews, request);
+  const semantic = await deliveryTaskRefusal(deps, record, referenced);
+  if (semantic === "wait") return waitRelease(deps, context, record, now);
+  if (semantic !== null) {
+    return persistWork(
+      deps,
+      context,
+      markBlocked(record, semanticRefusalKind(semantic), semantic, now),
+    );
   }
   const intent = {
     kind: "issue_closure" as const,
@@ -5931,7 +6103,7 @@ async function acceptRelease(
     expectedHead: record.target.head,
     observedBase: record.target.base,
     pr: record.target.pr,
-    requestId,
+    requestId: request.id,
     resultId: null,
   };
   const withIntent = setIntent(record, intent, now);
@@ -5976,7 +6148,7 @@ async function observeReleaseAcceptance(
     return waitRelease(deps, context, record, now);
   }
   if (observed.phase === "accepted") {
-    return await acceptRelease(deps, context, record, request.id, now);
+    return await acceptRelease(deps, context, record, request, now);
   }
   if (observed.phase === "failed" || observed.phase === "rolled_back") {
     return blockRelease(deps, context, record, observed.phase, now);
@@ -6018,6 +6190,53 @@ async function retryClosure(
   }
   if (cooling.kind === "deferred") {
     return { kind: "deferred", detail: cooling.detail };
+  }
+  // The durable intent was written from an EARLIER read of the trusted task
+  // context, which may have changed since (an edited issue body, a vanished or
+  // different issue). Revalidate the exact recorded delivery proof through the
+  // release request this intent names BEFORE the external closure and the done
+  // transition: a missing, mismatched or no-longer-bound proof blocks instead
+  // of closing the issue, and a transient read failure keeps the intent for the
+  // next run.
+  const intentRequestId = record.intent?.requestId ?? null;
+  const referencedRequest = context.snapshot.releaseRequests.find((item) =>
+    item.id === intentRequestId && releaseRequestMatchesDelivery(item, record)
+  );
+  const referenced = referencedRequest === undefined
+    ? null
+    : releaseRequestReceipt(context.snapshot.reviews, referencedRequest);
+  const semantic = await deliveryTaskRefusal(deps, record, referenced);
+  if (semantic === "wait") {
+    return persistWork(
+      deps,
+      context,
+      setWait(
+        record,
+        { reason: "unavailable", since: now, until: now + CHECK_POLL_MS },
+        now,
+      ),
+    );
+  }
+  if (semantic !== null) {
+    return persistWork(
+      deps,
+      context,
+      markBlocked(
+        clearIntent(record, now),
+        semanticRefusalKind(semantic),
+        semantic,
+        now,
+      ),
+    );
+  }
+  // The revalidation read is awaited wall-clock time: it may have crossed the
+  // total deadline, and the closure mutation must not start then. The closure
+  // intent stays durable; the next run revalidates and closes once.
+  if (deps.clock.now() >= context.bounds.runDeadline) {
+    return {
+      kind: "margin",
+      detail: "issue closure crossed the total run deadline",
+    };
   }
   const closed = await deps.github.closeIssue(issueNumber);
   if (!closed.ok) {
@@ -6135,6 +6354,197 @@ async function readIssueForModel(
     title: issue.title,
     body: issue.body,
   };
+}
+
+/**
+ * One trusted read-only source-issue context: the bounded canonical statement
+ * plus the native state it was read in. `read_failed` is transient; `missing`
+ * (the issue no longer exists) and `malformed` (the live text cannot be
+ * carried as a bounded statement) fail closed.
+ */
+type IssueTaskContextV1 =
+  | {
+    statement: ReviewTaskStatementV1;
+    state: "open" | "closed";
+  }
+  | null
+  | "read_failed"
+  | "missing"
+  | "malformed";
+
+/**
+ * Read the exact live source-issue context WITHOUT requiring an open state.
+ *
+ * The canonical title/body (and its digest) is the criterion any acceptance
+ * must be bound to. Post-merge GitHub auto-closure is expected for the
+ * published "Resolves #N" link, so delivery authorization must still be able
+ * to read and verify the same text after the issue is closed; only ADMISSION
+ * of new review work requires the open state.
+ */
+async function readIssueTaskContext(
+  deps: RepairCycleDepsV1,
+  record: WorkRecordV1,
+): Promise<IssueTaskContextV1> {
+  const issueNumber = record.related.issueNumber;
+  if (issueNumber === null) return null;
+  const read = await deps.github.readIssue(issueNumber);
+  if (!read.ok) return "read_failed";
+  const issue = read.value;
+  if (issue === null || issue.number !== issueNumber) return "missing";
+  const text = { issueNumber, title: issue.title, body: issue.body };
+  const digest = await reviewTaskStatementDigest(text);
+  const checked = await checkReviewTaskStatement({ ...text, digest });
+  if (!checked.ok) return "malformed";
+  return {
+    statement: checked.statement,
+    state: issue.state === "open" ? "open" : "closed",
+  };
+}
+
+/**
+ * The trusted delivery authorization context: the same read-only reader, with
+ * every non-readable outcome collapsed to `"unavailable"` so callers fail
+ * closed without inventing a statement. `null` means work with no source task.
+ */
+async function readDeliveryTaskContext(
+  deps: RepairCycleDepsV1,
+  record: WorkRecordV1,
+): Promise<ReviewTaskStatementV1 | null | "unavailable"> {
+  const context = await readIssueTaskContext(deps, record);
+  if (
+    context === "read_failed" || context === "missing" ||
+    context === "malformed"
+  ) {
+    return "unavailable";
+  }
+  return context === null ? null : context.statement;
+}
+
+/**
+ * Read the exact live source-issue task statement one NEW review must judge.
+ *
+ * Open-only ADMISSION wrapper over the read-only context: returns the bounded
+ * digest-bound statement, `null` for work with no source issue, or one static
+ * state:
+ * - `read_failed`: the issue read failed (transient; the request retries);
+ * - `not_open`: the issue is closed or no longer exists, so no task-bound
+ *   review may be requested;
+ * - `malformed`: the live text cannot be carried as a bounded statement (for
+ *   example an over-bound body); a truncated statement would bind the review
+ *   to text nobody wrote, so this fails closed instead.
+ */
+async function readReviewTaskStatement(
+  deps: RepairCycleDepsV1,
+  record: WorkRecordV1,
+): Promise<
+  ReviewTaskStatementV1 | null | "read_failed" | "not_open" | "malformed"
+> {
+  const context = await readIssueTaskContext(deps, record);
+  if (context === "read_failed") return "read_failed";
+  if (context === null) return null;
+  if (context === "malformed") return "malformed";
+  if (context === "missing" || context.state !== "open") return "not_open";
+  return context.statement;
+}
+
+/**
+ * The exact review receipt one durably persisted merge intent referenced: the
+ * intent records the review request id and result id that authorized the merge
+ * BEFORE the mutation, so reconciliation re-binds that same evidence instead of
+ * re-deriving it from PR/head alone.
+ */
+function mergeIntentReceipt(
+  reviews: readonly ReviewReceiptV1[],
+  record: WorkRecordV1,
+): ReviewReceiptV1 | null {
+  const intent = record.intent;
+  if (intent === null || intent.kind !== "merge") return null;
+  if (intent.requestId === null || intent.resultId === null) return null;
+  return reviews.find((review) =>
+    review.requestId === intent.requestId &&
+    review.resultId === intent.resultId
+  ) ?? null;
+}
+
+/**
+ * The exact review receipt one persisted release request references: BOTH the
+ * durable receipt id and the review request id must match, so a different
+ * completed receipt that merely shares the PR/head can never carry this
+ * delivery's proof.
+ */
+function releaseRequestReceipt(
+  reviews: readonly ReviewReceiptV1[],
+  request: ReleaseRequestV1,
+): ReviewReceiptV1 | null {
+  const receiptId = request.source.reviewReceiptId;
+  if (receiptId === null) return null;
+  return reviews.find((review) =>
+    review.id === receiptId &&
+    review.requestId === request.source.reviewRequestId
+  ) ?? null;
+}
+
+/**
+ * Re-verify one record's RECORDED delivery acceptance against the trusted
+ * live source-issue context, after the merge and before any release request or
+ * issue closure. The issue may already have been auto-closed by the published
+ * "Resolves #N" link; the read-only reader still returns the same canonical
+ * title/body digest, so a successful merge is never left unreleasable, while a
+ * changed context or a non-fulfilled/already-satisfied verdict is an honest
+ * no-delivery. Returns the static refusal detail, `"wait"` for a transient
+ * context read failure, or null when the exact positive acceptance binds.
+ *
+ * `referenced` is the EXACT receipt the durable delivery reference names (the
+ * merge intent's review request/result identity, or the release request's
+ * persisted review receipt id). It must satisfy the shared FULL authorization
+ * predicate — exact repository/base/PR/head, trusted unmodified reviewer,
+ * zero uncounted findings, no unresolved P0/P1 — and the acceptance must bind
+ * the trusted live text. A missing reference, a receipt that only shares
+ * PR/head, or a quality-only receipt never authorizes an issue-backed
+ * delivery; the specific acceptance refusal is surfaced first so the owner
+ * sees why the task proof fails.
+ */
+async function deliveryTaskRefusal(
+  deps: RepairCycleDepsV1,
+  record: WorkRecordV1,
+  referenced: ReviewReceiptV1 | null,
+): Promise<string | "wait" | null> {
+  if (record.related.issueNumber === null) return null;
+  const task = await readDeliveryTaskContext(deps, record);
+  if (task === "unavailable") return "wait";
+  if (referenced === null) return MERGE_WITHOUT_REVIEW_DETAIL;
+  const semantic = taskAcceptanceRefusal(referenced, record, task);
+  if (semantic !== null) return semantic;
+  // The exact reference must ALSO satisfy the shared full authorization
+  // predicate (exact identity, trusted reviewer, clean findings) for this same
+  // task; a receipt that only shares PR/head never carries the proof.
+  const authorized = authorizingReceipt(
+    [referenced],
+    record,
+    deps.github.reviewerIdentity,
+    task,
+  );
+  return authorized === null ? MERGE_WITHOUT_REVIEW_DETAIL : null;
+}
+
+/**
+ * Durable blocker kind of one static semantic refusal: a missing/changed
+ * evidence binding is `missing_evidence`; an explicit verdict that the task is
+ * not (or is already) satisfied is `other`.
+ */
+function semanticRefusalKind(
+  detail: string,
+): "missing_evidence" | "other" {
+  if (
+    detail === TASK_ACCEPTANCE_MISSING_DETAIL ||
+    detail === TASK_ACCEPTANCE_MISMATCH_DETAIL ||
+    detail === TASK_ACCEPTANCE_DIGEST_DETAIL ||
+    detail === TASK_ACCEPTANCE_CONTEXT_DETAIL ||
+    detail === MERGE_WITHOUT_REVIEW_DETAIL
+  ) {
+    return "missing_evidence";
+  }
+  return "other";
 }
 
 async function readBase(

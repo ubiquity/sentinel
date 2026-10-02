@@ -23,6 +23,8 @@ import type {
   ReviewFindingV1,
   ReviewReceiptV1,
   ReviewStatusV1,
+  ReviewTaskAcceptanceV1,
+  ReviewTaskStatementV1,
 } from "./review-receipt.ts";
 import type {
   ReleaseStateSnapshotV1,
@@ -274,6 +276,15 @@ export interface ReviewSubmissionV1 {
   operationKey: string;
   latestStartAt: number;
   settleBy: number;
+  /**
+   * Exact source-issue task statement the independent review must judge the
+   * candidate against, or null for work with no issue acceptance. It is
+   * bounded, digested and treated as untrusted data by the reviewer. Optional
+   * so existing change-only callers stay valid; the production repair loop
+   * always supplies the live issue statement, and a missing statement can
+   * never authorize an issue-backed delivery.
+   */
+  task?: ReviewTaskStatementV1 | null;
 }
 
 export interface ReviewRequestOutcomeV1 {
@@ -342,6 +353,12 @@ export interface ReviewObservationV1 {
   /** Full findings exactly as delivered; never trimmed. */
   findings: ReviewFindingV1[];
   summary: string | null;
+  /**
+   * The reviewer's positive task acceptance, bound to the exact task
+   * statement the review was requested with; null for a change-only or legacy
+   * observation, which never authorizes an issue-backed delivery.
+   */
+  taskAcceptance: ReviewTaskAcceptanceV1 | null;
   /** When the observation was made; completion is never inferred later. */
   receivedAt: number;
 }

@@ -53,13 +53,21 @@ import {
   canonicalStringifySha256,
 } from "../contracts/canonical.ts";
 import {
+  MAX_TASK_ACCEPTANCE_EVIDENCE,
+  MAX_TASK_ACCEPTANCE_EVIDENCE_CHARS,
+  parseReviewTaskAcceptance,
+  type ReviewTaskAcceptanceV1,
+} from "../contracts/review-receipt.ts";
+import {
   expectArray,
   expectBoolean,
   expectCanonicalBase64,
   expectCount,
   expectEnum,
   expectExactKeys,
+  expectExactKeysWithOptional,
   expectGitSha,
+  expectNullable,
   expectPositiveInt,
   expectRecord,
   expectSha256Hex,
@@ -115,6 +123,18 @@ export interface ReviewResultV1 {
   verdict: ReviewVerdictV1;
   summary: string;
   findings: ReviewFindingV1[];
+  /**
+   * The reviewer's positive task acceptance bound to the exact submitted
+   * task statement, or null when the review was asked with a task statement
+   * and the reviewer explicitly reported no acceptance.
+   *
+   * PRESENCE IS SEMANTIC: results written before the semantic acceptance
+   * boundary omit the key entirely, and the parser preserves that absence so
+   * old journals stay byte-verifiable and readable. Every consumer reads
+   * `taskAcceptance ?? null`; an absent or null acceptance is "no acceptance"
+   * and can never authorize an issue-backed delivery.
+   */
+  taskAcceptance?: ReviewTaskAcceptanceV1 | null;
 }
 
 /**
@@ -212,10 +232,51 @@ export const REVIEW_RESULT_OUTPUT_SCHEMA = {
         },
       },
     },
+    taskAcceptance: {
+      type: "object",
+      additionalProperties: false,
+      required: ["issueNumber", "taskDigest", "verdict", "evidence"],
+      description:
+        "Required exactly when the prompt contains a TASK STATEMENT section: copy its issueNumber and taskDigest verbatim and judge the exact candidate change against that task. Omit this property only when no TASK STATEMENT section was supplied. fulfilled requires concrete evidence that the change implements the task; already_satisfied_at_base requires evidence that the base already meets it; not_fulfilled requires evidence that the change does not; uncertain requires evidence that the exact evidence is insufficient (its evidence array may be empty).",
+      properties: {
+        issueNumber: { type: "integer", minimum: 1 },
+        taskDigest: {
+          type: "string",
+          minLength: 64,
+          maxLength: 64,
+          pattern: "^[0-9a-f]{64}$",
+        },
+        verdict: {
+          type: "string",
+          enum: [
+            "fulfilled",
+            "not_fulfilled",
+            "already_satisfied_at_base",
+            "uncertain",
+          ],
+        },
+        evidence: {
+          type: "array",
+          maxItems: MAX_TASK_ACCEPTANCE_EVIDENCE,
+          items: {
+            type: "string",
+            minLength: 1,
+            maxLength: MAX_TASK_ACCEPTANCE_EVIDENCE_CHARS,
+            pattern: SINGLE_LINE_TEXT_PATTERN,
+          },
+        },
+      },
+    },
   },
 } as const;
 
 const RESULT_KEYS = ["verdict", "summary", "findings"] as const;
+/**
+ * Additive optional key: a structured result written before the semantic
+ * acceptance boundary parses with `taskAcceptance: null`, which can never
+ * authorize an issue-backed delivery. It is never defaulted to a verdict.
+ */
+const RESULT_OPTIONAL_KEYS = ["taskAcceptance"] as const;
 const FINDING_KEYS = [
   "priority",
   "title",
@@ -260,6 +321,26 @@ function expectJournalExactKeys(
   expectExactKeys(obj, allowed, path);
 }
 
+/**
+ * Same fixed-path unknown-key rejection as `expectJournalExactKeys`, with the
+ * additive optional-key shape: required keys must exist, listed optional keys
+ * may be absent, and every other key is rejected with the static path/message.
+ */
+function expectJournalExactKeysWithOptional(
+  obj: Record<string, unknown>,
+  required: readonly string[],
+  optional: readonly string[],
+  path: string,
+): void {
+  const known = new Set([...required, ...optional]);
+  for (const key of Object.keys(obj)) {
+    if (!known.has(key)) {
+      fail(path, "unknown_key", "unknown key");
+    }
+  }
+  expectExactKeysWithOptional(obj, required, optional, path);
+}
+
 /** Required location text of one finding (`path:lineStart-lineEnd`). */
 export function findingLocation(finding: ReviewFindingV1): string {
   return `${finding.path}:${finding.lineStart}-${finding.lineEnd}`;
@@ -277,7 +358,12 @@ export function findingMessage(finding: ReviewFindingV1): string {
  */
 export function parseReviewResultV1(input: unknown): ReviewResultV1 {
   const obj = expectRecord(input, "$");
-  expectJournalExactKeys(obj, RESULT_KEYS, "$");
+  expectJournalExactKeysWithOptional(
+    obj,
+    RESULT_KEYS,
+    RESULT_OPTIONAL_KEYS,
+    "$",
+  );
   const verdict = expectEnum(
     obj.verdict,
     ["clean", "findings", "unavailable"],
@@ -310,7 +396,32 @@ export function parseReviewResultV1(input: unknown): ReviewResultV1 {
     }
     seen.add(key);
   }
-  return { verdict, summary, findings };
+  // An absent key (a result written before this boundary) stays ABSENT, so the
+  // canonical form of the parsed result is byte-identical to what an older
+  // writer digested and rendered: old journals stay readable and verifiable.
+  // A present value must be the strict bounded acceptance. Absence is treated
+  // as "no acceptance" by every consumer and can never authorize an
+  // issue-backed delivery.
+  const taskAcceptance = obj.taskAcceptance === undefined
+    ? undefined
+    : expectNullable(
+      obj.taskAcceptance,
+      "$.taskAcceptance",
+      parseReviewTaskAcceptance,
+    );
+  // Only a completed structured verdict can carry a task acceptance: an
+  // unavailable result claiming one would be completion evidence without a
+  // completed review.
+  if (verdict === "unavailable" && taskAcceptance != null) {
+    fail(
+      "$.taskAcceptance",
+      "invalid_lifecycle",
+      "an unavailable verdict cannot carry a task acceptance",
+    );
+  }
+  return taskAcceptance === undefined
+    ? { verdict, summary, findings }
+    : { verdict, summary, findings, taskAcceptance };
 }
 
 function parseFinding(input: unknown, path: string): ReviewFindingV1 {
@@ -1078,6 +1189,15 @@ function renderHumanSection(journal: ReviewJournalV1): string {
     escapeHuman(journal.result.summary),
     "",
   ];
+  const acceptance = journal.result.taskAcceptance ?? null;
+  if (acceptance !== null) {
+    lines.push(
+      `Task acceptance (issue #${acceptance.issueNumber}): ${acceptance.verdict}`,
+      `Task digest: ${acceptance.taskDigest}`,
+      ...acceptance.evidence.map((item) => `- ${escapeHuman(item)}`),
+      "",
+    );
+  }
   if (journal.result.verdict === "findings") {
     lines.push(`Findings (${journal.result.findings.length}):`, "");
     for (const finding of journal.result.findings) {

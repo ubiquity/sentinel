@@ -11,11 +11,20 @@
 import assert from "node:assert/strict";
 
 import type { WorkRecordV1 } from "../../src/contracts/work-record.ts";
+import type { ReviewTaskStatementV1 } from "../../src/contracts/review-receipt.ts";
 import {
   authorizingReceipt,
   MERGE_WITHOUT_REVIEW_DETAIL,
   REVIEW_STEP_ATTACHMENT,
   reviewAuthorizesMerge,
+  TASK_ACCEPTANCE_ALREADY_SATISFIED_DETAIL,
+  TASK_ACCEPTANCE_CONTEXT_DETAIL,
+  TASK_ACCEPTANCE_DIGEST_DETAIL,
+  TASK_ACCEPTANCE_MISMATCH_DETAIL,
+  TASK_ACCEPTANCE_MISSING_DETAIL,
+  TASK_ACCEPTANCE_NOT_FULFILLED_DETAIL,
+  TASK_ACCEPTANCE_UNCERTAIN_DETAIL,
+  taskAcceptanceRefusal,
 } from "../../src/repair/review-gate.ts";
 import {
   clearIntent,
@@ -25,6 +34,18 @@ import {
 import { reviewReceipt, SHA1, SHA2, T0, workRecord } from "../state/helpers.ts";
 
 const REVIEWER = "chatgpt-codex-connector[bot]";
+
+/**
+ * The TRUSTED live task statement independently read at authorization time.
+ * Authorization compares the receipt's acceptance digest against THIS digest,
+ * never against a digest the model echoed back.
+ */
+const TRUSTED_TASK: ReviewTaskStatementV1 = {
+  issueNumber: 1,
+  title: "start the service with the selected release configuration",
+  body: "load the selected release config, import map, lockfile and launcher",
+  digest: "b".repeat(64),
+};
 
 function record(overrides: Partial<WorkRecordV1> = {}): WorkRecordV1 {
   return workRecord("issue-12", {
@@ -50,19 +71,48 @@ function completedReceipt(
     resultId: "result-1",
     completedAt: T0 + 2000,
     pullRequest: { number: 12, head: SHA1, base: SHA2 },
+    // The record's source issue is #1: a completed verdict without this
+    // positive, exactly bound acceptance is never task completion.
+    taskAcceptance: fulfilledAcceptance(1),
     ...overrides,
   });
 }
 
+/** The reviewer's positive acceptance of one exact source issue. */
+function fulfilledAcceptance(
+  issueNumber: number,
+  taskDigest = TRUSTED_TASK.digest,
+) {
+  return {
+    issueNumber,
+    taskDigest,
+    verdict: "fulfilled" as const,
+    evidence: ["the exact candidate change satisfies the source issue"],
+  };
+}
+
 Deno.test("review gate: a completed exact-identity trusted receipt authorizes the merge", () => {
   const receipt = completedReceipt();
-  assert.equal(reviewAuthorizesMerge(receipt, record(), REVIEWER), true);
   assert.equal(
-    reviewAuthorizesMerge(receipt, record(), null),
+    reviewAuthorizesMerge(receipt, record(), REVIEWER, TRUSTED_TASK),
+    true,
+  );
+  assert.equal(
+    reviewAuthorizesMerge(receipt, record(), null, TRUSTED_TASK),
     true,
     "no configured reviewer still checks the observed/expected binding",
   );
-  assert.deepEqual(authorizingReceipt([receipt], record(), REVIEWER), receipt);
+  assert.deepEqual(
+    authorizingReceipt([receipt], record(), REVIEWER, TRUSTED_TASK),
+    receipt,
+  );
+  // Omitting the trusted statement (or supplying an unreadable one) fails
+  // closed for an issue-backed record.
+  assert.equal(reviewAuthorizesMerge(receipt, record(), REVIEWER), false);
+  assert.equal(
+    reviewAuthorizesMerge(receipt, record(), REVIEWER, "unavailable"),
+    false,
+  );
 });
 
 function finding(
@@ -86,6 +136,155 @@ function finding(
     resolutionEvidence: null,
   };
 }
+
+Deno.test("review gate: an issue-backed delivery requires the exact bound positive acceptance", () => {
+  const base = record();
+  const cases: [string, ReturnType<typeof reviewReceipt>, string][] = [
+    [
+      "legacy change-only receipt",
+      completedReceipt({ taskAcceptance: undefined }),
+      TASK_ACCEPTANCE_MISSING_DETAIL,
+    ],
+    [
+      "acceptance for another issue",
+      completedReceipt({ taskAcceptance: fulfilledAcceptance(2) }),
+      TASK_ACCEPTANCE_MISMATCH_DETAIL,
+    ],
+    [
+      // Same issue, same head, but judged against DIFFERENT issue text: the
+      // trusted live digest is what authorizes, never the echoed copy.
+      "same-issue acceptance against changed task text",
+      completedReceipt({
+        taskAcceptance: fulfilledAcceptance(1, "a".repeat(64)),
+      }),
+      TASK_ACCEPTANCE_DIGEST_DETAIL,
+    ],
+    [
+      "explicitly not fulfilled",
+      completedReceipt({
+        taskAcceptance: {
+          issueNumber: 1,
+          taskDigest: TRUSTED_TASK.digest,
+          verdict: "not_fulfilled",
+          evidence: ["the changed file is unrelated to the task"],
+        },
+      }),
+      TASK_ACCEPTANCE_NOT_FULFILLED_DETAIL,
+    ],
+    [
+      "already satisfied at base",
+      completedReceipt({
+        taskAcceptance: {
+          issueNumber: 1,
+          taskDigest: TRUSTED_TASK.digest,
+          verdict: "already_satisfied_at_base",
+          evidence: ["the base already implements the required behavior"],
+        },
+      }),
+      TASK_ACCEPTANCE_ALREADY_SATISFIED_DETAIL,
+    ],
+    [
+      "uncertain",
+      completedReceipt({
+        taskAcceptance: {
+          issueNumber: 1,
+          taskDigest: TRUSTED_TASK.digest,
+          verdict: "uncertain",
+          evidence: [],
+        },
+      }),
+      TASK_ACCEPTANCE_UNCERTAIN_DETAIL,
+    ],
+  ];
+  for (const [label, receipt, detail] of cases) {
+    assert.equal(
+      taskAcceptanceRefusal(receipt, base, TRUSTED_TASK),
+      detail,
+      `${label} carries its exact static refusal`,
+    );
+    assert.equal(
+      reviewAuthorizesMerge(receipt, base, REVIEWER, TRUSTED_TASK),
+      false,
+      `${label} never authorizes a merge`,
+    );
+  }
+  // An unreadable or wrong trusted context fails closed even for a receipt
+  // whose own copied fields are internally consistent.
+  for (
+    const task of ["unavailable", null, {
+      ...TRUSTED_TASK,
+      issueNumber: 2,
+    }] as const
+  ) {
+    assert.equal(
+      taskAcceptanceRefusal(completedReceipt(), base, task),
+      TASK_ACCEPTANCE_CONTEXT_DETAIL,
+    );
+    assert.equal(
+      reviewAuthorizesMerge(completedReceipt(), base, REVIEWER, task),
+      false,
+    );
+  }
+  // The positive control: the same completed receipt WITH the bound fulfilled
+  // acceptance authorizes, and the existing P0/P1 strength is untouched.
+  assert.equal(
+    taskAcceptanceRefusal(completedReceipt(), base, TRUSTED_TASK),
+    null,
+  );
+  assert.equal(
+    reviewAuthorizesMerge(completedReceipt(), base, REVIEWER, TRUSTED_TASK),
+    true,
+  );
+  assert.equal(
+    reviewAuthorizesMerge(
+      completedReceipt({
+        findings: [finding("P0")],
+        unresolvedSeverities: ["P0"],
+      }),
+      base,
+      REVIEWER,
+      TRUSTED_TASK,
+    ),
+    false,
+    "a positive acceptance never weakens the P0 gate",
+  );
+});
+
+Deno.test("review gate: work without a source issue keeps the change-only contract", () => {
+  const incident = record({
+    source: { kind: "incident", id: "inc-1", revision: SHA1 },
+    related: { incidentId: "inc-1", issueNumber: null },
+    fingerprint: "d".repeat(64) as WorkRecordV1["fingerprint"],
+  });
+  assert.equal(incident.related.issueNumber, null);
+  assert.equal(
+    taskAcceptanceRefusal(
+      completedReceipt({ taskAcceptance: undefined }),
+      incident,
+      null,
+    ),
+    null,
+    "there is no issue acceptance to judge",
+  );
+  assert.equal(
+    reviewAuthorizesMerge(
+      completedReceipt({ taskAcceptance: undefined }),
+      incident,
+      REVIEWER,
+      null,
+    ),
+    true,
+  );
+  // An acceptance for work with no source issue is an invented/unbound claim.
+  assert.equal(
+    taskAcceptanceRefusal(completedReceipt(), incident, null),
+    "task acceptance present for work without a source issue",
+  );
+  assert.equal(
+    reviewAuthorizesMerge(completedReceipt(), incident, REVIEWER, null),
+    false,
+  );
+});
 
 Deno.test("review gate: every non-authorizing receipt fails closed", () => {
   const base = record();
@@ -135,7 +334,7 @@ Deno.test("review gate: every non-authorizing receipt fails closed", () => {
   ];
   for (const [label, receipt] of cases) {
     assert.equal(
-      reviewAuthorizesMerge(receipt, base, REVIEWER),
+      reviewAuthorizesMerge(receipt, base, REVIEWER, TRUSTED_TASK),
       false,
       `${label} must not authorize`,
     );
@@ -149,15 +348,22 @@ Deno.test("review gate: every non-authorizing receipt fails closed", () => {
     completedAt: T0 + 2000,
     pullRequest: { number: 12, head: SHA1, base: SHA2 },
   });
-  assert.equal(reviewAuthorizesMerge(otherReviewer, base, REVIEWER), false);
   assert.equal(
-    authorizingReceipt([completedReceipt(), otherReviewer], base, REVIEWER)
-      ?.id,
+    reviewAuthorizesMerge(otherReviewer, base, REVIEWER, TRUSTED_TASK),
+    false,
+  );
+  assert.equal(
+    authorizingReceipt(
+      [completedReceipt(), otherReviewer],
+      base,
+      REVIEWER,
+      TRUSTED_TASK,
+    )?.id,
     "rev-1",
     "the first authorizing receipt is selected",
   );
   assert.equal(
-    authorizingReceipt([otherReviewer], base, REVIEWER),
+    authorizingReceipt([otherReviewer], base, REVIEWER, TRUSTED_TASK),
     null,
     "no authorizing receipt means no merge",
   );

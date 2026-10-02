@@ -216,6 +216,9 @@ Deno.test(
       expectedReviewer: REVIEWER,
       latestStartAt: T0 + 60_000,
       settleBy: T0 + 660_000,
+      // A change-only submission carries no task statement and can never
+      // authorize an issue-backed delivery.
+      task: null,
     });
     // Every authenticated path passed the injected durable cooldown gate with
     // the exact installation identity (the client re-checks the gate before

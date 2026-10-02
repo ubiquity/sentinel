@@ -400,6 +400,7 @@ export function defaultServiceReceipt(
     expectedHead: SHA1,
     expectedBase: SHA2,
     expectedReviewer: REVIEWER,
+    taskAcceptance: null,
     ...overrides,
   };
 }
@@ -516,6 +517,13 @@ export async function structuredCompletedFixture(
       operationKey,
       requestId,
       expectedBase: SHA2,
+      // The durable journal is the only source of the task acceptance, exactly
+      // as the production transport binds its service receipt
+      // (`journal.result.taskAcceptance ?? null`). A fixture that published a
+      // journal acceptance while its service read carried none would be a
+      // contradictory pair, which normalization correctly refuses: the two
+      // copies are the same evidence and must agree here too.
+      taskAcceptance: result.taskAcceptance ?? null,
     }),
   };
 }

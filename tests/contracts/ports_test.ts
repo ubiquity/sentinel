@@ -629,6 +629,7 @@ const _githubFake: GitHubPort = {
       findings: [],
       summary: null,
       receivedAt: 1786000000000,
+      taskAcceptance: null,
     }));
   },
   mergePullRequest() {

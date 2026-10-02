@@ -91,6 +91,10 @@ import { portOk } from "../../src/contracts/ports.ts";
 import type { RepositoryConfigV1 } from "../../src/contracts/repository-config.ts";
 import { parseRepositoryConfigV1 } from "../../src/contracts/repository-config.ts";
 import type { RepositoryIdentityV1 } from "../../src/contracts/shared.ts";
+import type {
+  ReviewTaskAcceptanceV1,
+  ReviewTaskStatementV1,
+} from "../../src/contracts/review-receipt.ts";
 import type { RepairStateSnapshotV1 } from "../../src/contracts/state-snapshots.ts";
 import type { ReleaseRecordV1 } from "../../src/contracts/release.ts";
 import type { ReleaseCycleResultV1 } from "../../src/release/controller.ts";
@@ -817,6 +821,26 @@ class ScriptedCandidateRegistry {
     this.index++;
     return { head, changedPaths: [...this.changedPaths] };
   }
+}
+
+/**
+ * Reviewer acceptance bound to the EXACT task statement the loop submitted
+ * for one source issue. A directly-assigned fake completion echoes the real
+ * submitted statement, so the semantic acceptance chain (submitted task ->
+ * bound verdict -> receipt -> merge gate) is exercised, not bypassed.
+ */
+function submittedTaskAcceptance(
+  tasks: readonly (ReviewTaskStatementV1 | null)[],
+  issueNumber: number,
+): ReviewTaskAcceptanceV1 | null {
+  const task = tasks.find((item) => item?.issueNumber === issueNumber);
+  if (task === undefined || task === null) return null;
+  return {
+    issueNumber: task.issueNumber,
+    taskDigest: task.digest,
+    verdict: "fulfilled",
+    evidence: [`The exact candidate change satisfies issue #${issueNumber}.`],
+  };
 }
 
 /** Exact-head fake GitHub: each head gets its own PR number, and a merge
@@ -1750,6 +1774,10 @@ Deno.test(
         findings: [],
         summary: null,
         receivedAt: rig.clock.now() + 1,
+        taskAcceptance: submittedTaskAcceptance(
+          rig.github.reviewRequestTasks,
+          1,
+        ),
       };
       const second = await rig.run();
       assert.equal(second.status, "idle", JSON.stringify(second));
@@ -1790,6 +1818,10 @@ Deno.test(
         findings: [],
         summary: null,
         receivedAt: rig.clock.now() + 1,
+        taskAcceptance: submittedTaskAcceptance(
+          rig.github.reviewRequestTasks,
+          2,
+        ),
       };
       const third = await rig.run();
       assert.equal(third.status, "idle", JSON.stringify(third));

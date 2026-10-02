@@ -44,6 +44,7 @@ import { repositoryConfig } from "../budget/helpers.ts";
 import type { MergeRequestV1 } from "../../src/contracts/merge-request.ts";
 import type { IncidentSummaryV1 } from "../../src/contracts/incident.ts";
 import type { IncidentEvidenceV1 } from "../../src/contracts/incident.ts";
+import type { ReviewTaskStatementV1 } from "../../src/contracts/review-receipt.ts";
 import type { WorkRecordV1 } from "../../src/contracts/work-record.ts";
 
 /** Deterministic fake clock with explicit ticks; never real waits. */
@@ -262,6 +263,15 @@ export class FakeGithub implements GitHubPort {
     prNumber: number;
     expectedHead: string;
   }[] = [];
+  /**
+   * Exact task statement the last review submission carried, or null. The
+   * loop must send the live issue task for issue-backed work; `completeReview`
+   * echoes it back as the reviewer's bound acceptance so a fake completion
+   * reproduces the production binding instead of inventing one.
+   */
+  lastReviewTask: ReviewTaskStatementV1 | null = null;
+  /** Every task statement submitted, in call order (null = no task). */
+  readonly reviewRequestTasks: (ReviewTaskStatementV1 | null)[] = [];
   prNumber = 7;
   releasedHead: GitSha | null = null;
   private readonly options: FakeGithubOptionsV1;
@@ -294,7 +304,28 @@ export class FakeGithub implements GitHubPort {
     const issue = this.options.issues?.find((candidate) =>
       candidate.number === issueNumber
     );
-    if (issue === undefined) return Promise.resolve(portOk(null));
+    if (issue === undefined) {
+      // The blanket fake (no issues table configured) answers with a
+      // deterministic OPEN issue, exactly as `listOpenIssues` synthesizes from
+      // its options: an issue-backed review request then carries the live task
+      // statement instead of stalling on an unconfigured fixture. A test that
+      // needs a missing/closed issue passes an explicit table or uses
+      // RelationsFakeGithub.latest.
+      if (this.options.issues === undefined) {
+        return Promise.resolve(portOk({
+          number: issueNumber,
+          title: `issue ${issueNumber}`,
+          body: "",
+          state: "open",
+          author: null,
+          labels: [],
+          createdAt: T0,
+          updatedAt: T0,
+          closedAt: null,
+        }));
+      }
+      return Promise.resolve(portOk(null));
+    }
     return Promise.resolve(portOk({
       number: issueNumber,
       title: issue.title ?? `issue ${issueNumber}`,
@@ -566,6 +597,7 @@ export class FakeGithub implements GitHubPort {
       operationKey?: unknown;
       prNumber?: unknown;
       expectedHead?: unknown;
+      task?: unknown;
     };
     this.reviewRequestIdentities.push({
       operationKey: typeof identity.operationKey === "string"
@@ -576,6 +608,9 @@ export class FakeGithub implements GitHubPort {
         ? identity.expectedHead
         : "",
     });
+    const task = identity.task;
+    this.lastReviewTask = isTaskStatement(task) ? task : null;
+    this.reviewRequestTasks.push(this.lastReviewTask);
     if (this.options.reviewRequestFailNext) {
       this.options.reviewRequestFailNext = false;
       return Promise.resolve(
@@ -622,6 +657,7 @@ export class FakeGithub implements GitHubPort {
         findings: [],
         summary: "head binding mismatch",
         receivedAt: T0,
+        taskAcceptance: null,
       }));
     }
     const exact = this.reviewObservationsByKey.get(operationKey);
@@ -643,6 +679,7 @@ export class FakeGithub implements GitHubPort {
         findings: [],
         summary: null,
         receivedAt: T0,
+        taskAcceptance: null,
       }));
     }
     return Promise.resolve(portOk(this.reviewObservation()));
@@ -737,7 +774,15 @@ export class FakeGithub implements GitHubPort {
     return callback(recorded);
   }
 
-  /** Deliver a completed review for the current release head. */
+  /**
+   * Deliver a completed review for the current release head.
+   *
+   * When the last submission carried a source-issue task statement (the
+   * production contract for issue-backed work), the completion carries the
+   * reviewer's acceptance BOUND TO THAT EXACT statement, exactly as a real
+   * task-bound review result must. Without a submitted task no acceptance is
+   * invented, so a change-only completion can never authorize delivery.
+   */
   completeReview(findings: unknown[] = [], at: number = T0 + 1000): void {
     this.reviewStatus = "completed";
     this.completedReviewAt = at;
@@ -752,6 +797,14 @@ export class FakeGithub implements GitHubPort {
       findings: findings as never[],
       summary: null,
       receivedAt: at + 1,
+      taskAcceptance: this.lastReviewTask === null ? null : {
+        issueNumber: this.lastReviewTask.issueNumber,
+        taskDigest: this.lastReviewTask.digest,
+        verdict: "fulfilled",
+        evidence: [
+          "The exact candidate change satisfies the submitted task statement.",
+        ],
+      },
     };
   }
 
@@ -767,6 +820,7 @@ export class FakeGithub implements GitHubPort {
       findings: [],
       summary: null,
       receivedAt: T0 + 1001,
+      taskAcceptance: null,
     };
   }
 
@@ -789,6 +843,16 @@ export class FakeGithub implements GitHubPort {
     };
     return { ...base, ...this.options.pullRequest };
   }
+}
+
+/** Narrow shape check for the task statement a test submission carried. */
+function isTaskStatement(value: unknown): value is ReviewTaskStatementV1 {
+  if (typeof value !== "object" || value === null) return false;
+  const task = value as Record<string, unknown>;
+  return typeof task.issueNumber === "number" &&
+    typeof task.title === "string" &&
+    typeof task.body === "string" &&
+    typeof task.digest === "string";
 }
 
 export interface FakeIncidentOptionsV1 {

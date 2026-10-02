@@ -27,12 +27,64 @@
  */
 
 import type { GitSha } from "../contracts/brands.ts";
+import {
+  reviewTaskAcceptanceRefusal,
+  type ReviewTaskStatementV1,
+  TASK_ACCEPTANCE_ALREADY_SATISFIED_DETAIL,
+  TASK_ACCEPTANCE_CONTEXT_DETAIL,
+  TASK_ACCEPTANCE_DIGEST_DETAIL,
+  TASK_ACCEPTANCE_MISMATCH_DETAIL,
+  TASK_ACCEPTANCE_MISSING_DETAIL,
+  TASK_ACCEPTANCE_NOT_FULFILLED_DETAIL,
+  TASK_ACCEPTANCE_UNCERTAIN_DETAIL,
+} from "../contracts/review-receipt.ts";
 import type { ReviewReceiptV1 } from "../contracts/review-receipt.ts";
 import type { WorkRecordV1 } from "../contracts/work-record.ts";
 
 /** Static, sanitized fail-closed detail for a refused merge. */
 export const MERGE_WITHOUT_REVIEW_DETAIL =
   "merge without an accepted current-head review";
+
+/**
+ * Static, sanitized semantic-refusal details. Each one is a terminal
+ * no-delivery disposition: the candidate is never merged and an issue-backed
+ * task is never closed. The durable review receipt (with its bounded evidence)
+ * remains the owner-facing evidence; these strings never echo task or model
+ * text. The authoritative definitions live in the shared review contract so
+ * every authorization surface (repair gate, GitHub adapter, hosted copies)
+ * refuses with the exact same bytes.
+ */
+export {
+  TASK_ACCEPTANCE_ALREADY_SATISFIED_DETAIL,
+  TASK_ACCEPTANCE_CONTEXT_DETAIL,
+  TASK_ACCEPTANCE_DIGEST_DETAIL,
+  TASK_ACCEPTANCE_MISMATCH_DETAIL,
+  TASK_ACCEPTANCE_MISSING_DETAIL,
+  TASK_ACCEPTANCE_NOT_FULFILLED_DETAIL,
+  TASK_ACCEPTANCE_UNCERTAIN_DETAIL,
+};
+
+/**
+ * The one semantic acceptance invariant. A completed review authorizes an
+ * issue-backed delivery only when it carries a positive task acceptance bound
+ * to the record's exact source issue AND to the trusted live task statement
+ * independently read at authorization time. `task` is that trusted statement
+ * (never the model's echoed digest and never equality between two copied
+ * receipts), or `"unavailable"` when it cannot be read or bounded — which
+ * fails closed. A record without a source issue keeps the existing
+ * change-only review gate.
+ */
+export function taskAcceptanceRefusal(
+  receipt: ReviewReceiptV1,
+  record: WorkRecordV1,
+  task: ReviewTaskStatementV1 | null | "unavailable" = "unavailable",
+): string | null {
+  return reviewTaskAcceptanceRefusal({
+    issueNumber: record.related.issueNumber,
+    task,
+    acceptance: receipt.taskAcceptance,
+  });
+}
 
 /**
  * Exact documentation anchor for where the Codex CLI review call attaches:
@@ -46,14 +98,17 @@ export const REVIEW_STEP_ATTACHMENT =
 
 /**
  * The one and only authorization for a merge. Returns true only for a durable
- * completed review receipt that covers the record's exact published identity.
- * Any missing, pending, unavailable, mismatched, untrusted or P0/P1-bearing
- * receipt refuses the merge.
+ * completed review receipt that covers the record's exact published identity
+ * AND whose task acceptance is positively, exactly bound to the TRUSTED live
+ * task statement passed by the caller. Any missing, pending, unavailable,
+ * mismatched, untrusted or P0/P1-bearing receipt refuses the merge; omitting
+ * the trusted statement fails closed for issue-backed records.
  */
 export function reviewAuthorizesMerge(
   receipt: ReviewReceiptV1 | null | undefined,
   record: WorkRecordV1,
   expectedReviewer: string | null = null,
+  task: ReviewTaskStatementV1 | null | "unavailable" = "unavailable",
 ): boolean {
   if (receipt === null || receipt === undefined) return false;
   const { pr, head, base } = record.target;
@@ -84,21 +139,30 @@ export function reviewAuthorizesMerge(
   ) {
     return false;
   }
+  // Task completion is a SEPARATE proof from a clean code review: an
+  // issue-backed delivery additionally requires the reviewer's positive task
+  // acceptance, exactly bound to this record's source issue AND to the trusted
+  // live task statement. A nonempty diff and a code-quality-only pass never
+  // establish completion, and a receipt the model echoed back never binds the
+  // live context by itself.
+  if (taskAcceptanceRefusal(receipt, record, task) !== null) return false;
   return true;
 }
 
 /**
  * The first durable receipt that authorizes this exact merge, or null. Callers
  * MUST fail closed on null; they must never substitute a pending, partial or
- * differently-scoped receipt.
+ * differently-scoped receipt, and they must pass the trusted live task
+ * statement (omission fails closed for issue-backed records).
  */
 export function authorizingReceipt(
   reviews: readonly ReviewReceiptV1[],
   record: WorkRecordV1,
   expectedReviewer: string | null = null,
+  task: ReviewTaskStatementV1 | null | "unavailable" = "unavailable",
 ): ReviewReceiptV1 | null {
   return reviews.find((receipt) =>
-    reviewAuthorizesMerge(receipt, record, expectedReviewer)
+    reviewAuthorizesMerge(receipt, record, expectedReviewer, task)
   ) ?? null;
 }
 

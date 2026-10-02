@@ -31,6 +31,10 @@ import type {
   ReviewDrainReportV1,
   ReviewDrainRequestV1,
 } from "../contracts/ports.ts";
+import type {
+  ReviewTaskAcceptanceV1,
+  ReviewTaskStatementV1,
+} from "../contracts/review-receipt.ts";
 import type { RepositoryIdentityV1 } from "../contracts/shared.ts";
 
 export interface ReviewRequestSubmitV1 {
@@ -43,6 +47,14 @@ export interface ReviewRequestSubmitV1 {
   latestStartAt: number;
   /** Absolute ms: the whole review, including close, must settle by this. */
   settleBy: number;
+  /**
+   * Exact bounded source-issue task statement the review must judge, or
+   * null/absent for work with no issue acceptance. The transport verifies its
+   * digest before any model work; the task text is never persisted in the
+   * review journal. Optional only for change-only callers: the production
+   * repair loop always supplies it for issue-backed work.
+   */
+  task?: ReviewTaskStatementV1 | null;
 }
 
 export type ReviewSubmitOutcomeV1 =
@@ -103,6 +115,13 @@ export interface ReviewServiceReadV1 extends ReviewServiceReceiptV1 {
   terminalTurnSucceeded: boolean;
   /** A completed review output/result was actually delivered. */
   outputPresent: boolean;
+  /**
+   * Reviewer task acceptance bound to the exact submitted task statement, or
+   * null for a change-only/legacy result. Only a completed standing journal
+   * can carry it; the merge gate refuses an issue-backed merge without a
+   * fulfilled acceptance.
+   */
+  taskAcceptance: ReviewTaskAcceptanceV1 | null;
 }
 
 /**

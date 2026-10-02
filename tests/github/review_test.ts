@@ -271,6 +271,7 @@ Deno.test("requestReview: exactly one submission with exact identities", async (
     expectedReviewer: REVIEWER,
     latestStartAt: T0 + 60_000,
     settleBy: T0 + 660_000,
+    task: null,
   });
   assert.equal(transport.requests.length, 1); // one PR read, zero retries
 

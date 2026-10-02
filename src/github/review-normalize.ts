@@ -52,6 +52,7 @@ import {
 import type {
   ReviewReceiptV1,
   ReviewStatusV1,
+  ReviewTaskAcceptanceV1,
 } from "../contracts/review-receipt.ts";
 import type { RepositoryIdentityV1 } from "../contracts/shared.ts";
 import type { SeverityV1 } from "../contracts/shared.ts";
@@ -89,6 +90,12 @@ export interface ReviewNormalizationV1 {
   findings: ParsedFindingV1[];
   /** Findings that carried a label but could not be fully retained. */
   findingsUncounted: number;
+  /**
+   * Accepted task acceptance of a completed verdict, or null. Only a
+   * completed observation can carry one; the merge gate refuses an
+   * issue-backed delivery without a positive acceptance.
+   */
+  taskAcceptance: ReviewTaskAcceptanceV1 | null;
 }
 
 export interface ReviewNormalizationInputV1 {
@@ -224,6 +231,7 @@ export async function normalizeReviewObservation(
     findings: await toReviewFindings(findings),
     summary,
     receivedAt: input.receivedAt,
+    taskAcceptance: null,
   });
 
   // 1. The service receipt must bind the exact submission identity the port
@@ -250,6 +258,7 @@ export async function normalizeReviewObservation(
       findings: [],
       summary: null,
       receivedAt: input.receivedAt,
+      taskAcceptance: null,
     });
   }
   if (service.status === "unavailable") {
@@ -359,6 +368,13 @@ export async function normalizeReviewObservation(
   if (findings.length > findingCap) {
     return portOk(await unavailable(service.resultId, service.summary));
   }
+  // The durable journal's acceptance and the transport receipt's acceptance
+  // are the SAME evidence. A contradictory pair is unavailable, never a
+  // verdict; absent on either side stays "no acceptance".
+  const journalAcceptance = journal.result.taskAcceptance ?? null;
+  if (!sameTaskAcceptance(journalAcceptance, service.taskAcceptance)) {
+    return portOk(await unavailable(service.resultId, service.summary));
+  }
 
   return portOk({
     status: "completed",
@@ -371,6 +387,7 @@ export async function normalizeReviewObservation(
     findings: await toReviewFindings(findings),
     summary: journal.result.summary,
     receivedAt: input.receivedAt,
+    taskAcceptance: journalAcceptance,
   });
 }
 
@@ -407,6 +424,19 @@ function journalMatchesService(
   if (journal.completedAt !== service.completedAt) return false;
   if (journal.resultDigest !== service.resultDigest) return false;
   return true;
+}
+
+/** Exact equality of two task acceptances; `null`/absent is "no acceptance". */
+function sameTaskAcceptance(
+  left: ReviewTaskAcceptanceV1 | null,
+  right: ReviewTaskAcceptanceV1 | null,
+): boolean {
+  if (left === null || right === null) return left === right;
+  if (left.issueNumber !== right.issueNumber) return false;
+  if (left.taskDigest !== right.taskDigest) return false;
+  if (left.verdict !== right.verdict) return false;
+  if (left.evidence.length !== right.evidence.length) return false;
+  return left.evidence.every((item, index) => item === right.evidence[index]);
 }
 
 /**
@@ -590,6 +620,7 @@ export function deriveReviewReceiptV1(
     findings: observation.findings,
     findingsUncounted: unknownFindingsCount,
     unresolvedSeverities: deriveUnresolvedSeverities(observation.findings),
+    taskAcceptance: observation.taskAcceptance,
     submittedAt: submission.submittedAt,
     completedAt: observation.status === "completed"
       ? observation.completedAt
@@ -616,6 +647,9 @@ export function completedReviewMatchesReceipt(
   if (normalized.reviewer !== receipt.observedReviewer) return false;
   if (normalized.observedHead !== receipt.pullRequest.head) return false;
   if (normalized.observedBase !== receipt.pullRequest.base) return false;
+  if (!sameTaskAcceptance(normalized.taskAcceptance, receipt.taskAcceptance)) {
+    return false;
+  }
   const current = normalized.findings.map((finding) =>
     `${finding.id}\u0000${finding.severity}\u0000${
       finding.path ?? ""
