@@ -1030,13 +1030,12 @@ export function planOwnerDevelopmentInstall(
       );
     }
     if (healthy !== null) {
-      return movePlan(
-        "install",
-        runtime,
-        OWNER_DEVELOPMENT_INSTALL_TRIGGER_REVISION,
-        OWNER_DEVELOPMENT_INSTALL_TRIGGER_GENERATION,
-        healthy,
-        "install the trigger revision after the settlement healthy proof",
+      // The 17 -> 18 movement belongs to the separate hosted promotion that
+      // accepted the released revision; planning the trigger revision here
+      // would be a two-generation jump the install snapshot builder always
+      // rejects, so this planner waits for that promotion instead.
+      return waiting(
+        "the released generation 18 promotion owns the next movement",
       );
     }
     return waiting(
@@ -1048,6 +1047,14 @@ export function planOwnerDevelopmentInstall(
     revision === OWNER_DEVELOPMENT_INSTALL_RELEASED_REVISION &&
     generation === OWNER_DEVELOPMENT_INSTALL_RELEASED_GENERATION
   ) {
+    // The retained healthy proof of this separately promoted pointer cannot
+    // authorize forward installation while its latest settlement failed, and
+    // no prior authority for rolling it back is recorded, so it waits.
+    if (failed !== null) {
+      return waiting(
+        "the failed released generation 18 refuses forward installation",
+      );
+    }
     if (healthy !== null) {
       return movePlan(
         "install",
@@ -1273,6 +1280,30 @@ export function planOwnerDevelopmentInstall(
     revision === OWNER_DEVELOPMENT_INSTALL_APP_IDENTITY_REVISION &&
     generation === OWNER_DEVELOPMENT_INSTALL_APP_IDENTITY_GENERATION
   ) {
+    // An exact failed settlement of this pointer is candidate failure
+    // evidence even when an older healthy proof exists; the rollback still
+    // requires the recorded healthy proof of the exact prior revision, so a
+    // missing or unrelated proof stays a zero-write waiting outcome.
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_DELIVERED_ROUND2_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_DELIVERED_ROUND2_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded delivered round-2 healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_DELIVERED_ROUND2_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed App identity candidate to its recorded prior",
+      );
+    }
     if (healthy !== null) {
       return movePlan(
         "install",
@@ -1292,6 +1323,30 @@ export function planOwnerDevelopmentInstall(
     revision === OWNER_DEVELOPMENT_INSTALL_MODEL_ROUTE_REVISION &&
     generation === OWNER_DEVELOPMENT_INSTALL_MODEL_ROUTE_GENERATION
   ) {
+    // An exact failed settlement of this pointer is candidate failure
+    // evidence even when an older healthy proof exists; the rollback still
+    // requires the recorded healthy proof of the exact prior revision, so a
+    // missing or unrelated proof stays a zero-write waiting outcome.
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_APP_IDENTITY_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_APP_IDENTITY_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded App identity healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_APP_IDENTITY_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed model-route candidate to its recorded prior",
+      );
+    }
     if (healthy !== null) {
       return movePlan(
         "install",
@@ -1311,6 +1366,30 @@ export function planOwnerDevelopmentInstall(
     revision === OWNER_DEVELOPMENT_INSTALL_RESERVE_MODEL_REVISION &&
     generation === OWNER_DEVELOPMENT_INSTALL_RESERVE_MODEL_GENERATION
   ) {
+    // An exact failed settlement of this pointer is candidate failure
+    // evidence even when an older healthy proof exists; the rollback still
+    // requires the recorded healthy proof of the exact prior revision, so a
+    // missing or unrelated proof stays a zero-write waiting outcome.
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_MODEL_ROUTE_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_MODEL_ROUTE_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded model-route healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_MODEL_ROUTE_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed reserve-model candidate to its recorded prior",
+      );
+    }
     if (healthy !== null) {
       return movePlan(
         "install",
@@ -1330,6 +1409,30 @@ export function planOwnerDevelopmentInstall(
     revision === OWNER_DEVELOPMENT_INSTALL_MULTI_TARGET_REVISION &&
     generation === OWNER_DEVELOPMENT_INSTALL_MULTI_TARGET_GENERATION
   ) {
+    // An exact failed settlement of this pointer is candidate failure
+    // evidence even when an older healthy proof exists; the rollback still
+    // requires the recorded healthy proof of the exact prior revision, so a
+    // missing or unrelated proof stays a zero-write waiting outcome.
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_RESERVE_MODEL_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_RESERVE_MODEL_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded reserve-model healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_RESERVE_MODEL_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed multi-target candidate to its recorded prior",
+      );
+    }
     if (healthy !== null) {
       return movePlan(
         "install",
@@ -1349,6 +1452,30 @@ export function planOwnerDevelopmentInstall(
     revision === OWNER_DEVELOPMENT_INSTALL_SCOPE_GATE_REVISION &&
     generation === OWNER_DEVELOPMENT_INSTALL_SCOPE_GATE_GENERATION
   ) {
+    // An exact failed settlement of this pointer is candidate failure
+    // evidence even when an older healthy proof exists; the rollback still
+    // requires the recorded healthy proof of the exact prior revision, so a
+    // missing or unrelated proof stays a zero-write waiting outcome.
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_MULTI_TARGET_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_MULTI_TARGET_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded multi-target healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_MULTI_TARGET_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed scope-gate candidate to its recorded prior",
+      );
+    }
     if (healthy !== null) {
       return movePlan(
         "install",
@@ -1368,6 +1495,30 @@ export function planOwnerDevelopmentInstall(
     revision === OWNER_DEVELOPMENT_INSTALL_CANDIDATE_AUTH_REVISION &&
     generation === OWNER_DEVELOPMENT_INSTALL_CANDIDATE_AUTH_GENERATION
   ) {
+    // An exact failed settlement of this pointer is candidate failure
+    // evidence even when an older healthy proof exists; the rollback still
+    // requires the recorded healthy proof of the exact prior revision, so a
+    // missing or unrelated proof stays a zero-write waiting outcome.
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_SCOPE_GATE_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_SCOPE_GATE_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded scope-gate healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_SCOPE_GATE_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed candidate-auth candidate to its recorded prior",
+      );
+    }
     if (healthy !== null) {
       return movePlan(
         "install",
@@ -1387,6 +1538,30 @@ export function planOwnerDevelopmentInstall(
     revision === OWNER_DEVELOPMENT_INSTALL_PRESERVE_SCOPE_REVISION &&
     generation === OWNER_DEVELOPMENT_INSTALL_PRESERVE_SCOPE_GENERATION
   ) {
+    // An exact failed settlement of this pointer is candidate failure
+    // evidence even when an older healthy proof exists; the rollback still
+    // requires the recorded healthy proof of the exact prior revision, so a
+    // missing or unrelated proof stays a zero-write waiting outcome.
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_CANDIDATE_AUTH_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_CANDIDATE_AUTH_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded candidate-auth healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_CANDIDATE_AUTH_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed preserve-scope candidate to its recorded prior",
+      );
+    }
     if (healthy !== null) {
       return movePlan(
         "install",
@@ -1406,6 +1581,30 @@ export function planOwnerDevelopmentInstall(
     revision === OWNER_DEVELOPMENT_INSTALL_FOREIGN_AUTH_REVISION &&
     generation === OWNER_DEVELOPMENT_INSTALL_FOREIGN_AUTH_GENERATION
   ) {
+    // An exact failed settlement of this pointer is candidate failure
+    // evidence even when an older healthy proof exists; the rollback still
+    // requires the recorded healthy proof of the exact prior revision, so a
+    // missing or unrelated proof stays a zero-write waiting outcome.
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_PRESERVE_SCOPE_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_PRESERVE_SCOPE_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded preserve-scope healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_PRESERVE_SCOPE_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed foreign-auth candidate to its recorded prior",
+      );
+    }
     if (healthy !== null) {
       return movePlan(
         "install",
@@ -1425,6 +1624,30 @@ export function planOwnerDevelopmentInstall(
     revision === OWNER_DEVELOPMENT_INSTALL_REASON_CODE_REVISION &&
     generation === OWNER_DEVELOPMENT_INSTALL_REASON_CODE_GENERATION
   ) {
+    // An exact failed settlement of this pointer is candidate failure
+    // evidence even when an older healthy proof exists; the rollback still
+    // requires the recorded healthy proof of the exact prior revision, so a
+    // missing or unrelated proof stays a zero-write waiting outcome.
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_FOREIGN_AUTH_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_FOREIGN_AUTH_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded foreign-auth healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_FOREIGN_AUTH_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed reason-code candidate to its recorded prior",
+      );
+    }
     if (healthy !== null) {
       return movePlan(
         "install",
