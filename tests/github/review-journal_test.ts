@@ -270,6 +270,85 @@ Deno.test("strict result: unavailable shape allows an empty finding list only", 
   assert.equal(parsed2.execution, null);
 });
 
+Deno.test("strict result: task acceptance is exact, bounded and never invented", async () => {
+  const acceptance = {
+    issueNumber: 263,
+    taskDigest: "b".repeat(64),
+    verdict: "fulfilled" as const,
+    evidence: ["the launcher loads the selected immutable release config"],
+  };
+  const withAcceptance: ReviewResultV1 = {
+    ...cleanResult(),
+    taskAcceptance: acceptance,
+  };
+  const parsed = await parseReviewResultV1(
+    JSON.parse(JSON.stringify(withAcceptance)),
+  );
+  assert.deepEqual(parsed.taskAcceptance, acceptance);
+
+  // A result written before the boundary stays keyless: absence is preserved,
+  // never defaulted into a passing acceptance.
+  const legacy = await parseReviewResultV1({
+    verdict: "clean",
+    summary: "no issues found",
+    findings: [],
+  });
+  assert.equal("taskAcceptance" in legacy, false);
+  assert.equal(legacy.taskAcceptance ?? null, null);
+
+  // A definitive verdict without evidence is not an acceptance.
+  assert.throws(() =>
+    parseReviewResultV1({
+      verdict: "clean",
+      summary: "no issues found",
+      findings: [],
+      taskAcceptance: { ...acceptance, evidence: [] },
+    })
+  );
+  // An unavailable verdict can never carry completion evidence.
+  assert.throws(() =>
+    parseReviewResultV1({
+      verdict: "unavailable",
+      summary: "no result",
+      findings: [],
+      taskAcceptance: acceptance,
+    })
+  );
+  // The acceptance is part of the digested durable result: it round-trips
+  // through the rendered journal exactly.
+  const journal = await readyJournal(withAcceptance);
+  const round = asReady(
+    await parseReviewJournalBody(renderReviewJournalBody(journal)),
+  );
+  assert.deepEqual(round.result.taskAcceptance, acceptance);
+  assert.equal(
+    canonicalStringify(round),
+    canonicalStringify(journal),
+    "the bound acceptance is covered by the journal digest",
+  );
+  // The model-facing schema exposes the bound shape (optional: only a review
+  // asked with a task statement may carry it).
+  const taskSchema = (REVIEW_RESULT_OUTPUT_SCHEMA as {
+    properties: { taskAcceptance: { additionalProperties: boolean } };
+  }).properties.taskAcceptance;
+  assert.equal(taskSchema.additionalProperties, false);
+});
+
+Deno.test("strict result: a pre-acceptance journal body stays fully readable", async () => {
+  // The exact legacy shape: a ready journal whose result has NO
+  // taskAcceptance key, digested and rendered by the old writer.
+  const legacyJournal = await readyJournal(cleanResult());
+  const body = renderReviewJournalBody(legacyJournal);
+  const parsed = asReady(await parseReviewJournalBody(body));
+  assert.equal(parsed.resultDigest, legacyJournal.resultDigest);
+  assert.equal(parsed.result.taskAcceptance ?? null, null);
+  assert.equal(
+    canonicalStringify(parsed),
+    canonicalStringify(legacyJournal),
+    "old durable state stays byte-identical and readable",
+  );
+});
+
 Deno.test("strict result: intent and running journal phases roundtrip", async () => {
   const intent = intentJournal();
   const parsedIntent = await parseReviewJournalBody(

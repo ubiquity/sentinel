@@ -9,6 +9,8 @@ import assert from "node:assert/strict";
 
 import type { MergeRequestV1 } from "../../src/contracts/ports.ts";
 import { parseReviewReceiptV1 } from "../../src/contracts/review-receipt.ts";
+import { reviewTaskStatementDigest } from "../../src/contracts/review-receipt.ts";
+import type { ReviewTaskAcceptanceV1 } from "../../src/contracts/review-receipt.ts";
 import type { ReviewReceiptV1 } from "../../src/contracts/review-receipt.ts";
 import type { GitSha } from "../../src/contracts/brands.ts";
 import { asFindingFingerprint } from "../../src/contracts/brands.ts";
@@ -30,6 +32,7 @@ import {
   FakeResolutionVerifier,
   FakeReviewService,
   httpRespond,
+  issueWire,
   makePort,
   mergeResponseWire,
   nonFastForwardRuleWire,
@@ -48,6 +51,7 @@ import {
   statusChecksRuleWire,
   statusesPageWire,
   structuredCompletedFixture,
+  type StructuredReviewFixtureV1,
   T0,
 } from "./helpers.ts";
 import type { ScriptEntry } from "./helpers.ts";
@@ -285,6 +289,155 @@ Deno.test("mergePullRequest: exact-head merge after full authoritative verificat
     request.url.includes("/rulesets?")
   );
   assert.ok(rulesetsRequest !== undefined);
+});
+
+Deno.test("mergePullRequest: a published closing link requires the exact bound task acceptance", async () => {
+  const issueNumber = 7;
+  const boundDigest = await reviewTaskStatementDigest({
+    issueNumber,
+    title: "an issue",
+    body: "issue body",
+  });
+  // Every positive fixture publishes the exact same structured completion the
+  // receipt carries (copied-receipt equality is NOT the authorization), while
+  // the PR's own body names the issue that must now be read live.
+  const scriptFor = (
+    completion: StructuredReviewFixtureV1,
+    issueEntries: ScriptEntry[],
+    put: boolean,
+  ): ScriptEntry[] => [
+    pullEntry({ body: `Resolves #${issueNumber}` }),
+    pullEntry({ body: `Resolves #${issueNumber}` }),
+    reviewsRead([completion.review]),
+    commentsRead([]),
+    ...rulesRead(),
+    ...checksRead([checkRunWire()], false, []),
+    {
+      ...httpRespond(
+        "POST",
+        "/graphql",
+        200,
+        reviewDecisionGraphqlWire("APPROVED"),
+      ),
+      repeat: true,
+    },
+    ...issueEntries,
+    ...(put
+      ? [
+        httpRespond(
+          "PUT",
+          "/repos/ubiquity/sentinel/pulls/1/merge",
+          200,
+          mergeResponseWire(SHA3),
+        ),
+      ]
+      : []),
+  ];
+  const portFor = (
+    completion: StructuredReviewFixtureV1,
+    issueEntries: ScriptEntry[],
+    put = false,
+  ) => {
+    const service = new FakeReviewService();
+    service.readResult = completion.service;
+    return makePort({
+      clock: CLOCK,
+      script: scriptFor(completion, issueEntries, put),
+      review: service,
+    });
+  };
+  const completionFor = (taskAcceptance: ReviewTaskAcceptanceV1) =>
+    structuredCompletedFixture({
+      operationKey: CLEAN_OPERATION_KEY,
+      result: {
+        verdict: "clean",
+        summary: "no issues found",
+        findings: [],
+        taskAcceptance,
+      },
+    });
+  const issueRead = () => httpRespond("GET", "/issues/7", 200, issueWire());
+
+  // An issue-backed PR whose receipt carries NO acceptance (a change-only
+  // code-quality pass) is refused before the merge mutation.
+  const missingAcceptance = portFor(CLEAN_COMPLETION, [issueRead()]);
+  const missingResult = await missingAcceptance.port.mergePullRequest(
+    mergeRequest(),
+  );
+  assert.equal(blockedReason(missingResult), "review_required");
+  assert.equal(putCount(missingAcceptance.transport), 0);
+
+  // Same issue, same head, receipt and journal copies agree, but the bound
+  // text is NOT the live issue text: the adapter's own read authorizes.
+  const wrongTextAcceptance: ReviewTaskAcceptanceV1 = {
+    issueNumber,
+    taskDigest: "a".repeat(64),
+    verdict: "fulfilled",
+    evidence: ["the candidate satisfies the text the reviewer was shown"],
+  };
+  const wrongText = portFor(
+    await completionFor(wrongTextAcceptance),
+    [issueRead()],
+  );
+  const wrongResult = await wrongText.port.mergePullRequest(mergeRequest({
+    review: completedCleanReceipt({ taskAcceptance: wrongTextAcceptance }),
+  }));
+  assert.equal(blockedReason(wrongResult), "review_required");
+  assert.equal(putCount(wrongText.transport), 0);
+
+  // An acceptance naming a different issue than the published link is refused.
+  const wrongIssueAcceptance: ReviewTaskAcceptanceV1 = {
+    issueNumber: 8,
+    taskDigest: boundDigest,
+    verdict: "fulfilled",
+    evidence: ["bound to another issue"],
+  };
+  const wrongIssue = portFor(
+    await completionFor(wrongIssueAcceptance),
+    [issueRead()],
+  );
+  const wrongIssueResult = await wrongIssue.port.mergePullRequest(
+    mergeRequest({
+      review: completedCleanReceipt({
+        taskAcceptance: wrongIssueAcceptance,
+      }),
+    }),
+  );
+  assert.equal(blockedReason(wrongIssueResult), "review_required");
+  assert.equal(putCount(wrongIssue.transport), 0);
+
+  // The exact positive acceptance bound to the live issue text merges once.
+  const alignedAcceptance: ReviewTaskAcceptanceV1 = {
+    issueNumber,
+    taskDigest: boundDigest,
+    verdict: "fulfilled",
+    evidence: ["the candidate implements the issue requirements"],
+  };
+  const aligned = portFor(
+    await completionFor(alignedAcceptance),
+    [issueRead()],
+    true,
+  );
+  const alignedResult = await aligned.port.mergePullRequest(mergeRequest({
+    review: completedCleanReceipt({ taskAcceptance: alignedAcceptance }),
+  }));
+  assert.ok(alignedResult.ok);
+  if (!alignedResult.ok) return;
+  assert.equal(alignedResult.value.outcome, "merged");
+  assert.equal(putCount(aligned.transport), 1);
+
+  // An unreadable issue context fails closed as a retryable port error: no
+  // merge is attempted on missing evidence.
+  const unreadable = portFor(await completionFor(alignedAcceptance), [
+    httpRespond("GET", "/issues/7", 500, { message: "server error" }),
+  ]);
+  const unreadableResult = await unreadable.port.mergePullRequest(
+    mergeRequest({
+      review: completedCleanReceipt({ taskAcceptance: alignedAcceptance }),
+    }),
+  );
+  assert.equal(unreadableResult.ok, false);
+  assert.equal(putCount(unreadable.transport), 0);
 });
 
 Deno.test("mergePullRequest: head/base/author/closed checks fail closed with zero merge calls", async () => {

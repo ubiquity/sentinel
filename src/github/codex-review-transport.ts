@@ -30,6 +30,10 @@
  */
 
 import type { GitSha } from "../contracts/brands.ts";
+import {
+  checkReviewTaskStatement,
+  type ReviewTaskStatementV1,
+} from "../contracts/review-receipt.ts";
 import type {
   Clock,
   PortResultV1,
@@ -129,6 +133,8 @@ const DETAIL_PUBLISH =
 const DETAIL_FAILURE =
   "review transport: review operation state is unavailable";
 const DETAIL_READ = "review transport: review read failed";
+const DETAIL_TASK =
+  "review transport: the task statement is malformed or its digest does not bind its text";
 
 /** Static sanitized summary of a standing unavailable disposition. */
 const UNAVAILABLE_SUMMARY =
@@ -177,6 +183,12 @@ interface OwnedReviewV1 {
   requestedAt: number;
   latestStartAt: number;
   settleBy: number;
+  /**
+   * Exact task statement this submission was validated with, or null. It is
+   * passed to the producer and never persisted in the journal; the producer's
+   * result must be bound to it.
+   */
+  task: ReviewTaskStatementV1 | null;
   phase: OperationPhaseV1;
   reviewId: number | null;
   /** True once any journal body was durably created on the remote. */
@@ -272,7 +284,16 @@ export class GitHubCodexReviewTransport implements ReviewServiceTransportV1 {
     request: ReviewRequestSubmitV1,
   ): Promise<PortResultV1<ReviewSubmitOutcomeV1>> {
     const now = this.clock.now();
-    const validated = this.validateSubmission(request, now);
+    // The optional task statement is validated BEFORE any operation is
+    // registered: a malformed statement or a digest that does not bind its
+    // own text is refused statically and never reaches a model.
+    let task: ReviewTaskStatementV1 | null = null;
+    if (request?.task !== undefined && request?.task !== null) {
+      const checked = await checkReviewTaskStatement(request.task);
+      if (!checked.ok) return portError("invalid", DETAIL_TASK);
+      task = checked.statement;
+    }
+    const validated = this.validateSubmission(request, now, task);
     if (!validated.ok) return validated.error;
     const op = validated.value;
     if (this.draining) return portError("unavailable", DETAIL_DRAIN);
@@ -403,6 +424,7 @@ export class GitHubCodexReviewTransport implements ReviewServiceTransportV1 {
     // Phase D: prepare the producer (bounded; no turn exists yet).
     const prepared = await this.reviewer.prepare({
       snapshot: captured.value,
+      task: op.task,
       requestId: op.requestId,
       invocationId: this.invocationId(op),
       ownerRunId: this.ownerRunId,
@@ -874,6 +896,7 @@ export class GitHubCodexReviewTransport implements ReviewServiceTransportV1 {
       requestedAt: journal.requestedAt,
       latestStartAt: now,
       settleBy: now,
+      task: null,
       phase: "ready",
       reviewId: review.id,
       remoteJournal: true,
@@ -1274,6 +1297,7 @@ export class GitHubCodexReviewTransport implements ReviewServiceTransportV1 {
       resultDigest: null,
       terminalTurnSucceeded: false,
       outputPresent: false,
+      taskAcceptance: null,
       operationKey: op.operationKey,
       githubReviewId: op.reviewId,
       repository: this.repository,
@@ -1296,6 +1320,7 @@ export class GitHubCodexReviewTransport implements ReviewServiceTransportV1 {
       resultDigest: null,
       terminalTurnSucceeded: false,
       outputPresent: false,
+      taskAcceptance: null,
       operationKey: request.operationKey,
       githubReviewId: null,
       repository: this.repository,
@@ -1325,6 +1350,9 @@ export class GitHubCodexReviewTransport implements ReviewServiceTransportV1 {
       resultDigest: null,
       terminalTurnSucceeded: false,
       outputPresent: false,
+      // Only the COMPLETED branch below may surface a task acceptance: a
+      // journal without an accepted verdict never carries one.
+      taskAcceptance: null,
       operationKey: journal.operationKey,
       githubReviewId: review.id,
       repository: this.repository,
@@ -1368,6 +1396,10 @@ export class GitHubCodexReviewTransport implements ReviewServiceTransportV1 {
       resultDigest: journal.resultDigest,
       terminalTurnSucceeded: true,
       outputPresent: true,
+      // The durable journal is the only source: the acceptance was bound to
+      // the submitted task statement by the producer before this ready record
+      // was persisted, and an absent key remains "no acceptance".
+      taskAcceptance: journal.result.taskAcceptance ?? null,
     };
   }
 
@@ -1378,6 +1410,7 @@ export class GitHubCodexReviewTransport implements ReviewServiceTransportV1 {
   private validateSubmission(
     request: ReviewRequestSubmitV1,
     now: number,
+    task: ReviewTaskStatementV1 | null,
   ): { ok: true; value: OwnedReviewV1 } | {
     ok: false;
     error: PortResultV1<never>;
@@ -1425,6 +1458,7 @@ export class GitHubCodexReviewTransport implements ReviewServiceTransportV1 {
       requestedAt: now,
       latestStartAt: request.latestStartAt,
       settleBy: request.settleBy,
+      task,
       phase: "intent",
       reviewId: null,
       remoteJournal: false,

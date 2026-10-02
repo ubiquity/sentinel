@@ -69,6 +69,10 @@ import {
   validateReviewSnapshotV1,
   verifyReviewSnapshotDigest,
 } from "./review-snapshot.ts";
+import {
+  checkReviewTaskStatement,
+  type ReviewTaskStatementV1,
+} from "../contracts/review-receipt.ts";
 
 /** Hard whole-review bound including owned settlement: twenty minutes. */
 export const MAX_REVIEW_TOTAL_MS = 1_200_000;
@@ -110,6 +114,14 @@ const DEADLINE_DETAIL =
   "structured review unavailable: the supplied absolute deadlines do not admit a bounded start";
 const REQUEST_DETAIL =
   "structured review unavailable: the prepare request identity is missing or over bound";
+const TASK_DETAIL =
+  "structured review unavailable: the task statement is malformed, over bound or its digest does not bind its text";
+const TASK_ACCEPTANCE_MISSING_DETAIL =
+  "structured review unavailable: the result omitted the required task acceptance for a supplied task statement";
+const TASK_ACCEPTANCE_UNBOUND_DETAIL =
+  "structured review unavailable: the result carried a task acceptance without a supplied task statement";
+const TASK_ACCEPTANCE_MISMATCH_DETAIL =
+  "structured review unavailable: the task acceptance is not bound to the supplied task statement";
 const PROMPT_DETAIL =
   "structured review unavailable: the complete review prompt exceeded its finite bound";
 const PREPARE_DETAIL =
@@ -286,6 +298,12 @@ function isForbiddenCommandNotification(method: string): boolean {
 export interface StructuredReviewPrepareV1 {
   /** Immutable trusted snapshot the review is performed against. */
   snapshot: ReviewSnapshotV1;
+  /**
+   * Exact bounded source-issue task statement the review must judge, or
+   * null/absent for work with no issue acceptance. When supplied, the result
+   * MUST carry a task acceptance bound to this exact statement.
+   */
+  task?: ReviewTaskStatementV1 | null;
   /** Durable request identity carried by the transport journal. */
   requestId: string;
   /** Exact invocation identity bound to this review. */
@@ -557,6 +575,8 @@ class PreparedStructuredReview implements PreparedStructuredReviewV1 {
   private readonly model: string;
   private readonly prompt: string;
   private readonly snapshot: ReviewSnapshotV1;
+  /** Exact task statement this review was prepared with, or null. */
+  private readonly task: ReviewTaskStatementV1 | null;
   private readonly now: () => number;
   private readonly hardSettleBy: number;
   private readonly turnDeadline: number;
@@ -605,6 +625,7 @@ class PreparedStructuredReview implements PreparedStructuredReviewV1 {
     model: string;
     prompt: string;
     snapshot: ReviewSnapshotV1;
+    task: ReviewTaskStatementV1 | null;
     now: () => number;
     request: StructuredReviewPrepareV1;
     thread: ThreadAckV1;
@@ -618,6 +639,7 @@ class PreparedStructuredReview implements PreparedStructuredReviewV1 {
     this.model = input.model;
     this.prompt = input.prompt;
     this.snapshot = input.snapshot;
+    this.task = input.task;
     this.now = input.now;
     this.requestId = input.request.requestId;
     this.invocationId = input.request.invocationId;
@@ -1352,6 +1374,28 @@ class PreparedStructuredReview implements PreparedStructuredReviewV1 {
     };
   }
 
+  /**
+   * Exact task acceptance binding check. Returns the static refusal detail, or
+   * null when the verdict is bound to exactly the supplied task statement (or
+   * when no statement was supplied and none was invented).
+   */
+  private taskAcceptanceFailure(result: ReviewResultV1): string | null {
+    const task = this.task;
+    // An absent key and an explicit null are the same "no acceptance".
+    const acceptance = result.taskAcceptance ?? null;
+    if (task === null) {
+      return acceptance === null ? null : TASK_ACCEPTANCE_UNBOUND_DETAIL;
+    }
+    if (acceptance === null) return TASK_ACCEPTANCE_MISSING_DETAIL;
+    if (
+      acceptance.issueNumber !== task.issueNumber ||
+      acceptance.taskDigest !== task.digest
+    ) {
+      return TASK_ACCEPTANCE_MISMATCH_DETAIL;
+    }
+    return null;
+  }
+
   private buildOutcome(): PortResultV1<StructuredReviewOutcomeV1> {
     const actual = this.buildActual();
     const unavailable = (
@@ -1410,6 +1454,15 @@ class PreparedStructuredReview implements PreparedStructuredReviewV1 {
     }
     const location = validateFindingLocations(result, this.snapshot);
     if (location !== null) return unavailable(location);
+    // Semantic acceptance binding: a supplied task statement REQUIRES a
+    // result-bound acceptance that names exactly that task; a result that
+    // invents an acceptance without a task statement is refused too. This is
+    // what makes a clean code-quality-only review unable to establish task
+    // completion.
+    const acceptanceFailure = this.taskAcceptanceFailure(result);
+    if (acceptanceFailure !== null) {
+      return unavailable(acceptanceFailure, result, message.itemId);
+    }
     // A throwing failure probe is treated as a reported fatal transport
     // failure; it never escapes as a raw error.
     let sessionFailed = false;
@@ -1577,7 +1630,17 @@ export class CodexStructuredReviewer {
     if (turnDeadline <= preparedAt) {
       return portError("unavailable", DEADLINE_DETAIL);
     }
-    const prompt = renderReviewPrompt(snapshot);
+    // The optional source-issue task statement must be the strict bounded
+    // shape AND its digest must actually bind its own text BEFORE any session
+    // opens: a malformed statement never reaches a model, and an over-bound
+    // one is a fail-closed refusal, never a silent truncation.
+    let task: ReviewTaskStatementV1 | null = null;
+    if (input.task !== undefined && input.task !== null) {
+      const checked = await checkReviewTaskStatement(input.task);
+      if (!checked.ok) return portError("unavailable", TASK_DETAIL);
+      task = checked.statement;
+    }
+    const prompt = renderReviewPrompt(snapshot, task);
     if (utf8Bytes(prompt) > MAX_PROMPT_BYTES) {
       return portError("unavailable", PROMPT_DETAIL);
     }
@@ -1627,9 +1690,11 @@ export class CodexStructuredReviewer {
         model: this.model,
         prompt,
         snapshot,
+        task,
         now: this.now,
         request: {
           snapshot,
+          task,
           requestId,
           invocationId,
           ownerRunId,

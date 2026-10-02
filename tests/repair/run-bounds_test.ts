@@ -18,6 +18,7 @@ import type {
 } from "../../src/contracts/ports.ts";
 import { portOk } from "../../src/contracts/ports.ts";
 import { parseReviewReceiptV1 } from "../../src/contracts/review-receipt.ts";
+import { reviewTaskStatementDigest } from "../../src/contracts/review-receipt.ts";
 import type { ReviewReceiptV1 } from "../../src/contracts/review-receipt.ts";
 import {
   REPAIR_MODEL_CUTOFF_MS,
@@ -878,11 +879,26 @@ function completedReceipt(
     findings: [],
     findingsUncounted: 0,
     unresolvedSeverities: [],
+    // The delivery fixture source is issue #1 and the digest must bind the
+    // blanket fake's live issue #1 text; a copied receipt can never authorize.
+    taskAcceptance: {
+      issueNumber: 1,
+      taskDigest: ISSUE_ONE_TASK_DIGEST,
+      verdict: "fulfilled",
+      evidence: ["the exact reviewed change implements the source issue"],
+    },
     submittedAt: T0,
     completedAt: T0 + 1000,
     observedAt: T0 + 1001,
   });
 }
+
+/** Digest of the blanket fake's synthesized issue #1 text. */
+const ISSUE_ONE_TASK_DIGEST = await reviewTaskStatementDigest({
+  issueNumber: 1,
+  title: "issue 1",
+  body: "",
+});
 
 Deno.test(
   "run ceiling: a push that crosses the total deadline publishes once and the next run creates the PR once without re-pushing",

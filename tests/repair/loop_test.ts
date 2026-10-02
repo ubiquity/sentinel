@@ -27,6 +27,14 @@ import type {
 } from "../../src/contracts/ports.ts";
 import { portError, portOk } from "../../src/contracts/ports.ts";
 import { parseReviewReceiptV1 } from "../../src/contracts/review-receipt.ts";
+import type { ReviewTaskAcceptanceV1 } from "../../src/contracts/review-receipt.ts";
+import { reviewTaskStatementDigest } from "../../src/contracts/review-receipt.ts";
+import {
+  TASK_ACCEPTANCE_ALREADY_SATISFIED_DETAIL,
+  TASK_ACCEPTANCE_DIGEST_DETAIL,
+  TASK_ACCEPTANCE_MISSING_DETAIL,
+  TASK_ACCEPTANCE_NOT_FULFILLED_DETAIL,
+} from "../../src/repair/review-gate.ts";
 import { parseLocalReleaseReceiptV1 } from "../../src/contracts/local-release.ts";
 import type { LocalReleaseReceiptV1 } from "../../src/contracts/local-release.ts";
 import type { ReviewReceiptV1 } from "../../src/contracts/review-receipt.ts";
@@ -796,6 +804,417 @@ Deno.test("review receipt preserves the actual submission timestamp", async () =
     state = await rig.snapshot();
     assert.equal(state.reviews.length, 1);
     assert.equal(state.reviews[0].submittedAt, submittedAt);
+  } finally {
+    await rig.ctx.cleanup();
+  }
+});
+
+/**
+ * Digest of the blanket fake's synthesized issue #1 text ("issue 1", empty
+ * body). Authorization compares the receipt's acceptance digest against this
+ * TRUSTED live digest, never against a digest the model echoed back.
+ */
+const FAKE_ISSUE_TASK_DIGEST = await reviewTaskStatementDigest({
+  issueNumber: 1,
+  title: "issue 1",
+  body: "",
+});
+
+/** One issue-backed record parked on the review of its exact published head. */
+function reviewWaitIssueRecord(head: GitSha): WorkRecordV1 {
+  return workRecord("issue-1", {
+    source: { kind: "issue", id: "1", revision: SHA1 },
+    related: { incidentId: null, issueNumber: 1 },
+    nextStep: "review",
+    wait: { reason: "review_pending", since: T0, until: T0 + 3600_000 },
+    target: {
+      base: SHA1,
+      branch: "sentinel/repair/issue-1",
+      checkpoint: null,
+      head,
+      pr: 7,
+    },
+    counters: { attempts: 1, retries: 0, reviewRounds: 1 },
+  });
+}
+
+/** Completed review observation for the exact head and chosen acceptance. */
+function acceptedObservation(
+  head: GitSha,
+  taskAcceptance: ReviewTaskAcceptanceV1 | null,
+  at: number,
+): ReviewObservationV1 {
+  return {
+    status: "completed",
+    requestId: "review-req-1",
+    reviewer: "chatgpt-codex-connector[bot]",
+    resultId: "result-1",
+    completedAt: at,
+    observedHead: head,
+    observedBase: SHA1,
+    findings: [],
+    summary: null,
+    receivedAt: at + 1,
+    taskAcceptance,
+  };
+}
+
+/** Issue-backed record at review, served by its exact per-operation fake. */
+async function semanticRig(prefix: string, head: GitSha) {
+  const rig = await makeRig(prefix, {
+    summaries: false,
+    github: {
+      candidateLifecycle: {
+        ...positiveLifecycle(),
+        refs: { "refs/heads/sentinel/repair/issue-1": head },
+        pullRequests: [exactOpenPr(7, head, "sentinel/repair/issue-1")],
+      },
+    },
+  });
+  const written = await rig.store.writeRepair(
+    seededSnapshot([reviewWaitIssueRecord(head)]),
+    null,
+  );
+  assert.ok(written.ok && written.value.status === "applied");
+  // Leave the seeded review wait behind so the record is eligible again.
+  rig.clock.advance(3600_000 + 1);
+  return rig;
+}
+
+Deno.test(
+  "semantic acceptance: an issue-backed delivery requires the bound positive verdict",
+  async () => {
+    const cases: [
+      string,
+      ReviewTaskAcceptanceV1 | null,
+      string,
+      "missing_evidence" | "other",
+    ][] = [
+      [
+        "change-only review (no acceptance)",
+        null,
+        TASK_ACCEPTANCE_MISSING_DETAIL,
+        "missing_evidence",
+      ],
+      [
+        // Same issue, same head, but the verdict was judged against DIFFERENT
+        // issue text: only the trusted live digest authorizes.
+        "same-issue receipt against changed task text",
+        {
+          issueNumber: 1,
+          taskDigest: "a".repeat(64),
+          verdict: "fulfilled",
+          evidence: ["the candidate satisfies the text the reviewer was shown"],
+        },
+        TASK_ACCEPTANCE_DIGEST_DETAIL,
+        "missing_evidence",
+      ],
+      [
+        "relevant file changed in an unrelated way",
+        {
+          issueNumber: 1,
+          taskDigest: FAKE_ISSUE_TASK_DIGEST,
+          verdict: "not_fulfilled",
+          evidence: ["the changed file does not implement the task"],
+        },
+        TASK_ACCEPTANCE_NOT_FULFILLED_DETAIL,
+        "other",
+      ],
+      [
+        "already satisfied at base",
+        {
+          issueNumber: 1,
+          taskDigest: FAKE_ISSUE_TASK_DIGEST,
+          verdict: "already_satisfied_at_base",
+          evidence: ["the base commit already implements the required fix"],
+        },
+        TASK_ACCEPTANCE_ALREADY_SATISFIED_DETAIL,
+        "other",
+      ],
+    ];
+    for (const [label, acceptance, detail, kind] of cases) {
+      const head = SHA2;
+      const rig = await semanticRig(
+        `semantic-${label.replace(/[^a-z]+/gi, "")}`,
+        head,
+      );
+      try {
+        const completedAt = rig.clock.now() + 1000;
+        rig.github.reviewObservationsByKey.set(
+          `review:7:${head}`,
+          acceptedObservation(head, acceptance, completedAt),
+        );
+        const outcome = await rig.run();
+        assert.equal(outcome.status, "idle", JSON.stringify(outcome));
+        const state = await rig.snapshot();
+        const work = state.work[0]!;
+        assert.equal(work.nextStep, "blocked", label);
+        assert.equal(work.blocker?.message, detail, label);
+        assert.equal(work.blocker?.kind, kind, label);
+        assert.equal(
+          rig.github.calls.includes("merge"),
+          false,
+          `${label} must never merge`,
+        );
+        assert.equal(
+          state.releaseRequests.length,
+          0,
+          `${label} must never request a release`,
+        );
+        assert.equal(
+          state.work[0]!.target.pr,
+          7,
+          "the publication identity is retained for audit",
+        );
+      } finally {
+        await rig.ctx.cleanup();
+      }
+    }
+  },
+);
+
+Deno.test(
+  "semantic acceptance: the exact bound fulfilled verdict delivers",
+  async () => {
+    const head = SHA2;
+    const rig = await semanticRig("semantic-fulfilled", head);
+    try {
+      const completedAt = rig.clock.now() + 1000;
+      rig.github.reviewObservationsByKey.set(
+        `review:7:${head}`,
+        acceptedObservation(head, {
+          issueNumber: 1,
+          taskDigest: FAKE_ISSUE_TASK_DIGEST,
+          verdict: "fulfilled",
+          evidence: ["the exact candidate change implements the source issue"],
+        }, completedAt),
+      );
+      const outcome = await rig.run();
+      assert.equal(outcome.status, "idle", JSON.stringify(outcome));
+      const state = await rig.snapshot();
+      const work = state.work[0]!;
+      assert.equal(work.blocker, null);
+      assert.equal(work.nextStep, "delivery");
+      assert.equal(
+        rig.github.calls.filter((call) => call === "merge").length,
+        1,
+        "the exact bound verdict is the only path to the merge",
+      );
+      assert.equal(state.reviews.length, 1);
+      assert.equal(state.reviews[0]!.taskAcceptance?.verdict, "fulfilled");
+      assert.equal(state.releaseRequests.length, 1);
+    } finally {
+      await rig.ctx.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "semantic acceptance: unverifiable task context never delivers and never merges",
+  async () => {
+    const head = SHA2;
+    // Exact published identity, but the live issue read answers "missing": the
+    // trusted context cannot be built, so no delivery may be authorized.
+    const github = new RelationsFakeGithub({
+      baseSha: SHA1,
+      candidateLifecycle: {
+        ...positiveLifecycle(),
+        refs: { "refs/heads/sentinel/repair/issue-1": head },
+        pullRequests: [exactOpenPr(7, head, "sentinel/repair/issue-1")],
+      },
+    });
+    github.latest.set(1, null);
+    const rig = await makeRig("semantic-nocontext", {
+      summaries: false,
+      githubPort: github,
+    });
+    try {
+      const written = await rig.store.writeRepair(
+        seededSnapshot([reviewWaitIssueRecord(head)]),
+        null,
+      );
+      assert.ok(written.ok && written.value.status === "applied");
+      rig.clock.advance(3600_000 + 1);
+      const at = rig.clock.now() + 1000;
+      github.reviewObservationsByKey.set(
+        `review:7:${head}`,
+        acceptedObservation(head, {
+          issueNumber: 1,
+          taskDigest: FAKE_ISSUE_TASK_DIGEST,
+          verdict: "fulfilled",
+          evidence: ["the exact candidate change implements the source issue"],
+        }, at),
+      );
+      const outcome = await rig.run();
+      assert.equal(outcome.status, "idle", JSON.stringify(outcome));
+      const state = await rig.snapshot();
+      const work = state.work[0]!;
+      assert.equal(
+        work.nextStep === "delivery",
+        false,
+        "missing context is never a delivery",
+      );
+      assert.equal(
+        work.blocker?.message === TASK_ACCEPTANCE_MISSING_DETAIL,
+        false,
+      );
+      assert.equal(
+        github.calls.includes("merge"),
+        false,
+        "no merge is attempted against an unverifiable task context",
+      );
+      assert.equal(state.releaseRequests.length, 0);
+    } finally {
+      await rig.ctx.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "semantic acceptance: a closed post-merge source issue still authorizes the exact reviewed delivery",
+  async () => {
+    const head = SHA2;
+    // GitHub auto-closes the issue through the published "Resolves #N" link at
+    // merge time; the SAME canonical title/body digest must keep the delivery
+    // releasable and closable.
+    const github = new RelationsFakeGithub({
+      baseSha: SHA1,
+      candidateLifecycle: {
+        ...positiveLifecycle(),
+        refs: { "refs/heads/sentinel/repair/issue-1": head },
+        pullRequests: [exactOpenPr(7, head, "sentinel/repair/issue-1")],
+      },
+    });
+    github.latest.set(1, issueRecord(1, { state: "closed" }));
+    const rig = await makeRig("semantic-closed", {
+      summaries: false,
+      githubPort: github,
+    });
+    try {
+      const written = await rig.store.writeRepair(
+        seededSnapshot([reviewWaitIssueRecord(head)]),
+        null,
+      );
+      assert.ok(written.ok && written.value.status === "applied");
+      rig.clock.advance(3600_000 + 1);
+      const at = rig.clock.now() + 1000;
+      github.reviewObservationsByKey.set(
+        `review:7:${head}`,
+        acceptedObservation(head, {
+          issueNumber: 1,
+          taskDigest: FAKE_ISSUE_TASK_DIGEST,
+          verdict: "fulfilled",
+          evidence: ["the exact candidate change implements the source issue"],
+        }, at),
+      );
+      const outcome = await rig.run();
+      assert.equal(outcome.status, "idle", JSON.stringify(outcome));
+      const state = await rig.snapshot();
+      const work = state.work[0]!;
+      assert.equal(work.blocker, null);
+      assert.equal(work.nextStep, "delivery");
+      assert.equal(
+        github.calls.filter((call) => call === "merge").length,
+        1,
+        "the closed-at-merge issue keeps the same trusted task digest",
+      );
+      assert.equal(state.releaseRequests.length, 1);
+    } finally {
+      await rig.ctx.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "semantic acceptance: an unreadable source issue is never reviewed into a false task",
+  async () => {
+    const head = SHA2;
+    // Exact published identity (so the freshness gate admits a new request)
+    // with the source issue deliberately absent: no live task can be read.
+    const github = new RelationsFakeGithub({
+      baseSha: SHA1,
+      candidateLifecycle: {
+        ...positiveLifecycle(),
+        refs: { "refs/heads/sentinel/repair/issue-1": head },
+        pullRequests: [exactOpenPr(7, head, "sentinel/repair/issue-1")],
+      },
+    });
+    github.latest.set(1, null);
+    const rig = await makeRig("semantic-stale", {
+      summaries: false,
+      githubPort: github,
+    });
+    try {
+      const written = await rig.store.writeRepair(
+        seededSnapshot([reviewWaitIssueRecord(head)]),
+        null,
+      );
+      assert.ok(written.ok && written.value.status === "applied");
+      // Leave the seeded review wait behind so the record is eligible again.
+      rig.clock.advance(3600_000 + 1);
+      // A bound no-verdict review forces the bounded re-attempt path, which
+      // must NOT submit a review that could never carry the task acceptance.
+      const at = rig.clock.now() + 1000;
+      github.reviewObservationsByKey.set(
+        `review:7:${head}`,
+        noVerdictObservation(
+          head,
+          "structured review unavailable: no accepted result",
+          at,
+        ),
+      );
+      const outcome = await rig.run();
+      assert.equal(outcome.status, "idle", JSON.stringify(outcome));
+      const state = await rig.snapshot();
+      assert.equal(state.work[0]!.nextStep, "blocked");
+      assert.equal(state.work[0]!.blocker?.kind, "stale_source");
+      assert.equal(
+        state.work[0]!.blocker?.message,
+        "source issue is not open: no task-bound review can be requested",
+      );
+      assert.equal(
+        github.calls.includes("requestReview"),
+        false,
+        "no review is requested without a live task statement",
+      );
+      assert.equal(
+        state.reservations.filter((reservation) =>
+          reservation.purpose === "review_request"
+        ).length,
+        0,
+        "no review start is ever charged for an unreadable task",
+      );
+    } finally {
+      await rig.ctx.cleanup();
+    }
+  },
+);
+
+Deno.test("generated/cache-only candidates are never a repair", async () => {
+  const rig = await makeRig("artifactonly", {
+    model: {
+      changedPaths: [".npm/_logs/2026-10-02T10_54_49_178Z-debug-0.log"],
+    },
+  });
+  try {
+    const outcome = await rig.run();
+    assert.equal(outcome.status, "idle", JSON.stringify(outcome));
+    const state = await rig.snapshot();
+    assert.equal(state.work[0]!.nextStep, "blocked");
+    assert.equal(
+      state.work[0]!.blocker?.message,
+      "model candidate changed only generated/cache artifacts",
+    );
+    assert.equal(
+      rig.github.pushes.length,
+      0,
+      "an artifact-only candidate is never published",
+    );
+    assert.equal(
+      rig.github.calls.includes("requestReview"),
+      false,
+      "an artifact-only candidate is never reviewed",
+    );
   } finally {
     await rig.ctx.cleanup();
   }
@@ -1947,6 +2366,15 @@ function completedReceipt(
     findings: [],
     findingsUncounted: 0,
     unresolvedSeverities: [],
+    // The delivery-record fixture source is issue #1: a completed verdict is
+    // authorized only with this exact bound positive acceptance, and the digest
+    // must bind the blanket fake's live issue #1 text.
+    taskAcceptance: {
+      issueNumber: 1,
+      taskDigest: FAKE_ISSUE_TASK_DIGEST,
+      verdict: "fulfilled",
+      evidence: ["the exact reviewed change implements the source issue"],
+    },
     submittedAt: T0,
     completedAt: T0 + 1000,
     observedAt: T0 + 1001,
@@ -2435,6 +2863,65 @@ function gatewayDeliveryRecord(): WorkRecordV1 {
   });
 }
 
+/** Digest of the blanket fake's synthesized issue #42 text (empty body). */
+const LOCAL_DELIVERY_TASK_DIGEST = await reviewTaskStatementDigest({
+  issueNumber: LOCAL_DELIVERY_ISSUE,
+  title: `issue ${LOCAL_DELIVERY_ISSUE}`,
+  body: "",
+});
+
+/**
+ * The EXACT review receipt a delivery release request references: the id and
+ * review request id the request persisted, bound to the record's repository,
+ * PR/head/base and live source-issue text so the shared FULL authorization
+ * predicate holds (trusted reviewer, zero uncounted findings, no unresolved
+ * P0/P1, positive bound acceptance). `overrides` changes one dimension at a
+ * time in the refusal cases, so each refusal proves that exact dimension while
+ * every other field stays the genuine bound proof.
+ */
+function referencedDeliveryReceipt(
+  request: ReleaseRequestV1,
+  record: WorkRecordV1,
+  taskDigest: string,
+  overrides: Record<string, unknown> = {},
+): ReviewReceiptV1 {
+  const receiptId = request.source.reviewReceiptId;
+  const issueNumber = record.related.issueNumber;
+  if (receiptId === null || issueNumber === null) {
+    throw new Error("an issue-backed delivery fixture needs both identities");
+  }
+  return parseReviewReceiptV1({
+    version: "v1",
+    kind: "review_receipt",
+    id: receiptId,
+    requestId: request.source.reviewRequestId,
+    expectedReviewer: "chatgpt-codex-connector[bot]",
+    observedReviewer: "chatgpt-codex-connector[bot]",
+    repository: record.repository,
+    pullRequest: {
+      number: request.source.pullRequest,
+      head: request.source.head,
+      base: request.source.base,
+    },
+    outcome: "completed",
+    resultId: "result-1",
+    summary: null,
+    findings: [],
+    findingsUncounted: 0,
+    unresolvedSeverities: [],
+    taskAcceptance: {
+      issueNumber,
+      taskDigest,
+      verdict: "fulfilled",
+      evidence: ["the exact reviewed change implements the source issue"],
+    },
+    submittedAt: T0,
+    completedAt: T0 + 1000,
+    observedAt: T0 + 1001,
+    ...overrides,
+  });
+}
+
 Deno.test(
   "local release: accepted local receipt closes the delivery record",
   async () => {
@@ -2444,8 +2931,20 @@ Deno.test(
     });
     try {
       const request = localDeliveryRequest("release-local-1", SHA3);
+      const record = localDeliveryRecord();
+      // The release request references one EXACT receipt: the full
+      // authorization predicate and its task acceptance must still bind the
+      // trusted live issue text, so the genuine proof is seeded.
+      const proof = referencedDeliveryReceipt(
+        request,
+        record,
+        LOCAL_DELIVERY_TASK_DIGEST,
+      );
       const seeded = await rig.store.writeRepair(
-        seededSnapshot([localDeliveryRecord()], { releaseRequests: [request] }),
+        seededSnapshot([record], {
+          releaseRequests: [request],
+          reviews: [proof],
+        }),
         null,
       );
       assert.ok(seeded.ok && seeded.value.status === "applied");
@@ -2461,6 +2960,252 @@ Deno.test(
       const state = await rig.snapshot();
       assert.equal(state.work[0].nextStep, "done");
       assert.equal(reads, 1, "the local capability was consulted exactly once");
+    } finally {
+      await rig.ctx.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "local release: an accepted receipt without the exact referenced proof never closes",
+  async () => {
+    // The release controller accepted the deployment, but no receipt carries
+    // delivery proof: the exact referenced id resolves to nothing, so no
+    // closure intent, no external close and no done transition may happen.
+    const rig = await makeRig("localnoproof", {
+      summaries: false,
+      localScope: true,
+    });
+    try {
+      const request = localDeliveryRequest("release-local-1", SHA3);
+      await rig.store.writeRepair(
+        seededSnapshot([localDeliveryRecord()], { releaseRequests: [request] }),
+        null,
+      );
+      Object.assign(rig.store, {
+        readLocalRelease: () =>
+          Promise.resolve(portOk(localAcceptedReceipt(request))),
+      });
+      const run = await rig.run();
+      assert.equal(run.status, "idle", JSON.stringify(run));
+      const state = await rig.snapshot();
+      assert.equal(state.work[0].nextStep, "blocked");
+      assert.equal(
+        state.work[0].intent,
+        null,
+        "no durable closure intent without proof",
+      );
+      assert.equal(state.work[0].blocker?.kind, "missing_evidence");
+      assert.equal(
+        rig.github.calls.filter((call) => call.startsWith("closeIssue"))
+          .length,
+        0,
+        "no closure without proof",
+      );
+    } finally {
+      await rig.ctx.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "local release: a referenced receipt that fails one full-identity check never closes",
+  async () => {
+    // Every case keeps the EXACT referenced id/request id of the accepted
+    // request, so only the changed dimension can refuse it: another repository
+    // scope, another reviewed base, an untrusted observed reviewer, an
+    // unresolved P1, a change-only receipt without any acceptance, and the
+    // explicit `already_satisfied_at_base` verdict. None may persist a closure
+    // intent, close the issue or finish the record.
+    const variants: Array<{
+      name: string;
+      overrides: Record<string, unknown>;
+      blockerKind: "missing_evidence" | "other";
+    }> = [
+      {
+        name: "wrong-repository",
+        overrides: { repository: REPO },
+        blockerKind: "missing_evidence",
+      },
+      {
+        name: "wrong-base",
+        overrides: { pullRequest: { number: 12, head: SHA1, base: SHA3 } },
+        blockerKind: "missing_evidence",
+      },
+      {
+        name: "untrusted-reviewer",
+        overrides: {
+          expectedReviewer: "someone-else[bot]",
+          observedReviewer: "someone-else[bot]",
+        },
+        blockerKind: "missing_evidence",
+      },
+      {
+        name: "unresolved-P1",
+        overrides: {
+          findings: [{
+            id: "finding-1",
+            severity: "P1",
+            path: "src/app.ts",
+            message: "required fix",
+            fingerprint: "a".repeat(64),
+            resolved: false,
+            resolutionEvidence: null,
+          }],
+          unresolvedSeverities: ["P1"],
+        },
+        blockerKind: "missing_evidence",
+      },
+      {
+        name: "no-acceptance",
+        overrides: { taskAcceptance: null },
+        blockerKind: "missing_evidence",
+      },
+      {
+        name: "already-satisfied",
+        overrides: {
+          taskAcceptance: {
+            issueNumber: LOCAL_DELIVERY_ISSUE,
+            taskDigest: LOCAL_DELIVERY_TASK_DIGEST,
+            verdict: "already_satisfied_at_base",
+            evidence: ["the base already satisfies the issue"],
+          },
+        },
+        blockerKind: "other",
+      },
+    ];
+    for (const variant of variants) {
+      const rig = await makeRig(`localwrongproof-${variant.name}`, {
+        summaries: false,
+        localScope: true,
+      });
+      try {
+        const request = localDeliveryRequest("release-local-1", SHA3);
+        const record = localDeliveryRecord();
+        const receipt = referencedDeliveryReceipt(
+          request,
+          record,
+          LOCAL_DELIVERY_TASK_DIGEST,
+          variant.overrides,
+        );
+        await rig.store.writeRepair(
+          seededSnapshot([record], {
+            releaseRequests: [request],
+            reviews: [receipt],
+          }),
+          null,
+        );
+        Object.assign(rig.store, {
+          readLocalRelease: () =>
+            Promise.resolve(portOk(localAcceptedReceipt(request))),
+        });
+        const run = await rig.run();
+        assert.equal(run.status, "idle", JSON.stringify(run));
+        const state = await rig.snapshot();
+        assert.equal(state.work[0].nextStep, "blocked", variant.name);
+        assert.equal(state.work[0].intent, null, variant.name);
+        assert.equal(
+          state.work[0].blocker?.kind,
+          variant.blockerKind,
+          variant.name,
+        );
+        assert.equal(
+          rig.github.calls.filter((call) => call.startsWith("closeIssue"))
+            .length,
+          0,
+          variant.name,
+        );
+      } finally {
+        await rig.ctx.cleanup();
+      }
+    }
+  },
+);
+
+/**
+ * Live issue reader whose task text changes between runs: reproduces an edited
+ * source issue AFTER the durable closure intent already exists.
+ */
+class MutableIssueGithub extends FakeGithub {
+  body = "";
+  override readIssue(
+    issueNumber: number,
+  ): Promise<PortResultV1<GitHubIssueV1 | null>> {
+    return Promise.resolve(portOk({
+      number: issueNumber,
+      title: `issue ${issueNumber}`,
+      body: this.body,
+      state: "open",
+      author: null,
+      labels: [],
+      createdAt: T0,
+      updatedAt: T0,
+      closedAt: null,
+    }));
+  }
+}
+
+Deno.test(
+  "closure retry: a task-text change after the durable intent blocks instead of closing",
+  async () => {
+    // The durable closure intent was written from an earlier read of the
+    // trusted task text. Once the live text changes, the recorded acceptance no
+    // longer binds it: the retry must revalidate and block instead of closing
+    // the issue and marking the record done.
+    const github = new MutableIssueGithub({
+      baseSha: SHA1,
+      closeFailNext: true,
+    });
+    const rig = await makeRig("closuretextchange", {
+      summaries: false,
+      localScope: true,
+      githubPort: github,
+    });
+    try {
+      const request = localDeliveryRequest("release-local-1", SHA3);
+      const record = localDeliveryRecord();
+      await rig.store.writeRepair(
+        seededSnapshot([record], {
+          releaseRequests: [request],
+          reviews: [
+            referencedDeliveryReceipt(
+              request,
+              record,
+              LOCAL_DELIVERY_TASK_DIGEST,
+            ),
+          ],
+        }),
+        null,
+      );
+      Object.assign(rig.store, {
+        readLocalRelease: () =>
+          Promise.resolve(portOk(localAcceptedReceipt(request))),
+      });
+      await rig.run();
+      let state = await rig.snapshot();
+      assert.equal(state.work[0].nextStep, "delivery");
+      assert.equal(state.work[0].intent?.kind, "issue_closure");
+      assert.equal(
+        rig.github.calls.filter((call) => call.startsWith("closeIssue:"))
+          .length,
+        1,
+        "the first closure attempt failed and stayed retryable",
+      );
+
+      github.body = "edited after the accepted delivery";
+      rig.clock.advance(5 * 60_000 + 1);
+      const retried = await rig.run();
+      assert.equal(retried.status, "idle", JSON.stringify(retried));
+      state = await rig.snapshot();
+      assert.equal(state.work[0].nextStep, "blocked");
+      assert.equal(state.work[0].intent, null, "no closure intent survives");
+      assert.equal(state.work[0].blocker?.kind, "missing_evidence");
+      assert.equal(
+        rig.github.calls.filter((call) => call.startsWith("closeIssue:"))
+          .length,
+        1,
+        "the changed task text never closes the issue",
+      );
     } finally {
       await rig.ctx.cleanup();
     }
@@ -2746,6 +3491,15 @@ Deno.test(
       const seeded = await rig.store.writeRepair(
         seededSnapshot([gatewayDeliveryRecord()], {
           releaseRequests: [request],
+          // The exact referenced receipt, bound to the nonlocal record's own
+          // repository and live issue task.
+          reviews: [
+            referencedDeliveryReceipt(
+              request,
+              gatewayDeliveryRecord(),
+              LOCAL_DELIVERY_TASK_DIGEST,
+            ),
+          ],
         }),
         null,
       );
@@ -3128,9 +3882,10 @@ async function seedActionsDelivery(
   rig: RigV1,
   request: ReleaseRequestV1,
   record: WorkRecordV1 = localDeliveryRecord(),
+  reviews: ReviewReceiptV1[] = [],
 ): Promise<void> {
   const seeded = await rig.store.writeRepair(
-    seededSnapshot([record], { releaseRequests: [request] }),
+    seededSnapshot([record], { releaseRequests: [request], reviews }),
     null,
   );
   assert.ok(seeded.ok && seeded.value.status === "applied");
@@ -3153,7 +3908,13 @@ Deno.test(
     });
     try {
       const request = localDeliveryRequest("release-hosted-1", SHA3);
-      await seedActionsDelivery(rig, request);
+      const record = localDeliveryRecord();
+      await seedActionsDelivery(rig, request, record, [
+        // The hosted receipt is acceptance of the DEPLOYMENT only; closing the
+        // issue still requires the exact referenced review proof bound to the
+        // live task text.
+        referencedDeliveryReceipt(request, record, LOCAL_DELIVERY_TASK_DIGEST),
+      ]);
       await seedHostedReceipt(rig, request, "accepted");
       wireHostedReader(rig);
       const run = await rig.entry();
@@ -6049,6 +6810,7 @@ function noVerdictObservation(
     findings: [],
     summary,
     receivedAt: at + 1,
+    taskAcceptance: null,
   };
 }
 
@@ -6139,6 +6901,7 @@ Deno.test(
         findings: [],
         summary: "No actionable defects found in the supplied change.",
         receivedAt: completedAt + 1,
+        taskAcceptance: null,
       });
       rig.clock.advance(15 * 60_000 + 1);
       await rig.run();
