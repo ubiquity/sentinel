@@ -482,6 +482,15 @@ export const OWNER_DEVELOPMENT_INSTALL_CHILD_DEADLINE_GENERATION = 51;
 export const OWNER_DEVELOPMENT_INSTALL_RUNTIME_SOURCE_REVISION =
   "80cc73a4a38d58a53e215b1b8daaccb8e6fe97b1" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_RUNTIME_SOURCE_GENERATION = 52;
+/**
+ * Exact owner-approved repair of the idle, unproven runtime-source pointer.
+ * Its install retains the genuine child-deadline generation 51 proof without
+ * claiming generation 52 healthy. Failure restores that proven revision once
+ * at generation 54; neither rollback target retries this repair.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_OWNER_REPAIR_REVISION =
+  "573d862429ab49eefbfcb99bd1878926024af96d" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_OWNER_REPAIR_GENERATION = 53;
 /** Monotonic rollback target the failed generation 45 candidate rolled to. */
 export const OWNER_DEVELOPMENT_INSTALL_ROLLBACK_TARGET_GENERATION =
   OWNER_DEVELOPMENT_INSTALL_ASSIGN_FIRST_GENERATION + 2;
@@ -507,8 +516,8 @@ export interface OwnerDevelopmentInstallMoveV1 {
   nextGeneration: number;
   /**
    * Exact recorded healthy proof authorizing this movement: the current
-   * pointer's proof for an install, the recorded previously healthy revision's
-   * proof for a rollback.
+   * pointer's proof for an install, or the recorded previously healthy
+   * revision's proof for a rollback or the pinned unproven-pointer repair.
    */
   priorHealthyProof: HostedRunProofV1;
 }
@@ -2464,8 +2473,68 @@ export function planOwnerDevelopmentInstall(
     if (healthy !== null) {
       return noChange("the owner development installation is complete");
     }
+    const prior = healthyProofFor(
+      runtime,
+      OWNER_DEVELOPMENT_INSTALL_CHILD_DEADLINE_REVISION,
+      OWNER_DEVELOPMENT_INSTALL_CHILD_DEADLINE_GENERATION,
+    );
+    if (prior === null) {
+      return waiting(
+        "the recorded child-deadline healthy proof for the owner repair is unavailable",
+      );
+    }
+    // Only the unproven pointer takes this exceptional repair path. A
+    // conflicting settlement cannot be discarded to manufacture eligibility;
+    // the exact failed settlement has already taken rollback precedence above.
+    const settlement = runtime.lastExecutionProof;
+    if (
+      settlement !== null &&
+      (settlement.execution.revision === revision ||
+        settlement.execution.generation >= generation)
+    ) {
+      return waiting(
+        "the runtime-source settlement does not authorize the unproven owner repair",
+      );
+    }
+    return movePlan(
+      "install",
+      runtime,
+      OWNER_DEVELOPMENT_INSTALL_OWNER_REPAIR_REVISION,
+      OWNER_DEVELOPMENT_INSTALL_OWNER_REPAIR_GENERATION,
+      prior,
+      "install the pinned owner repair with the retained child-deadline healthy proof",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_OWNER_REPAIR_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_OWNER_REPAIR_GENERATION
+  ) {
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_CHILD_DEADLINE_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_CHILD_DEADLINE_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded child-deadline healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_CHILD_DEADLINE_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed owner repair to its recorded proven predecessor",
+      );
+    }
+    if (healthy !== null) {
+      return noChange("the owner development installation is complete");
+    }
     return waiting(
-      "the runtime-source generation 52 healthy proof is not recorded",
+      "the owner-repair generation 53 healthy proof is not recorded",
     );
   }
 
