@@ -7,13 +7,21 @@
 import assert from "node:assert/strict";
 
 import type { GitSha } from "../../src/contracts/brands.ts";
+import { parseBudgetReservationV1 } from "../../src/contracts/budget-reservation.ts";
+import { canonicalStringify } from "../../src/contracts/canonical.ts";
 import type { Clock } from "../../src/contracts/ports.ts";
-import type { HostedExecutionIntentV1 } from "../../src/contracts/hosted-supervisor.ts";
+import type {
+  HostedExecutionIntentV1,
+  HostedRunProofV1,
+} from "../../src/contracts/hosted-supervisor.ts";
 import {
   parseReleaseStateSnapshotV1,
   parseRepairStateSnapshotV1,
 } from "../../src/contracts/state-snapshots.ts";
-import type { ReleaseStateSnapshotV1 } from "../../src/contracts/state-snapshots.ts";
+import type {
+  ReleaseStateSnapshotV1,
+  RepairStateSnapshotV1,
+} from "../../src/contracts/state-snapshots.ts";
 import type {
   HttpRequestV1,
   HttpResponseV1,
@@ -61,6 +69,9 @@ const TERM_FINISHED = T0 + 1500;
 const STEP_FINISHED = T0 + 2000;
 const JOB_FINISHED = T0 + 2500;
 const OBSERVED = T0 + 4000;
+// Connected cancellation scenario: a queued repair job saved over a prior
+// healthy proof, then force-cancelled before it ever produced a terminal.
+const QUEUED_RUN = 910;
 
 class StepClock implements Clock {
   constructor(private t: number) {}
@@ -345,6 +356,176 @@ function scriptFinalize(rig: RigV1, saved: HostedExecutionIntentV1): void {
     ));
 }
 
+/** Authenticated native workflow-attempt evidence, overridable per case. */
+function scriptAttempt(
+  rig: RigV1,
+  runId: number,
+  overrides: Record<string, unknown> = {},
+): void {
+  rig.http.on(
+    "GET",
+    `/repos/${REPO}/actions/runs/${runId}/attempts/1`,
+    () =>
+      response(200, {
+        id: runId,
+        run_attempt: 1,
+        workflow_id: 357012162,
+        path: ".github/workflows/supervisor.yml",
+        head_sha: rig.launcherSha,
+        head_branch: "sentinel-supervisor",
+        event: "workflow_dispatch",
+        status: "in_progress",
+        conclusion: null,
+        repository: { full_name: REPO },
+        head_repository: { full_name: REPO },
+        run_started_at: iso(JOB_STARTED),
+        updated_at: iso(JOB_FINISHED),
+        ...overrides,
+      }),
+  );
+}
+
+/** Authenticated native repair-job evidence, overridable per case. */
+function scriptRepairJob(
+  rig: RigV1,
+  runId: number,
+  job: Record<string, unknown>,
+): void {
+  rig.http.on(
+    "GET",
+    `/repos/${REPO}/actions/runs/${runId}/attempts/1/jobs`,
+    () =>
+      response(200, {
+        total_count: 1,
+        jobs: [{
+          id: JOB_ID,
+          name: "repair",
+          run_id: runId,
+          run_attempt: 1,
+          head_sha: rig.launcherSha,
+          ...job,
+        }],
+      }),
+  );
+}
+
+/** Exact persisted repair state and its head, read through the real store. */
+async function repairState(rig: RigV1): Promise<{
+  snapshot: RepairStateSnapshotV1;
+  head: GitSha | null;
+}> {
+  const read = await rig.repair.readRepair();
+  assert.ok(read.ok && read.value.status === "found");
+  if (!read.ok || read.value.status !== "found") {
+    throw new Error("missing repair state");
+  }
+  return { snapshot: read.value.snapshot, head: read.value.head };
+}
+
+/**
+ * Legal reachable cancellation state built by real host calls: the bootstrap
+ * cycle records the prior healthy proof, the next due prepare saves the queued
+ * ordinary execution, and the separate repair store holds one charged
+ * admission reservation. The caller owns cleanup of the returned rig.
+ */
+async function seedCancellationRig(): Promise<{
+  rig: RigV1;
+  queuedIntent: HostedExecutionIntentV1;
+  priorHealthy: HostedRunProofV1;
+  saved: ReleaseStateSnapshotV1;
+  repairSeed: RepairStateSnapshotV1;
+  cancelAt: number;
+}> {
+  const rig = await makeRig();
+  try {
+    const charged = parseBudgetReservationV1({
+      version: "v1",
+      kind: "budget_reservation",
+      repository: { owner: "ubiquity", name: "sentinel", installationId: 0 },
+      id: "reservation-1",
+      taskId: "issue:82",
+      attempt: 1,
+      head: rig.launcherSha,
+      purpose: "implementation",
+      createdAt: T0,
+      outcome: "reserved",
+      settledAt: null,
+      proofRef: null,
+    });
+    const seededRepair = await repairState(rig);
+    const repairSeed = parseRepairStateSnapshotV1({
+      ...seededRepair.snapshot,
+      stateHead: seededRepair.head,
+      sequence: seededRepair.snapshot.sequence + 1,
+      updatedAt: T0,
+      reservations: [charged],
+    });
+    const repairWritten = await rig.repair.writeRepair(
+      repairSeed,
+      seededRepair.head,
+    );
+    assert.ok(
+      repairWritten.ok && repairWritten.value.status === "applied",
+      JSON.stringify(repairWritten),
+    );
+
+    scriptCompare(rig);
+    const bootstrapped = await rig.run("prepare", RUN_ID);
+    assert.equal(bootstrapped.status, "run", JSON.stringify(bootstrapped));
+    if (bootstrapped.execution === null) throw new Error("unreachable");
+    rig.clock.advance(OBSERVED - T0);
+    scriptFinalize(rig, bootstrapped.execution);
+    assert.equal((await rig.run("finalize", RUN_ID)).status, "idle");
+    rig.output.length = 0;
+    rig.clock.advance(HOUR_MS + 1000);
+    const prepared = await rig.run("prepare", QUEUED_RUN);
+    assert.equal(prepared.status, "run", JSON.stringify(prepared));
+    const queuedIntent = prepared.execution;
+    if (queuedIntent === null) throw new Error("unreachable");
+    rig.output.length = 0;
+    const saved = await rig.releaseSnapshot();
+    const priorHealthy = saved.hostedRuntimes[0]?.lastHealthyProof ?? null;
+    if (priorHealthy === null) {
+      throw new Error("the prior healthy proof is not recorded");
+    }
+    assert.equal(saved.hostedRuntimes[0]?.execution?.id, queuedIntent.id);
+    return {
+      rig,
+      queuedIntent,
+      priorHealthy,
+      saved,
+      repairSeed,
+      cancelAt: rig.clock.now() + 1_000,
+    };
+  } catch (error) {
+    await rig.cleanup();
+    throw error;
+  }
+}
+
+/**
+ * Minimal legal negative-case state: the real bootstrap prepare alone saves one
+ * execution through the same composition. The caller owns cleanup.
+ */
+async function seedBootstrapRig(): Promise<{
+  rig: RigV1;
+  saved: ReleaseStateSnapshotV1;
+}> {
+  const rig = await makeRig();
+  try {
+    scriptCompare(rig);
+    const prepared = await rig.run("prepare", RUN_ID);
+    assert.equal(prepared.status, "run", JSON.stringify(prepared));
+    // Observe after the attempt's own authenticated timestamps.
+    rig.clock.advance(OBSERVED - T0);
+    rig.output.length = 0;
+    return { rig, saved: await rig.releaseSnapshot() };
+  } catch (error) {
+    await rig.cleanup();
+    throw error;
+  }
+}
+
 Deno.test("hosted workflow: prepare saves the bootstrap intent and exact output revision", async () => {
   const rig = await makeRig();
   try {
@@ -411,6 +592,215 @@ Deno.test("hosted workflow: finalize settles the exact completed repair job whil
     await rig.cleanup();
   }
 });
+
+Deno.test(
+  "hosted workflow: a queued repair reconciliation stays pending",
+  async () => {
+    const seeded = await seedCancellationRig();
+    try {
+      const { rig, queuedIntent, saved } = seeded;
+      // The repair job is still queued: the saved execution, its prior health
+      // and the pointer all stay untouched.
+      scriptAttempt(rig, QUEUED_RUN);
+      scriptRepairJob(rig, QUEUED_RUN, {
+        status: "queued",
+        conclusion: null,
+        started_at: null,
+        completed_at: null,
+        steps: [],
+      });
+      const pending = await rig.run("finalize", QUEUED_RUN);
+      assert.equal(pending.status, "pending", JSON.stringify(pending));
+      assert.equal(pending.run, false);
+      assert.deepEqual(rig.output, [], "finalize writes no outputs");
+      assert.equal(
+        canonicalStringify(await rig.releaseSnapshot()),
+        canonicalStringify(saved),
+        "an incomplete repair job leaves the saved execution untouched",
+      );
+      assert.equal(queuedIntent.purpose, "ordinary");
+      assert.equal(
+        canonicalStringify((await repairState(rig)).snapshot),
+        canonicalStringify(seeded.repairSeed),
+        "a pending reconciliation writes nothing, not even repair state",
+      );
+    } finally {
+      await seeded.rig.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "hosted workflow: a force-cancelled repair settles not_started and preserves prior health",
+  async () => {
+    const seeded = await seedCancellationRig();
+    try {
+      const { rig, queuedIntent, priorHealthy, saved, repairSeed, cancelAt } =
+        seeded;
+      // The simulated authenticated force-cancel outcome for the SAME repair
+      // job: completed/cancelled, no runtime step and no child terminal
+      // artifact (no log read is scripted and none may be needed).
+      scriptAttempt(rig, QUEUED_RUN);
+      scriptRepairJob(rig, QUEUED_RUN, {
+        status: "completed",
+        conclusion: "cancelled",
+        started_at: null,
+        completed_at: iso(cancelAt),
+        steps: [],
+      });
+      rig.clock.advance(5_000);
+      const observed = rig.clock.now();
+      const callsBeforeCancellation = rig.http.calls.length;
+      const settled = await rig.run("finalize", QUEUED_RUN);
+      assert.equal(settled.status, "idle", JSON.stringify(settled));
+      assert.equal(settled.run, false);
+      assert.deepEqual(rig.output, []);
+
+      const after = await rig.releaseSnapshot();
+      const runtime = after.hostedRuntimes[0];
+      if (runtime === undefined) throw new Error("runtime pointer is missing");
+      assert.equal(runtime.execution, null, "the saved execution is freed");
+      assert.equal(runtime.lastExecutionProof?.outcome, "not_started");
+      assert.equal(runtime.lastExecutionProof?.execution.id, queuedIntent.id);
+      assert.equal(runtime.lastExecutionProof?.jobId, JOB_ID);
+      assert.equal(runtime.lastExecutionProof?.finishedAt, cancelAt);
+      // Only the matching execution moved: the pointer revision and generation
+      // are unchanged and the prior health proof is retained verbatim, so a
+      // cancellation can never fabricate or demote health.
+      assert.equal(runtime.activeRevision, rig.launcherSha);
+      assert.equal(runtime.generation, 1);
+      assert.equal(
+        canonicalStringify(runtime.lastHealthyProof),
+        canonicalStringify(priorHealthy),
+      );
+      assert.equal(
+        runtime.nextOrdinaryAt,
+        observed,
+        "ordinary eligibility is restored at the observation time",
+      );
+      assert.equal(runtime.updatedAt, observed);
+      // The settlement needed no child terminal artifact at all: the cancelled
+      // observation reads only the run attempt and its job list.
+      assert.ok(
+        rig.http.calls.slice(callsBeforeCancellation).every((call) =>
+          !call.url.includes("/logs")
+        ),
+        "a cancelled job with no terminal settles without any log read",
+      );
+      // Release history and the charged admission reservation survive.
+      assert.equal(
+        canonicalStringify(after.hostedReleases),
+        canonicalStringify(saved.hostedReleases),
+      );
+      assert.equal(
+        canonicalStringify(after.releases),
+        canonicalStringify(saved.releases),
+      );
+      assert.equal(
+        canonicalStringify((await repairState(rig)).snapshot),
+        canonicalStringify(repairSeed),
+      );
+
+      // The freed pointer is due again immediately, and the reservation
+      // history is still untouched.
+      const next = await rig.run("prepare", QUEUED_RUN + 1);
+      assert.equal(next.status, "run", JSON.stringify(next));
+      assert.equal(next.run, true);
+      assert.equal(next.execution?.purpose, "ordinary");
+      assert.equal(next.execution?.revision, rig.launcherSha);
+      assert.deepEqual(rig.output, [
+        "run=true",
+        `revision=${rig.launcherSha}`,
+      ]);
+      assert.equal(
+        canonicalStringify((await repairState(rig)).snapshot),
+        canonicalStringify(repairSeed),
+      );
+      // Every native GitHub API request carried the repository token, never an
+      // App token; the signed blob log URL is deliberately unauthenticated.
+      for (const call of rig.http.calls) {
+        if (!call.url.startsWith("https://api.github.com")) continue;
+        assert.equal(
+          call.headers.get("authorization"),
+          `Bearer ${NATIVE_TOKEN}`,
+        );
+      }
+    } finally {
+      await seeded.rig.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "hosted workflow: foreign run and launcher evidence leaves the saved execution pending",
+  async () => {
+    const seeded = await seedBootstrapRig();
+    try {
+      const { rig, saved } = seeded;
+      // A repair job belonging to another run is refused outright.
+      scriptAttempt(rig, RUN_ID);
+      scriptRepairJob(rig, RUN_ID, {
+        run_id: RUN_ID + 1,
+        status: "queued",
+        conclusion: null,
+        started_at: null,
+        completed_at: null,
+        steps: [],
+      });
+      const foreignRun = await rig.run("finalize", RUN_ID);
+      assert.equal(foreignRun.status, "pending", JSON.stringify(foreignRun));
+      assert.equal(foreignRun.run, false);
+      assert.equal(
+        canonicalStringify(await rig.releaseSnapshot()),
+        canonicalStringify(saved),
+        "foreign run evidence changes nothing",
+      );
+
+      // An attempt whose launcher (controller) is not the saved launcher is
+      // refused the same way.
+      scriptAttempt(rig, RUN_ID, { head_sha: OTHER_SHA });
+      const foreignLauncher = await rig.run("finalize", RUN_ID);
+      assert.equal(
+        foreignLauncher.status,
+        "pending",
+        JSON.stringify(foreignLauncher),
+      );
+      assert.equal(foreignLauncher.run, false);
+      assert.deepEqual(rig.output, [], "finalize writes no outputs");
+      assert.equal(
+        canonicalStringify(await rig.releaseSnapshot()),
+        canonicalStringify(saved),
+        "foreign launcher evidence changes nothing",
+      );
+    } finally {
+      await seeded.rig.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "hosted workflow: a mismatched run attempt leaves the saved execution pending",
+  async () => {
+    const seeded = await seedBootstrapRig();
+    try {
+      const { rig, saved } = seeded;
+      // The saved attempt is 1, so any other attempt number is foreign
+      // evidence and never settles the saved execution.
+      scriptAttempt(rig, RUN_ID, { run_attempt: 2 });
+      const mismatched = await rig.run("finalize", RUN_ID);
+      assert.equal(mismatched.status, "pending", JSON.stringify(mismatched));
+      assert.equal(mismatched.run, false);
+      assert.deepEqual(rig.output, [], "finalize writes no outputs");
+      assert.equal(
+        canonicalStringify(await rig.releaseSnapshot()),
+        canonicalStringify(saved),
+        "mismatched attempt evidence changes nothing",
+      );
+    } finally {
+      await seeded.rig.cleanup();
+    }
+  },
+);
 
 Deno.test("hosted workflow: ordinary work starts only after its due time", async () => {
   const rig = await makeRig();
