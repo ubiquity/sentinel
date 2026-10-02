@@ -51,7 +51,6 @@ const ROOT = decodeURIComponent(HERE.pathname).replace(
   "",
 );
 
-const HOUR_MS = 3_600_000;
 const LAUNCHER = "1".repeat(40) as GitSha;
 const CANDIDATE = "2".repeat(40) as GitSha;
 const DIGEST = "a".repeat(64);
@@ -388,13 +387,13 @@ Deno.test("hosted supervisor core: bootstrap is written once, replayed and settl
   }
 });
 
-Deno.test("hosted supervisor core: ordinary cadence advances once per hour with no duplicate execution", async () => {
+Deno.test("hosted supervisor core: ordinary cadence advances on each dispatch with no duplicate execution", async () => {
   const rig = await makeRig();
   try {
     await bootstrapHealthy(rig);
     const identity = run(2);
-    assert.equal((await rig.prepare(identity)).status, "idle");
-    rig.clock.advance(HOUR_MS);
+    // No artificial hour cooldown: once the prior execution actually settled,
+    // the next scheduled dispatch is immediately due for ordinary work.
     const ordinary = requireRun(await rig.prepare(identity));
     assert.equal(ordinary.purpose, "ordinary");
     assert.equal(ordinary.revision, LAUNCHER);
@@ -405,12 +404,11 @@ Deno.test("hosted supervisor core: ordinary cadence advances once per hour with 
     const state = await rig.snapshot();
     assert.equal(
       state.hostedRuntimes[0].nextOrdinaryAt,
-      ordinary.createdAt + HOUR_MS,
+      ordinary.createdAt,
     );
     rig.evidence.settlements.set(ordinary.id, runProof(ordinary, "healthy"));
     assert.equal((await rig.finalize(identity)).status, "idle");
     // Same run/attempt cannot start a second execution even when due.
-    rig.clock.advance(HOUR_MS);
     assert.equal((await rig.prepare(identity)).status, "idle");
     assert.equal(requireRun(await rig.prepare(run(3))).purpose, "ordinary");
   } finally {
@@ -480,7 +478,10 @@ Deno.test("hosted supervisor core: healthy prior promotes and a healthy candidat
     assert.equal(state.hostedReleases[0].phase, "verifying");
     assert.equal(state.hostedReleases[0].priorProof?.execution.id, prior.id);
     rig.evidence.settlements.set(candidate.id, runProof(candidate, "healthy"));
-    assert.equal((await rig.prepare(run(4))).status, "idle");
+    // The candidate settles into acceptance; with no hour cooldown the same
+    // dispatch then starts the next ordinary execution.
+    const settledOrdinary = requireRun(await rig.prepare(run(4)));
+    assert.equal(settledOrdinary.purpose, "ordinary");
     state = await rig.snapshot();
     assert.equal(state.hostedReleases[0].phase, "accepted");
     assert.equal(
@@ -526,7 +527,10 @@ Deno.test("hosted supervisor core: failed candidate rolls back exactly and a lat
       prior.id,
     );
     rig.evidence.settlements.set(retry.id, runProof(retry, "healthy"));
-    assert.equal((await rig.prepare(run(6))).status, "idle");
+    // The rollback settles; with no hour cooldown the same dispatch then
+    // starts the next ordinary execution.
+    const settledOrdinary = requireRun(await rig.prepare(run(6)));
+    assert.equal(settledOrdinary.purpose, "ordinary");
     state = await rig.snapshot();
     assert.equal(state.hostedReleases[0].phase, "rolled_back");
     assert.equal(
@@ -618,9 +622,16 @@ Deno.test("hosted supervisor core: unreviewed or unverified requests never move 
     await bootstrapHealthy(rig);
     const request = releaseRequest();
     const before = await rig.snapshot();
-    // No completed review receipt -> not selectable.
+    // No completed review receipt -> not selectable; the now-immediately-due
+    // ordinary work is what the dispatch starts instead.
     await rig.seedRepair([request], []);
-    assert.equal((await rig.prepare(run(2))).status, "idle");
+    const dueOrdinary = requireRun(await rig.prepare(run(2)));
+    assert.equal(dueOrdinary.purpose, "ordinary");
+    rig.evidence.settlements.set(
+      dueOrdinary.id,
+      runProof(dueOrdinary, "healthy"),
+    );
+    assert.equal((await rig.finalize(run(2))).status, "idle");
     let state = await rig.snapshot();
     assert.equal(state.hostedReleases.length, 0);
     assert.equal(
@@ -700,10 +711,10 @@ Deno.test("hosted supervisor core: an exact ordinary not_started settlement rest
   try {
     await bootstrapHealthy(rig);
     const identity = run(2);
-    rig.clock.advance(HOUR_MS);
+    // Ordinary work is due on the next dispatch, with no hour cooldown.
     const ordinary = requireRun(await rig.prepare(identity));
     const originalDue = (await rig.snapshot()).hostedRuntimes[0].nextOrdinaryAt;
-    assert.equal(originalDue, ordinary.createdAt + HOUR_MS);
+    assert.equal(originalDue, ordinary.createdAt);
     const skipped = skippedProof(ordinary);
     rig.evidence.settlements.set(ordinary.id, skipped);
     assert.equal((await rig.finalize(identity)).status, "idle");
@@ -714,12 +725,11 @@ Deno.test("hosted supervisor core: an exact ordinary not_started settlement rest
     );
     assert.equal(state.hostedRuntimes[0].lastHealthyProof?.outcome, "healthy");
     assert.equal(state.hostedRuntimes[0].nextOrdinaryAt, skipped.observedAt);
-    assert.ok(state.hostedRuntimes[0].nextOrdinaryAt < originalDue);
     // Same run/attempt cannot resubmit.
     assert.equal((await rig.prepare(identity)).status, "idle");
-    // A later run/attempt before the original hour deadline retries.
+    // A later run/attempt at the restored due instant retries.
     rig.clock.advance(skipped.observedAt - rig.clock.now() + 1);
-    assert.ok(rig.clock.now() < originalDue);
+    assert.ok(rig.clock.now() >= state.hostedRuntimes[0].nextOrdinaryAt);
     const retry = requireRun(await rig.prepare(run(3)));
     assert.equal(retry.purpose, "ordinary");
     state = await rig.snapshot();

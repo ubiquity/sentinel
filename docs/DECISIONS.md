@@ -2,6 +2,12 @@
 
 Read before changing Sentinel runtime or delivery. These are scoped user exceptions; they do not broadly override higher authority.
 
+## Owner-directed uncapped issue throughput - 2026-10-02
+
+The owner requested concurrent processing of the GitHub issue backlog, then explicitly directed "lift all the limits for now" at 22:05 UTC after the one-writer, three-PR and 120-start hourly limits were identified. This supersedes the earlier artificial runtime throughput limits: enable isolated concurrent issue implementation, remove hourly and weekly start caps, unfinished-PR and concurrent-review caps, the eight-item review-drain cap, and the ordinary-run hourly delay. Reconsider stored waits caused solely by those retired caps; preserve durable admission and settlement history. The trusted default is `liveStartLimits: { perHour: null, perSevenDays: null }`; a wholly null or invalid policy still does not enable inference.
+
+Use a GitHub Actions matrix across eligible configured targets with all available runner capacity, subject to GitHub and provider limits. Keep unique task/admission identity, credential-free model processes, source freshness, current-head semantic review and CI, and trusted serialized state, merge and promotion ownership. This decision authorizes the concurrency implementation; it is not evidence that the matrix or new policy is deployed. The existing hosted-development approval boundary still applies to this task.
+
 ## Owner-directed autonomous recovery - 2026-10-02
 
 At 2026-10-02 14:23 UTC, after the integration owner requested permission to publish the tested queue-recovery workflow using the existing GitHub owner account because the Sentinel App lacks Workflows write, the owner directed: "You can start writing workflow changes now hurry up and fix everything". This authorizes the existing owner account for this narrowly scoped workflow-recovery publication without expanding App permissions or adding credentials. All subsequent ordinary Sentinel code/runtime/review/issue activity retains the existing App identity and trusted acceptance/admission/promotion gates.
@@ -99,4 +105,4 @@ Repair every repository in `sentinel.targets.json` under the one
    addressed. The gateway release receipt stays sentinel-self-only and refuses a
    foreign request explicitly.
 
-Keep targets sequential, not concurrent: the design is one production writer.
+The sequential-target restriction above is superseded by the owner-directed uncapped issue throughput decision of 2026-10-02; target identities and shared durable accounting remain mandatory.

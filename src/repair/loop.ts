@@ -90,10 +90,8 @@ import {
   reviewReceiptId,
 } from "./keys.ts";
 import {
-  countUnfinishedPullRequests,
   hasPublishedIdentity,
   isWaiting,
-  MAX_UNFINISHED_PRS,
   rankEligibleWork,
   rankReviewDrain,
   RETIRED_MERGED_MESSAGE,
@@ -171,13 +169,6 @@ const MAX_IMPLEMENTATION_ATTEMPTS = 4;
  * allowance the task is blocked with the recorded reason, never merged.
  */
 const MAX_REVIEW_ROUNDS = 3;
-/**
- * Bounded review-drain attempts per run: the retroactive pass releases at most
- * this many transient `review_quota` records, highest-priority/oldest first,
- * once each per run. The shared model-start budget still bounds the actual
- * starts; this only bounds the pass's own bookkeeping.
- */
-const MAX_REVIEW_DRAIN_PER_RUN = 8;
 const MAX_OUTPUT_LIMIT_BYTES = 4096;
 /**
  * Frozen gateway default model id. It is used ONLY when neither the trusted
@@ -666,15 +657,17 @@ export async function runRepairCycle(
  * Release the next transient review-quota record's wait so the ordinary
  * ranking selects it on a following iteration. The drain order is highest
  * priority first, then oldest first (pure `rankReviewDrain`), and each record is
- * released at most once per run. Returns null when there is nothing left to
- * drain or the next candidate cannot fit the remaining run bounds.
+ * released at most once per run. There is no fixed per-run truncation: the
+ * pass walks the ACTUAL pending collection and every candidate must still fit
+ * the remaining run bounds (`declaredOperationFits`), while the outer loop's
+ * step budget and deadline bound the run. Returns null when there is nothing
+ * left to drain or the next candidate cannot fit the remaining run bounds.
  */
 async function releaseReviewQuotaWait(
   deps: RepairCycleDepsV1,
   context: LoopContextV1,
   attempted: Set<string>,
 ): Promise<StepResultV1 | null> {
-  if (attempted.size >= MAX_REVIEW_DRAIN_PER_RUN) return null;
   for (const id of rankReviewDrain(context.snapshot)) {
     if (attempted.has(id)) continue;
     attempted.add(id);
@@ -693,8 +686,8 @@ async function releaseReviewQuotaWait(
  * naming its deterministic branch but no persisted `target.pr` yet. The PR is
  * adopted only when it is OPEN, its head is the record's exact candidate
  * head, and its base is the configured base branch; a foreign or divergent PR
- * is never adopted. This runs before ranking, so discovery precedes cap
- * enforcement (issue-141 / PR 433).
+ * is never adopted. This runs before ranking, so discovery precedes selection
+ * (issue-141 / PR 433).
  */
 async function reconcileOrphanPublication(
   deps: RepairCycleDepsV1,
@@ -3443,27 +3436,9 @@ async function executePublishStep(
     };
   }
 
-  // The unfinished-PR cap applies only to FRESH publications. A correction of
-  // an existing PR does not open another unfinished PR — it updates the branch
-  // this task already owns — so it must never be blocked by the cap (matching
-  // the selection rule, which caps only records with target.pr === null).
-  // The unfinished-PR cap applies only to FRESH publications, and it MUST see
-  // the same identity the selection gate sees. A record that already holds a
-  // PR (or an in-flight publication intent that names one) is a correction or
-  // recovery of its own existing publication and never counts as a new one.
-  const openPrs = countUnfinishedPullRequests(context.snapshot.work);
-  if (!hasPublishedIdentity(record) && openPrs >= MAX_UNFINISHED_PRS) {
-    return persistWork(
-      deps,
-      context,
-      setWait(
-        record,
-        { reason: "backoff", since: now, until: now + CHECK_POLL_MS },
-        now,
-      ),
-    );
-  }
-
+  // No unfinished-PR admission cap exists on this surface: a fresh publication
+  // is not deferred because other publications are open. Every identity,
+  // candidate-preservation, CI, review and merge gate below is unchanged.
   // Push the exact candidate. The expected old ref is the verified published
   // head: an already-published exact candidate is adopted, the exact saved old
   // head is one expected-ref update, and any unrelated head is a conflict that

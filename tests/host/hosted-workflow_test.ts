@@ -44,7 +44,6 @@ const REPO = "ubiquity/sentinel";
 const RUN_ID = 1;
 const JOB_ID = 901;
 const NATIVE_TOKEN = "native-token-0123456789";
-const HOUR_MS = 3_600_000;
 const OTHER_SHA = "9".repeat(40) as GitSha;
 const SIGNED_URL =
   "https://productionresultssa17.blob.core.windows.net/logs/abc?sv=1&sig=x";
@@ -412,7 +411,7 @@ Deno.test("hosted workflow: finalize settles the exact completed repair job whil
   }
 });
 
-Deno.test("hosted workflow: ordinary work starts only after its due time", async () => {
+Deno.test("hosted workflow: ordinary work starts on the next dispatch after settlement", async () => {
   const rig = await makeRig();
   try {
     scriptCompare(rig);
@@ -424,19 +423,21 @@ Deno.test("hosted workflow: ordinary work starts only after its due time", async
     assert.equal((await rig.run("finalize", RUN_ID)).status, "idle");
     rig.output.length = 0;
 
-    // Not yet due: the runtime is healthy but nextOrdinaryAt has not passed.
-    const early = await rig.run("prepare", RUN_ID + 1);
-    assert.equal(early.status, "idle", JSON.stringify(early));
-    assert.equal(early.run, false, JSON.stringify(early));
-    assert.deepEqual(rig.output, ["run=false"]);
-
-    rig.output.length = 0;
-    rig.clock.advance(HOUR_MS + 1000);
-    const due = await rig.run("prepare", RUN_ID + 2);
+    // No artificial hour cooldown: the next scheduled dispatch immediately
+    // starts ordinary work once the prior execution actually settled.
+    const due = await rig.run("prepare", RUN_ID + 1);
     assert.equal(due.status, "run", JSON.stringify(due));
     assert.equal(due.execution?.purpose, "ordinary");
     assert.equal(due.revision, rig.launcherSha);
     assert.deepEqual(rig.output, ["run=true", `revision=${rig.launcherSha}`]);
+
+    // The started execution owns the pointer until it settles: durable state
+    // carries exactly that one execution intent.
+    const snapshot = await rig.releaseSnapshot();
+    assert.equal(
+      snapshot.hostedRuntimes[0].execution?.id,
+      `${RUN_ID + 1}:1:repair`,
+    );
   } finally {
     await rig.cleanup();
   }
