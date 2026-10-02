@@ -6,21 +6,28 @@
  *
  *  1. RETRY PASS — a work record blocked by one of the runtime's TRANSIENT
  *     failures (a model session that produced no trusted receipt or candidate,
- *     an exhausted attempt budget, exhausted review rounds, or a reservation
- *     identity that is already settled at the current base) is granted the
- *     smallest closed counter adjustment that makes its next admission an
- *     UNUSED reservation identity; a work-returning grant must also land
- *     strictly below the runtime's own implementation-attempt ceiling, because
- *     admission at or above that ceiling is refused outright. When every
- *     identity at the record's current base is already charged, the grant
- *     instead records the runtime's own base-refresh intent for the newest
- *     observed base, which is what supplies fresh identities. Each task may use
- *     at most `HOSTED_AUTONOMY_MAX_RETRIES` such grants, counted in the task's
- *     durable reservations (every purpose, including one still `reserved`), so
- *     no uncharged retry cycle exists and a task can never loop forever.
- *     Nothing is deleted or reset: the preserved `retries` counter, every
- *     charge, reservation, receipt, review and candidate stay exactly as they
- *     are, and only `attempts` is lowered by the grant.
+ *     an exhausted attempt budget, exhausted review rounds, a review that
+ *     produced no verdict within its bounded wait, or a review admission that
+ *     was already settled at the current head) is granted the smallest closed
+ *     counter adjustment that makes its next admission an UNUSED reservation
+ *     identity; a work-returning grant must also land strictly below the
+ *     runtime's own implementation-attempt ceiling, because admission at or
+ *     above that ceiling is refused outright. A review-returning grant instead
+ *     persists the review-round floor its own settled `review_request` charges
+ *     prove — never zeroing or lowering a charged counter — and, once every
+ *     review identity inside the runtime's round allowance is spent at that
+ *     head, records the runtime's own base-refresh intent for a newer observed
+ *     base, which is what supplies a new head and therefore fresh identities.
+ *     When every identity at the record's current base is already charged, a
+ *     work-returning grant uses that same base-refresh path, and a review
+ *     intent is cleared only when its exact request reservation is proven
+ *     settled. Each task may use at most `HOSTED_AUTONOMY_MAX_RETRIES` such
+ *     grants, counted in the task's durable reservations (every purpose,
+ *     including one still `reserved`), so no uncharged retry cycle exists and a
+ *     task can never loop forever. Nothing is deleted or reset: the preserved
+ *     `retries` counter, every charge, reservation, receipt, review and
+ *     candidate stay exactly as they are, and only `attempts` is lowered by a
+ *     work-returning grant.
  *
  *  2. DELIVERY PASS — a record whose exact reviewed head carries a completed
  *     review receipt with no unresolved P0/P1 (the runtime's own retained
@@ -84,7 +91,11 @@ import {
   type SelfFailureV1,
 } from "./self-defects.ts";
 import { canonicalStringify } from "../src/contracts/canonical.ts";
-import { releaseRequestId } from "../src/repair/keys.ts";
+import {
+  candidateBranch,
+  releaseRequestId,
+  reviewOperationKey,
+} from "../src/repair/keys.ts";
 import { githubGitAuthEnv } from "../src/host/local.ts";
 import { createRepairStateStore, DenoGitRunner } from "../src/state/mod.ts";
 import type {
@@ -237,6 +248,13 @@ export const HOSTED_AUTONOMY_TRUSTED_AUTHORS: readonly string[] = [
 /**
  * The exact transient blockers the retry pass may clear, with the step the
  * record returns to. A blocker outside this closed set is never touched.
+ *
+ * The two review classes are the runtime's own transient review outcomes: a
+ * review whose durable admission was settled while its operation intent was
+ * lost (re-entry on the same identity is the runtime's terminal "settled
+ * without an intent" contradiction), and the legacy bounded no-verdict review
+ * wait. Both return to `review`, where the runtime rehydrates its standing
+ * review before any new charge and continues inside its own round allowance.
  */
 export const HOSTED_AUTONOMY_RETRYABLE: readonly {
   readonly prefix: string;
@@ -259,6 +277,14 @@ export const HOSTED_AUTONOMY_RETRYABLE: readonly {
     nextStep: "review",
   },
   {
+    prefix: "review produced no verdict within the bounded review wait",
+    nextStep: "review",
+  },
+  {
+    prefix: "review admission already settled without an intent",
+    nextStep: "review",
+  },
+  {
     prefix: "model admission refused: duplicate",
     nextStep: "work",
   },
@@ -267,6 +293,16 @@ export const HOSTED_AUTONOMY_RETRYABLE: readonly {
 const API_BASE = "https://api.github.com";
 const REQUEST_TIMEOUT_MS = 30_000;
 const MAX_RESPONSE_BYTES = 1_048_576;
+/**
+ * GitHub list pagination bound. Every list read that gates a delivery must be
+ * COMPLETE: the reader walks pages until the response's own `total_count` is
+ * covered, and a listing that promises more items than the bound can cover is
+ * refused rather than answered from a prefix.
+ */
+const LISTING_PAGE_SIZE = 100;
+/** The workflow-run listing keeps its pre-existing 50-item page size. */
+const RUN_LISTING_PAGE_SIZE = 50;
+const MAX_LISTING_PAGES = 20;
 
 export type HostedAutonomyReasonV1 =
   | "applied"
@@ -325,13 +361,18 @@ export interface HostedAutonomyGitHubV1 {
   readBaseTip(branch: string): Promise<string | null>;
   /**
    * Self gate: true when the exact head carries a completed successful
-   * check-run named `test-local`.
+   * check-run named `test-local`. The whole check-run listing is read and must
+   * be proven complete and consistent; an unreadable, incomplete, drifted,
+   * duplicated or malformed read is never green, and a later page may not hide
+   * the named check or a failure.
    */
   hasSuccessfulCheck(head: string): Promise<boolean>;
   /**
    * Foreign gate: true when the exact head carries at least one check-run and
    * every one of them is completed with conclusion `success`. Zero check-runs
-   * is not green, and no run may still be pending or queued on that head.
+   * is not green, no run may still be pending or queued on that head, and the
+   * listing must be proven complete across every page: a read that cannot be
+   * completed is never green.
    */
   hasAllChecksGreen(head: string): Promise<boolean>;
   /**
@@ -354,7 +395,11 @@ export interface HostedAutonomyGitHubV1 {
   ): Promise<{ merged: boolean; sha: string | null } | null>;
   /** Idempotent issue closure: true when the issue ends closed. */
   closeIssue(number: number): Promise<boolean>;
-  /** Workflow-run ids parked for approval on exactly this commit. */
+  /**
+   * Workflow-run ids parked for approval on exactly this commit, read from the
+   * complete listing (a parked run on a later page is still found). A listing
+   * that cannot be proven complete approves nothing.
+   */
   listParkedRuns(head: string): Promise<number[]>;
   /** Approve one parked workflow run; true when the approval was accepted. */
   approveRun(id: number): Promise<boolean>;
@@ -524,12 +569,92 @@ function intentClosable(
   reservations: RepairStateSnapshotV1["reservations"],
 ): boolean {
   if (record.intent === null) return true;
-  if (record.intent.kind !== "implementation") return false;
   const requestId = record.intent.requestId;
   if (requestId === null || requestId === "") return false;
+  if (record.intent.kind === "implementation") {
+    return reservations.some((reservation) =>
+      reservation.id === requestId && reservation.outcome !== "reserved"
+    );
+  }
+  // A review intent may be cleared only when BOTH sides of its identity are
+  // proven: the intent itself must be bound to the record's exact current
+  // publication (same head, PR, deterministic candidate branch and the non-null
+  // base that publication was reviewed against), and the settled reservation
+  // must be the exact review charge of the round the intent's canonical
+  // operation key names. A still-`reserved`, unknown or mismatched reservation
+  // — or a stale intent for another publication, key, round or base — leaves
+  // everything protected for the runtime's own reconciliation.
+  if (record.intent.kind !== "review_request") return false;
+  const intent = record.intent;
+  const head = record.target.head;
+  const pullRequest = record.target.pr;
+  if (head === null || pullRequest === null) return false;
+  if (intent.expectedHead !== head) return false;
+  if (intent.pr !== pullRequest) return false;
+  if (intent.branch !== candidateBranch(record.id)) return false;
+  if (record.target.branch !== intent.branch) return false;
+  // A review admission binds the head, not the base, so the base the intent
+  // itself observed is the only proof this charge belongs to the record's
+  // current publication; a null record base or a moved intent base refuses.
+  const base = record.target.base;
+  if (base === null) return false;
+  if (intent.observedBase !== base) return false;
   return reservations.some((reservation) =>
-    reservation.id === requestId && reservation.outcome !== "reserved"
+    reservation.id === requestId &&
+    reservation.outcome !== "reserved" &&
+    reservation.taskId === record.id &&
+    reservation.purpose === "review_request" &&
+    reservation.head === head &&
+    sameRepository(reservation.repository, record.repository) &&
+    intent.key === reviewOperationKey(pullRequest, head, reservation.attempt)
   );
+}
+
+/**
+ * Review identities already charged and SETTLED at one record's current
+ * candidate head. The runtime's review identity is (repository, task, head,
+ * attempt, purpose), and a duplicate of a settled identity is the terminal
+ * "review admission already settled without an intent" contradiction, so these
+ * attempts are occupied and must never be planned again. A reservation still
+ * `reserved` is an in-flight admission the review step reconciles through its
+ * own semantics, so it stays out of this set exactly as it does for the
+ * attempt identities above.
+ */
+function settledReviewAttempts(
+  snapshot: RepairStateSnapshotV1,
+  record: RepairStateSnapshotV1["work"][number],
+): Set<number> {
+  const settled = new Set<number>();
+  const head = record.target.head;
+  if (head === null) return settled;
+  for (const reservation of snapshot.reservations) {
+    if (reservation.taskId !== record.id) continue;
+    if (reservation.purpose !== "review_request") continue;
+    if (reservation.head !== head) continue;
+    if (reservation.outcome === "reserved") continue;
+    if (!sameRepository(reservation.repository, record.repository)) continue;
+    settled.add(reservation.attempt);
+  }
+  return settled;
+}
+
+/**
+ * The review-round counter a review-returning grant must persist: the record's
+ * current counter raised to the first review identity at its current head that
+ * no settled admission occupies. A charged counter is history and is only ever
+ * raised — never zeroed, never lowered and never reused, so the next admission
+ * the runtime charges is an identity nothing has charged yet.
+ */
+function plannedReviewRounds(
+  record: RepairStateSnapshotV1["work"][number],
+  settled: ReadonlySet<number>,
+): number {
+  let rounds = record.counters.reviewRounds;
+  for (const attempt of settled) {
+    if (attempt > rounds) rounds = attempt;
+  }
+  while (settled.has(rounds + 1)) rounds++;
+  return rounds;
 }
 
 export interface RetryPlanV1 {
@@ -538,13 +663,23 @@ export interface RetryPlanV1 {
   repository: RepositoryIdentityV1;
   grant: number;
   nextStep: "work" | "review";
-  resetReviewRounds: boolean;
   /**
-   * True when every attempt identity at the record's CURRENT base is already
+   * The exact review-round counter a review-returning plan persists, or null
+   * when the counter is preserved. It is the computed floor — the highest
+   * settled `review_request` attempt at the record's current head raised past
+   * every occupied identity — and never below the record's current value: a
+   * charged counter is history, so it is never zeroed or lowered. Work plans
+   * carry null.
+   */
+  reviewRounds: number | null;
+  /**
+   * True when every identity at the record's CURRENT base is already
    * charged, so the only way to admit another attempt is the runtime's own
    * deterministic base refresh: the plan persists that intent and the loop
    * republishes the candidate on the newest base, which gives fresh
-   * reservation identities.
+   * reservation identities. A review-returning plan advances the base for the
+   * same reason once every review identity inside the runtime's own round
+   * allowance is spent at the current head.
    */
   advanceBase: boolean;
   /** Exact base observed for an advancing plan. */
@@ -611,6 +746,50 @@ export function planHostedRetries(
     if (base === null) continue;
     const baseTip = baseTips.get(hostedRepositoryKey(record.repository)) ??
       null;
+    // A review-returning grant has its OWN identity space: the runtime admits
+    // a review with attempt = reviewRounds + 1 at the record's current head, so
+    // the grant must persist the floor its durable charges prove. While the
+    // runtime's round allowance remains, that floor is an identity nothing has
+    // charged; once the allowance is spent at this head, only the runtime's own
+    // base refresh (a new head, therefore a new identity) can continue the
+    // task, and without a newer base this pass fails closed rather than
+    // re-using a charged identity or zeroing a charged counter.
+    if (rule.nextStep === "review") {
+      const head = record.target.head;
+      const pr = record.target.pr;
+      const branch = record.target.branch;
+      // A review can only continue on the record's exact published identity:
+      // without it there is nothing the runtime could rehydrate or review, so
+      // nothing is planned rather than clearing the blocker into a state error.
+      if (head === null || pr === null || branch === null) continue;
+      const settled = settledReviewAttempts(snapshot, record);
+      const rounds = plannedReviewRounds(record, settled);
+      if (rounds >= HOSTED_AUTONOMY_MAX_REVIEW_ROUNDS) {
+        if (baseTip === null || baseTip === base) continue;
+        plans.push({
+          id: record.id,
+          repository: record.repository,
+          grant: 0,
+          nextStep: "review",
+          reviewRounds: rounds,
+          advanceBase: true,
+          observedBase: baseTip,
+          detail: `${blocker.kind}:${rule.prefix}:base-advance`,
+        });
+        continue;
+      }
+      plans.push({
+        id: record.id,
+        repository: record.repository,
+        grant: 0,
+        nextStep: "review",
+        reviewRounds: rounds,
+        advanceBase: false,
+        observedBase: null,
+        detail: `${blocker.kind}:${rule.prefix}`,
+      });
+      continue;
+    }
     const attempts = record.counters.attempts;
     let grant: number | null = null;
     for (
@@ -622,20 +801,13 @@ export function planHostedRetries(
       // No work-returning grant may land at or above the runtime's own
       // implementation ceiling: admission there is refused outright, so such a
       // grant would only re-block the record instead of buying a run.
-      if (
-        rule.nextStep === "work" &&
-        remaining >= HOSTED_AUTONOMY_MAX_IMPLEMENTATION_ATTEMPTS
-      ) {
+      if (remaining >= HOSTED_AUTONOMY_MAX_IMPLEMENTATION_ATTEMPTS) {
         continue;
       }
       // The identity the runtime will charge is fixed by the counters AFTER
       // this grant: the loop admits corrections with purpose `retry`, and only
       // a zero-attempt record is admitted as `implementation`.
-      const purpose = rule.nextStep === "review"
-        ? "review_request"
-        : remaining === 0
-        ? "implementation"
-        : "retry";
+      const purpose = remaining === 0 ? "implementation" : "retry";
       if (
         usedAttempts(snapshot, record.id, base, purpose).has(remaining + 1)
       ) {
@@ -650,14 +822,12 @@ export function planHostedRetries(
     }
     if (grant === null) {
       // Every attempt number at this base is charged. The runtime's own base
-      // refresh is what gives an unused identity, and only a work-returning
-      // rule may spend it: a review-returning grant has its own identity space
-      // and never advances the base.
+      // refresh is what gives an unused identity.
       const pr = record.target.pr;
       const head = record.target.head;
       const branch = record.target.branch;
       if (
-        rule.nextStep !== "work" || pr === null || head === null ||
+        pr === null || head === null ||
         branch === null || baseTip === null || baseTip === base
       ) {
         continue;
@@ -677,8 +847,8 @@ export function planHostedRetries(
         id: record.id,
         repository: record.repository,
         grant: ceilingGrant,
-        nextStep: rule.nextStep,
-        resetReviewRounds: false,
+        nextStep: "work",
+        reviewRounds: null,
         advanceBase: true,
         observedBase: baseTip,
         detail: `${blocker.kind}:${rule.prefix}:base-advance`,
@@ -689,8 +859,8 @@ export function planHostedRetries(
       id: record.id,
       repository: record.repository,
       grant,
-      nextStep: rule.nextStep,
-      resetReviewRounds: rule.nextStep === "review",
+      nextStep: "work",
+      reviewRounds: null,
       advanceBase: false,
       observedBase: null,
       detail: `${blocker.kind}:${rule.prefix}`,
@@ -740,12 +910,12 @@ export function applyHostedRetries(
         counters: {
           // Only the attempt ceiling moves: the grant buys an unused identity
           // by lowering attempts, while the preserved `retries` counter (and
-          // every other counter) stays exactly as it was.
+          // every other counter) stays exactly as it was. A review-returning
+          // plan carries its computed floor, which is only ever at or above the
+          // current counter — never a reset.
           attempts: record.counters.attempts - plan.grant,
           retries: record.counters.retries,
-          reviewRounds: plan.resetReviewRounds
-            ? 0
-            : record.counters.reviewRounds,
+          reviewRounds: plan.reviewRounds ?? record.counters.reviewRounds,
         },
         updatedAt: now,
       };
@@ -2045,6 +2215,97 @@ export function createHostedAutonomyGitHub(
     return { ...parsed, parents, revisionOnBaseBranch };
   }
 
+  /**
+   * Complete listing read for ONE GitHub list endpoint. Every page is read
+   * until the response's own `total_count` is covered, and the read is refused
+   * (null) whenever it cannot be proven complete and consistent:
+   *
+   *  - a page without a valid `total_count` or list field is malformed;
+   *  - a `total_count` that changes between pages is count drift;
+   *  - an item without a usable id, or the same id twice, is a duplicate read;
+   *  - an empty page while more items are promised, or a page bound that the
+   *    promised count cannot fit, is an incomplete read.
+   *
+   * Callers fail closed on null: an unproven listing is never green and never
+   * authorizes an approval.
+   */
+  async function readCompleteListing(
+    pagePath: (page: number) => string,
+    key: string,
+    pageSize: number,
+  ): Promise<Record<string, unknown>[] | null> {
+    const items: Record<string, unknown>[] = [];
+    const seen = new Set<number>();
+    let total: number | null = null;
+    for (let page = 1; page <= MAX_LISTING_PAGES; page++) {
+      const body = await request("GET", pagePath(page));
+      if (body === null || typeof body !== "object") return null;
+      const obj = body as Record<string, unknown>;
+      const count = obj["total_count"];
+      if (
+        typeof count !== "number" || !Number.isSafeInteger(count) || count < 0
+      ) {
+        return null;
+      }
+      if (total === null) {
+        total = count;
+        if (total > MAX_LISTING_PAGES * pageSize) return null;
+      } else if (total !== count) {
+        // The endpoint's own count moved between pages: the listing is not one
+        // stable read.
+        return null;
+      }
+      const list = obj[key];
+      if (!Array.isArray(list)) return null;
+      for (const entry of list) {
+        if (entry === null || typeof entry !== "object") return null;
+        const record = entry as Record<string, unknown>;
+        const id = record["id"];
+        if (typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0) {
+          return null;
+        }
+        if (seen.has(id)) return null;
+        seen.add(id);
+        items.push(record);
+      }
+      if (items.length > total) return null;
+      if (items.length === total) break;
+      if (list.length === 0) return null;
+    }
+    if (total === null || items.length !== total) return null;
+    return items;
+  }
+
+  /**
+   * Complete check-run listing for exactly one commit. Every reported run must
+   * be bound to the requested head: a run recorded for another commit is not
+   * evidence for this head, and a page that could not be read completely makes
+   * the whole listing unusable.
+   */
+  async function readCompleteCheckRuns(
+    head: string,
+  ): Promise<Record<string, unknown>[] | null> {
+    const runs = await readCompleteListing(
+      (page) =>
+        `/repos/${scope}/commits/${head}/check-runs?per_page=${LISTING_PAGE_SIZE}&page=${page}`,
+      "check_runs",
+      LISTING_PAGE_SIZE,
+    );
+    if (runs === null) return null;
+    for (const run of runs) {
+      if (run["head_sha"] !== head) return null;
+      if (typeof run["name"] !== "string" || run["name"].length === 0) {
+        return null;
+      }
+      if (typeof run["status"] !== "string" || run["status"].length === 0) {
+        return null;
+      }
+      const conclusion = run["conclusion"];
+      if (conclusion !== null && typeof conclusion !== "string") return null;
+    }
+    return runs;
+  }
+
   return {
     async readDefaultBranch() {
       const repo = await request("GET", `/repos/${scope}`);
@@ -2064,64 +2325,52 @@ export function createHostedAutonomyGitHub(
       return typeof sha === "string" ? sha : null;
     },
     async hasSuccessfulCheck(head: string) {
-      const runs = await request(
-        "GET",
-        `/repos/${scope}/commits/${head}/check-runs?per_page=100`,
-      );
-      const list = runs !== null && typeof runs === "object"
-        ? (runs as Record<string, unknown>)["check_runs"]
-        : null;
-      if (!Array.isArray(list)) return false;
-      return list.some((item) =>
-        typeof item === "object" && item !== null &&
-        (item as Record<string, unknown>)["name"] ===
-          HOSTED_AUTONOMY_REQUIRED_CHECK &&
-        (item as Record<string, unknown>)["head_sha"] === head &&
-        (item as Record<string, unknown>)["status"] === "completed" &&
-        (item as Record<string, unknown>)["conclusion"] === "success"
+      const runs = await readCompleteCheckRuns(head);
+      // An unreadable, incomplete, drifted or malformed listing is never
+      // green; the exact named check must be found on its bound head.
+      if (runs === null) return false;
+      return runs.some((run) =>
+        run["name"] === HOSTED_AUTONOMY_REQUIRED_CHECK &&
+        run["head_sha"] === head &&
+        run["status"] === "completed" &&
+        run["conclusion"] === "success"
       );
     },
     async hasAllChecksGreen(head: string) {
-      const runs = await request(
-        "GET",
-        `/repos/${scope}/commits/${head}/check-runs?per_page=100`,
-      );
-      const list = runs !== null && typeof runs === "object"
-        ? (runs as Record<string, unknown>)["check_runs"]
-        : null;
-      if (!Array.isArray(list)) return false;
-      // Only the runs reported on the exact head count. Zero runs is not
+      const runs = await readCompleteCheckRuns(head);
+      if (runs === null) return false;
+      // Only the runs reported on the exact head count, and the listing was
+      // already proven complete and bound to this head. Zero runs is not
       // green: a foreign repository's own completed CI is the only
       // deterministic signal it can supply, so a head with no CI at all is
       // never delivered. Every run on that head must be completed and
-      // successful, which also excludes anything pending, queued or failed.
-      const onHead = list.filter((item) =>
-        typeof item === "object" && item !== null &&
-        (item as Record<string, unknown>)["head_sha"] === head
-      );
-      if (onHead.length === 0) return false;
-      return onHead.every((item) =>
-        (item as Record<string, unknown>)["status"] === "completed" &&
-        (item as Record<string, unknown>)["conclusion"] === "success"
+      // successful, which also excludes anything pending, queued or failed —
+      // including a failure that only the last page carries.
+      if (runs.length === 0) return false;
+      return runs.every((run) =>
+        run["head_sha"] === head &&
+        run["status"] === "completed" &&
+        run["conclusion"] === "success"
       );
     },
     readPull,
     async listParkedRuns(head: string) {
-      const runs = await request(
-        "GET",
-        `/repos/${scope}/actions/runs?head_sha=${head}&per_page=50`,
+      // The approval listing gates the same delivery as the checks themselves,
+      // so it is read completely too: a parked run on a later page must still
+      // be found, and an unproven listing approves nothing.
+      const runs = await readCompleteListing(
+        (page) =>
+          `/repos/${scope}/actions/runs?head_sha=${head}&per_page=${RUN_LISTING_PAGE_SIZE}&page=${page}`,
+        "workflow_runs",
+        RUN_LISTING_PAGE_SIZE,
       );
-      const list = runs !== null && typeof runs === "object"
-        ? (runs as Record<string, unknown>)["workflow_runs"]
-        : null;
-      if (!Array.isArray(list)) return [];
-      return list
-        .filter((item) =>
-          typeof item === "object" && item !== null &&
-          (item as Record<string, unknown>)["head_sha"] === head &&
-          (item as Record<string, unknown>)["conclusion"] === "action_required"
+      if (runs === null) return [];
+      return runs
+        .filter((run) =>
+          run["head_sha"] === head &&
+          run["conclusion"] === "action_required"
         )
-        .map((item) => Number((item as Record<string, unknown>)["id"]))
+        .map((run) => Number(run["id"]))
         .filter((id) => Number.isSafeInteger(id) && id > 0);
     },
     async approveRun(id: number) {
