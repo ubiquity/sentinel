@@ -1493,6 +1493,160 @@ Deno.test("hosted runtime: the real repair entrypoint refuses a malformed identi
   assert.equal(result.truncated, false);
 });
 
+Deno.test("hosted runtime: actions environment allowlist", async () => {
+  // The committed `repair:actions` task runs the REAL `src/host/actions.ts`
+  // entrypoint under one NAMED environment allowlist (deno.json). A named
+  // allowlist grants only the listed names and never an unrestricted
+  // `Deno.env.toObject()`, so the entrypoint must resolve its route and review
+  // configuration through named reads and cross the environment configuration
+  // boundary instead of demanding a full environment dump.
+  const declaredEnvAllowlist = [
+    "HOME",
+    "PATH",
+    "GITHUB_TOKEN",
+    "SENTINEL_SUPERVISOR_TOKEN",
+    "UOS_AI_TOKEN",
+    "SENTINEL_MODEL_BASE_URL",
+    "SENTINEL_MODEL_ID",
+    "SENTINEL_MODEL_FALLBACK",
+    "SENTINEL_DEEPSEEK_API_KEY",
+    "SENTINEL_COOLDOWN_MODE",
+    "SENTINEL_APP_INSTALLATION_ID",
+    "NODE_V8_COVERAGE",
+    "GITHUB_RUN_ID",
+    "GITHUB_RUN_ATTEMPT",
+    "GITHUB_REPOSITORY",
+    "GITHUB_REF",
+    "GITHUB_SHA",
+    "GITHUB_WORKFLOW_SHA",
+    "GITHUB_WORKFLOW_REF",
+    "GITHUB_JOB",
+    "SENTINEL_REVIEW_MODEL_ID",
+  ].join(",");
+
+  // The full valid hosted identity, with the credential keys present but
+  // EMPTY, exactly as an absent workflow secret appears. The run must stop at
+  // its own credential boundary, so no real Git fetch, model session or
+  // GitHub write is reachable; the child also never receives `--allow-run` or
+  // `--allow-net`, so even a regression that moved that boundary could not
+  // touch the network.
+  const identityEnv = {
+    ...hostedEnv(FIXED_LAUNCHER),
+    GITHUB_TOKEN: "",
+    UOS_AI_TOKEN: "",
+  };
+
+  /** Run the real entrypoint once through the owned-group child border. */
+  const runEntrypoint = (env: Record<string, string>) =>
+    new DenoReplayRuntime(Deno.execPath()).run({
+      executable: Deno.execPath(),
+      args: [
+        "run",
+        "--allow-read",
+        "--allow-write",
+        `--allow-env=${declaredEnvAllowlist}`,
+        HOSTED_RUNTIME_CHILD_ENTRYPOINT,
+      ],
+      cwd: ROOT,
+      env,
+      maxDurationMs: 120_000,
+      maxOutputBytes: 256 * 1024,
+    });
+
+  /**
+   * Assert one run crossed the environment configuration boundary and stopped
+   * at its own credential boundary with no environment-capability denial
+   * anywhere, then return its non-empty stdout lines.
+   */
+  const assertCrossedBoundary = (result: ReplayCommandResultV1): string[] => {
+    const stdout = new TextDecoder().decode(result.stdout);
+    const stderr = new TextDecoder().decode(result.stderr);
+    assert.equal(result.outcome, "exited", stderr);
+    assert.equal(result.settled, true, stderr);
+    assert.equal(result.truncated, false, stderr);
+    assert.notEqual(result.exitCode, 0, stderr);
+    for (
+      const denial of [
+        "NotCapable",
+        "PermissionDenied",
+        "Requires env access",
+      ]
+    ) {
+      assert.equal(
+        `${stdout}\n${stderr}`.includes(denial),
+        false,
+        `the declared named allowlist must be sufficient; found ${denial}\n` +
+          `stdout:\n${stdout}\nstderr:\n${stderr}`,
+      );
+    }
+    assert.ok(
+      stderr.includes(
+        "hosted repair host requires its configured credentials",
+      ),
+      "the run must cross the environment configuration boundary and stop " +
+        `at its credential boundary\nstdout:\n${stdout}\nstderr:\n${stderr}`,
+    );
+    const lines = stdout.split("\n").map((line) => line.trim()).filter((line) =>
+      line.length > 0
+    );
+    assert.equal(
+      lines[0]?.includes('"sentinel_run_window"'),
+      true,
+      `stdout:\n${stdout}\nstderr:\n${stderr}`,
+    );
+    return lines;
+  };
+
+  /** Parse the one strict route/review advisory this run recorded. */
+  const routeOf = (lines: readonly string[]): Record<string, unknown> => {
+    const line = lines.find((candidate) =>
+      candidate.includes('"sentinel_model_route"')
+    );
+    assert.ok(
+      line !== undefined,
+      `no model route recorded:\n${lines.join("\n")}`,
+    );
+    return JSON.parse(line) as Record<string, unknown>;
+  };
+
+  // 1. Without a route input the gateway primary and the preferred review
+  //    model are the resolved values; nothing is fabricated from a missing key.
+  const plainRoute = routeOf(
+    assertCrossedBoundary(await runEntrypoint({ ...identityEnv })),
+  );
+  assert.deepEqual(plainRoute, {
+    kind: "sentinel_model_route",
+    provider: "uos",
+    model: "gpt-reserve",
+    baseUrl: ACTIONS_UOS_BASE_URL,
+    reviewModel: "codex-auto-review",
+  });
+
+  // 2. The explicit DeepSeek fallback and the dedicated review-model override
+  //    are still read from the real environment under the same named
+  //    allowlist: the owner's selections reach the resolved route instead of
+  //    hardcoded defaults. The fallback key is a synthetic marker, and the
+  //    empty GitHub credential still stops the run before any budget, state or
+  //    transport work.
+  const fallbackRoute = routeOf(
+    assertCrossedBoundary(
+      await runEntrypoint({
+        ...identityEnv,
+        SENTINEL_MODEL_FALLBACK: "deepseek",
+        SENTINEL_DEEPSEEK_API_KEY: "synthetic-marker-not-a-credential",
+        SENTINEL_REVIEW_MODEL_ID: "codex-auto-review-canary",
+      }),
+    ),
+  );
+  assert.deepEqual(fallbackRoute, {
+    kind: "sentinel_model_route",
+    provider: "deepseek",
+    model: "deepseek-flash",
+    baseUrl: "https://api.deepseek.com/v1",
+    reviewModel: "codex-auto-review-canary",
+  });
+});
+
 Deno.test("hosted runtime: source preparation is charged against the one absolute child deadline", async () => {
   // The launcher's own bounded wait over the child process stays 112 minutes,
   // measured from the instant it spawns the child. It is not the child's
