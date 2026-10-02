@@ -30,8 +30,12 @@
  *     work-returning grant.
  *
  *  2. DELIVERY PASS — a record whose exact reviewed head carries a completed
- *     review receipt with no unresolved P0/P1 (the runtime's own retained
- *     acceptance rule) and a successful deterministic check is delivered end to
+ *     review receipt that POSITIVELY accepts the record's own source issue,
+ *     bound to the trusted live issue statement read immediately before the
+ *     merge (the shared predicate of `src/repair/review-gate.ts`; a legacy
+ *     quality-only receipt, a wrong-task digest, a not-fulfilled/uncertain or
+ *     already-satisfied-base verdict never authorizes delivery) and a
+ *     successful deterministic check is delivered end to
  *     end without an operator: the expected-head merge is performed with a
  *     compare-and-swap under the runtime's own criteria — necessary because
  *     this deployment's `development` ruleset carries no active `pull_request`
@@ -44,7 +48,9 @@
  *     budget is spent, so no further verdict is reachable.
  *
  *  3. CLOSURE PASS — a SELF record whose exact pull request and reviewed head
- *     are delivered by an ACCEPTED hosted release is closed, exactly as before.
+ *     are delivered by an ACCEPTED hosted release is closed, exactly as before,
+ *     and only while the same semantic receipt predicate still authorizes it
+ *     against the trusted issue statement read immediately before the closure.
  *     A FOREIGN record is closed from its OWN merged pull request instead: the
  *     trusted release path is bound to the self scope by design, so sentinel
  *     holds no release authority for another repository and never fabricates a
@@ -77,7 +83,13 @@ import type {
 import { parseRepairStateSnapshotV1 } from "../src/contracts/state-snapshots.ts";
 import type { ReleaseRequestV1 } from "../src/contracts/release.ts";
 import { parseReleaseRequestV1 } from "../src/contracts/release.ts";
-import type { ReviewReceiptV1 } from "../src/contracts/review-receipt.ts";
+import {
+  checkReviewTaskStatement,
+  type ReviewReceiptV1,
+  reviewTaskStatementDigest,
+  type ReviewTaskStatementV1,
+} from "../src/contracts/review-receipt.ts";
+import { reviewAuthorizesMerge } from "../src/repair/review-gate.ts";
 import type { GitSha } from "../src/contracts/brands.ts";
 import type { RepositoryIdentityV1 } from "../src/contracts/shared.ts";
 import {
@@ -235,6 +247,14 @@ export const HOSTED_AUTONOMY_TRUSTED_AUTHOR = "github-actions[bot]";
 /** The sentinel App bot identity that now authors repaired pull requests. */
 export const HOSTED_AUTONOMY_TRUSTED_APP_AUTHOR = "ubiquity-sentinel[bot]";
 /**
+ * The same fixed sentinel App identity (App 4682172, bot user 319834869) is
+ * the ONLY reviewer that may authorize issue-backed delivery at the persisted
+ * receipt boundary: `authorizingReceipt` pins
+ * `HOSTED_AUTONOMY_TRUSTED_APP_AUTHOR` as the receipt's exact reviewer, so a
+ * self-consistent receipt naming any other reviewer never authorizes. Legacy
+ * receipts keep parsing; they simply refuse as new authorization.
+ */
+/**
  * Bounded identity-transition acceptance: pull requests published before the
  * sentinel App migration still carry the native Actions identity, and every
  * pull request published after it carries the App bot. Remove the old login
@@ -388,6 +408,16 @@ export interface HostedAutonomyGitHubV1 {
    * null when that cannot be read. Only a definitive false stops a retry.
    */
   readIssueOpen(number: number): Promise<boolean | null>;
+  /**
+   * Trusted, independent read of the exact source-issue task statement this
+   * delivery must fulfill: the issue's own number, title and body with the
+   * canonical digest of that text, read over THIS repository's authenticated
+   * surface immediately before a merge, release request or closure. Null means
+   * the statement could not be read or bounded, which never authorizes
+   * issue-backed delivery. Absent means the surface cannot supply it, which
+   * also fails closed for issue-backed records.
+   */
+  readIssueTask?(number: number): Promise<ReviewTaskStatementV1 | null>;
   /** Expected-head merge; null on any refusal. */
   merge(
     number: number,
@@ -924,19 +954,23 @@ export function applyHostedRetries(
 }
 
 /**
- * The exact completed receipt the runtime's own release authorization requires:
- * same reviewer identity, exact PR/head/base binding, a result and completion
- * instant, zero uncounted findings and no unresolved P0/P1. P2/P3 stay future
- * work exactly as the plan states.
+ * Every completed receipt this record's delivery identity binds: same
+ * repository, pull request, reviewed head and observed base, a result and
+ * completion instant, and a reviewer-bound identity with zero uncounted
+ * findings and no unresolved P0/P1. This is the identity pre-filter only; it
+ * NEVER authorizes a delivery. `authorizingReceipt` applies the shared semantic
+ * predicate to these candidates.
  */
-function authorizingReceipt(
+function boundReviewReceipts(
   snapshot: RepairStateSnapshotV1,
-  repository: ReleaseRequestV1["target"]["repository"],
-  pullRequest: number,
-  head: string,
-  base: string,
-): ReviewReceiptV1 | null {
-  const found = snapshot.reviews.find((review) =>
+  record: HostedAutonomyRecordV1,
+): ReviewReceiptV1[] {
+  const pullRequest = record.target.pr;
+  const head = record.target.head;
+  const base = record.target.base;
+  if (pullRequest === null || head === null || base === null) return [];
+  const repository = record.repository;
+  return snapshot.reviews.filter((review) =>
     review.repository.owner === repository.owner &&
     review.repository.name === repository.name &&
     review.repository.installationId === repository.installationId &&
@@ -951,7 +985,54 @@ function authorizingReceipt(
     review.findingsUncounted === 0 &&
     !review.unresolvedSeverities.some((s) => s === "P0" || s === "P1")
   );
-  return found ?? null;
+}
+
+/**
+ * The ONE authorization for an issue-delivery action: the shared predicate from
+ * `src/repair/review-gate.ts` over the exact existing receipt and WorkRecord,
+ * with the TRUSTED live source-issue statement independently read immediately
+ * before the merge/release/closure, AND the fixed GitHub App reviewer identity
+ * pinned by the contract's own reviewer field. A legacy quality-only receipt, a
+ * receipt bound to another issue or to changed issue text, a not-fulfilled/
+ * uncertain verdict, an already-satisfied base, an alternate self-consistent
+ * reviewer identity and an unreadable task context all refuse.
+ */
+function authorizingReceipt(
+  snapshot: RepairStateSnapshotV1,
+  record: HostedAutonomyRecordV1,
+  task: ReviewTaskStatementV1 | null | "unavailable",
+): ReviewReceiptV1 | null {
+  const candidates = boundReviewReceipts(snapshot, record);
+  return candidates.find((candidate) =>
+    reviewAuthorizesMerge(
+      candidate,
+      record,
+      HOSTED_AUTONOMY_TRUSTED_APP_AUTHOR,
+      task,
+    )
+  ) ?? null;
+}
+
+/**
+ * The trusted source-issue statement for one record, read over that record's
+ * OWN repository surface. A record without a source issue keeps the existing
+ * change-only contract (null); an unreadable, throwing or absent read is
+ * `"unavailable"`, which never authorizes issue-backed delivery.
+ */
+async function readTrustedTask(
+  surface: HostedAutonomyGitHubV1 | null,
+  record: HostedAutonomyRecordV1,
+): Promise<ReviewTaskStatementV1 | null | "unavailable"> {
+  const issueNumber = record.related.issueNumber;
+  if (issueNumber === null) return null;
+  const read = surface?.readIssueTask;
+  if (surface === null || read === undefined) return "unavailable";
+  try {
+    const task = await read.call(surface, issueNumber);
+    return task ?? "unavailable";
+  } catch {
+    return "unavailable";
+  }
 }
 
 /** Verified merge facts: the exact revision a foreign record delivered. */
@@ -1082,6 +1163,10 @@ export function planHostedClosures(
   snapshot: RepairStateSnapshotV1,
   released: ReadonlyMap<string, unknown>,
   foreignMerged: ReadonlyMap<string, unknown> = new Map(),
+  tasks: ReadonlyMap<
+    string,
+    ReviewTaskStatementV1 | null | "unavailable"
+  > = new Map(),
 ): HostedClosurePlanV1[] {
   const plans: HostedClosurePlanV1[] = [];
   for (const record of snapshot.work) {
@@ -1102,6 +1187,19 @@ export function planHostedClosures(
       ? released.has(key)
       : foreignMerged.has(key);
     if (!delivered) continue;
+    // Delivered evidence alone never closes a task: the SAME shared semantic
+    // predicate that authorized the delivery must still authorize the closure
+    // against the trusted live issue statement read immediately before it.
+    // A legacy quality-only receipt, a drifted digest or an unreadable task
+    // context leaves the issue open.
+    if (
+      authorizingReceipt(
+        snapshot,
+        record,
+        tasks.get(record.id) ?? "unavailable",
+      ) ===
+        null
+    ) continue;
     if (!intentClosable(record, snapshot.reservations)) continue;
     plans.push({ id: record.id, issueNumber, repository: record.repository });
   }
@@ -1665,14 +1763,25 @@ export async function runHostedAutonomy(
     const head = record.target.head;
     const base = record.target.base;
     if (pullRequest === null || head === null || base === null) continue;
+    const scope = await scopeFor(record.repository);
+    // The exact receipts bound to this delivery identity decide whether the
+    // candidate is even a delivery candidate. A record without one changes
+    // nothing and is reported exactly as before, without an extra read.
+    if (boundReviewReceipts(snapshot, record).length === 0) continue;
+    // The trusted live source-issue statement is read over the record's OWN
+    // authenticated surface immediately before the merge and the release
+    // request; the shared predicate then binds the receipt's acceptance to
+    // that exact text. A legacy quality-only receipt, a wrong-task digest or
+    // an unreadable context refuses here, before any external effect.
     const receipt = authorizingReceipt(
       snapshot,
-      record.repository,
-      pullRequest,
-      head,
-      base,
+      record,
+      await readTrustedTask(scope.surface, record),
     );
-    if (receipt === null) continue;
+    if (receipt === null) {
+      actions.push(`delivery:${record.id}:task_acceptance_refused`);
+      continue;
+    }
     const self = isHostedSelf(record.repository);
     if (
       self &&
@@ -1686,7 +1795,6 @@ export async function runHostedAutonomy(
       actions.push(`delivery:${record.id}:already_recorded`);
       continue;
     }
-    const scope = await scopeFor(record.repository);
     if (scope.surface === null) {
       actions.push(`delivery:${record.id}:surface_unreadable`);
       continue;
@@ -1734,6 +1842,19 @@ export async function runHostedAutonomy(
       }
       if (!green) {
         actions.push(`delivery:${record.id}:checks_pending`);
+        continue;
+      }
+      // One more trusted source-issue read immediately before the external
+      // merge: issue text that drifted while the other gates were read is a
+      // different task and never authorizes this merge.
+      if (
+        authorizingReceipt(
+          snapshot,
+          record,
+          await readTrustedTask(scope.surface, record),
+        ) === null
+      ) {
+        actions.push(`delivery:${record.id}:task_acceptance_refused`);
         continue;
       }
       let merged: { merged: boolean; sha: string | null } | null;
@@ -1959,32 +2080,83 @@ export async function runHostedAutonomy(
     }
     const key = hostedDeliveryKey(record.repository, pullRequest, head, base);
     if (foreignMerged.has(key)) continue;
+    const scope = await scopeFor(record.repository);
+    // The same trusted, immediately-preceding source-issue read authorizes the
+    // merge evidence this closure will consume, exactly as it did the merge.
     if (
       authorizingReceipt(
         snapshot,
-        record.repository,
-        pullRequest,
-        head,
-        base,
-      ) ===
-        null
+        record,
+        await readTrustedTask(scope.surface, record),
+      ) === null
     ) {
       continue;
     }
-    const scope = await scopeFor(record.repository);
     const pull = await readPull(scope, pullRequest);
     if (pull === null) continue;
     const evidence = verifiedMergedDelivery(record, pull, scope.baseBranch);
     if (evidence === null) continue;
     foreignMerged.set(key, evidence);
   }
-  const closures = planHostedClosures(snapshot, released, foreignMerged).slice(
-    0,
-    5,
-  );
+  // The trusted task statement is read again for every record whose delivered
+  // evidence is present, immediately before the closure plan that may close
+  // its issue: issue text that drifted after the delivery read is a different
+  // task and never authorizes this closure.
+  const closureTasks = new Map<
+    string,
+    ReviewTaskStatementV1 | null | "unavailable"
+  >();
+  for (const record of snapshot.work) {
+    if (record.nextStep === "done") continue;
+    const issueNumber = record.related.issueNumber;
+    const pullRequest = record.target.pr;
+    const head = record.target.head;
+    const base = record.target.base;
+    if (
+      issueNumber === null || pullRequest === null || head === null ||
+      base === null
+    ) {
+      continue;
+    }
+    const key = hostedDeliveryKey(record.repository, pullRequest, head, base);
+    const delivered = isHostedSelf(record.repository)
+      ? released.has(key)
+      : foreignMerged.has(key);
+    if (!delivered) continue;
+    const scope = await scopeFor(record.repository);
+    closureTasks.set(
+      record.id,
+      await readTrustedTask(scope.surface, record),
+    );
+  }
+  const closures = planHostedClosures(
+    snapshot,
+    released,
+    foreignMerged,
+    closureTasks,
+  ).slice(0, 5);
   if (closures.length > 0) {
     for (const plan of closures) {
+      const record = snapshot.work.find((item) =>
+        item.id === plan.id && sameRepository(item.repository, plan.repository)
+      );
+      if (record === undefined) continue;
       const scope = await scopeFor(plan.repository);
+      // The plan above is only a candidate list. Immediately before EVERY
+      // actual closure, including a self closure, the CURRENT source-issue
+      // statement is re-read over the record's own authenticated surface and
+      // the full receipt/record authorization is re-applied to it: an earlier
+      // action in this same pass that changed this issue's text (or an
+      // unreadable context) refuses here, so a stale bulk read never closes.
+      const authorized = authorizingReceipt(
+        snapshot,
+        record,
+        await readTrustedTask(scope.surface, record),
+      );
+      if (authorized === null) {
+        actions.push(`close:${plan.id}:issue=${plan.issueNumber}:refused`);
+        continue;
+      }
       let closed = false;
       if (scope.surface !== null) {
         try {
@@ -2387,6 +2559,34 @@ export function createHostedAutonomyGitHub(
       if (state === "open") return true;
       if (state === "closed") return false;
       return null;
+    },
+    async readIssueTask(number: number) {
+      // Trusted independent read over THIS repository's authenticated surface,
+      // through the same client and auth as every other read here. Only the
+      // bounded exact statement is returned: a malformed, over-bound or
+      // unreadable issue is null and never authorizes anything.
+      const issue = await request("GET", `/repos/${scope}/issues/${number}`);
+      if (issue === null || typeof issue !== "object") return null;
+      const obj = issue as Record<string, unknown>;
+      const title = obj["title"];
+      const rawBody = obj["body"];
+      const body = typeof rawBody === "string"
+        ? rawBody
+        : rawBody === null
+        ? ""
+        : null;
+      if (typeof title !== "string" || body === null) return null;
+      const checked = await checkReviewTaskStatement({
+        issueNumber: Number(obj["number"]),
+        title,
+        body,
+        digest: await reviewTaskStatementDigest({
+          issueNumber: Number(obj["number"]),
+          title,
+          body,
+        }),
+      });
+      return checked.ok ? checked.statement : null;
     },
     async closeIssue(number: number) {
       const closed = await request(

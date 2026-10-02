@@ -25,10 +25,18 @@ import type {
 import { portError, portOk } from "../../src/contracts/ports.ts";
 import { parseReleaseRequestV1 } from "../../src/contracts/release.ts";
 import type { ReleaseRequestV1 } from "../../src/contracts/release.ts";
-import { parseReviewReceiptV1 } from "../../src/contracts/review-receipt.ts";
+import {
+  parseReviewReceiptV1,
+  reviewTaskStatementDigest,
+  type ReviewTaskStatementV1,
+} from "../../src/contracts/review-receipt.ts";
 import type { ReviewReceiptV1 } from "../../src/contracts/review-receipt.ts";
-import { parseRepairStateSnapshotV1 } from "../../src/contracts/state-snapshots.ts";
+import {
+  parseRepairStateSnapshotV1,
+  type RepairStateSnapshotV1,
+} from "../../src/contracts/state-snapshots.ts";
 import type { ReleaseStateSnapshotV1 } from "../../src/contracts/state-snapshots.ts";
+import { parseWorkRecordV1 } from "../../src/contracts/work-record.ts";
 import {
   runHostedSupervisorFinalize,
   runHostedSupervisorPrepare,
@@ -56,6 +64,21 @@ const LAUNCHER = "1".repeat(40) as GitSha;
 const CANDIDATE = "2".repeat(40) as GitSha;
 const DIGEST = "a".repeat(64);
 const SELF = { owner: "ubiquity", name: "sentinel", installationId: 0 };
+/** The exact source issue the fixture release request delivers. */
+const ISSUE = 48;
+const TASK_TITLE = "Deliver the reviewed hosted supervisor candidate";
+const TASK_BODY = "The protected supervisor must select this release request.";
+const TASK_DIGEST = await reviewTaskStatementDigest({
+  issueNumber: ISSUE,
+  title: TASK_TITLE,
+  body: TASK_BODY,
+});
+const TASK: ReviewTaskStatementV1 = {
+  issueNumber: ISSUE,
+  title: TASK_TITLE,
+  body: TASK_BODY,
+  digest: TASK_DIGEST,
+};
 
 class FakeClock implements Clock {
   constructor(private t: number) {}
@@ -71,9 +94,13 @@ class FakeEvidence implements HostedSupervisorEvidencePortV1 {
   readonly settlements = new Map<string, HostedExecutionSettlementV1 | null>();
   readonly revisions = new Set<string>();
   readonly requests = new Set<string>();
+  /** Per-issue trusted statements; an absent entry is the bound fixture task. */
+  readonly tasks = new Map<number, ReviewTaskStatementV1 | null>();
   readFail = false;
   revisionFail = false;
   requestFail = false;
+  taskFail = false;
+  taskCalls = 0;
 
   readExecution(
     savedIntent: HostedExecutionIntentV1,
@@ -98,6 +125,17 @@ class FakeEvidence implements HostedSupervisorEvidencePortV1 {
       return Promise.resolve(portError("unavailable", "request unavailable"));
     }
     return Promise.resolve(portOk(this.requests.has(request.id)));
+  }
+
+  readIssueTask(
+    issueNumber: number,
+  ): Promise<PortResultV1<ReviewTaskStatementV1 | null>> {
+    this.taskCalls++;
+    if (this.taskFail) {
+      return Promise.resolve(portError("unavailable", "issue unavailable"));
+    }
+    const task = this.tasks.get(issueNumber);
+    return Promise.resolve(portOk(task === undefined ? TASK : task));
   }
 }
 
@@ -191,8 +229,8 @@ function reviewReceipt(
     kind: "review_receipt",
     id: request.source.reviewReceiptId,
     requestId: request.source.reviewRequestId,
-    expectedReviewer: "chatgpt-codex-connector[bot]",
-    observedReviewer: "chatgpt-codex-connector[bot]",
+    expectedReviewer: "ubiquity-sentinel[bot]",
+    observedReviewer: "ubiquity-sentinel[bot]",
     repository: { ...SELF },
     pullRequest: {
       number: request.source.pullRequest,
@@ -208,6 +246,62 @@ function reviewReceipt(
     submittedAt: T0 - 2000,
     completedAt: T0 - 1000,
     observedAt: T0 - 500,
+    taskAcceptance: {
+      issueNumber: ISSUE,
+      taskDigest: TASK_DIGEST,
+      verdict: "fulfilled",
+      evidence: ["the reviewed candidate satisfies the source issue"],
+    },
+    ...overrides,
+  });
+}
+
+/**
+ * The exact EXISTING work record that published the request. The supervisor
+ * binds the trusted issue read to this record's own source issue; without it
+ * no release is selectable.
+ */
+function workRecordFor(
+  request: ReleaseRequestV1,
+  overrides: Record<string, unknown> = {},
+) {
+  return parseWorkRecordV1({
+    version: "v1",
+    kind: "work",
+    repository: { ...SELF },
+    id: `issue-ubiquity-sentinel-${ISSUE}`,
+    source: { kind: "issue", id: String(ISSUE), revision: LAUNCHER },
+    related: { incidentId: null, issueNumber: ISSUE },
+    fingerprint: null,
+    failingRevision: null,
+    sourceSnapshotDigest: null,
+    classification: { severity: "P2", priority: null },
+    urgency: {
+      activeProduction: false,
+      reproducible5xx: false,
+      severeSecurityOrDataLoss: false,
+    },
+    dependencies: [],
+    controller: { sha: LAUNCHER },
+    target: {
+      base: request.source.base,
+      branch: `sentinel/repair/issue-ubiquity-sentinel-${ISSUE}`,
+      checkpoint: null,
+      head: request.source.head,
+      pr: request.source.pullRequest,
+    },
+    nextStep: "delivery",
+    wait: null,
+    blocker: null,
+    counters: { attempts: 1, retries: 0, reviewRounds: 1 },
+    evidence: [{
+      kind: "review_receipt",
+      ref: `artifact:${request.source.reviewReceiptId ?? "none"}`,
+    }],
+    intent: null,
+    firstSeenAt: T0,
+    createdAt: T0,
+    updatedAt: T0,
     ...overrides,
   });
 }
@@ -231,6 +325,7 @@ interface RigV1 {
   seedRepair(
     requests: ReleaseRequestV1[],
     reviews: ReviewReceiptV1[],
+    overrides?: Record<string, unknown>,
   ): Promise<void>;
   cleanup(): Promise<void>;
 }
@@ -280,31 +375,61 @@ async function makeRig(): Promise<RigV1> {
       }
       return read.value.snapshot;
     },
-    seedRepair: async (requests, reviews) => {
+    seedRepair: async (requests, reviews, overrides = {}) => {
       const current = await repair.readRepair();
-      let head: GitSha | null = null;
-      let sequence = 1;
-      if (current.ok && current.value.status === "found") {
-        head = current.value.head;
-        sequence = current.value.snapshot.sequence + 1;
-      }
+      const existing: RepairStateSnapshotV1 | null =
+        current.ok && current.value.status === "found"
+          ? current.value.snapshot
+          : null;
+      const head: GitSha | null = current.ok && current.value.status === "found"
+        ? current.value.head
+        : null;
+      const sequence = (existing?.sequence ?? 0) + 1;
+      // Real repair writers only append or update records in place. Seeding
+      // preserves every durable record and replaces a record only under its
+      // own id, so the store's immutable-identity and terminal-state guards
+      // stay in force instead of being bypassed.
+      const mergeById = <T extends { id: string }>(
+        prior: readonly T[],
+        next: readonly T[],
+      ): T[] => {
+        const merged = [...prior];
+        for (const record of next) {
+          const at = merged.findIndex((item) => item.id === record.id);
+          if (at === -1) merged.push(record);
+          else merged[at] = record;
+        }
+        return merged;
+      };
       const seed = parseRepairStateSnapshotV1({
         version: "v1",
         kind: "repair_state_snapshot",
         stateHead: head,
         sequence,
         updatedAt: T0 + sequence,
-        incidents: [],
-        evidence: [],
-        work: [],
-        reservations: [],
-        reviews,
-        replays: [],
-        releaseRequests: requests,
-        githubCooldowns: [],
+        incidents: existing?.incidents ?? [],
+        evidence: existing?.evidence ?? [],
+        work: mergeById(
+          existing?.work ?? [],
+          requests.map((request) => workRecordFor(request, overrides)),
+        ),
+        reservations: existing?.reservations ?? [],
+        reviews: mergeById(existing?.reviews ?? [], reviews),
+        replays: existing?.replays ?? [],
+        releaseRequests: mergeById(existing?.releaseRequests ?? [], requests),
+        githubCooldowns: existing?.githubCooldowns ?? [],
       });
       const written = await repair.writeRepair(seed, head);
-      assert.ok(written.ok && written.value.status === "applied");
+      if (!written.ok) {
+        throw new Error(
+          `repair seed transport failed: ${written.error.kind}: ${written.error.detail}`,
+        );
+      }
+      assert.equal(
+        written.value.status,
+        "applied",
+        `repair seed refused: ${JSON.stringify(written.value)}`,
+      );
     },
     cleanup: async () => {
       await Deno.remove(tmp, { recursive: true }).catch(() => {});
@@ -752,6 +877,417 @@ Deno.test("hosted supervisor core: promotion preflight requires the exact frozen
     assert.equal(after.hostedRuntimes[0].execution?.id, prior.id);
     assert.equal(after.hostedRuntimes[0].activeRevision, LAUNCHER);
     assert.equal(after.hostedRuntimes[0].generation, 1);
+  } finally {
+    await rig.cleanup();
+  }
+});
+
+/** A self-consistent statement whose text drifted from the reviewed task. */
+async function driftedTask(body: string): Promise<ReviewTaskStatementV1> {
+  return {
+    issueNumber: ISSUE,
+    title: TASK_TITLE,
+    body,
+    digest: await reviewTaskStatementDigest({
+      issueNumber: ISSUE,
+      title: TASK_TITLE,
+      body,
+    }),
+  };
+}
+
+/**
+ * One distinct self-open request + completed receipt pair per refusal below.
+ * Every variant owns its own immutable ids, so seeding never rewrites an
+ * already-completed receipt or a frozen request identity: separate review
+ * cycles look exactly like this to the real repair store.
+ */
+function variantRequest(
+  slug: string,
+  receiptOverrides: Record<string, unknown> = {},
+): { request: ReleaseRequestV1; receipt: ReviewReceiptV1 } {
+  const request = releaseRequest({
+    id: `release-${slug}`,
+    source: {
+      pullRequest: 5,
+      reviewRequestId: `review-req-${slug}`,
+      reviewReceiptId: `review-receipt-${slug}`,
+      head: CANDIDATE,
+      base: LAUNCHER,
+    },
+  });
+  return { request, receipt: reviewReceipt(request, receiptOverrides) };
+}
+
+Deno.test("hosted supervisor core: legacy, wrong-task or unreadable acceptance never selects a release", async () => {
+  const rig = await makeRig();
+  try {
+    await bootstrapHealthy(rig);
+    let nextRun = 2;
+    const refuse = async (
+      slug: string,
+      receiptOverrides: Record<string, unknown> = {},
+    ): Promise<void> => {
+      const variant = variantRequest(slug, receiptOverrides);
+      rig.evidence.requests.add(variant.request.id);
+      await rig.seedRepair([variant.request], [variant.receipt]);
+      const identity = run(nextRun);
+      nextRun++;
+      assert.equal((await rig.prepare(identity)).status, "idle");
+      const state = await rig.snapshot();
+      assert.equal(state.hostedReleases.length, 0);
+      assert.equal(state.hostedRuntimes[0].activeRevision, LAUNCHER);
+    };
+    // A legacy quality-only receipt parses and is otherwise green, yet it can
+    // never select a release.
+    await refuse("legacy", { taskAcceptance: null });
+    // A fulfilled verdict bound to a digest that is not this issue's text.
+    await refuse("wrong-digest", {
+      taskAcceptance: {
+        issueNumber: ISSUE,
+        taskDigest: "e".repeat(64),
+        verdict: "fulfilled",
+        evidence: ["different task digest"],
+      },
+    });
+    // An honest already-satisfied-at-base verdict is a non-delivery too.
+    await refuse("satisfied", {
+      taskAcceptance: {
+        issueNumber: ISSUE,
+        taskDigest: TASK_DIGEST,
+        verdict: "already_satisfied_at_base",
+        evidence: ["the base already satisfies the issue"],
+      },
+    });
+    // A receipt for another issue number is refused as well.
+    await refuse("other-issue", {
+      taskAcceptance: {
+        issueNumber: ISSUE + 1,
+        taskDigest: TASK_DIGEST,
+        verdict: "fulfilled",
+        evidence: ["another issue"],
+      },
+    });
+    // A self-consistent but non-App reviewer identity refuses as well.
+    await refuse("other-reviewer", {
+      expectedReviewer: "alternate-reviewer[bot]",
+      observedReviewer: "alternate-reviewer[bot]",
+    });
+    // The exact-bound positive acceptance selects the release normally.
+    const request = releaseRequest();
+    rig.evidence.requests.add(request.id);
+    await rig.seedRepair([request], [reviewReceipt(request)]);
+    const prior = requireRun(await rig.prepare(run(nextRun)));
+    assert.equal(prior.purpose, "prior");
+    const state = await rig.snapshot();
+    assert.equal(state.hostedReleases.length, 1);
+    assert.equal(state.hostedReleases[0].phase, "requested");
+  } finally {
+    await rig.cleanup();
+  }
+});
+
+Deno.test("hosted supervisor core: an unreadable trusted task context never selects a release", async () => {
+  const rig = await makeRig();
+  try {
+    await bootstrapHealthy(rig);
+    const request = releaseRequest();
+    await rig.seedRepair([request], [reviewReceipt(request)]);
+    rig.evidence.requests.add(request.id);
+    // Transmission failure and an explicit null read both fail closed.
+    rig.evidence.taskFail = true;
+    assert.equal((await rig.prepare(run(2))).status, "idle");
+    assert.equal((await rig.snapshot()).hostedReleases.length, 0);
+    rig.evidence.taskFail = false;
+    rig.evidence.tasks.set(ISSUE, null);
+    assert.equal((await rig.prepare(run(3))).status, "idle");
+    assert.equal((await rig.snapshot()).hostedReleases.length, 0);
+    rig.evidence.tasks.delete(ISSUE);
+    assert.equal(requireRun(await rig.prepare(run(4))).purpose, "prior");
+  } finally {
+    await rig.cleanup();
+  }
+});
+
+Deno.test("hosted supervisor core: promotion preflight rechecks the trusted acceptance immediately before promotion", async () => {
+  const rig = await makeRig();
+  try {
+    await bootstrapHealthy(rig);
+    const request = releaseRequest();
+    await rig.seedRepair([request], [reviewReceipt(request)]);
+    rig.evidence.requests.add(request.id);
+    const prior = requireRun(await rig.prepare(run(2)));
+    assert.equal(prior.purpose, "prior");
+    rig.evidence.settlements.set(prior.id, runProof(prior, "healthy"));
+    // The live issue text moved after the prior verification: the frozen
+    // request no longer binds the current task and the promote intent must not
+    // be persisted.
+    rig.evidence.tasks.set(ISSUE, await driftedTask(`${TASK_BODY} (edited)`));
+    const before = await rig.snapshot();
+    assert.equal((await rig.prepare(run(3))).status, "pending");
+    const after = await rig.snapshot();
+    assert.deepEqual(after.hostedReleases, before.hostedReleases);
+    assert.equal(after.hostedRuntimes[0].execution?.id, prior.id);
+    assert.equal(after.hostedRuntimes[0].activeRevision, LAUNCHER);
+    // An unavailable trusted read refuses the same promotion: the frozen
+    // receipt and request records stay untouched and no intent is persisted.
+    rig.evidence.tasks.set(ISSUE, null);
+    assert.equal((await rig.prepare(run(4))).status, "pending");
+    assert.deepEqual(
+      (await rig.snapshot()).hostedReleases,
+      before.hostedReleases,
+    );
+    // The exact reviewed text and receipt still promote normally.
+    rig.evidence.tasks.delete(ISSUE);
+    const candidate = requireRun(await rig.prepare(run(5)));
+    assert.equal(candidate.purpose, "candidate");
+    assert.equal(candidate.revision, CANDIDATE);
+    const promoted = await rig.snapshot();
+    assert.equal(promoted.hostedReleases[0].phase, "verifying");
+    assert.equal(promoted.hostedReleases[0].priorProof?.execution.id, prior.id);
+    assert.equal(promoted.hostedRuntimes[0].activeRevision, CANDIDATE);
+    assert.equal(promoted.hostedRuntimes[0].generation, 2);
+  } finally {
+    await rig.cleanup();
+  }
+});
+
+Deno.test("hosted supervisor core: issue text that drifts while the source verifier runs never promotes", async () => {
+  const rig = await makeRig();
+  try {
+    await bootstrapHealthy(rig);
+    const request = releaseRequest();
+    await rig.seedRepair([request], [reviewReceipt(request)]);
+    rig.evidence.requests.add(request.id);
+    const prior = requireRun(await rig.prepare(run(2)));
+    assert.equal(prior.purpose, "prior");
+    rig.evidence.settlements.set(prior.id, runProof(prior, "healthy"));
+    // The live issue text changes exactly WHILE the trusted source verifier is
+    // in flight: the authorization that permits the pointer move is the read
+    // taken after that verifier settles, so this drift must refuse the
+    // promotion and leave the durable state untouched.
+    const drifted = await driftedTask(
+      `${TASK_BODY} (edited during verification)`,
+    );
+    const verify = rig.evidence.verifyRequest.bind(rig.evidence);
+    let driftedDuringVerify = false;
+    rig.evidence.verifyRequest = (request) => {
+      if (!driftedDuringVerify) {
+        driftedDuringVerify = true;
+        rig.evidence.tasks.set(ISSUE, drifted);
+      }
+      return verify(request);
+    };
+    const before = await rig.snapshot();
+    assert.equal((await rig.prepare(run(3))).status, "pending");
+    assert.equal(driftedDuringVerify, true);
+    const after = await rig.snapshot();
+    assert.deepEqual(after.hostedReleases, before.hostedReleases);
+    assert.equal(after.hostedRuntimes[0].execution?.id, prior.id);
+    assert.equal(after.hostedRuntimes[0].activeRevision, LAUNCHER);
+    assert.equal(after.hostedRuntimes[0].generation, 1);
+    // The exact unchanged positive still promotes normally.
+    rig.evidence.tasks.delete(ISSUE);
+    const candidate = requireRun(await rig.prepare(run(4)));
+    assert.equal(candidate.purpose, "candidate");
+    assert.equal(candidate.revision, CANDIDATE);
+    const promoted = await rig.snapshot();
+    assert.equal(promoted.hostedRuntimes[0].activeRevision, CANDIDATE);
+    assert.equal(promoted.hostedRuntimes[0].generation, 2);
+    assert.equal(promoted.hostedReleases[0].phase, "verifying");
+    assert.equal(promoted.hostedReleases[0].priorProof?.execution.id, prior.id);
+  } finally {
+    await rig.cleanup();
+  }
+});
+
+Deno.test("hosted supervisor core: a missing current health proof plans model-disabled verification and preserves the ordinary deadline", async () => {
+  const rig = await makeRig();
+  try {
+    rig.evidence.revisions.add(LAUNCHER);
+    // The only legally reachable runtime without a current health proof is the
+    // first generation: the store correctly refuses to clear a persisted
+    // healthy proof, so the gap is exercised at its real origin rather than by
+    // hand-clearing one.
+    const planned = requireRun(await rig.prepare(run(1)));
+    // Model work is started only by an `ordinary` execution.
+    assert.notEqual(planned.purpose, "ordinary");
+    assert.equal(planned.purpose, "bootstrap");
+    assert.equal(planned.revision, LAUNCHER);
+    let state = await rig.snapshot();
+    const due = state.hostedRuntimes[0].nextOrdinaryAt;
+    assert.ok(due > rig.clock.now());
+    assert.equal(state.hostedRuntimes[0].lastHealthyProof, null);
+    assert.equal(state.hostedRuntimes[0].execution?.id, planned.id);
+    // A healthy verification settles without moving the admission deadline.
+    rig.evidence.settlements.set(planned.id, runProof(planned, "healthy"));
+    assert.equal((await rig.prepare(run(2))).status, "idle");
+    state = await rig.snapshot();
+    assert.equal(state.hostedRuntimes[0].nextOrdinaryAt, due);
+    assert.equal(
+      state.hostedRuntimes[0].lastHealthyProof?.execution.id,
+      planned.id,
+    );
+    assert.ok(rig.clock.now() < due);
+    // Waiting with current health evidence still starts nothing.
+    assert.equal((await rig.prepare(run(3))).status, "idle");
+    // The ordinary cadence itself is untouched: it starts only when due.
+    rig.clock.advance(due - rig.clock.now());
+    const ordinary = requireRun(await rig.prepare(run(4)));
+    assert.equal(ordinary.purpose, "ordinary");
+    assert.equal(ordinary.revision, LAUNCHER);
+    assert.equal(
+      (await rig.snapshot()).hostedRuntimes[0].nextOrdinaryAt,
+      ordinary.createdAt + HOUR_MS,
+    );
+  } finally {
+    await rig.cleanup();
+  }
+});
+
+/**
+ * Persist the exact RESUMED promote intent by running the real core once and
+ * refusing only its second (pointer-movement) CAS write: the durable state
+ * stays at the already-persisted `promoting` intent with the real healthy
+ * prior proof that authorized it, exactly what a later prepare resumes.
+ * Nothing is fabricated and no lifecycle transition is hand-written.
+ */
+async function persistPromotingIntent(
+  rig: RigV1,
+  identity: HostedSupervisorRunIdentityV1,
+): Promise<void> {
+  let writes = 0;
+  const state: StateReadView & ReleaseStateWriter = {
+    readRelease: rig.release.readRelease.bind(rig.release),
+    readRepair: rig.release.readRepair.bind(rig.release),
+    writeRelease: async (next, expectedHead) => {
+      writes++;
+      if (writes === 2) {
+        return portOk<StateWriteResultV1>({
+          status: "conflict",
+          currentHead: null,
+        });
+      }
+      return await rig.release.writeRelease(next, expectedHead);
+    },
+  };
+  const outcome = await runHostedSupervisorPrepare({
+    clock: rig.clock,
+    state,
+    run: identity,
+    evidence: rig.evidence,
+  });
+  assert.equal(outcome.status, "pending", JSON.stringify(outcome));
+  const read = await rig.release.readRelease();
+  assert.ok(read.ok && read.value.status === "found");
+  if (!read.ok || read.value.status !== "found") {
+    throw new Error("release state unreadable");
+  }
+  assert.equal(read.value.snapshot.hostedReleases[0]?.phase, "promoting");
+  assert.notEqual(read.value.snapshot.hostedReleases[0]?.pointerIntent, null);
+  assert.equal(read.value.snapshot.hostedRuntimes[0]?.activeRevision, LAUNCHER);
+  assert.equal(read.value.snapshot.hostedRuntimes[0]?.generation, 1);
+  assert.equal(read.value.snapshot.hostedRuntimes[0]?.execution, null);
+  assert.equal(
+    read.value.snapshot.hostedRuntimes[0]?.lastHealthyProof?.outcome,
+    "healthy",
+  );
+}
+
+Deno.test("hosted supervisor core: a persisted promote intent is re-authorized immediately before the pointer moves", async () => {
+  const rig = await makeRig();
+  try {
+    await bootstrapHealthy(rig);
+    const request = releaseRequest();
+    await rig.seedRepair([request], [reviewReceipt(request)]);
+    rig.evidence.requests.add(request.id);
+    const prior = requireRun(await rig.prepare(run(2)));
+    assert.equal(prior.purpose, "prior");
+    rig.evidence.settlements.set(prior.id, runProof(prior, "healthy"));
+    // The real core persists the intent, then its pointer write is refused:
+    // the durable state is the exact resumed intent a later prepare sees.
+    await persistPromotingIntent(rig, run(3));
+    // The live issue text changed after the intent was persisted: the resumed
+    // prepare must not move the active revision or clear the old intent.
+    rig.evidence.tasks.set(ISSUE, await driftedTask(`${TASK_BODY} (edited)`));
+    const before = await rig.snapshot();
+    assert.equal((await rig.prepare(run(4))).status, "pending");
+    const after = await rig.snapshot();
+    assert.equal(after.hostedRuntimes[0].activeRevision, LAUNCHER);
+    assert.equal(after.hostedRuntimes[0].generation, 1);
+    assert.equal(after.hostedReleases[0].phase, "promoting");
+    assert.notEqual(after.hostedReleases[0].pointerIntent, null);
+    assert.deepEqual(after.hostedReleases, before.hostedReleases);
+    // An unavailable trusted read refuses the same move and keeps the intent.
+    rig.evidence.tasks.delete(ISSUE);
+    rig.evidence.taskFail = true;
+    assert.equal((await rig.prepare(run(5))).status, "pending");
+    rig.evidence.taskFail = false;
+    assert.deepEqual(
+      (await rig.snapshot()).hostedReleases,
+      before.hostedReleases,
+    );
+    // The exact unchanged positive still promotes through the persisted intent.
+    const candidate = requireRun(await rig.prepare(run(6)));
+    assert.equal(candidate.purpose, "candidate");
+    assert.equal(candidate.revision, CANDIDATE);
+    const promoted = await rig.snapshot();
+    assert.equal(promoted.hostedRuntimes[0].activeRevision, CANDIDATE);
+    assert.equal(promoted.hostedRuntimes[0].generation, 2);
+    assert.equal(promoted.hostedReleases[0].phase, "verifying");
+    assert.equal(promoted.hostedReleases[0].pointerIntent, null);
+    assert.equal(promoted.hostedReleases[0].priorProof?.execution.id, prior.id);
+  } finally {
+    await rig.cleanup();
+  }
+});
+
+Deno.test("hosted supervisor core: a supported review_quota wait survives readRepair and prepare while an unknown reason refuses", async () => {
+  const rig = await makeRig();
+  try {
+    await bootstrapHealthy(rig);
+    const request = releaseRequest();
+    // The installed runtime's own bounded quota wait: nextStep review with a
+    // budget-bound review_quota reason, exactly as the captured repair record
+    // carries it.
+    await rig.seedRepair([request], [reviewReceipt(request)], {
+      nextStep: "review",
+      wait: { reason: "review_quota", since: T0, until: T0 + 60_000 },
+    });
+    rig.evidence.requests.add(request.id);
+    const before = await rig.repair.readRepair();
+    assert.ok(before.ok && before.value.status === "found");
+    if (!before.ok || before.value.status !== "found") {
+      throw new Error("repair state unreadable");
+    }
+    const seeded = before.value.snapshot.work[0];
+    assert.equal(seeded.nextStep, "review");
+    assert.equal(seeded.wait?.reason, "review_quota");
+    assert.equal(seeded.wait?.until, T0 + 60_000);
+    // The real readRepair view + prepare consume the supported wait without a
+    // parser refusal, and leave the budget-bound wait untouched.
+    assert.equal(
+      requireRun(await rig.prepare(run(2))).purpose,
+      "prior",
+    );
+    const after = await rig.repair.readRepair();
+    assert.ok(after.ok && after.value.status === "found");
+    if (!after.ok || after.value.status !== "found") {
+      throw new Error("repair state unreadable");
+    }
+    const held = after.value.snapshot.work[0];
+    assert.equal(held.nextStep, "review");
+    assert.equal(held.wait?.reason, "review_quota");
+    assert.equal(held.wait?.until, T0 + 60_000);
+    assert.equal(held.wait?.since, T0);
+    // Any other wait reason is still refused by the frozen parser.
+    assert.throws(() =>
+      parseWorkRecordV1({
+        ...workRecordFor(request),
+        nextStep: "review",
+        wait: { reason: "quota", since: T0, until: null },
+      })
+    );
   } finally {
     await rig.cleanup();
   }

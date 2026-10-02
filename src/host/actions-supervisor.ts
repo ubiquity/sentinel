@@ -37,6 +37,12 @@ import type {
 } from "../contracts/ports.ts";
 import { portOk, SystemClock } from "../contracts/ports.ts";
 import type { ReleaseRequestV1 } from "../contracts/release.ts";
+import {
+  checkReviewTaskStatement,
+  reviewTaskStatementDigest,
+  type ReviewTaskStatementV1,
+} from "../contracts/review-receipt.ts";
+import { reviewAuthorizesMerge } from "../repair/review-gate.ts";
 import type { RepositoryIdentityV1 } from "../contracts/shared.ts";
 import { parseReleaseStateSnapshotV1 } from "../contracts/state-snapshots.ts";
 import type {
@@ -68,6 +74,15 @@ const SUPERVISOR_TOKEN_ENV = "SENTINEL_SUPERVISOR_TOKEN";
 const STATIC_TOKEN = "hosted supervisor credentials are unavailable";
 const STATIC_STATE = "hosted supervisor release state is unavailable";
 const STATIC_SEED = "hosted supervisor release state could not be seeded";
+/**
+ * The one fixed GitHub App reviewer identity that may authorize an
+ * issue-backed release at the persisted-receipt boundary: sentinel App
+ * 4682172, bot user 319834869, whose review login is `ubiquity-sentinel[bot]`.
+ * The predicate pins this exact reviewer string, so a self-consistent receipt
+ * naming any other reviewer is a different reviewer and never authorizes.
+ * Legacy receipts still parse; they refuse as new authorization.
+ */
+const HOSTED_SUPERVISOR_REVIEWER = "ubiquity-sentinel[bot]";
 
 export interface HostedSupervisorBootstrapResultV1 {
   status: "seeded" | "already_present";
@@ -219,6 +234,17 @@ export interface HostedSupervisorEvidencePortV1 {
   ): Promise<PortResultV1<HostedExecutionSettlementV1 | null>>;
   verifyRevision(revision: GitSha): Promise<PortResultV1<boolean>>;
   verifyRequest(request: ReleaseRequestV1): Promise<PortResultV1<boolean>>;
+  /**
+   * Trusted, independent read of the source issue's exact task statement,
+   * performed immediately before any release selection or promotion: the
+   * issue's own bounded title/body with the canonical digest of that text.
+   * Absent, unreadable or over-bound context means the statement is
+   * unavailable, which never authorizes an issue-backed release. A record
+   * without a source issue (incident work) is not read at all.
+   */
+  readIssueTask?(
+    issueNumber: number,
+  ): Promise<PortResultV1<ReviewTaskStatementV1 | null>>;
 }
 
 export interface HostedSupervisorInputV1 {
@@ -701,26 +727,95 @@ function isSelfOpenRequest(request: ReleaseRequestV1): boolean {
     sameRepository(request.target.repository, SELF_REPOSITORY);
 }
 
-/** Exact completed review binding: reviewer, PR/head/base, zero unresolved. */
-function reviewAuthorizes(
+/**
+ * The exact receipt the request references, bound to the request's own
+ * repository/PR/head/base identity. This is an identity lookup only: the shared
+ * semantic predicate in `reviewAuthorizes` decides whether it authorizes.
+ */
+function boundReceipt(
   snapshot: RepairStateSnapshotV1,
   request: ReleaseRequestV1,
-): boolean {
+): RepairStateSnapshotV1["reviews"][number] | null {
   const receiptId = request.source.reviewReceiptId;
-  if (receiptId === null) return false;
-  return snapshot.reviews.some((review) =>
+  if (receiptId === null) return null;
+  const found = snapshot.reviews.find((review) =>
     review.id === receiptId &&
     review.requestId === request.source.reviewRequestId &&
     sameRepository(review.repository, request.target.repository) &&
     review.pullRequest.number === request.source.pullRequest &&
     review.pullRequest.head === request.source.head &&
-    review.pullRequest.base === request.source.base &&
-    review.outcome === "completed" &&
-    review.resultId !== null && review.completedAt !== null &&
-    review.observedReviewer !== null &&
-    review.observedReviewer === review.expectedReviewer &&
-    review.findingsUncounted === 0 &&
-    !review.unresolvedSeverities.some((s) => s === "P0" || s === "P1")
+    review.pullRequest.base === request.source.base
+  );
+  return found ?? null;
+}
+
+/**
+ * The exact existing WorkRecord that published the request: same repository and
+ * the same PR/head/base. Its own `related.issueNumber` is the only task identity
+ * the trusted live read may be bound to; a request without that record has no
+ * provable task context and never authorizes a release.
+ */
+function boundWorkRecord(
+  snapshot: RepairStateSnapshotV1,
+  request: ReleaseRequestV1,
+): RepairStateSnapshotV1["work"][number] | null {
+  const found = snapshot.work.find((record) =>
+    sameRepository(record.repository, request.target.repository) &&
+    record.target.pr === request.source.pullRequest &&
+    record.target.head === request.source.head &&
+    record.target.base === request.source.base
+  );
+  return found ?? null;
+}
+
+/**
+ * The trusted live task statement for one record, read through the evidence
+ * port immediately before the authorization it feeds. A record without a
+ * source issue keeps the existing change-only contract (null); an unavailable
+ * port, transport failure or unreadable/over-bound statement is
+ * `"unavailable"`, which never authorizes issue-backed work.
+ */
+async function trustedTask(
+  input: HostedSupervisorInputV1,
+  record: RepairStateSnapshotV1["work"][number],
+): Promise<ReviewTaskStatementV1 | null | "unavailable"> {
+  const issueNumber = record.related.issueNumber;
+  if (issueNumber === null) return null;
+  const evidence = input.evidence;
+  if (evidence.readIssueTask === undefined) return "unavailable";
+  try {
+    // Called on the port itself: a detached reference loses the receiver and
+    // turns every legal port into an unavailable read.
+    const result = await evidence.readIssueTask(issueNumber);
+    if (!result.ok || result.value === null) return "unavailable";
+    return result.value;
+  } catch {
+    return "unavailable";
+  }
+}
+
+/**
+ * The one release authorization, shared with the maintenance consumer through
+ * `src/repair/review-gate.ts`: the exact referenced receipt must bind this
+ * request's identity and the record's exact publication AND carry a positive
+ * task acceptance bound to the trusted live source-issue statement read
+ * immediately before this check. A legacy quality-only receipt, a
+ * wrong-task/wrong-issue acceptance, a not-fulfilled, uncertain or
+ * already-satisfied base verdict and an unreadable task context all refuse.
+ */
+async function reviewAuthorizes(
+  input: HostedSupervisorInputV1,
+  snapshot: RepairStateSnapshotV1,
+  request: ReleaseRequestV1,
+): Promise<boolean> {
+  const receipt = boundReceipt(snapshot, request);
+  const record = boundWorkRecord(snapshot, request);
+  if (receipt === null || record === null) return false;
+  return reviewAuthorizesMerge(
+    receipt,
+    record,
+    HOSTED_SUPERVISOR_REVIEWER,
+    await trustedTask(input, record),
   );
 }
 
@@ -745,27 +840,33 @@ async function selectSourceRequest(
   const recorded = new Set(releases.map((item) => item.id));
   const eligible = snapshot.releaseRequests
     .filter((request) =>
-      !recorded.has(request.id) && isSelfOpenRequest(request) &&
-      reviewAuthorizes(snapshot, request)
+      !recorded.has(request.id) && isSelfOpenRequest(request)
     )
     .sort((a, b) =>
       a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
     );
-  const request = eligible[0];
-  if (request === undefined) return { kind: "none" };
-  if (request.revision === runtime.activeRevision) {
-    return { kind: "pending", detail: STATIC_REQUEST_ACTIVE };
+  for (const request of eligible) {
+    if (!(await reviewAuthorizes(input, snapshot, request))) continue;
+    if (request.revision === runtime.activeRevision) {
+      return { kind: "pending", detail: STATIC_REQUEST_ACTIVE };
+    }
+    let verified: PortResultV1<boolean>;
+    try {
+      verified = await input.evidence.verifyRequest(request);
+    } catch {
+      return { kind: "pending", detail: STATIC_REQUEST };
+    }
+    if (!verified.ok || !verified.value) {
+      return { kind: "pending", detail: STATIC_REQUEST };
+    }
+    // The source verifier has settled, so the trusted live task statement is
+    // read again now: this FINAL semantic authorization is the last read
+    // before the requested receipt is created, and text that drifted while the
+    // verifier ran changes the task and never selects the release.
+    if (!(await reviewAuthorizes(input, snapshot, request))) continue;
+    return { kind: "found", request };
   }
-  let verified: PortResultV1<boolean>;
-  try {
-    verified = await input.evidence.verifyRequest(request);
-  } catch {
-    return { kind: "pending", detail: STATIC_REQUEST };
-  }
-  if (!verified.ok || !verified.value) {
-    return { kind: "pending", detail: STATIC_REQUEST };
-  }
-  return { kind: "found", request };
+  return { kind: "none" };
 }
 
 function buildRequestedReceipt(
@@ -806,8 +907,10 @@ function ordinaryDue(
 /**
  * Promotion-source preflight before a healthy prior settlement may persist the
  * promote intent: the reread repair request must canonical-equal the frozen
- * hosted release request, still pass the review binding, and be accepted by
- * the source verifier. Failure/unavailability changes nothing.
+ * hosted release request and be accepted by the source verifier, and only then
+ * is the review binding re-applied to the freshly read live task statement, so
+ * the final semantic authorization is the last read before the pointer
+ * mutation. Failure/unavailability changes nothing.
  */
 async function authorizePromotionSource(
   input: HostedSupervisorInputV1,
@@ -830,10 +933,14 @@ async function authorizePromotionSource(
   );
   if (
     request === undefined || !sameCanonical(request, frozen) ||
-    !isSelfOpenRequest(request) || !reviewAuthorizes(snapshot, request)
+    !isSelfOpenRequest(request)
   ) {
     return { ok: false, detail: STATIC_REQUEST };
   }
+  // The source verifier settles FIRST: the trusted live task statement is read
+  // only after it, so the FINAL semantic authorization below is the last read
+  // before the caller's pointer mutation. Text that drifted while the verifier
+  // ran changes the task and never promotes.
   let verified: PortResultV1<boolean>;
   try {
     verified = await input.evidence.verifyRequest(request);
@@ -841,6 +948,9 @@ async function authorizePromotionSource(
     return { ok: false, detail: STATIC_REQUEST };
   }
   if (!verified.ok || !verified.value) {
+    return { ok: false, detail: STATIC_REQUEST };
+  }
+  if (!(await reviewAuthorizes(input, snapshot, request))) {
     return { ok: false, detail: STATIC_REQUEST };
   }
   return { ok: true };
@@ -948,6 +1058,19 @@ export async function runHostedSupervisorPrepare(
 
     const recovery = planPointerRecovery(runtime, releases, input.clock.now());
     if (recovery !== null) {
+      // A persisted promote intent is durable, not self-authorizing: before
+      // the pointer actually moves on a RESUMED intent, the current trusted
+      // WorkRecord/receipt/source issue are re-read and the same semantic
+      // authorization is re-applied. An unavailable context or a changed task
+      // blocks conservatively here: the old intent is never cleared,
+      // rewritten or fabricated, and the active revision never moves.
+      const promoting = releases.find((item) =>
+        item.phase === "promoting" && item.pointerIntent !== null
+      );
+      if (promoting !== undefined) {
+        const authorized = await authorizePromotionSource(input, promoting);
+        if (!authorized.ok) return pending(authorized.detail);
+      }
       const applied = await commitHosted(
         input,
         cursor,
@@ -1033,15 +1156,22 @@ export async function runHostedSupervisorPrepare(
       runtime.lastHealthyProof.execution.revision !== runtime.activeRevision ||
       runtime.lastHealthyProof.execution.generation !== runtime.generation
     ) {
+      // The active revision carries no current health proof, so one
+      // verification execution is scheduled. It is deliberately NOT an
+      // `ordinary` execution: only `ordinary` may start model work, and the
+      // missing-proof condition must never turn waiting time before
+      // `nextOrdinaryAt` into an early model-enabled run. The existing
+      // admission deadline is preserved: this verification neither brings the
+      // ordinary run forward nor pushes it back, and the ordinary cadence
+      // stays owned by `ordinaryDue`.
       return await startExecution(
         input,
         cursor,
         runtime,
         releases,
-        "ordinary",
+        "bootstrap",
         runtime.activeRevision,
         null,
-        input.clock.now() + HOUR_MS,
       );
     }
     return idle(STATIC_IDLE_NONE);
@@ -1183,6 +1313,26 @@ export async function runHostedSupervisorHost(
     readExecution: (saved) => client.readHostedExecution(saved),
     verifyRevision: (revision) => client.verifyHostedRevision(revision),
     verifyRequest: (request) => client.verifyHostedReleaseRequest(request),
+    // The trusted source-issue statement is read over the same authenticated
+    // native client (and the same cooldown gate) as every other supervisor
+    // read, immediately before the release authorization it feeds. An
+    // unreadable, malformed or over-bound issue is not a statement.
+    readIssueTask: async (issueNumber: number) => {
+      const issue = await client.readIssue(issueNumber);
+      if (!issue.ok) return issue;
+      if (issue.value === null) return portOk(null);
+      const checked = await checkReviewTaskStatement({
+        issueNumber: issue.value.number,
+        title: issue.value.title,
+        body: issue.value.body,
+        digest: await reviewTaskStatementDigest({
+          issueNumber: issue.value.number,
+          title: issue.value.title,
+          body: issue.value.body,
+        }),
+      });
+      return portOk(checked.ok ? checked.statement : null);
+    },
   };
   const core = {
     clock: input.clock,

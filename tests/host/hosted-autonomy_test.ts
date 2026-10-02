@@ -27,6 +27,10 @@ import type {
 import { parseWorkRecordV1 } from "../../src/contracts/work-record.ts";
 import type { WorkRecordV1 } from "../../src/contracts/work-record.ts";
 import {
+  reviewTaskStatementDigest,
+  type ReviewTaskStatementV1,
+} from "../../src/contracts/review-receipt.ts";
+import {
   candidateBranch,
   releaseRequestId,
   reviewOperationKey,
@@ -61,6 +65,7 @@ import type {
   HostedAutonomyResultV1,
 } from "../../ops/hosted-autonomy.ts";
 import type { RepositoryIdentityV1 } from "../../src/contracts/shared.ts";
+import type { ReleaseRequestV1 } from "../../src/contracts/release.ts";
 import {
   makeRemoteCtx,
   reservation,
@@ -68,6 +73,7 @@ import {
   SHA1,
   T0,
 } from "../state/helpers.ts";
+import { persistHostedReceipt } from "./hosted-receipt-fixture.ts";
 
 const HEAD = "ae6ff044280a04803958fcd1f6f9304bb894249e" as GitSha;
 const BASE = "f1b5a86b80ca4759ab37307484b223907bd1b1d6" as GitSha;
@@ -92,6 +98,84 @@ const FOREIGN_PR = 375;
 const FOREIGN_RECEIPT_ID = `review-receipt:${"b".repeat(64)}`;
 /** The same issue number in both repositories: the collision under test. */
 const SHARED_ISSUE_NUMBER = 120;
+/** The exact trusted self issue statement every self receipt must bind. */
+const SELF_TASK_TITLE = "Deliver the reviewed sentinel candidate";
+const SELF_TASK_BODY = "The protected maintenance pass must deliver issue 48.";
+const SELF_TASK: ReviewTaskStatementV1 = {
+  issueNumber: 48,
+  title: SELF_TASK_TITLE,
+  body: SELF_TASK_BODY,
+  digest: await reviewTaskStatementDigest({
+    issueNumber: 48,
+    title: SELF_TASK_TITLE,
+    body: SELF_TASK_BODY,
+  }),
+};
+/** The exact trusted foreign issue statement its own receipt must bind. */
+const FOREIGN_TASK_TITLE = "Deliver the reviewed foreign candidate";
+const FOREIGN_TASK_BODY = "The foreign repository must deliver its issue 120.";
+const FOREIGN_TASK: ReviewTaskStatementV1 = {
+  issueNumber: SHARED_ISSUE_NUMBER,
+  title: FOREIGN_TASK_TITLE,
+  body: FOREIGN_TASK_BODY,
+  digest: await reviewTaskStatementDigest({
+    issueNumber: SHARED_ISSUE_NUMBER,
+    title: FOREIGN_TASK_TITLE,
+    body: FOREIGN_TASK_BODY,
+  }),
+};
+
+/** The trusted statement the live surface returns for one fixture issue. */
+function taskFor(issueNumber: number): ReviewTaskStatementV1 | null {
+  if (issueNumber === SELF_TASK.issueNumber) return SELF_TASK;
+  if (issueNumber === FOREIGN_TASK.issueNumber) return FOREIGN_TASK;
+  return null;
+}
+
+/** sentinel's own issue 120: the same number, a different repository's task. */
+const SELF_TASK_120_TITLE = "Deliver the reviewed sentinel issue 120 candidate";
+const SELF_TASK_120_BODY =
+  "Sentinel's own issue 120 is distinct from the foreign issue 120.";
+const SELF_TASK_120: ReviewTaskStatementV1 = {
+  issueNumber: SHARED_ISSUE_NUMBER,
+  title: SELF_TASK_120_TITLE,
+  body: SELF_TASK_120_BODY,
+  digest: await reviewTaskStatementDigest({
+    issueNumber: SHARED_ISSUE_NUMBER,
+    title: SELF_TASK_120_TITLE,
+    body: SELF_TASK_120_BODY,
+  }),
+};
+
+/**
+ * The trusted statement one repository's own surface returns for one issue:
+ * the same issue number in two repositories is two different tasks.
+ */
+function repositoryTask(
+  repository: RepositoryIdentityV1,
+  issueNumber: number,
+): ReviewTaskStatementV1 | null {
+  if (
+    repository.name === FOREIGN_REPO.name && repository.owner === "ubiquity"
+  ) {
+    return issueNumber === FOREIGN_TASK.issueNumber ? FOREIGN_TASK : null;
+  }
+  if (issueNumber === SELF_TASK.issueNumber) return SELF_TASK;
+  if (issueNumber === FOREIGN_TASK.issueNumber) return SELF_TASK_120;
+  return null;
+}
+
+/** The per-record trusted statement map `planHostedClosures` consumes. */
+function closureTasks(
+  records: readonly WorkRecordV1[],
+): Map<string, ReviewTaskStatementV1 | null | "unavailable"> {
+  return new Map(records.map((record) => [
+    record.id,
+    record.related.issueNumber === null
+      ? null
+      : repositoryTask(record.repository, record.related.issueNumber),
+  ]));
+}
 
 const ENV: Record<string, string> = {
   PATH: Deno.env.get("PATH") ?? "/usr/bin:/bin",
@@ -256,14 +340,20 @@ function finding(severity: "P1" | "P2") {
 function authorizingReceipt(overrides: Record<string, unknown> = {}) {
   return reviewReceipt(RECEIPT_ID, {
     repository: SELF_REPO,
-    expectedReviewer: "github-actions[bot]",
-    observedReviewer: "github-actions[bot]",
+    expectedReviewer: "ubiquity-sentinel[bot]",
+    observedReviewer: "ubiquity-sentinel[bot]",
     pullRequest: { number: 51, head: HEAD, base: BASE },
     outcome: "completed",
     resultId: "msg_0123456789abcdef",
     completedAt: T0 + 3000,
     unresolvedSeverities: [],
     observedAt: T0 + 4000,
+    taskAcceptance: {
+      issueNumber: SELF_TASK.issueNumber,
+      taskDigest: SELF_TASK.digest,
+      verdict: "fulfilled",
+      evidence: ["the reviewed candidate satisfies the source issue"],
+    },
     ...overrides,
   });
 }
@@ -294,14 +384,20 @@ function foreignRecord(overrides: Record<string, unknown> = {}): WorkRecordV1 {
 function foreignReceipt(overrides: Record<string, unknown> = {}) {
   return reviewReceipt(FOREIGN_RECEIPT_ID, {
     repository: FOREIGN_REPO,
-    expectedReviewer: "github-actions[bot]",
-    observedReviewer: "github-actions[bot]",
+    expectedReviewer: "ubiquity-sentinel[bot]",
+    observedReviewer: "ubiquity-sentinel[bot]",
     pullRequest: { number: FOREIGN_PR, head: HEAD, base: BASE },
     outcome: "completed",
     resultId: "msg_0123456789abcdef",
     completedAt: T0 + 3000,
     unresolvedSeverities: [],
     observedAt: T0 + 4000,
+    taskAcceptance: {
+      issueNumber: FOREIGN_TASK.issueNumber,
+      taskDigest: FOREIGN_TASK.digest,
+      verdict: "fulfilled",
+      evidence: ["the reviewed candidate satisfies the foreign issue"],
+    },
     ...overrides,
   });
 }
@@ -485,11 +581,24 @@ async function makeRig(
     foreignCheckGreen?: boolean;
     defaultBranch?: string | null;
     issueOpen?: boolean | null;
+    /** Trusted source-issue statement override, e.g. for body drift. */
+    issueTask?: (
+      number: number,
+    ) => Promise<ReviewTaskStatementV1 | null>;
     mergeResult?: { merged: boolean; sha: string | null } | null;
     afterMerge?: HostedAutonomyPullV1 | null;
     resolver?: (
       repository: RepositoryIdentityV1,
     ) => HostedAutonomyGitHubV1 | null;
+    /**
+     * Drive the REAL release store to an accepted receipt for this exact
+     * reviewed request through the shared legal-lifecycle fixture; no phase,
+     * proof or pointer intent is ever hand-written into the store.
+     */
+    hostedReceipt?: {
+      request: ReleaseRequestV1;
+      priorRevision: GitSha;
+    };
   } = {},
 ): Promise<{ rig: RigV1; github: HostedAutonomyGitHubV1 }> {
   const tmp = await Deno.makeTempDir({ prefix: `sentinel-${prefix}-` });
@@ -519,6 +628,24 @@ async function makeRig(
     throw new Error(
       `release fixture seed failed: ${JSON.stringify(releaseSeed)}`,
     );
+  }
+  if (options.hostedReceipt !== undefined) {
+    // The shared fixture runs the ACTUAL supervisor core over this same real
+    // release store until it persists `accepted`, so the consumers below read
+    // a genuinely reachable receipt instead of a hand-written phase.
+    let receiptNow = T0;
+    await persistHostedReceipt({
+      release,
+      clock: {
+        now: () => receiptNow,
+        advance: (ms: number) => {
+          receiptNow += ms;
+        },
+      },
+      request: options.hostedReceipt.request,
+      priorRevision: options.hostedReceipt.priorRevision,
+      phase: "accepted",
+    });
   }
   const rig: RigV1 = {
     tmp,
@@ -563,6 +690,12 @@ async function makeRig(
     readIssueOpen: () =>
       Promise.resolve(
         options.issueOpen === undefined ? true : options.issueOpen,
+      ),
+    readIssueTask: (number: number) =>
+      Promise.resolve(
+        options.issueTask === undefined
+          ? taskFor(number)
+          : options.issueTask(number),
       ),
     listParkedRuns: () => Promise.resolve([]),
     approveRun: () => Promise.resolve(true),
@@ -2106,7 +2239,12 @@ Deno.test(
     const released = new Map([
       [hostedDeliveryKey(SELF_REPO, 51, HEAD, BASE), accepted],
     ]);
-    const plans = planHostedClosures(snapshot, released);
+    const plans = planHostedClosures(
+      snapshot,
+      released,
+      new Map(),
+      closureTasks(snapshot.work),
+    );
     assert.deepEqual(plans, [
       { id: TARGET, issueNumber: 48, repository: SELF_REPO },
     ]);
@@ -2120,7 +2258,29 @@ Deno.test(
       planHostedClosures(
         snapshot,
         new Map([[hostedDeliveryKey(SELF_REPO, 51, SHA1, BASE), accepted]]),
+        new Map(),
+        closureTasks(snapshot.work),
       ),
+      [],
+    );
+    // A legacy quality-only receipt never closes a delivered issue, and
+    // neither does an unreadable trusted task context.
+    const legacy = repairSnapshot(
+      [blockedRecord()],
+      [authorizingReceipt({ taskAcceptance: null })],
+      [request],
+    );
+    assert.deepEqual(
+      planHostedClosures(
+        legacy,
+        released,
+        new Map(),
+        closureTasks(legacy.work),
+      ),
+      [],
+    );
+    assert.deepEqual(
+      planHostedClosures(legacy, released, new Map(), new Map()),
       [],
     );
   },
@@ -2659,7 +2819,12 @@ Deno.test(
         : url.includes("/actions/runs")
         ? { workflow_runs: [] }
         : url.includes("/issues/")
-        ? { state: "open" }
+        ? {
+          state: "open",
+          number: SHARED_ISSUE_NUMBER,
+          title: FOREIGN_TASK_TITLE,
+          body: FOREIGN_TASK_BODY,
+        }
         : { default_branch: FOREIGN_BRANCH };
       return Promise.resolve(jsonResponse(payload));
     }) as typeof fetch;
@@ -2856,7 +3021,19 @@ Deno.test(
         }),
         foreignRecord(),
       ],
-      [authorizingReceipt(), foreignReceipt()],
+      [
+        // Sentinel's own issue 120 accepts ITS OWN task text, not the foreign
+        // repository's identically numbered issue.
+        authorizingReceipt({
+          taskAcceptance: {
+            issueNumber: SHARED_ISSUE_NUMBER,
+            taskDigest: SELF_TASK_120.digest,
+            verdict: "fulfilled",
+            evidence: ["sentinel issue 120 is satisfied"],
+          },
+        }),
+        foreignReceipt(),
+      ],
     );
     const released = new Map([
       [hostedDeliveryKey(SELF_REPO, 51, HEAD, BASE), {}],
@@ -2864,16 +3041,32 @@ Deno.test(
     const foreignMerged = new Map([
       [hostedDeliveryKey(FOREIGN_REPO, FOREIGN_PR, HEAD, BASE), {}],
     ]);
-    assert.deepEqual(planHostedClosures(closable, released), [{
-      id: "issue-ubiquity-sentinel-120",
-      issueNumber: SHARED_ISSUE_NUMBER,
-      repository: SELF_REPO,
-    }]);
-    assert.deepEqual(planHostedClosures(closable, new Map(), foreignMerged), [{
-      id: FOREIGN_TARGET,
-      issueNumber: SHARED_ISSUE_NUMBER,
-      repository: FOREIGN_REPO,
-    }]);
+    assert.deepEqual(
+      planHostedClosures(
+        closable,
+        released,
+        new Map(),
+        closureTasks(closable.work),
+      ),
+      [{
+        id: "issue-ubiquity-sentinel-120",
+        issueNumber: SHARED_ISSUE_NUMBER,
+        repository: SELF_REPO,
+      }],
+    );
+    assert.deepEqual(
+      planHostedClosures(
+        closable,
+        new Map(),
+        foreignMerged,
+        closureTasks(closable.work),
+      ),
+      [{
+        id: FOREIGN_TARGET,
+        issueNumber: SHARED_ISSUE_NUMBER,
+        repository: FOREIGN_REPO,
+      }],
+    );
 
     // Runner level: closing the foreign issue 120 must not touch sentinel's
     // record for its own issue 120, and vice versa.
@@ -3137,7 +3330,12 @@ Deno.test(
         : url.includes("/git/ref/")
         ? { object: { sha: BASE } }
         : url.includes("/issues/")
-        ? { state: "open" }
+        ? {
+          state: "open",
+          number: SHARED_ISSUE_NUMBER,
+          title: FOREIGN_TASK_TITLE,
+          body: FOREIGN_TASK_BODY,
+        }
         : { default_branch: FOREIGN_BRANCH };
       return Promise.resolve(jsonResponse(payload));
     }) as typeof fetch;
@@ -3235,5 +3433,344 @@ Deno.test(
         Deno.remove(entry.rig.tmp, { recursive: true })
       ),
     );
+  },
+);
+
+/** Read the current repair snapshot from the real store. */
+async function readWork(rig: RigV1): Promise<WorkRecordV1[]> {
+  const read = await rig.state.readRepair();
+  if (!read.ok || read.value.status !== "found") {
+    throw new Error("unreadable repair state");
+  }
+  return read.value.snapshot.work;
+}
+
+/** A self-consistent trusted statement with edited text. */
+async function driftedSelfTask(body: string): Promise<ReviewTaskStatementV1> {
+  return {
+    issueNumber: SELF_TASK.issueNumber,
+    title: SELF_TASK_TITLE,
+    body,
+    digest: await reviewTaskStatementDigest({
+      issueNumber: SELF_TASK.issueNumber,
+      title: SELF_TASK_TITLE,
+      body,
+    }),
+  };
+}
+
+Deno.test(
+  "hosted autonomy: a legacy quality-only receipt never merges or records a release",
+  async () => {
+    const { rig, github } = await makeRig("autonomy-legacy", {
+      repair: repairSnapshot([deliveryRecord()], [
+        authorizingReceipt({ taskAcceptance: null }),
+      ]),
+    });
+    const result = await run(rig, github);
+    assert.equal(rig.merges, 0);
+    assert.equal(result.status, "skipped");
+    assert.ok(
+      result.actions.includes(`delivery:${TARGET}:task_acceptance_refused`),
+      JSON.stringify(result.actions),
+    );
+    assert.equal((await readRequests(rig)).length, 0);
+    assert.deepEqual(rig.closed, []);
+    assert.equal((await readWork(rig))[0].nextStep, "delivery");
+    await Deno.remove(rig.tmp, { recursive: true });
+  },
+);
+
+Deno.test(
+  "hosted autonomy: a receipt bound to a different task digest never merges",
+  async () => {
+    const { rig, github } = await makeRig("autonomy-digest", {
+      repair: repairSnapshot([deliveryRecord()], [
+        authorizingReceipt({
+          taskAcceptance: {
+            issueNumber: SELF_TASK.issueNumber,
+            taskDigest: "e".repeat(64),
+            verdict: "fulfilled",
+            evidence: ["stale task digest"],
+          },
+        }),
+      ]),
+    });
+    const result = await run(rig, github);
+    assert.equal(rig.merges, 0);
+    assert.equal(result.status, "skipped");
+    assert.ok(
+      result.actions.includes(`delivery:${TARGET}:task_acceptance_refused`),
+      JSON.stringify(result.actions),
+    );
+    assert.equal((await readRequests(rig)).length, 0);
+    await Deno.remove(rig.tmp, { recursive: true });
+  },
+);
+
+Deno.test(
+  "hosted autonomy: a fulfilled verdict for a different issue never merges",
+  async () => {
+    const { rig, github } = await makeRig("autonomy-issue", {
+      repair: repairSnapshot([deliveryRecord()], [
+        authorizingReceipt({
+          taskAcceptance: {
+            issueNumber: SELF_TASK.issueNumber + 1,
+            taskDigest: SELF_TASK.digest,
+            verdict: "fulfilled",
+            evidence: ["another issue"],
+          },
+        }),
+      ]),
+    });
+    const result = await run(rig, github);
+    assert.equal(rig.merges, 0);
+    assert.equal(result.status, "skipped");
+    assert.ok(
+      result.actions.includes(`delivery:${TARGET}:task_acceptance_refused`),
+      JSON.stringify(result.actions),
+    );
+    assert.equal((await readRequests(rig)).length, 0);
+    await Deno.remove(rig.tmp, { recursive: true });
+  },
+);
+
+Deno.test(
+  "hosted autonomy: an already-satisfied base is an honest non-delivery",
+  async () => {
+    const { rig, github } = await makeRig("autonomy-satisfied", {
+      repair: repairSnapshot([deliveryRecord()], [
+        authorizingReceipt({
+          taskAcceptance: {
+            issueNumber: SELF_TASK.issueNumber,
+            taskDigest: SELF_TASK.digest,
+            verdict: "already_satisfied_at_base",
+            evidence: ["the recorded base already satisfies the issue"],
+          },
+        }),
+      ]),
+    });
+    const result = await run(rig, github);
+    assert.equal(rig.merges, 0);
+    assert.equal(result.status, "skipped");
+    assert.ok(
+      result.actions.includes(`delivery:${TARGET}:task_acceptance_refused`),
+      JSON.stringify(result.actions),
+    );
+    assert.equal((await readRequests(rig)).length, 0);
+    assert.deepEqual(rig.closed, []);
+    assert.equal((await readWork(rig))[0].nextStep, "delivery");
+    await Deno.remove(rig.tmp, { recursive: true });
+  },
+);
+
+Deno.test(
+  "hosted autonomy: issue text that drifted before the merge blocks the final action",
+  async () => {
+    // The first trusted read binds the reviewed text and passes; the live issue
+    // moves while the remaining gates are read. The fresh read taken
+    // immediately before the merge sees a different task, so the candidate
+    // that already passed every other gate is still never merged.
+    const drifted = await driftedSelfTask(`${SELF_TASK_BODY} (edited)`);
+    let reads = 0;
+    const { rig, github } = await makeRig("autonomy-merge-drift", {
+      repair: repairSnapshot([deliveryRecord()], [authorizingReceipt()]),
+      pull: pullFacts({ state: "open", merged: false, mergeCommitSha: null }),
+      afterMerge: pullFacts(),
+      issueTask: () => {
+        reads++;
+        return Promise.resolve(reads === 1 ? SELF_TASK : drifted);
+      },
+    });
+    const result = await run(rig, github);
+    assert.ok(reads >= 2, `expected a pre-merge read, got ${reads}`);
+    assert.equal(rig.merges, 0);
+    assert.equal(result.status, "skipped");
+    assert.ok(
+      result.actions.includes(`delivery:${TARGET}:task_acceptance_refused`),
+      JSON.stringify(result.actions),
+    );
+    assert.equal((await readRequests(rig)).length, 0);
+    await Deno.remove(rig.tmp, { recursive: true });
+  },
+);
+
+Deno.test(
+  "hosted autonomy: issue text that drifted before the closure leaves the issue open",
+  async () => {
+    const request = await buildHostedReleaseRequest(
+      SELF_REPO,
+      MERGE,
+      HEAD,
+      BASE,
+      51,
+      authorizingReceipt(),
+      T0 + 2000,
+    );
+    if (request === null) throw new Error("fixture request invalid");
+    const drifted = await driftedSelfTask(`${SELF_TASK_BODY} (edited)`);
+    const { rig, github } = await makeRig("autonomy-close-drift", {
+      repair: repairSnapshot(
+        [deliveryRecord()],
+        [authorizingReceipt()],
+        [request],
+      ),
+      // The accepted release is produced by the REAL supervisor core over the
+      // rig's own release store: the store only ever sees a legal lifecycle.
+      hostedReceipt: { request, priorRevision: BASE },
+      issueTask: () => Promise.resolve(drifted),
+    });
+    const result = await run(rig, github);
+    assert.deepEqual(rig.closed, []);
+    assert.equal(result.status, "skipped");
+    assert.equal((await readWork(rig))[0].nextStep, "delivery");
+    await Deno.remove(rig.tmp, { recursive: true });
+  },
+);
+
+Deno.test(
+  "hosted autonomy: a legacy quality-only receipt closes nothing even after an accepted release",
+  async () => {
+    const request = await buildHostedReleaseRequest(
+      SELF_REPO,
+      MERGE,
+      HEAD,
+      BASE,
+      51,
+      authorizingReceipt(),
+      T0 + 2000,
+    );
+    if (request === null) throw new Error("fixture request invalid");
+    const { rig, github } = await makeRig("autonomy-close-legacy", {
+      repair: repairSnapshot(
+        [deliveryRecord()],
+        [authorizingReceipt({ taskAcceptance: null })],
+        [request],
+      ),
+      // The accepted release is produced by the REAL supervisor core over the
+      // rig's own release store: the store only ever sees a legal lifecycle.
+      hostedReceipt: { request, priorRevision: BASE },
+      issueTask: () => Promise.resolve(null),
+    });
+    const result = await run(rig, github);
+    assert.deepEqual(rig.closed, []);
+    assert.equal(result.status, "skipped");
+    assert.equal((await readWork(rig))[0].nextStep, "delivery");
+    await Deno.remove(rig.tmp, { recursive: true });
+  },
+);
+
+Deno.test(
+  "hosted autonomy: a self-consistent alternate reviewer identity never merges",
+  async () => {
+    const { rig, github } = await makeRig("autonomy-reviewer", {
+      repair: repairSnapshot([deliveryRecord()], [
+        authorizingReceipt({
+          expectedReviewer: "alternate-reviewer[bot]",
+          observedReviewer: "alternate-reviewer[bot]",
+        }),
+      ]),
+    });
+    const result = await run(rig, github);
+    assert.equal(rig.merges, 0);
+    assert.equal(result.status, "skipped");
+    assert.ok(
+      result.actions.includes(`delivery:${TARGET}:task_acceptance_refused`),
+      JSON.stringify(result.actions),
+    );
+    assert.equal((await readRequests(rig)).length, 0);
+    assert.deepEqual(rig.closed, []);
+    await Deno.remove(rig.tmp, { recursive: true });
+  },
+);
+
+Deno.test(
+  "hosted autonomy: a later closure re-reads the issue text changed by the earlier close",
+  async () => {
+    const request = await buildHostedReleaseRequest(
+      SELF_REPO,
+      MERGE,
+      HEAD,
+      BASE,
+      51,
+      authorizingReceipt(),
+      T0 + 2000,
+    );
+    if (request === null) throw new Error("fixture request invalid");
+    const { rig, github } = await makeRig("autonomy-close-refresh", {
+      repair: repairSnapshot(
+        [deliveryRecord(), foreignRecord()],
+        [authorizingReceipt(), foreignReceipt()],
+        [request],
+      ),
+      // The accepted release is produced by the REAL supervisor core over the
+      // rig's own release store: the store only ever sees a legal lifecycle.
+      hostedReceipt: { request, priorRevision: BASE },
+      pull: foreignPullFacts(),
+    });
+    // The server-side issue text the surfaces serve. The state layer orders
+    // work records by id, so the foreign issue (120) is closed before the
+    // self issue (48): the first closure mutates the LATER self issue's text,
+    // which the bulk read taken for the plan still holds.
+    const drifted = await driftedSelfTask(
+      `${SELF_TASK_BODY} (edited by the earlier closure)`,
+    );
+    const states = new Map<number, ReviewTaskStatementV1 | null>([
+      [SELF_TASK.issueNumber, SELF_TASK],
+      [FOREIGN_TASK.issueNumber, FOREIGN_TASK],
+    ]);
+    const selfClosed: number[] = [];
+    const foreignClosed: number[] = [];
+    rig.githubFor = (repository) =>
+      isSelfRepository(repository)
+        ? {
+          ...github,
+          readIssueTask: (number: number) =>
+            Promise.resolve(states.get(number) ?? null),
+          closeIssue: (number: number) => {
+            selfClosed.push(number);
+            return Promise.resolve(true);
+          },
+        }
+        : {
+          ...github,
+          readDefaultBranch: () => Promise.resolve(FOREIGN_BRANCH),
+          readIssueTask: (number: number) =>
+            Promise.resolve(states.get(number) ?? null),
+          readPull: (number: number) =>
+            Promise.resolve(number === FOREIGN_PR ? foreignPullFacts() : null),
+          closeIssue: (number: number) => {
+            foreignClosed.push(number);
+            // Closing the first (foreign) issue changes the LATER (self)
+            // issue's text: the bulk read taken for the plan is now stale for
+            // that issue, whose fresh pre-closure read must therefore refuse.
+            states.set(SELF_TASK.issueNumber, drifted);
+            return Promise.resolve(true);
+          },
+        };
+    const result = await run(rig);
+    assert.equal(result.status, "applied", JSON.stringify(result));
+    // The first (foreign) closure happened; the later self closure re-read the
+    // changed text and refused, so the self issue stays open and the foreign
+    // issue is legitimately done.
+    assert.deepEqual(foreignClosed, [FOREIGN_TASK.issueNumber]);
+    assert.deepEqual(selfClosed, []);
+    assert.deepEqual(
+      result.actions.filter((action) => action.startsWith("close:")),
+      [
+        `close:${FOREIGN_TARGET}:issue=${FOREIGN_TASK.issueNumber}`,
+        `close:${TARGET}:issue=${SELF_TASK.issueNumber}:refused`,
+      ],
+    );
+    const work = await readWork(rig);
+    assert.equal(
+      work.find((record) => record.id === FOREIGN_TARGET)?.nextStep,
+      "done",
+    );
+    assert.equal(
+      work.find((record) => record.id === TARGET)?.nextStep,
+      "delivery",
+    );
+    await Deno.remove(rig.tmp, { recursive: true });
   },
 );
