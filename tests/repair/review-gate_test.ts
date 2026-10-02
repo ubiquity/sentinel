@@ -146,6 +146,11 @@ Deno.test("review gate: an issue-backed delivery requires the exact bound positi
       TASK_ACCEPTANCE_MISSING_DETAIL,
     ],
     [
+      "explicit null acceptance (legacy decode)",
+      completedReceipt({ taskAcceptance: null }),
+      TASK_ACCEPTANCE_MISSING_DETAIL,
+    ],
+    [
       "acceptance for another issue",
       completedReceipt({ taskAcceptance: fulfilledAcceptance(2) }),
       TASK_ACCEPTANCE_MISMATCH_DETAIL,
@@ -208,6 +213,23 @@ Deno.test("review gate: an issue-backed delivery requires the exact bound positi
       `${label} never authorizes a merge`,
     );
   }
+  // The persisted legacy shape decodes with the key ABSENT — injecting an
+  // explicit null would change the record's canonical bytes — and an absent
+  // field is not evidence of acceptance either.
+  const absentAcceptance = completedReceipt({ taskAcceptance: undefined });
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(absentAcceptance, "taskAcceptance"),
+    false,
+    "an absent legacy task acceptance must stay absent after decoding",
+  );
+  assert.equal(
+    taskAcceptanceRefusal(absentAcceptance, base, TRUSTED_TASK),
+    TASK_ACCEPTANCE_MISSING_DETAIL,
+  );
+  assert.equal(
+    reviewAuthorizesMerge(absentAcceptance, base, REVIEWER, TRUSTED_TASK),
+    false,
+  );
   // An unreadable or wrong trusted context fails closed even for a receipt
   // whose own copied fields are internally consistent.
   for (

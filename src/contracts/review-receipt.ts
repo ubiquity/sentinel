@@ -168,21 +168,25 @@ export const TASK_ACCEPTANCE_UNCERTAIN_DETAIL =
  * exactly bound `fulfilled` acceptance of the record's own issue; every other
  * combination is a static refusal. Work without a source issue accepts only a
  * matching absence (no invented acceptance), so incident work keeps its
- * existing change-only contract.
+ * existing change-only contract. An absent field and an explicit null are the
+ * same "no acceptance": absence is the legacy on-disk shape and is never a
+ * defaulted passing acceptance.
  */
 export function reviewTaskAcceptanceRefusal(input: {
   /** The record's own source issue number, or null for incident work. */
   issueNumber: number | null;
   /** Trusted live task statement, or "unavailable" when it cannot be read. */
   task: ReviewTaskStatementV1 | null | "unavailable";
-  /** The acceptance carried by the durable review receipt, or null. */
-  acceptance: ReviewTaskAcceptanceV1 | null;
+  /**
+   * The acceptance carried by the durable review receipt: an acceptance, an
+   * explicit null, or undefined when the legacy record omitted the field.
+   */
+  acceptance: ReviewTaskAcceptanceV1 | null | undefined;
 }): string | null {
   const { issueNumber, task, acceptance } = input;
   if (issueNumber === null) {
-    return task === null && acceptance === null
-      ? null
-      : TASK_ACCEPTANCE_UNBOUND_DETAIL;
+    const absent = acceptance === null || acceptance === undefined;
+    return task === null && absent ? null : TASK_ACCEPTANCE_UNBOUND_DETAIL;
   }
   if (task === "unavailable" || task === null) {
     return TASK_ACCEPTANCE_CONTEXT_DETAIL;
@@ -190,7 +194,9 @@ export function reviewTaskAcceptanceRefusal(input: {
   if (task.issueNumber !== issueNumber) {
     return TASK_ACCEPTANCE_CONTEXT_DETAIL;
   }
-  if (acceptance === null) return TASK_ACCEPTANCE_MISSING_DETAIL;
+  if (acceptance === null || acceptance === undefined) {
+    return TASK_ACCEPTANCE_MISSING_DETAIL;
+  }
   if (acceptance.issueNumber !== issueNumber) {
     return TASK_ACCEPTANCE_MISMATCH_DETAIL;
   }
@@ -327,10 +333,15 @@ export interface ReviewReceiptV1 {
   /** Distinct unresolved severities, derived from unresolved findings. */
   unresolvedSeverities: SeverityV1[];
   /**
-   * Positive task acceptance evidence, or null. Legacy/change-only receipts
-   * carry null and can never authorize an issue-backed delivery.
+   * Positive task acceptance evidence, an explicit null when the review
+   * reported none, or absent entirely on a receipt written before the semantic
+   * acceptance boundary existed. PRESENCE IS SEMANTIC: absence is preserved
+   * through decoding and canonical serialization (it is never rewritten as an
+   * explicit null), so a legacy receipt stays byte-verifiable in state. Every
+   * authorization surface reads `taskAcceptance ?? null`; absence and null are
+   * both "no acceptance" and can never authorize an issue-backed delivery.
    */
-  taskAcceptance: ReviewTaskAcceptanceV1 | null;
+  taskAcceptance?: ReviewTaskAcceptanceV1 | null;
   submittedAt: number;
   completedAt: number | null;
   observedAt: number;
@@ -357,9 +368,10 @@ const KEYS = [
 ] as const;
 /**
  * Additive optional key: a receipt written before the semantic acceptance
- * boundary existed parses with `taskAcceptance: null`, which the merge gate
- * refuses for issue-backed work. The key is never silently defaulted to a
- * passing acceptance.
+ * boundary existed omits it entirely, and the parser preserves that absence
+ * rather than injecting a default. An explicit null decodes as null and an
+ * explicit acceptance decodes under the strict bounded parser; neither the
+ * legacy absence nor an explicit null is ever a passing acceptance.
  */
 const OPTIONAL_KEYS = ["taskAcceptance"] as const;
 const PULL_REQUEST_KEYS = ["number", "head", "base"] as const;
@@ -447,10 +459,14 @@ export function parseReviewReceiptV1(input: unknown): ReviewReceiptV1 {
     obj.unresolvedSeverities,
     "$.unresolvedSeverities",
   );
-  // An absent key (a receipt written before this boundary) parses as null;
-  // every other value must be the strict bounded acceptance.
+  // ABSENCE IS SEMANTIC: a receipt written before the semantic acceptance
+  // boundary carries no key at all, so the absent field stays absent and is
+  // never defaulted to an explicit null — that default would change the
+  // record's canonical bytes and reject the very blob that stored it. An
+  // explicit null stays explicitly null; every other value must be the strict
+  // bounded acceptance.
   const taskAcceptance = obj.taskAcceptance === undefined
-    ? null
+    ? undefined
     : expectNullable(
       obj.taskAcceptance,
       "$.taskAcceptance",
@@ -514,8 +530,8 @@ export function parseReviewReceiptV1(input: unknown): ReviewReceiptV1 {
     }
     // Only a completed review can carry a task verdict; a pending/unavailable
     // receipt claiming acceptance would be completion evidence without a
-    // completed review.
-    if (taskAcceptance !== null) {
+    // completed review. An absent legacy field is not a claim.
+    if (taskAcceptance !== null && taskAcceptance !== undefined) {
       fail(
         "$.taskAcceptance",
         "invalid_lifecycle",
@@ -558,9 +574,9 @@ export function parseReviewReceiptV1(input: unknown): ReviewReceiptV1 {
     );
   }
 
-  return {
-    version: "v1",
-    kind: "review_receipt",
+  const receipt = {
+    version: "v1" as const,
+    kind: "review_receipt" as const,
     id,
     requestId,
     expectedReviewer,
@@ -573,11 +589,16 @@ export function parseReviewReceiptV1(input: unknown): ReviewReceiptV1 {
     findings,
     findingsUncounted,
     unresolvedSeverities,
-    taskAcceptance,
     submittedAt,
     completedAt,
     observedAt,
   };
+  // The optional acceptance key is emitted only when the record carried it:
+  // emitting an explicit null for an absent legacy field would change the
+  // record's canonical bytes and reject the stored blob on read.
+  return taskAcceptance === undefined
+    ? receipt
+    : { ...receipt, taskAcceptance };
 }
 
 function parseFinding(input: unknown, path: string): ReviewFindingV1 {

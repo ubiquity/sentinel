@@ -647,7 +647,18 @@ export function completedReviewMatchesReceipt(
   if (normalized.reviewer !== receipt.observedReviewer) return false;
   if (normalized.observedHead !== receipt.pullRequest.head) return false;
   if (normalized.observedBase !== receipt.pullRequest.base) return false;
-  if (!sameTaskAcceptance(normalized.taskAcceptance, receipt.taskAcceptance)) {
+  // A durable receipt written before the semantic acceptance boundary omits
+  // taskAcceptance entirely; that absence is "no acceptance", exactly like the
+  // explicit null a fresh change-only normalization carries. Normalize before
+  // comparing so legacy absence matches the null it equals — never a copied
+  // acceptance, and never evidence: an issue-backed delivery still needs the
+  // positive bound acceptance evaluated by the semantic gate.
+  if (
+    !sameTaskAcceptance(
+      normalized.taskAcceptance,
+      receipt.taskAcceptance ?? null,
+    )
+  ) {
     return false;
   }
   const current = normalized.findings.map((finding) =>
