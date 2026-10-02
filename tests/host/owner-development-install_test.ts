@@ -204,6 +204,13 @@ const CHILD_DEADLINE_GENERATION = 51;
 // missing import.
 const RUNTIME52_REVISION = "80cc73a4a38d58a53e215b1b8daaccb8e6fe97b1" as GitSha;
 const RUNTIME52_GENERATION = 52;
+// The owner-repair generation 53 pin stays a test-local exact literal: this
+// suite must also compile against pre-rung production source, where the new
+// constant does not exist, so the expected red is a semantic plan mismatch and
+// never a missing import.
+const OWNER_REPAIR53_REVISION =
+  "573d862429ab49eefbfcb99bd1878926024af96d" as GitSha;
+const OWNER_REPAIR53_GENERATION = 53;
 const ROLLBACK_TARGET_GENERATION = 46;
 
 function hostedProof(input: {
@@ -4648,6 +4655,433 @@ Deno.test(
       assert.equal(
         planOwnerDevelopmentInstall(refusal, NOW).status,
         "waiting",
+      );
+    }
+  },
+);
+
+Deno.test(
+  "owner install owner-repair53: an idle unproven generation 52 installs the pinned 573d repair at generation 53",
+  () => {
+    const retained51 = healthyProof(
+      CHILD_DEADLINE_REVISION,
+      CHILD_DEADLINE_GENERATION,
+      601,
+    );
+    // The pointer is exactly the idle unproven generation 52 revision: no
+    // settlement and no healthy proof of its own, only the genuine retained
+    // generation 51 proof.
+    const state = releaseSnapshot({
+      runtime: runtimeRecord({
+        revision: RUNTIME52_REVISION,
+        generation: RUNTIME52_GENERATION,
+        healthyProof: retained51,
+      }),
+    });
+    const before = canonicalStringify(state);
+    const plan = planOwnerDevelopmentInstall(state, NOW);
+    assert.equal(plan.status, "install");
+    if (plan.status !== "install") throw new Error("expected install");
+    assert.equal(plan.move.action, "install");
+    assert.equal(plan.move.priorRevision, RUNTIME52_REVISION);
+    assert.equal(plan.move.priorGeneration, RUNTIME52_GENERATION);
+    assert.equal(plan.move.nextRevision, OWNER_REPAIR53_REVISION);
+    assert.equal(plan.move.nextGeneration, OWNER_REPAIR53_GENERATION);
+    assert.equal(plan.move.nextGeneration, plan.move.priorGeneration + 1);
+    assert.equal(
+      canonicalStringify(plan.move.priorHealthyProof),
+      canonicalStringify(retained51),
+    );
+    // The repair install applies to the intended snapshot and preserves the
+    // retained prior proof and every unrelated release/history record.
+    const planned = buildOwnerDevelopmentInstallSnapshot(
+      state,
+      STATE_HEAD,
+      plan.move,
+      NOW,
+    );
+    const priorRuntime = state.hostedRuntimes[0];
+    const nextRuntime = planned.hostedRuntimes[0];
+    assert.equal(planned.sequence, state.sequence + 1);
+    assert.equal(planned.stateHead, STATE_HEAD);
+    assert.equal(planned.updatedAt, NOW);
+    assert.equal(
+      canonicalStringify(planned.releases),
+      canonicalStringify(state.releases),
+    );
+    assert.equal(
+      canonicalStringify(planned.hostedReleases),
+      canonicalStringify(state.hostedReleases),
+    );
+    assert.equal(
+      canonicalStringify(planned.githubCooldowns),
+      canonicalStringify(state.githubCooldowns),
+    );
+    assert.equal(nextRuntime.id, priorRuntime.id);
+    assert.equal(nextRuntime.activeRevision, OWNER_REPAIR53_REVISION);
+    assert.equal(nextRuntime.generation, OWNER_REPAIR53_GENERATION);
+    assert.equal(nextRuntime.createdAt, priorRuntime.createdAt);
+    assert.equal(
+      canonicalStringify(nextRuntime.lastHealthyProof),
+      canonicalStringify(retained51),
+    );
+    assert.equal(
+      canonicalStringify(nextRuntime.lastExecutionProof),
+      canonicalStringify(priorRuntime.lastExecutionProof),
+    );
+    assert.equal(canonicalStringify(state), before);
+
+    // A missing or mismatched retained proof never authorizes the repair
+    // install.
+    const refusals = [
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: RUNTIME52_REVISION,
+          generation: RUNTIME52_GENERATION,
+        }),
+      }),
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: RUNTIME52_REVISION,
+          generation: RUNTIME52_GENERATION,
+          healthyProof: healthyProof(
+            UNRELATED,
+            CHILD_DEADLINE_GENERATION,
+            602,
+          ),
+        }),
+      }),
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: RUNTIME52_REVISION,
+          generation: RUNTIME52_GENERATION,
+          healthyProof: healthyProof(
+            CHILD_DEADLINE_REVISION,
+            RUNTIME52_GENERATION,
+            603,
+          ),
+        }),
+      }),
+    ];
+    for (const refusal of refusals) {
+      assert.equal(
+        planOwnerDevelopmentInstall(refusal, NOW).status,
+        "waiting",
+      );
+    }
+
+    // A retained earlier settlement remains history, while any inconsistent
+    // own-generation settlement cannot be ignored to take the repair path.
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: RUNTIME52_REVISION,
+            generation: RUNTIME52_GENERATION,
+            healthyProof: retained51,
+            executionProof: retained51,
+          }),
+        }),
+        NOW,
+      ).status,
+      "install",
+    );
+    for (
+      const settlement of [
+        healthyProof(RUNTIME52_REVISION, RUNTIME52_GENERATION, 605),
+        notStartedProof(RUNTIME52_REVISION, RUNTIME52_GENERATION),
+        failedProof(UNRELATED, RUNTIME52_GENERATION, 606),
+        failedProof(RUNTIME52_REVISION, CHILD_DEADLINE_GENERATION, 607),
+      ]
+    ) {
+      assert.equal(
+        planOwnerDevelopmentInstall(
+          releaseSnapshot({
+            runtime: runtimeRecord({
+              revision: RUNTIME52_REVISION,
+              generation: RUNTIME52_GENERATION,
+              healthyProof: retained51,
+              executionProof: settlement,
+            }),
+          }),
+          NOW,
+        ).status,
+        "waiting",
+      );
+    }
+    for (
+      const proof of [
+        { ...retained51, repository: "ubiquity/ai.ubq.fi" },
+        { ...retained51, ref: "refs/heads/development" },
+      ]
+    ) {
+      const tampered = structuredClone(state);
+      tampered.hostedRuntimes[0].lastHealthyProof = proof;
+      assert.equal(
+        planOwnerDevelopmentInstall(tampered, NOW).status,
+        "waiting",
+      );
+    }
+
+    // The proven generation 52 keeps its existing terminal outcome instead of
+    // taking the unproven repair path.
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: RUNTIME52_REVISION,
+            generation: RUNTIME52_GENERATION,
+            healthyProof: healthyProof(
+              RUNTIME52_REVISION,
+              RUNTIME52_GENERATION,
+              604,
+            ),
+            executionProof: healthyProof(
+              RUNTIME52_REVISION,
+              RUNTIME52_GENERATION,
+              604,
+            ),
+          }),
+        }),
+        NOW,
+      ).status,
+      "no_change",
+    );
+
+    // A running execution, a requested release, a live pointer intent and an
+    // active cooldown each keep the repair install a zero-write wait.
+    const intentRelease = parseHostedReleaseRecordV1({
+      ...acceptedRelease(),
+      phase: "promoting",
+      pointerIntent: {
+        action: "promote",
+        expectedRevision: ORIGINAL,
+        nextRevision: AGGREGATE,
+        expectedGeneration: OWNER_DEVELOPMENT_INSTALL_ORIGINAL_GENERATION,
+        createdAt: T0,
+      },
+    });
+    const gated = [
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: RUNTIME52_REVISION,
+          generation: RUNTIME52_GENERATION,
+          healthyProof: retained51,
+          execution: executionIntent(RUNTIME52_REVISION, RUNTIME52_GENERATION),
+        }),
+      }),
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: RUNTIME52_REVISION,
+          generation: RUNTIME52_GENERATION,
+          healthyProof: retained51,
+        }),
+        hostedReleases: [requestedRelease()],
+      }),
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: RUNTIME52_REVISION,
+          generation: RUNTIME52_GENERATION,
+          healthyProof: retained51,
+        }),
+        hostedReleases: [intentRelease],
+      }),
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: RUNTIME52_REVISION,
+          generation: RUNTIME52_GENERATION,
+          healthyProof: retained51,
+        }),
+        cooldowns: [cooldown(NOW + 1)],
+      }),
+    ];
+    for (const gatedState of gated) {
+      assert.equal(
+        planOwnerDevelopmentInstall(gatedState, NOW).status,
+        "waiting",
+      );
+    }
+  },
+);
+
+Deno.test(
+  "owner install owner-repair53: a failed corrected generation 53 rolls back to the recorded 1f90 generation 51 predecessor at generation 54",
+  () => {
+    const retained51 = healthyProof(
+      CHILD_DEADLINE_REVISION,
+      CHILD_DEADLINE_GENERATION,
+      611,
+    );
+    const state = releaseSnapshot({
+      runtime: runtimeRecord({
+        revision: OWNER_REPAIR53_REVISION,
+        generation: OWNER_REPAIR53_GENERATION,
+        healthyProof: retained51,
+        executionProof: failedProof(
+          OWNER_REPAIR53_REVISION,
+          OWNER_REPAIR53_GENERATION,
+          612,
+        ),
+      }),
+    });
+    const before = canonicalStringify(state);
+    const plan = planOwnerDevelopmentInstall(state, NOW);
+    assert.equal(plan.status, "rollback");
+    if (plan.status !== "rollback") throw new Error("expected rollback");
+    assert.equal(plan.move.action, "rollback");
+    assert.equal(plan.move.priorRevision, OWNER_REPAIR53_REVISION);
+    assert.equal(plan.move.priorGeneration, OWNER_REPAIR53_GENERATION);
+    assert.equal(plan.move.nextRevision, CHILD_DEADLINE_REVISION);
+    assert.equal(plan.move.nextGeneration, OWNER_REPAIR53_GENERATION + 1);
+    assert.equal(plan.move.nextGeneration, plan.move.priorGeneration + 1);
+    assert.equal(
+      canonicalStringify(plan.move.priorHealthyProof),
+      canonicalStringify(retained51),
+    );
+    // The single rollback applies to the intended snapshot and preserves the
+    // recorded prior proof and every unrelated release/history record.
+    const planned = buildOwnerDevelopmentInstallSnapshot(
+      state,
+      STATE_HEAD,
+      plan.move,
+      NOW,
+    );
+    const priorRuntime = state.hostedRuntimes[0];
+    const nextRuntime = planned.hostedRuntimes[0];
+    assert.equal(planned.sequence, state.sequence + 1);
+    assert.equal(planned.stateHead, STATE_HEAD);
+    assert.equal(planned.updatedAt, NOW);
+    assert.equal(
+      canonicalStringify(planned.releases),
+      canonicalStringify(state.releases),
+    );
+    assert.equal(
+      canonicalStringify(planned.hostedReleases),
+      canonicalStringify(state.hostedReleases),
+    );
+    assert.equal(
+      canonicalStringify(planned.githubCooldowns),
+      canonicalStringify(state.githubCooldowns),
+    );
+    assert.equal(nextRuntime.id, priorRuntime.id);
+    assert.equal(nextRuntime.activeRevision, CHILD_DEADLINE_REVISION);
+    assert.equal(nextRuntime.generation, OWNER_REPAIR53_GENERATION + 1);
+    assert.equal(nextRuntime.createdAt, priorRuntime.createdAt);
+    assert.equal(
+      canonicalStringify(nextRuntime.lastHealthyProof),
+      canonicalStringify(retained51),
+    );
+    assert.equal(
+      canonicalStringify(nextRuntime.lastExecutionProof),
+      canonicalStringify(priorRuntime.lastExecutionProof),
+    );
+    assert.equal(canonicalStringify(state), before);
+
+    // Installing the corrected pointer retains the earlier proof; it must wait
+    // for its own genuine generation 53 healthy settlement before completion.
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: OWNER_REPAIR53_REVISION,
+            generation: OWNER_REPAIR53_GENERATION,
+            healthyProof: retained51,
+          }),
+        }),
+        NOW,
+      ).status,
+      "waiting",
+    );
+
+    // A missing, own-generation or wrong-generation predecessor proof never
+    // authorizes the rollback.
+    const refusals = [
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: OWNER_REPAIR53_REVISION,
+          generation: OWNER_REPAIR53_GENERATION,
+          executionProof: failedProof(
+            OWNER_REPAIR53_REVISION,
+            OWNER_REPAIR53_GENERATION,
+            613,
+          ),
+        }),
+      }),
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: OWNER_REPAIR53_REVISION,
+          generation: OWNER_REPAIR53_GENERATION,
+          healthyProof: healthyProof(
+            OWNER_REPAIR53_REVISION,
+            OWNER_REPAIR53_GENERATION,
+            614,
+          ),
+          executionProof: failedProof(
+            OWNER_REPAIR53_REVISION,
+            OWNER_REPAIR53_GENERATION,
+            615,
+          ),
+        }),
+      }),
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: OWNER_REPAIR53_REVISION,
+          generation: OWNER_REPAIR53_GENERATION,
+          healthyProof: healthyProof(
+            CHILD_DEADLINE_REVISION,
+            OWNER_REPAIR53_GENERATION,
+            616,
+          ),
+          executionProof: failedProof(
+            OWNER_REPAIR53_REVISION,
+            OWNER_REPAIR53_GENERATION,
+            617,
+          ),
+        }),
+      }),
+    ];
+    for (const refusal of refusals) {
+      assert.equal(
+        planOwnerDevelopmentInstall(refusal, NOW).status,
+        "waiting",
+      );
+    }
+
+    // A healthy corrected generation 53 is terminal as the existing latest
+    // pattern, and both rollback targets (1f90 generation 53 and 1f90
+    // generation 54) stay terminal with no automatic retry.
+    for (
+      const terminalState of [
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: OWNER_REPAIR53_REVISION,
+            generation: OWNER_REPAIR53_GENERATION,
+            healthyProof: healthyProof(
+              OWNER_REPAIR53_REVISION,
+              OWNER_REPAIR53_GENERATION,
+              618,
+            ),
+          }),
+        }),
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: CHILD_DEADLINE_REVISION,
+            generation: OWNER_REPAIR53_GENERATION,
+            healthyProof: retained51,
+          }),
+        }),
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: CHILD_DEADLINE_REVISION,
+            generation: OWNER_REPAIR53_GENERATION + 1,
+            healthyProof: retained51,
+          }),
+        }),
+      ]
+    ) {
+      assert.equal(
+        planOwnerDevelopmentInstall(terminalState, NOW).status,
+        "no_change",
       );
     }
   },
