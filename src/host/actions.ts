@@ -434,9 +434,18 @@ export async function runActionsRepairHost(
   // deterministic (owner override, then the explicit DeepSeek fallback with
   // its key present, else the primary gateway); it is never a per-request
   // swap, and the resolved model id is the id the runtime requests and records.
-  // The route environment is the injected one when the caller supplies it;
-  // otherwise it is exactly the process environment read as before.
-  const routeEnv = deps.env ?? Deno.env.toObject();
+  // The route environment is the injected one when the caller supplies it, in
+  // which case the literal below is never evaluated and no process key is
+  // read; otherwise it is exactly the documented route/review variables read
+  // through their own named grants. The process environment is never
+  // enumerated, so a named allowlist is sufficient.
+  const routeEnv = deps.env ?? {
+    SENTINEL_MODEL_BASE_URL: Deno.env.get("SENTINEL_MODEL_BASE_URL"),
+    SENTINEL_MODEL_ID: Deno.env.get("SENTINEL_MODEL_ID"),
+    SENTINEL_MODEL_FALLBACK: Deno.env.get("SENTINEL_MODEL_FALLBACK"),
+    SENTINEL_DEEPSEEK_API_KEY: Deno.env.get("SENTINEL_DEEPSEEK_API_KEY"),
+    SENTINEL_REVIEW_MODEL_ID: Deno.env.get("SENTINEL_REVIEW_MODEL_ID"),
+  };
   const modelRoute = resolveModelRoute(routeEnv);
   // The dedicated structured-review model override is resolved EXACTLY ONCE
   // here alongside the route: an unset or blank value yields the owner's

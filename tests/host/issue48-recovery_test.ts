@@ -75,6 +75,7 @@ const REPOSITORY = "ubiquity/sentinel";
 const PR_NUMBER = 51;
 const PR_HEAD = "1a".repeat(20) as GitSha;
 const PR_BASE = "2b".repeat(20) as GitSha;
+const BASE_REF = "development";
 const OTHER_SHA = "3c".repeat(20) as GitSha;
 const RUNTIME_REVISION = "4d".repeat(20) as GitSha;
 const NOW = T0 + 10_000;
@@ -261,6 +262,7 @@ function bindingFor(
     pullRequestNumber: PR_NUMBER,
     pullRequestHead: PR_HEAD,
     pullRequestBase: PR_BASE,
+    pullRequestBaseRef: BASE_REF,
     pullRequestRepository: REPOSITORY,
     targetId: TARGET_ID,
   };
@@ -345,6 +347,7 @@ async function makeRig(
       state: "open",
       head: PR_HEAD,
       base: PR_BASE,
+      baseRef: BASE_REF,
       repository: REPOSITORY,
     },
     counters,
@@ -520,6 +523,100 @@ Deno.test("issue48 recovery: applies the fixed CAS transition then stays skipped
   }
 });
 
+Deno.test("issue48 recovery: an advanced live PR base still applies the pinned transition", async () => {
+  const rig = await makeRig("advanced-base");
+  try {
+    // Another commit landed on the target branch after the reviewed PR was
+    // published: the live PR view reports the advanced base.sha while the
+    // durable record still pins the exact reviewed historical base.
+    const liveAdvancedBase = "5e".repeat(20) as GitSha;
+    assert.notEqual(liveAdvancedBase, rig.binding.pullRequestBase);
+    const result = await runRig(rig, {
+      prView: { ...rig.prView, base: liveAdvancedBase },
+    });
+    // Regression: this was pull_request_mismatch while the live base head was
+    // still compared against the saved historical base.
+    assert.equal(result.reason, "applied");
+    assert.equal(result.status, "applied");
+    assert.equal(result.beforeHead, rig.repairHead);
+    assert.equal(rig.counters.writes, 1);
+    assert.equal(rig.counters.prReads, 1);
+    const appliedHead = result.appliedHead;
+    if (appliedHead === null) throw new Error("expected a proved applied head");
+
+    // The release pin and every other state branch stayed untouched.
+    assert.equal(await remoteHead(rig.ctx, RELEASE_STATE_REF), rig.releaseHead);
+
+    // Whole-state equality: the one CAS transition changed only the four target
+    // lifecycle fields, and every historical PR/repo/number/state binding,
+    // digest and pin stays byte-for-byte.
+    const intended = intendedSnapshot(
+      rig.seed,
+      TARGET_ID,
+      rig.repairHead,
+      NOW,
+    );
+    const read = await rig.repair.readRepair();
+    if (!read.ok || read.value.status !== "found") {
+      throw new Error("expected applied state");
+    }
+    assert.equal(read.value.head, appliedHead);
+    assert.equal(
+      canonicalStringify(read.value.snapshot),
+      canonicalStringify(intended),
+    );
+
+    const after = read.value.snapshot.work.find((record) =>
+      record.id === TARGET_ID
+    );
+    if (after === undefined) throw new Error("expected the target work record");
+    // The saved HISTORICAL base identity remains pinned to the record and to
+    // the reviewed binding; only the live base.sha moved.
+    assert.equal(after.target.base, PR_BASE);
+    assert.equal(after.target.base, rig.binding.pullRequestBase);
+    assert.equal(after.target.head, PR_HEAD);
+    assert.equal(after.target.pr, PR_NUMBER);
+    assert.equal(after.related.issueNumber, 48);
+    assert.equal(after.nextStep, "work");
+    assert.equal(after.blocker, null);
+    assert.equal(after.intent, null);
+  } finally {
+    await rig.ctx.cleanup();
+  }
+});
+
+Deno.test("issue48 recovery: a mismatched historical target base still refuses", async () => {
+  const rig = await makeRig("historical-base", {
+    repair: repairFixture({
+      work: [
+        targetRecord({
+          target: {
+            base: OTHER_SHA,
+            branch: null,
+            checkpoint: null,
+            head: PR_HEAD,
+            pr: PR_NUMBER,
+          },
+        }),
+        workRecord("issue-ubiquity-sentinel-58"),
+      ],
+    }),
+  });
+  try {
+    // The live PR itself matches the reviewed binding; the refusal must come
+    // from the durable record's historical base no longer matching it, so no
+    // loosened live-base comparison may skip the saved identity check.
+    await expectRejected(
+      rig,
+      await runRig(rig),
+      "target_precondition_mismatch",
+    );
+    assert.equal(rig.counters.prReads, 1);
+  } finally {
+    await rig.ctx.cleanup();
+  }
+});
+
 Deno.test("issue48 recovery: bounded preflight rejections write nothing", async () => {
   const rig = await makeRig("reject");
   try {
@@ -557,9 +654,11 @@ Deno.test("issue48 recovery: bounded preflight rejections write nothing", async 
       await runRig(rig, { prView: { ...rig.prView, head: OTHER_SHA } }),
       "pull_request_mismatch",
     );
+    // A live base SHA advance is ordinary, but a PR retargeted to another
+    // base branch is refused on the stable branch identity.
     await expectRejected(
       rig,
-      await runRig(rig, { prView: { ...rig.prView, base: OTHER_SHA } }),
+      await runRig(rig, { prView: { ...rig.prView, baseRef: "main" } }),
       "pull_request_mismatch",
     );
     await expectRejected(
@@ -706,6 +805,7 @@ Deno.test("issue48 recovery: missing repair state is a bounded failure", async (
           state: "open" as const,
           head: PR_HEAD,
           base: PR_BASE,
+          baseRef: BASE_REF,
           repository: REPOSITORY,
         })),
     });
@@ -1126,7 +1226,7 @@ function prPayload(): Record<string, unknown> {
     state: "open",
     merged: false,
     head: { sha: PR_HEAD, repo: { full_name: REPOSITORY } },
-    base: { sha: PR_BASE, repo: { full_name: REPOSITORY } },
+    base: { sha: PR_BASE, ref: BASE_REF, repo: { full_name: REPOSITORY } },
   };
 }
 
@@ -1157,8 +1257,40 @@ Deno.test("issue48 recovery: bounded PR read accepts valid in-budget JSON", asyn
     state: "open",
     head: PR_HEAD,
     base: PR_BASE,
+    baseRef: BASE_REF,
     repository: REPOSITORY,
   });
+});
+
+Deno.test("issue48 recovery: malformed live base ref is refused", async () => {
+  const read = (payload: Record<string, unknown>) =>
+    readGitHubPullRequest(
+      PR_NUMBER,
+      PR_READ_TOKEN,
+      () =>
+        Promise.resolve(new Response(JSON.stringify(payload), { status: 200 })),
+    );
+  const missing = {
+    ...prPayload(),
+    base: { sha: PR_BASE, repo: { full_name: REPOSITORY } },
+  };
+  const empty = {
+    ...prPayload(),
+    base: { sha: PR_BASE, ref: "", repo: { full_name: REPOSITORY } },
+  };
+  const overlong = {
+    ...prPayload(),
+    base: {
+      sha: PR_BASE,
+      ref: "d".repeat(257),
+      repo: { full_name: REPOSITORY },
+    },
+  };
+  for (const payload of [missing, empty, overlong]) {
+    const result = await read(payload);
+    if (result.ok) throw new Error("expected a malformed base ref refusal");
+    assert.equal(result.error.kind, "invalid");
+  }
 });
 
 Deno.test("issue48 recovery: oversized streamed PR bytes are cancelled early", async () => {

@@ -47,5 +47,6 @@
   "submittedAt": 1786000000000,
   "completedAt": 1786003600000,
   "observedAt": 1786003600000,
-  "findingsUncounted": 0
+  "findingsUncounted": 0,
+  "taskAcceptance": null
 }

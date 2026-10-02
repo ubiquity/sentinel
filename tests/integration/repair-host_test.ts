@@ -22,6 +22,12 @@
  * - an idle no-inference run through `runRepairEntrypoint` with the REAL
  *   GitStateStore over a disposable local remote and credential-free fake
  *   gateway transports.
+ * - the direct startup environment boundary (issue89): executing the REAL
+ *   `src/main.ts` direct consumer under a named environment allowlist must
+ *   read its review-model override through that key's own grant and still
+ *   cross into the local host configuration; an unrestricted
+ *   `Deno.env.toObject()` read is denied under a named allowlist, so no
+ *   startup path may depend on one.
  *
  * No network, no model call, no credentials, no GitHub writes, no
  * deployment; every state/transport interaction is local and disposable.
@@ -827,5 +833,159 @@ Deno.test(
       ),
       `unexpected direct-execution output: ${output}`,
     );
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Issue89: the direct startup consumer's named environment boundary
+// ---------------------------------------------------------------------------
+
+/** Combined stdout+stderr of one real direct-startup child process. */
+interface DirectStartupChildV1 {
+  code: number;
+  combined: string;
+}
+
+/** Deno's permission denial for an environment read that was not granted. */
+const ENV_ACCESS_DENIAL = /Requires env access/;
+/** The one named review-model key the direct startup consumer may read. */
+const REVIEW_MODEL_ENV = "SENTINEL_REVIEW_MODEL_ID";
+/**
+ * The production fail-closed refusal raised by the orphan guard, which runs
+ * INSIDE `runLocalRepairHost` after the startup configuration was resolved
+ * and validated. Reaching it proves the consumer crossed the environment
+ * configuration boundary; no Git fetch, network call or model session exists
+ * on the way there.
+ */
+const ORPHAN_REFUSAL = "prior run left an active session marker";
+
+/**
+ * Run the REAL production direct startup consumer (`src/main.ts` ->
+ * `startLocalRepairHostFromEnv`) in a child process under one exact named
+ * environment allowlist. The child receives synthetic non-credential values
+ * and a disposable state root whose orphan marker makes its post-boundary
+ * refusal deterministic and network-free; `Deno.env` access is limited to the
+ * named keys, so an unrestricted read is denied exactly as in production.
+ */
+async function runDirectStartupChild(input: {
+  home: string;
+  allowEnv: string;
+  env: Record<string, string>;
+}): Promise<DirectStartupChildV1> {
+  const deno = Deno.execPath();
+  const output = await new Deno.Command(deno, {
+    args: [
+      "run",
+      "--quiet",
+      `--allow-read=.,/usr,/bin,${deno},${input.home}`,
+      "--allow-run",
+      `--allow-write=${input.home}`,
+      `--allow-env=${input.allowEnv}`,
+      "src/main.ts",
+    ],
+    cwd: Deno.cwd(),
+    clearEnv: true,
+    env: {
+      PATH: Deno.env.get("PATH") ?? "/usr/bin:/bin",
+      ...input.env,
+    },
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  return {
+    code: output.code,
+    combined: new TextDecoder().decode(output.stdout) +
+      new TextDecoder().decode(output.stderr),
+  };
+}
+
+Deno.test(
+  "direct startup: the named environment allowlist carries the review-model override into the host configuration (issue89)",
+  async () => {
+    // Disposable fake home under the worktree, matching the Wave C
+    // integration fixture pattern (already ignored when a run is interrupted).
+    const home = await Deno.makeTempDir({
+      prefix: "sentinel-integration-test-startup-env-",
+      dir: Deno.cwd(),
+    });
+    try {
+      const stateRoot = `${home}/.local/state/sentinel-local`;
+      await Deno.mkdir(stateRoot, { recursive: true, mode: 0o700 });
+      await Deno.writeTextFile(
+        `${stateRoot}/session-active.json`,
+        JSON.stringify({ version: "v1", kind: "local_session_active" }) + "\n",
+      );
+      const baseEnv = {
+        HOME: home,
+        PATH: Deno.env.get("PATH") ?? "/usr/bin:/bin",
+        // Synthetic markers only: no real credential is ever supplied.
+        GITHUB_TOKEN: "synthetic-local-marker-not-a-credential",
+        UOS_AI_TOKEN: "synthetic-gateway-marker-not-a-credential",
+      };
+      // The named allowlist the direct consumer needs. The review-model key is
+      // its OWN item; the unrestricted environment read this test guards
+      // against is never granted. `NODE_V8_COVERAGE` is granted because the
+      // owned-group spawn layer reads it even when it is unset, and every
+      // production launcher grant (`repair:run`, the workflow launchers) names
+      // it for the same reason.
+      const namedAllowlist =
+        `HOME,PATH,GITHUB_TOKEN,UOS_AI_TOKEN,NODE_V8_COVERAGE,${REVIEW_MODEL_ENV}`;
+
+      // 1. Omitted override: the declared default must still start under the
+      //    named allowlist and cross the configuration boundary.
+      const omitted = await runDirectStartupChild({
+        home,
+        allowEnv: namedAllowlist,
+        env: baseEnv,
+      });
+      assert.ok(
+        !ENV_ACCESS_DENIAL.test(omitted.combined),
+        "the direct startup consumer demanded unrestricted environment " +
+          `access under its named allowlist (issue89):\n${omitted.combined}`,
+      );
+      assert.ok(
+        omitted.combined.includes(ORPHAN_REFUSAL),
+        "the omitted-override startup did not cross the startup " +
+          `configuration boundary:\n${omitted.combined}`,
+      );
+
+      // 2. Provided override, granted: the same boundary is crossed with the
+      //    override present.
+      const provided = await runDirectStartupChild({
+        home,
+        allowEnv: namedAllowlist,
+        env: { ...baseEnv, [REVIEW_MODEL_ENV]: "codex-auto-review-canary" },
+      });
+      assert.ok(
+        !ENV_ACCESS_DENIAL.test(provided.combined),
+        "the provided-override startup demanded unrestricted environment " +
+          `access:\n${provided.combined}`,
+      );
+      assert.ok(
+        provided.combined.includes(ORPHAN_REFUSAL),
+        "the provided-override startup did not cross the startup " +
+          `configuration boundary:\n${provided.combined}`,
+      );
+
+      // 3. Provided override, withheld grant: the consumer must read the
+      //    override through that key's OWN named grant. A hardcoded default,
+      //    an ignored key or a swallowed generic read cannot produce this
+      //    named denial, so the provided override cannot be silently dropped.
+      //    This is the same named set as above minus only the review-model key.
+      const withheld = await runDirectStartupChild({
+        home,
+        allowEnv: "HOME,PATH,GITHUB_TOKEN,UOS_AI_TOKEN,NODE_V8_COVERAGE",
+        env: { ...baseEnv, [REVIEW_MODEL_ENV]: "codex-auto-review-canary" },
+      });
+      assert.ok(
+        ENV_ACCESS_DENIAL.test(withheld.combined) &&
+          withheld.combined.includes(REVIEW_MODEL_ENV) &&
+          !withheld.combined.includes(ORPHAN_REFUSAL),
+        "the provided review-model override was not read through its own " +
+          `named grant:\n${withheld.combined}`,
+      );
+    } finally {
+      await Deno.remove(home, { recursive: true }).catch(() => {});
+    }
   },
 );

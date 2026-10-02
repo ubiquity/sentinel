@@ -1159,7 +1159,11 @@ export async function startLocalRepairHostFromEnv(): Promise<
     codexExecutable: joinPath(home, ".codex", "bin", "codex"),
     denoExecutable: Deno.execPath(),
     trustedPath,
-    reviewModelId: resolveReviewModelId(Deno.env.toObject()),
+    // Named read only: an unrestricted `Deno.env.toObject()` is denied under
+    // the launcher's `--allow-env` allowlist (issue89 regression).
+    reviewModelId: resolveReviewModelId({
+      SENTINEL_REVIEW_MODEL_ID: Deno.env.get("SENTINEL_REVIEW_MODEL_ID"),
+    }),
   });
 }
 
