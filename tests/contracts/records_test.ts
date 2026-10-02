@@ -269,6 +269,64 @@ for (const { file, parser, code, path } of INVALID) {
   });
 }
 
+Deno.test("review receipt: absent task acceptance is the exact legacy shape", async () => {
+  // The durable store writes `${canonicalStringify(record)}\n` and re-reads a
+  // blob by strict-parsing it and re-canonicalizing the result; a receipt that
+  // predates the semantic acceptance boundary carries no key at all and must
+  // survive that byte comparison unchanged.
+  const raw = (await readFixture("valid", "review-receipt-v1.json")) as Record<
+    string,
+    unknown
+  >;
+  delete raw.taskAcceptance;
+  const text = `${canonicalStringify(raw)}\n`;
+  const parsed = parseReviewReceiptV1(JSON.parse(text));
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(parsed, "taskAcceptance"),
+    false,
+    "the legacy absence must not be decoded as an explicit null",
+  );
+  assert.equal(parsed.taskAcceptance ?? null, null);
+  assert.equal(
+    `${canonicalStringify(parsed)}\n`,
+    text,
+    "the stored legacy bytes must still verify as canonical",
+  );
+});
+
+Deno.test("review receipt: explicit null and acceptance stay explicit", async () => {
+  const raw = (await readFixture("valid", "review-receipt-v1.json")) as Record<
+    string,
+    unknown
+  >;
+  // The committed fixture carries an explicit null; it stays an own key.
+  const nullReceipt = parseReviewReceiptV1(raw);
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(nullReceipt, "taskAcceptance"),
+    true,
+  );
+  assert.equal(nullReceipt.taskAcceptance, null);
+  assert.equal(
+    `${canonicalStringify(nullReceipt)}\n`,
+    `${canonicalStringify(raw)}\n`,
+  );
+
+  // A valid explicit acceptance keeps its strict parsed identity and bytes.
+  const acceptance = {
+    issueNumber: 82,
+    taskDigest: "a".repeat(64),
+    verdict: "fulfilled",
+    evidence: ["the candidate satisfies the source issue"],
+  };
+  raw.taskAcceptance = acceptance;
+  const accepted = parseReviewReceiptV1(raw);
+  assert.deepEqual(accepted.taskAcceptance, acceptance);
+  assert.equal(
+    `${canonicalStringify(accepted)}\n`,
+    `${canonicalStringify(raw)}\n`,
+  );
+});
+
 Deno.test("brands are preserved for every digest kind in the work record", async () => {
   const raw = await readFixture("valid", "work-record-v1.json");
   const parsed = parseWorkRecordV1(raw);
