@@ -542,7 +542,15 @@ export async function runMatrixCell(
   return {
     ...binding,
     status: "completed",
-    receipt: receipt.value,
+    receipt: {
+      ...receipt.value,
+      // Runtime error text stays in private model evidence. Export only a fixed
+      // classification; the exact trusted loop-stop marker retains its meaning.
+      error: receipt.value.error === null ||
+          receipt.value.error === "failed_command_loop"
+        ? receipt.value.error
+        : "runtime_error",
+    },
     bundle,
     detail: null,
     completedAt: now,
