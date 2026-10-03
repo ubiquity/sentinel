@@ -898,6 +898,8 @@ export function createCandidatePreserver(
       candidate,
       publishedHead,
       protectedPaths: input.protectedPaths,
+      sourcePath: input.sourcePath,
+      restoreSource: before.value !== null,
       trustedPath: input.trustedPath,
       gitExecutable: input.gitExecutable,
       scratch: input.scratch,
@@ -936,6 +938,8 @@ async function freshStoreProof(input: {
   candidate: CandidatePreservationV1;
   publishedHead: GitSha | null;
   protectedPaths: readonly string[];
+  sourcePath: string;
+  restoreSource: boolean;
   trustedPath: string;
   gitExecutable: string;
   scratch: string;
@@ -949,6 +953,8 @@ async function freshStoreProof(input: {
     candidate,
     publishedHead,
     protectedPaths,
+    sourcePath,
+    restoreSource,
     trustedPath,
     gitExecutable,
     scratch,
@@ -1111,6 +1117,39 @@ async function freshStoreProof(input: {
       });
     } catch {
       return portError("unavailable", STATIC_PRESERVE_PROOF);
+    }
+    if (!validated.ok) return validated;
+    uncertain = false;
+    if (!restoreSource) return portOk(undefined);
+    // A resumed source mirror may have none of these retained objects. Import
+    // only the exact graph just proved above, including the excluded published
+    // head, before removing the proof store. This local fetch has no credential
+    // and cannot select a mutable remote/task ref or a producer checkout.
+    const imported = await run(sourcePath, [
+      "fetch",
+      "--no-tags",
+      store,
+      candidate.head,
+      ...(publishedHead === null ? [] : [publishedHead]),
+    ], false);
+    if (imported === null || imported.code !== 0) {
+      return portError("unavailable", STATIC_PRESERVE_LOCAL);
+    }
+    const sourceValidator = new GitReviewSnapshot({
+      trustedPath,
+      repositoryDir: sourcePath,
+      gitExecutable,
+    });
+    uncertain = true;
+    try {
+      validated = await sourceValidator.validatePublication({
+        base: candidate.base,
+        head: candidate.head,
+        publishedHead,
+        protectedPaths,
+      });
+    } catch {
+      return portError("unavailable", STATIC_PRESERVE_LOCAL);
     }
     if (!validated.ok) return validated;
     uncertain = false;
@@ -1629,7 +1668,9 @@ export function createLegacyBaseRefreshLossProver(
     }
     const predecessor = branchRead.value.sha;
     if (predecessor === lostHead) {
-      return portError("conflict", STATIC_LOSS_PRESENT);
+      // Exact remote presence is not loss. The ordinary refresh consumer must
+      // still restore and validate the candidate through its normal gates.
+      return portOk(null);
     }
     // 10. The exact owned open PR on that same predecessor head. The PR's
     //     current base SHA is deliberately NOT required to equal B0.
