@@ -144,6 +144,7 @@ class MemoryReleaseState implements StateReadView, ReleaseStateWriter {
 class FakeEvidence implements HostedSupervisorEvidencePortV1 {
   readonly settlements = new Map<string, HostedExecutionSettlementV1 | null>();
   readonly revisions = new Set<string>();
+  readonly matrixRevisions = new Set<string>();
 
   readExecution(
     savedIntent: HostedExecutionIntentV1,
@@ -155,6 +156,12 @@ class FakeEvidence implements HostedSupervisorEvidencePortV1 {
 
   verifyRevision(revision: GitSha): Promise<PortResultV1<boolean>> {
     return Promise.resolve(portOk(this.revisions.has(revision)));
+  }
+
+  verifyMatrixOrdinaryRevision(
+    revision: GitSha,
+  ): Promise<PortResultV1<boolean>> {
+    return Promise.resolve(portOk(this.matrixRevisions.has(revision)));
   }
 
   verifyRequest(): Promise<PortResultV1<boolean>> {
@@ -203,6 +210,7 @@ function makeRig(): RigV1 {
   const state = new MemoryReleaseState();
   const evidence = new FakeEvidence();
   evidence.revisions.add(LAUNCHER);
+  evidence.matrixRevisions.add(LAUNCHER);
   const input = (runId: number): HostedSupervisorInputV1 => ({
     clock,
     state,

@@ -140,6 +140,8 @@ async function makeCheckout(
   await gitRun(dir, ["init", "-q"], env);
   await Deno.writeTextFile(`${dir}/README.md`, "launcher\n");
   await Deno.writeTextFile(`${dir}/.gitignore`, ".sentinel/\n");
+  await Deno.mkdir(`${dir}/src/host`, { recursive: true });
+  await Deno.writeTextFile(`${dir}/src/host/matrix-actions.ts`, "export {};\n");
   await gitRun(dir, ["add", "-A"], env);
   const committed = await gitRun(dir, ["commit", "-q", "-m", "fixture"], env);
   assert.ok(committed.ok, committed.stderr);
@@ -235,6 +237,42 @@ async function makeRig(): Promise<RigV1> {
   assert.ok(seededRepair.ok && seededRepair.value.status === "applied");
 
   const http = new ScriptedHttp();
+  // Bind ordinary capability to the fixture's immutable committed Git objects.
+  const rootTree = await gitRun(sourceDir, [
+    "rev-parse",
+    `${launcherSha}^{tree}`,
+  ], env);
+  assert.ok(rootTree.ok, rootTree.stderr);
+  http.on(
+    "GET",
+    `/repos/${REPO}/git/commits/${launcherSha}`,
+    () =>
+      response(200, {
+        sha: launcherSha,
+        tree: { sha: rootTree.stdout.trim() },
+      }),
+  );
+  for (const path of ["", "src", "src/host"]) {
+    const tree = await gitRun(sourceDir, [
+      "rev-parse",
+      path === "" ? `${launcherSha}^{tree}` : `${launcherSha}:${path}`,
+    ], env);
+    assert.ok(tree.ok, tree.stderr);
+    const treeSha = tree.stdout.trim();
+    const listed = await gitRun(sourceDir, ["ls-tree", treeSha], env);
+    assert.ok(listed.ok, listed.stderr);
+    const entries = listed.stdout.trim().split("\n").map((line) => {
+      const match = /^(\d{6}) (blob|tree) ([a-f0-9]{40})\t(.+)$/.exec(line);
+      assert.ok(match, `invalid fixture tree entry: ${line}`);
+      const [, mode, type, sha, path] = match;
+      return { mode, type, sha, path };
+    });
+    http.on(
+      "GET",
+      `/repos/${REPO}/git/trees/${treeSha}`,
+      () => response(200, { sha: treeSha, truncated: false, tree: entries }),
+    );
+  }
   const clock = new StepClock(T0);
   const output: string[] = [];
   const releaseSnapshot = async () => {
