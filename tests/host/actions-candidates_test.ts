@@ -6,6 +6,7 @@
  */
 import assert from "node:assert/strict";
 
+import { RollingStartBudget } from "../../src/budget/mod.ts";
 import type { GitSha, WorkItemId } from "../../src/contracts/brands.ts";
 import type { GitHubRateLimitV1 } from "../../src/contracts/github-cooldown.ts";
 import type {
@@ -43,8 +44,10 @@ import {
 import { composeGitHubHost } from "../../src/host/github.ts";
 import {
   createLocalCandidateLoader,
+  createPrepareBaseRefresh,
   localCheckoutKey,
 } from "../../src/host/local.ts";
+import { runRepairCycle } from "../../src/repair/loop.ts";
 import {
   baseRefreshIntentKey,
   candidateBranch,
@@ -57,7 +60,15 @@ import type {
 } from "../../src/replay/runtime.ts";
 import { DenoReplayRuntime } from "../../src/replay/runtime.ts";
 import { FakeAuthProvider, FakeReviewService } from "../github/helpers.ts";
-import { FakeClock, MemoryState } from "../repair/helpers.ts";
+import {
+  FakeClock,
+  FakeGithub,
+  FakeIncidents,
+  FakeModel,
+  FakeReplay,
+  MemoryState,
+  repairConfigs,
+} from "../repair/helpers.ts";
 import {
   REPO,
   reservation,
@@ -1123,6 +1134,7 @@ Deno.test(
   async () => {
     const ctx = await makeCandidateCtx();
     try {
+      const publishedHead = ctx.base;
       const taskId = CANDIDATE_TASK_ID;
       const ref = await candidatePreservationRef(
         { ...SELF_REPO },
@@ -1136,7 +1148,7 @@ Deno.test(
           checkpoint: null,
           head: ctx.head,
           pr: 12,
-          candidateState: { preserved: null, publishedHead: null },
+          candidateState: { preserved: null, publishedHead },
         },
         intent: {
           kind: "candidate_preservation",
@@ -1160,6 +1172,7 @@ Deno.test(
         state,
         taskId,
         sourcePath: mirrorPath,
+        publishedHead,
         candidate: await candidateFor(
           taskId,
           ctx.base,
@@ -1227,12 +1240,18 @@ Deno.test(
       assert.ok(
         (await gitRun(emptySource, ["init", "-q", "--bare"], ctx.env)).ok,
       );
+      assert.equal(await objectPresent(emptySource, ctx.env, ctx.head), false);
+      assert.equal(
+        await objectPresent(emptySource, ctx.env, publishedHead),
+        false,
+      );
       const loaderCalls = ensured.length;
       const recovery = await preserveAttempt({
         ctx,
         state,
         taskId,
         sourcePath: emptySource,
+        publishedHead,
         candidate: await candidateFor(
           taskId,
           ctx.base,
@@ -1245,6 +1264,27 @@ Deno.test(
         },
       });
       assert.ok(recovery.result.ok, JSON.stringify(recovery.result));
+      const publication = await new GitReviewSnapshot({
+        trustedPath: TRUSTED_PATH,
+        repositoryDir: emptySource,
+        gitExecutable: "git",
+      }).validatePublication({
+        base: ctx.base,
+        head: ctx.head,
+        publishedHead,
+        protectedPaths: [],
+      });
+      assert.ok(
+        publication.ok,
+        `the resumed publication mirror must validate the retained candidate: ${
+          JSON.stringify(publication)
+        }`,
+      );
+      assert.equal(await objectPresent(emptySource, ctx.env, ctx.head), true);
+      assert.equal(
+        await objectPresent(emptySource, ctx.env, publishedHead),
+        true,
+      );
       assert.equal(
         recovery.pushes.length,
         0,
@@ -2680,6 +2720,193 @@ Deno.test(
 );
 
 Deno.test(
+  "legacy loss: remotely present candidate continues through the real loop and base restoration without a charge",
+  async () => {
+    const fixture = await makeLegacyLossCtx();
+    const { ctx } = fixture;
+    try {
+      const sourcePath = `${ctx.tmp}/resumed.git`;
+      assert.ok(
+        (await gitRun(ctx.tmp, ["init", "-q", "--bare", sourcePath], ctx.env))
+          .ok,
+      );
+      const record = legacyRecord({
+        lost: ctx.head,
+        base: ctx.base,
+        observedBase: fixture.movedBase,
+      });
+      const state = legacyState([record], [legacyReservation(record)]);
+      const reservationsBefore = structuredClone(state.repair!.reservations);
+      const clock = new FakeClock(T0 + 6000);
+      const gate = new FakeGate();
+      const git = new DenoGitExecutor({
+        localDir: sourcePath,
+        remoteUrl: `file://${ctx.bare}`,
+        gitHome: `${ctx.tmp}/home`,
+        gitPath: "git",
+      });
+      const github: GitHubPort = new FakeGithub({
+        issues: [legacyIssue()],
+        openIssues: [],
+      });
+      github.readIssue = () => Promise.resolve(portOk(legacyIssue()));
+      github.readRef = async (ref) => {
+        const read = await git.readRemoteRef(ref);
+        return read.ok
+          ? portOk(read.value === null ? null : { ref, sha: read.value })
+          : read;
+      };
+      github.readPullRequest = () =>
+        Promise.resolve(portOk(legacyPull({
+          predecessor: ctx.head,
+          base: fixture.movedBase,
+        })));
+      const restorer = createActionsCandidateRestorer({
+        state,
+        gate,
+        token: "dummy-token",
+        http: new RealRefHttp(git).transport,
+        clock,
+        sourcePath,
+        scratch: `${ctx.tmp}/home`,
+        trustedPath: TRUSTED_PATH,
+        gitExecutable: "git",
+        remoteUrl: `file://${ctx.bare}`,
+      });
+      let proofCalls = 0;
+      let proofResult:
+        | PortResultV1<LegacyBaseRefreshLossProofV1 | null>
+        | null = null;
+      const prove = createLegacyBaseRefreshLossProver({
+        state,
+        port: github,
+        gate,
+        token: "dummy-token",
+        scratch: `${ctx.tmp}/home`,
+        trustedPath: TRUSTED_PATH,
+        gitExecutable: "git",
+        baseBranch: "development",
+        trustedPrAuthor: LEGACY_AUTHOR,
+        remoteUrl: `file://${ctx.bare}`,
+        ensureLocalCandidate: async (_id, head) =>
+          await objectPresent(sourcePath, ctx.env, head)
+            ? portOk(undefined)
+            : portError(
+              "not_found",
+              "exact candidate absent from resumed mirror",
+            ),
+      });
+      github.proveLegacyBaseRefreshLoss = async (id) => {
+        proofCalls++;
+        proofResult = await prove(id);
+        return proofResult;
+      };
+      let restoreCalls = 0;
+      let prepared: GitSha | null = null;
+      const prepare = createPrepareBaseRefresh({
+        git,
+        observer: github,
+        baseBranch: "development",
+        trustedPrAuthor: LEGACY_AUTHOR,
+        ensureCandidateObjects: (request) => {
+          restoreCalls++;
+          return restorer.ensure(request);
+        },
+        ensureBaseObjects: async () => {
+          const fetched = await gitRun(sourcePath, [
+            "fetch",
+            "--no-tags",
+            `file://${ctx.bare}`,
+            "refs/heads/development",
+          ], ctx.env);
+          return fetched.ok
+            ? portOk(undefined)
+            : portError("unavailable", "fixture base fetch failed");
+        },
+      });
+      github.prepareBaseRefresh = async (request) => {
+        const result = await prepare(request);
+        if (!result.ok) return result;
+        prepared = result.value;
+        return portError(
+          "unavailable",
+          "fixture stops after real base preparation",
+        );
+      };
+      const configs = repairConfigs({
+        repository: { ...SELF_REPO },
+        adapter: { kind: "github" },
+        protectedPaths: [],
+      });
+      const model = new FakeModel();
+      assert.equal(await objectPresent(sourcePath, ctx.env, ctx.head), false);
+      const outcome = await runRepairCycle({
+        clock,
+        state,
+        configs,
+        controllerSha: SHA1,
+        github,
+        githubCooldown: gate,
+        incidents: new FakeIncidents({ summaries: [], evidence: null }),
+        replay: new FakeReplay(),
+        model,
+        budget: new RollingStartBudget({ clock, state, configs }),
+      }, {
+        deadline: clock.now() + 60 * 60_000,
+        stepLimit: 4,
+        modelStartsEnabled: false,
+      });
+      assert.equal(proofCalls, 1, JSON.stringify(outcome));
+      assert.equal(
+        restoreCalls,
+        1,
+        `exact remote presence must continue to ordinary restoration: ${
+          JSON.stringify({ outcome, proofResult })
+        }`,
+      );
+      assert.equal(await objectPresent(sourcePath, ctx.env, ctx.head), true);
+      assert.notEqual(
+        prepared,
+        null,
+        "the real adapter generated the base-refresh candidate",
+      );
+      assert.deepEqual(state.repair!.reservations, reservationsBefore);
+      assert.equal(model.requests.length, 0);
+      assert.deepEqual(state.repair!.work[0]!.target, record.target);
+      assert.equal(state.repair!.work[0]!.blocker, null);
+      assert.equal(
+        await remoteSha(ctx, `refs/heads/${LEGACY_BRANCH}`),
+        ctx.head,
+      );
+      // Non-loss never authorizes a refresh against an untrusted publication.
+      github.readPullRequest = () =>
+        Promise.resolve(portOk(legacyPull({
+          predecessor: ctx.head,
+          base: fixture.movedBase,
+          overrides: { author: "untrusted" },
+        })));
+      const refused = await prepare({
+        pullRequestNumber: LEGACY_PR,
+        branch: LEGACY_BRANCH,
+        expectedHead: ctx.head,
+        previousBase: ctx.base,
+        expectedBase: fixture.movedBase,
+      });
+      assert.equal(refused.ok, false);
+      assert.equal(refused.ok ? "" : refused.error.kind, "conflict");
+      assert.equal(
+        restoreCalls,
+        1,
+        "the ordinary PR guard refuses before restoration",
+      );
+      assert.deepEqual(state.repair!.reservations, reservationsBefore);
+    } finally {
+      await ctx.cleanup();
+    }
+  },
+);
+
+Deno.test(
   "legacy loss: unsupported shapes and cheap binding negatives refuse before local or remote work",
   async () => {
     const ctx = await makeCandidateCtx();
@@ -3041,11 +3268,6 @@ Deno.test(
           name: "missing task branch",
           expectKind: "unavailable",
           ref: portOk(null),
-        },
-        {
-          name: "branch carries the lost head",
-          expectKind: "conflict",
-          ref: portOk({ ref: refName, sha: SHA2 }),
         },
         {
           name: "branch and PR disagree",
