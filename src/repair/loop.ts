@@ -343,6 +343,11 @@ export type RepairCycleOutcomeV1 =
   | { status: "state_error"; detail: string }
   | { status: "source_error"; detail: string };
 
+/** One-shot deterministic continuation retained by the entrypoint during drain. */
+export type PostDrainReviewContinuationV1 = (
+  operationKeys: readonly string[],
+) => Promise<RepairCycleOutcomeV1 | null>;
+
 /**
  * One loaded run context. Exported for the matrix planner/ingester, which are
  * trusted consumers of the same selection, preparation and receipt paths.
@@ -375,6 +380,15 @@ export type StepResultV1 =
   | { kind: "margin"; detail: string }
   | { kind: "state_error"; detail: string }
   | { kind: "deferred"; detail: string };
+
+const MATRIX_IMPLEMENTATION_DEFERRED: StepResultV1 = {
+  kind: "deferred",
+  detail: "implementation admission belongs to the matrix planner",
+};
+const MATRIX_ARTIFACT_DEFERRED: StepResultV1 = {
+  kind: "deferred",
+  detail: "implementation awaits its authenticated matrix artifact",
+};
 
 /**
  * One fully prepared, durably admitted implementation start: the exact
@@ -472,6 +486,7 @@ export function createRunBounds(
 export async function runRepairCycle(
   deps: RepairCycleDepsV1,
   options: RepairCycleOptionsV1,
+  registerPostDrain?: (continuation: PostDrainReviewContinuationV1) => void,
 ): Promise<RepairCycleOutcomeV1> {
   const bounds = createRunBounds(deps, options);
   const { runDeadline } = bounds;
@@ -483,6 +498,9 @@ export async function runRepairCycle(
   // bounds are deferred so that lower-ranked deterministic work still runs;
   // the run ends in the existing typed "margin" outcome when nothing remains.
   const deferred = new Set<string>();
+  const matrixDeferred = new Set<string>();
+  let horizonDeferred = false;
+  let postDrainAllowed = false;
   // One run-local attempt per task and legacy-loss phase: a phase is never
   // proved twice in the same run, even after a state reload.
   const legacyLossAttempted = new Set<string>();
@@ -500,6 +518,164 @@ export async function runRepairCycle(
   // iteration must never re-poll the sources: subsequent loop iterations reuse
   // the run-local deferral tracking instead of repeating intake reads.
   let intakePolled = false;
+  let lastSnapshot: RepairStateSnapshotV1 | null = null;
+  let continued = false;
+  registerPostDrain?.(async (operationKeys) => {
+    if (!postDrainAllowed || continued || lastSnapshot === null) return null;
+    continued = true;
+    // Reuse the original absolute bounds and remaining transitions. Disabling
+    // starts is an additional guard; the narrow dispatcher below never selects
+    // intake, implementation, publication, refresh or a review request.
+    const continuationBounds = {
+      ...bounds,
+      modelCutoff: Number.NEGATIVE_INFINITY,
+    };
+    const original = lastSnapshot;
+    let progressed = false;
+    for (const key of new Set(operationKeys)) {
+      const tracked = original.work.find((record) =>
+        configFor(deps, record.repository) !== null &&
+        record.nextStep === "review" && record.target.pr !== null &&
+        record.target.head !== null &&
+        reviewOperationKey(
+            record.target.pr,
+            record.target.head,
+            standingReviewAttempt(record),
+          ) === key
+      );
+      if (tracked === undefined) continue;
+      let observed = false;
+      for (;;) {
+        if (deps.clock.now() >= runDeadline) {
+          return {
+            status: "margin",
+            detail: "repair run deadline reached after review drain",
+          };
+        }
+        if (steps >= stepLimit) return { status: "step_limit", steps };
+        const context = await loadSnapshot(deps, continuationBounds);
+        if (context === null) {
+          return { status: "state_error", detail: "repair state unavailable" };
+        }
+        if (deps.clock.now() >= runDeadline) {
+          return {
+            status: "margin",
+            detail: "repair run deadline reached during post-drain state read",
+          };
+        }
+        const record = context.snapshot.work.find((item) =>
+          item.id === tracked.id
+        );
+        if (
+          record === undefined ||
+          !sameRepositoryIdentity(record.repository, tracked.repository) ||
+          record.target.pr !== tracked.target.pr ||
+          record.target.head !== tracked.target.head ||
+          record.target.base !== tracked.target.base ||
+          record.target.branch !== tracked.target.branch ||
+          record.counters.reviewRounds !== tracked.counters.reviewRounds ||
+          canonicalStringify(record.source) !==
+            canonicalStringify(tracked.source)
+        ) break;
+        context.executionBaseline = record;
+        let result: StepResultV1;
+        if (!observed) {
+          observed = true;
+          if (
+            record.nextStep !== "review" || record.intent !== null ||
+            configFor(deps, record.repository) === null
+          ) break;
+          const cooling = await checkGithubCooldown(
+            deps,
+            record.repository,
+            continuationBounds,
+          );
+          if (cooling.kind === "state_error") {
+            return { status: "state_error", detail: cooling.detail };
+          }
+          if (cooling.kind === "deferred") break;
+          if (deps.clock.now() >= runDeadline) {
+            return {
+              status: "margin",
+              detail: "repair run deadline reached during post-drain cooldown",
+            };
+          }
+          const pull = await deps.github.readPullRequest(record.target.pr!);
+          if (
+            !pull.ok || pull.value === null || pull.value.state !== "open" ||
+            pull.value.head !== record.target.head ||
+            pull.value.base !== record.target.base ||
+            pull.value.headRef !== record.target.branch
+          ) break;
+          if (deps.clock.now() >= runDeadline) {
+            return {
+              status: "margin",
+              detail: "repair run deadline reached during post-drain PR read",
+            };
+          }
+          const review = await observeStandingReview(
+            deps,
+            record,
+            record.target.pr!,
+            record.target.head!,
+          );
+          if (
+            !review.ok || review.value.operationKey !== key ||
+            review.value.observation.status !== "completed"
+          ) break;
+          if (deps.clock.now() >= runDeadline) {
+            return {
+              status: "margin",
+              detail:
+                "repair run deadline reached during post-drain review read",
+            };
+          }
+          result = await applyObservedReview(
+            deps,
+            context,
+            record,
+            review.value.observation,
+            key,
+          );
+        } else {
+          if (
+            record.nextStep !== "delivery" ||
+            isWaiting(record, deps.clock.now())
+          ) break;
+          if (record.intent?.kind === "merge") {
+            result = await reconcileMergeIntent(deps, context, record);
+          } else if (record.intent?.kind === "issue_closure") {
+            result = await retryClosure(deps, context, record);
+          } else if (record.intent !== null) {
+            break;
+          } else {
+            const release = context.snapshot.releaseRequests.find((request) =>
+              releaseRequestMatchesDelivery(request, record)
+            );
+            result = release === undefined
+              ? await executeMerge(deps, context, record)
+              : await observeReleaseAcceptance(deps, context, record, release);
+          }
+        }
+        context.executionBaseline = null;
+        if (result.kind === "state_error") {
+          return { status: "state_error", detail: result.detail };
+        }
+        if (result.kind === "margin") {
+          return { status: "margin", detail: result.detail };
+        }
+        if (result.kind !== "progress") break;
+        progressed = true;
+        steps++;
+      }
+    }
+    return progressed
+      ? {
+        status: "idle",
+        detail: `post-drain delivery continued within ${steps} steps`,
+      }
+      : null;
+  });
 
   for (;;) {
     if (deps.clock.now() >= runDeadline) {
@@ -524,6 +700,7 @@ export async function runRepairCycle(
       }
     }
     const context: LoopContextV1 = { ...loaded, bounds };
+    lastSnapshot = context.snapshot;
 
     // The initial state read is awaited wall-clock time and may have crossed
     // the total deadline (fakes advance the clock inside port calls): no
@@ -668,6 +845,7 @@ export async function runRepairCycle(
       if (!didWork && sourceError !== null) {
         return { status: "source_error", detail: sourceError };
       }
+      postDrainAllowed = true;
       return {
         status: "idle",
         detail: idleDetail(context.snapshot, rank.skipped),
@@ -693,9 +871,14 @@ export async function runRepairCycle(
       // This record cannot start under the current bounds; keep looking for
       // eligible deterministic work before giving up (never block it).
       deferred.add(id);
+      horizonDeferred = true;
       cannotFit = `next operation for ${id} cannot fit`;
     }
     if (selected === null) {
+      // Only matrix ownership can leave this deterministic continuation open.
+      // A horizon refusal anywhere in the run remains a real margin exit.
+      postDrainAllowed = !horizonDeferred &&
+        rank.ordered.every((id) => matrixDeferred.has(id));
       return {
         status: "margin",
         detail: deferred.size > 0
@@ -709,6 +892,10 @@ export async function runRepairCycle(
     context.executionBaseline = null;
     if (result.kind === "deferred") {
       deferred.add(selected.id);
+      if (
+        result === MATRIX_IMPLEMENTATION_DEFERRED ||
+        result === MATRIX_ARTIFACT_DEFERRED
+      ) matrixDeferred.add(selected.id);
       continue;
     }
     if (result.kind === "state_error") {
@@ -721,6 +908,7 @@ export async function runRepairCycle(
       if (!didWork && sourceError !== null) {
         return { status: "source_error", detail: sourceError };
       }
+      postDrainAllowed = true;
       return {
         status: "idle",
         detail: `no eligible work after ${steps} steps`,
@@ -1932,10 +2120,7 @@ async function executeWorkStep(
   // A saved implementation intent is never resubmitted; fail closed.
   if (record.intent !== null && record.intent.kind === "implementation") {
     if (deps.externalImplementations === true) {
-      return {
-        kind: "deferred",
-        detail: "implementation awaits its authenticated matrix artifact",
-      };
+      return MATRIX_ARTIFACT_DEFERRED;
     }
     return handleImplementationUncertainty(deps, context, record);
   }
@@ -2228,10 +2413,11 @@ async function ensureBeforeReplay(
         savedForHead,
       );
       if (validated.kind === "wait") {
+        const at = deps.clock.now();
         return setWait(
           record,
-          { reason: "unavailable", since: now, until: null },
-          now,
+          { reason: "unavailable", since: at, until: at + CHECK_POLL_MS },
+          at,
         );
       }
       if (validated.kind === "invalid") {
@@ -2265,10 +2451,11 @@ async function ensureBeforeReplay(
       already,
     );
     if (validated.kind === "wait") {
+      const at = deps.clock.now();
       return setWait(
         record,
-        { reason: "unavailable", since: now, until: null },
-        now,
+        { reason: "unavailable", since: at, until: at + CHECK_POLL_MS },
+        at,
       );
     }
     if (validated.kind === "invalid") {
@@ -2307,10 +2494,11 @@ async function ensureBeforeReplay(
     fixtureDigest,
   );
   if (testIds.kind === "wait") {
+    const at = deps.clock.now();
     return setWait(
       record,
-      { reason: "unavailable", since: now, until: null },
-      now,
+      { reason: "unavailable", since: at, until: at + CHECK_POLL_MS },
+      at,
     );
   }
   if (testIds.kind === "invalid") {
@@ -2333,10 +2521,11 @@ async function ensureBeforeReplay(
     outputLimitBytes: MAX_OUTPUT_LIMIT_BYTES,
   });
   if (!run.ok) {
+    const at = deps.clock.now();
     return setWait(
       record,
-      { reason: "unavailable", since: now, until: null },
-      now,
+      { reason: "unavailable", since: at, until: at + CHECK_POLL_MS },
+      at,
     );
   }
   const result = run.value;
@@ -3178,10 +3367,7 @@ async function executeImplementationStep(
   config: RepositoryConfigV1,
 ): Promise<StepResultV1> {
   if (deps.externalImplementations === true) {
-    return {
-      kind: "deferred",
-      detail: "implementation admission belongs to the matrix planner",
-    };
+    return MATRIX_IMPLEMENTATION_DEFERRED;
   }
   const prepared = await prepareImplementationStart(
     deps,
@@ -3470,6 +3656,21 @@ async function executeCandidatePreservation(
   });
   const at = deps.clock.now();
   if (!preserved.ok) {
+    // A trusted content refusal is deterministic for this exact immutable
+    // candidate. Keep its publication identity and submitted charge, but close
+    // the preservation operation instead of retrying it or regenerating work.
+    if (preserved.error.kind === "invalid") {
+      return persistWork(
+        deps,
+        context,
+        markBlocked(
+          clearIntent(record, at),
+          "other",
+          "candidate preservation validation refused",
+          at,
+        ),
+      );
+    }
     // A positively proven absent candidate can never be reconciled: the
     // producing checkout lived only inside that run's private scratch, no
     // trusted store or remote ref holds the object, and every retry repeats

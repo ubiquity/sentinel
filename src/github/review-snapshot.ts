@@ -1481,15 +1481,19 @@ export class GitReviewSnapshot {
         );
       }
       const metadataText = this.text(metadata.bytes);
-      if (metadataText === null) return fail(PUBLICATION_METADATA_DETAIL);
+      if (metadataText === null) {
+        return portError("invalid", PUBLICATION_METADATA_DETAIL);
+      }
       if (containsSecretShapedText(metadata.bytes)) {
-        return fail(PUBLICATION_METADATA_SECRET_DETAIL);
+        return portError("invalid", PUBLICATION_METADATA_SECRET_DETAIL);
       }
       if (hasIssueClosingReference(metadataText)) {
-        return fail(PUBLICATION_ISSUE_DETAIL);
+        return portError("invalid", PUBLICATION_ISSUE_DETAIL);
       }
       const parents = parseCommitParents(metadataText);
-      if (parents === null) return fail(PUBLICATION_METADATA_DETAIL);
+      if (parents === null) {
+        return portError("invalid", PUBLICATION_METADATA_DETAIL);
+      }
 
       if (protectedPaths.length > 0) {
         for (const protectedPath of protectedPaths) {
