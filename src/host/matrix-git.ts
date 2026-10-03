@@ -11,6 +11,9 @@
  * state update. No snapshot travels; only the bounded candidate delta does.
  */
 import type { GitSha } from "../contracts/brands.ts";
+import { DenoReplayRuntime } from "../replay/runtime.ts";
+
+const MAX_BUNDLE_BYTES = 64 * 1024 * 1024;
 
 const BUNDLE_NAME = /^[0-9a-f]{64}\.bundle$/;
 
@@ -27,12 +30,34 @@ async function sha256HexBytes(bytes: Uint8Array): Promise<string> {
 
 async function runGit(dir: string, args: string[]): Promise<number> {
   try {
-    const output = await new Deno.Command("git", {
-      args: ["-C", dir, ...args],
-      stdout: "piped",
-      stderr: "piped",
-    }).output();
-    return output.code;
+    const output = await new DenoReplayRuntime(Deno.execPath()).run({
+      executable: "/usr/bin/git",
+      args: [
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "protocol.allow=never",
+        "-c",
+        "protocol.file.allow=always",
+        "-C",
+        dir,
+        ...args,
+      ],
+      cwd: dir,
+      env: {
+        PATH: "/usr/bin:/bin",
+        HOME: "/dev/null",
+        GIT_CONFIG_GLOBAL: "/dev/null",
+        GIT_CONFIG_SYSTEM: "/dev/null",
+        GIT_TERMINAL_PROMPT: "0",
+        GIT_NO_REPLACE_OBJECTS: "1",
+      },
+      maxDurationMs: 60_000,
+      maxOutputBytes: 1024 * 1024,
+    });
+    return output.outcome === "exited" && output.settled && !output.truncated
+      ? output.exitCode ?? 1
+      : 1;
   } catch {
     return 1;
   }
@@ -76,6 +101,29 @@ export function createGitBundleExporter(input: {
   return {
     create: async (request) => {
       if (!BUNDLE_NAME.test(request.file)) return null;
+      if (
+        await runGit(input.repositoryDir, [
+          "merge-base",
+          "--is-ancestor",
+          request.base,
+          request.head,
+        ]) !== 0
+      ) return null;
+      if (
+        request.checkpointSha !== null &&
+        (await runGit(input.repositoryDir, [
+              "merge-base",
+              "--is-ancestor",
+              request.base,
+              request.checkpointSha,
+            ]) !== 0 ||
+          await runGit(input.repositoryDir, [
+              "merge-base",
+              "--is-ancestor",
+              request.checkpointSha,
+              request.head,
+            ]) !== 0)
+      ) return null;
       const ref = `refs/sentinel-matrix/${request.file.slice(0, -7)}`;
       const path = `${input.outputDir}/${request.file}`;
       try {
@@ -96,12 +144,17 @@ export function createGitBundleExporter(input: {
           "create",
           path,
           ref,
+          "^" + request.base,
         ]);
       } finally {
         await runGit(input.repositoryDir, ["update-ref", "-d", ref]);
       }
       if (code !== 0) return null;
       try {
+        const info = await Deno.lstat(path);
+        if (!info.isFile || info.isSymlink || info.size > MAX_BUNDLE_BYTES) {
+          return null;
+        }
         const bytes = await Deno.readFile(path);
         return { digest: await sha256HexBytes(bytes) };
       } catch {
@@ -126,6 +179,10 @@ export function createGitBundleImporter(input: {
       const path = `${input.bundlesDir}/${request.file}`;
       let bytes: Uint8Array;
       try {
+        const info = await Deno.lstat(path);
+        if (!info.isFile || info.isSymlink || info.size > MAX_BUNDLE_BYTES) {
+          return false;
+        }
         bytes = await Deno.readFile(path);
       } catch {
         return false;
@@ -158,6 +215,20 @@ export function createGitBundleImporter(input: {
         return false;
       }
       if (request.checkpointSha !== null) {
+        if (
+          await runGit(input.repositoryDir, [
+              "merge-base",
+              "--is-ancestor",
+              request.base,
+              request.checkpointSha,
+            ]) !== 0 ||
+          await runGit(input.repositoryDir, [
+              "merge-base",
+              "--is-ancestor",
+              request.checkpointSha,
+              request.head,
+            ]) !== 0
+        ) return false;
         if (
           await runGit(input.repositoryDir, [
             "rev-parse",

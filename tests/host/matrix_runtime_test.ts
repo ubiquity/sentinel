@@ -185,6 +185,7 @@ class OverlappingModel implements ImplementationPort {
 
 interface CellContextV1 {
   cell: MatrixCellPlanV1;
+  repositoryDir: string;
   deps: {
     state: RigV1["store"];
     github: ListedGithub;
@@ -410,6 +411,7 @@ async function makeRig(
       await Deno.mkdir(bundlesDir, { recursive: true });
       return {
         cell,
+        repositoryDir: repo,
         deps: {
           state: store,
           github,
@@ -593,6 +595,82 @@ Deno.test(
         0,
         "no model for mismatched runs",
       );
+
+      const substitutedRequest = {
+        ...first.request,
+        issue: second.request.issue,
+      };
+      const wrongSourceCell = {
+        ...first,
+        request: substitutedRequest,
+        requestDigest: await matrixDigestV1(substitutedRequest),
+      };
+      assert.equal(
+        (await runMatrixCell(
+          (await rig.claimCell(first)).deps,
+          { waveId: WAVE, run: RUN, cell: wrongSourceCell },
+          ACTUAL,
+          T0,
+        )).status,
+        "not_started",
+        "another real issue cannot substitute for the authoritative task source",
+      );
+      const foreignRepository = {
+        ...first.repository,
+        installationId: first.repository.installationId + 1,
+      };
+      const foreignRequest = {
+        ...first.request,
+        repository: foreignRepository,
+      };
+      const wrongRepositoryCell = {
+        ...first,
+        repository: foreignRepository,
+        request: foreignRequest,
+        requestDigest: await matrixDigestV1(foreignRequest),
+      };
+      assert.equal(
+        (await runMatrixCell(
+          (await rig.claimCell(first)).deps,
+          { waveId: WAVE, run: RUN, cell: wrongRepositoryCell },
+          ACTUAL,
+          T0,
+        )).status,
+        "not_started",
+        "self-consistent grant repository must still match authoritative task",
+      );
+      const read = await rig.store.readRepair();
+      assert.ok(read.ok && read.value.status === "found");
+      const actualRead = read.value;
+      const mismatchedAdmission = parseRepairStateSnapshotV1({
+        ...actualRead.snapshot,
+        reservations: actualRead.snapshot.reservations.map((reservation) =>
+          reservation.id === first.reservationId
+            ? { ...reservation, attempt: reservation.attempt + 1 }
+            : reservation
+        ),
+      });
+      const admissionCtx = await rig.claimCell(first);
+      assert.equal(
+        (await runMatrixCell(
+          {
+            ...admissionCtx.deps,
+            state: {
+              readRepair: () =>
+                Promise.resolve(
+                  portOk({ ...actualRead, snapshot: mismatchedAdmission }),
+                ),
+              readRelease: () => rig.store.readRelease(),
+            },
+          },
+          { waveId: WAVE, run: RUN, cell: first },
+          ACTUAL,
+          T0,
+        )).status,
+        "not_started",
+        "reservation attempt must match authoritative task attempt",
+      );
+      assert.equal(rig.model.requests.length, 0);
 
       const ctx = await rig.claimCell(first);
       const completed = await runMatrixCell(
@@ -814,3 +892,76 @@ Deno.test(
     }
   },
 );
+
+Deno.test("matrix runtime: delta bundle requires its base and ignores model-controlled Git hooks", async () => {
+  const rig = await makeRig([501], 1);
+  try {
+    const written = await rig.store.writeRepair(
+      seedSnapshot([freshIssue(501, rig.base)]),
+      null,
+    );
+    assert.ok(written.ok && written.value.status === "applied");
+    const planned = await planMatrixWave(rig.deps, rig.planOptions());
+    const cell = planned.plan.cells[0]!;
+    const ctx = await rig.claimCell(cell);
+    const hooks = ctx.bundlesDir + "/hooks";
+    const marker = ctx.bundlesDir + "/hook-ran";
+    await Deno.mkdir(hooks);
+    await Deno.writeTextFile(
+      hooks + "/reference-transaction",
+      '#!/bin/sh\nprintf hook > "' + marker + '"\nexit 1\n',
+      { mode: 0o700 },
+    );
+    const exporter = ctx.deps.bundle;
+    ctx.deps.bundle = {
+      create: async (request) => {
+        assert.ok(
+          (await gitRun(
+            ctx.repositoryDir,
+            ["config", "core.hooksPath", hooks],
+            rig.env,
+          )).ok,
+        );
+        return exporter.create(request);
+      },
+    };
+    const result = await runMatrixCell(
+      ctx.deps,
+      { waveId: WAVE, run: RUN, cell },
+      ACTUAL,
+      T0,
+    );
+    assert.equal(result.status, "completed");
+    assert.ok(result.bundle);
+    const bytes = await Deno.readFile(
+      ctx.bundlesDir + "/" + result.bundle.file,
+    );
+    const header = new TextDecoder().decode(bytes.slice(0, 4096)).split(
+      "\n\n",
+    )[0]!;
+    assert.ok(
+      header.split("\n").some((line) => line.startsWith("-" + rig.base + " ")),
+      "planned base is an external prerequisite, not bundled history",
+    );
+    await assert.rejects(Deno.stat(marker), Deno.errors.NotFound);
+    await rig.transfer([result], [ctx]);
+    assert.ok(
+      (await gitRun(
+        rig.mirrorRepo,
+        ["config", "core.hooksPath", hooks],
+        rig.env,
+      )).ok,
+    );
+    const report = await ingestMatrixResults(
+      rig.deps,
+      planned.plan,
+      [result],
+      rig.ingestOptions(),
+    );
+    assert.equal(report.ingested, 1);
+    assert.equal(await rig.objectPresent(result.bundle.head), true);
+    await assert.rejects(Deno.stat(marker), Deno.errors.NotFound);
+  } finally {
+    await rig.cleanup();
+  }
+});

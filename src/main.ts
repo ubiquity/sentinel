@@ -108,6 +108,8 @@ export interface RepairEntrypointDepsV1 {
   model: ImplementationPort;
   /** The one durable model-start admission controller. */
   budget: BudgetControllerV1;
+  /** Trusted matrix ownership: no serial implementation fallback or uncertainty settlement. */
+  externalImplementations?: boolean;
 }
 
 export interface RepairEntrypointOptionsV1 {
@@ -187,6 +189,7 @@ export async function runRepairEntrypoint(
         fixtureIdentities: deps.fixtureIdentities,
         model: deps.model,
         budget: deps.budget,
+        externalImplementations: deps.externalImplementations,
       },
       {
         deadline: hardDeadline - OPERATION_MARGIN_MS,

@@ -162,16 +162,6 @@ const DEFAULT_STEP_LIMIT = 32;
 export const REPAIR_RUN_CEILING_MS = 120 * 60_000;
 /** No NEW model work may start after 90 minutes of one run (plan §4). */
 export const REPAIR_MODEL_CUTOFF_MS = 90 * 60_000;
-/**
- * Legacy-loss recovery bound: it gates ONLY the legacy base-refresh-loss
- * restore proof. A blocked missing-evidence record at or above this many
- * attempts is given truthful discovery but is never restored. It is a
- * recovery/provenance safeguard, not a model-spending ceiling: fresh
- * implementation starts have no fixed attempt ceiling and continue while
- * durable progress is made (provider limits, run deadlines, failure blocks and
- * the no-progress demotion still bound the work).
- */
-const LEGACY_LOSS_RESTORE_MAX_ATTEMPTS = 4;
 const MAX_OUTPUT_LIMIT_BYTES = 4096;
 /**
  * Frozen gateway default model id. It is used ONLY when neither the trusted
@@ -834,18 +824,61 @@ function executionAdvanced(
 // same step never races its own earlier checkpoint.
 // ---------------------------------------------------------------------------
 
+/** Rearm only authentic historical emissions of the retired spending ceilings. */
+function retiredCapNextStep(
+  deps: RepairCycleDepsV1,
+  record: WorkRecordV1,
+): "work" | "review" | null {
+  if (
+    record.nextStep !== "blocked" || record.blocker?.kind !== "review_quota" ||
+    record.intent !== null || record.wait !== null ||
+    configFor(deps, record.repository) === null
+  ) return null;
+  const message = record.blocker.message;
+  if (
+    record.counters.attempts >= 4 &&
+    message === "implementation attempt budget exhausted"
+  ) return "work";
+  const prefix = "review rounds exhausted without an accepted verdict (";
+  if (
+    record.counters.reviewRounds >= 3 && record.target.head !== null &&
+    record.target.pr !== null && message.startsWith(prefix) &&
+    message.endsWith(")") &&
+    message.length > prefix.length + 1
+  ) return "review";
+  return null;
+}
+
 async function loadSnapshot(
   deps: RepairCycleDepsV1,
   bounds: RunBoundsV1,
 ): Promise<LoopContextV1 | null> {
   const read = await deps.state.readRepair();
   if (!read.ok || read.value.status === "absent") return null;
-  return {
+  const context: LoopContextV1 = {
     snapshot: read.value.snapshot,
     head: read.value.head,
     bounds,
     executionBaseline: null,
   };
+  if (
+    deps.clock.now() < bounds.runDeadline &&
+    context.snapshot.work.some((record) =>
+      retiredCapNextStep(deps, record) !== null
+    )
+  ) {
+    const now = deps.clock.now();
+    const restored = await persistTransition(deps, context, (draft) => {
+      draft.work = draft.work.map((record) => {
+        const nextStep = retiredCapNextStep(deps, record);
+        return nextStep === null
+          ? record
+          : { ...record, nextStep, blocker: null, updatedAt: now };
+      });
+    });
+    if (restored.kind !== "progress") return null;
+  }
+  return context;
 }
 
 /**
@@ -1163,8 +1196,7 @@ function legacyLossPhase(
   if (record.nextStep === "work") return "discover";
   if (
     record.nextStep === "blocked" &&
-    record.blocker?.kind === "missing_evidence" &&
-    record.counters.attempts < LEGACY_LOSS_RESTORE_MAX_ATTEMPTS
+    record.blocker?.kind === "missing_evidence"
   ) {
     return "restore";
   }
@@ -1712,6 +1744,12 @@ function declaredOperationFits(
   if (now >= bounds.runDeadline) return false;
   const config = configFor(deps, record.repository);
   if (config === null) return false;
+  // Fresh matrix intake still needs the ordinary deterministic branch assignment.
+  // No model admission occurs until the planner prepares the resulting record.
+  if (
+    deps.externalImplementations === true && record.nextStep === "work" &&
+    record.intent === null && record.target.branch === null
+  ) return true;
   if (isModelStartAction(context.snapshot, record)) {
     if (now >= bounds.modelCutoff) return false;
     const bound = config.sessionBound;
@@ -3418,6 +3456,21 @@ async function executeCandidatePreservation(
     // attempt under the existing attempt ceiling instead of retrying a
     // candidate that can never appear.
     if (preserved.error.kind === "not_found") {
+      // There is no durable serial/matrix producer discriminator in this shape.
+      // Local/remote Git absence does not prove archived artifact loss. Preserve
+      // ambiguous modern serial rows too; the separately proven legacy bridge
+      // remains the authority for its own historical loss cases.
+      if (deps.externalImplementations === true) {
+        return persistWork(
+          deps,
+          context,
+          setWait(record, {
+            reason: "unavailable",
+            since: at,
+            until: at + CHECK_POLL_MS,
+          }, at),
+        );
+      }
       const recovered: WorkRecordV1 = {
         ...record,
         intent: null,

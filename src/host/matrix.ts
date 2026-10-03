@@ -56,7 +56,11 @@ import type {
 } from "../contracts/ports.ts";
 import type { RepositoryConfigV1 } from "../contracts/repository-config.ts";
 import type { RepositoryIdentityV1 } from "../contracts/shared.ts";
-import { implementationIntentKey } from "../repair/keys.ts";
+import {
+  candidateBranch,
+  candidatePreservationRef,
+  implementationIntentKey,
+} from "../repair/keys.ts";
 import {
   createRunBounds,
   handleModelReceipt,
@@ -152,6 +156,8 @@ export interface MatrixPlanOptionsV1 {
   plannedAt: number;
   runStartedAt?: number;
   modelStartsEnabled?: boolean;
+  /** Exact target source port while ranking all repositories on one shared budget/state. */
+  githubForRepository?: (repository: RepositoryIdentityV1) => GitHubPort;
   /**
    * Optional planning bound. Defaults to the platform matrix ceiling
    * (`MAX_MATRIX_CELLS`) and is never allowed above it.
@@ -217,13 +223,28 @@ export async function planMatrixWave(
       continue;
     }
     const outcome = await prepareImplementationStart(
-      deps,
+      options.githubForRepository === undefined
+        ? deps
+        : { ...deps, github: options.githubForRepository(record.repository) },
       context,
       record,
       config,
     );
     if (outcome.kind !== "prepared") {
       deferred++;
+      // An ordinary fresh-base refresh is progress, not a failed admission.
+      // Reconsider that same task against its persisted current base.
+      if (outcome.kind === "progress") {
+        const refreshed = await deps.state.readRepair();
+        if (
+          refreshed.ok && refreshed.value.status === "found" &&
+          refreshed.value.snapshot.work.some((entry) =>
+            entry.id === record.id && entry.target.base !== record.target.base
+          )
+        ) {
+          attemptedIds.delete(record.id);
+        }
+      }
       continue;
     }
     const request = outcome.request;
@@ -415,10 +436,21 @@ export async function runMatrixCell(
   if (record === undefined) {
     return refuse("not_started", "planned task is not in authoritative state");
   }
+  if (
+    !sameRepository(record.repository, cell.repository) ||
+    record.source.kind !== "issue" ||
+    record.related.issueNumber !== issueNumber || cell.request.issue === null
+  ) {
+    return refuse(
+      "not_started",
+      "planned task source/repository does not match authoritative state",
+    );
+  }
   const intent = record.intent;
   if (
     intent === null || intent.kind !== "implementation" ||
-    intent.requestId !== cell.reservationId || intent.key !== cell.intentKey
+    intent.requestId !== cell.reservationId || intent.key !== cell.intentKey ||
+    intent.observedBase !== cell.expectedBase || intent.expectedHead !== null
   ) {
     return refuse(
       "not_started",
@@ -431,7 +463,15 @@ export async function runMatrixCell(
   const reservation = stateRead.value.snapshot.reservations.find((entry) =>
     entry.id === cell.reservationId
   );
-  if (reservation === undefined || reservation.outcome !== "reserved") {
+  if (
+    reservation === undefined || reservation.outcome !== "reserved" ||
+    !sameRepository(reservation.repository, record.repository) ||
+    reservation.taskId !== record.id ||
+    reservation.head !== cell.expectedBase ||
+    reservation.attempt !== record.counters.attempts ||
+    (reservation.purpose !== "implementation" &&
+      reservation.purpose !== "retry")
+  ) {
     return refuse("not_started", "planned reservation is not reserved");
   }
 
@@ -632,7 +672,107 @@ export async function ingestMatrixResults(
       });
       continue;
     }
+    const reservation = context.snapshot.reservations.find((entry) =>
+      entry.id === cell.reservationId
+    );
+    if (
+      !sameRepository(record.repository, cell.repository) ||
+      record.source.kind !== "issue" ||
+      record.related.issueNumber !== cell.request.issue?.number ||
+      record.target.base !== cell.expectedBase ||
+      reservation === undefined ||
+      !sameRepository(reservation.repository, record.repository) ||
+      reservation.taskId !== record.id ||
+      reservation.head !== cell.expectedBase ||
+      reservation.attempt !== record.counters.attempts ||
+      (reservation.purpose !== "implementation" &&
+        reservation.purpose !== "retry")
+    ) {
+      entries.push({
+        cellId: cell.cellId,
+        disposition: "binding_mismatch",
+        detail: "grant does not bind authoritative task/admission",
+      });
+      continue;
+    }
+    const config = configForRepository(deps, cell.repository);
+    if (config === null) {
+      entries.push({
+        cellId: cell.cellId,
+        disposition: "binding_mismatch",
+        detail: "repository is not configured",
+      });
+      continue;
+    }
     const intent = record.intent;
+    if (
+      intent?.kind === "candidate_preservation" &&
+      intent.requestId === cell.reservationId &&
+      intent.key === cell.intentKey
+    ) {
+      // The receipt was already consumed. Restore only its exact saved objects;
+      // never settle this admission again or reopen implementation.
+      const candidate = result.receipt?.candidate;
+      const expectedRef = await candidatePreservationRef(
+        record.repository,
+        record.id,
+        cell.intentKey,
+      );
+      if (
+        reservation.outcome !== "submitted" || reservation.settledAt === null ||
+        result.status !== "completed" || result.receipt === null ||
+        candidate?.head === null ||
+        candidate === undefined || candidate === null ||
+        candidate.head !== record.target.head ||
+        candidate.checkpointSha !== (record.target.checkpoint?.sha ?? null) ||
+        (record.target.checkpoint !== null &&
+          record.target.checkpoint.branch !== candidateBranch(record.id)) ||
+        intent.expectedHead !== record.target.head ||
+        intent.observedBase !== cell.expectedBase ||
+        intent.branch !== expectedRef || intent.pr !== null ||
+        intent.resultId !== null ||
+        record.target.candidateState?.preserved !== null ||
+        !verifyMatrixReceiptV1(
+          result.receipt,
+          cell.request,
+          options.expectedProvider,
+        )
+      ) {
+        entries.push({
+          cellId: cell.cellId,
+          disposition: "binding_mismatch",
+          detail: "saved preservation does not bind authenticated candidate",
+        });
+        continue;
+      }
+      if (
+        options.bundleImporter === undefined || result.bundle === null ||
+        result.bundle.head !== candidate.head ||
+        result.bundle.checkpointSha !== candidate.checkpointSha ||
+        result.bundle.file !== matrixBundleFileNameV1(cell.cellId) ||
+        !await options.bundleImporter.import({
+          base: cell.expectedBase,
+          file: result.bundle.file,
+          digest: result.bundle.digest,
+          head: candidate.head!,
+          checkpointSha: candidate.checkpointSha,
+        })
+      ) {
+        entries.push({
+          cellId: cell.cellId,
+          disposition: "candidate_unavailable",
+          detail: "saved candidate artifact objects are unavailable",
+        });
+        continue;
+      }
+      entries.push({
+        cellId: cell.cellId,
+        disposition: "duplicate",
+        detail:
+          "receipt already consumed; exact saved candidate objects rehydrated",
+      });
+      continue;
+    }
     if (
       intent === null || intent.kind !== "implementation" ||
       intent.requestId !== cell.reservationId || intent.key !== cell.intentKey
@@ -643,15 +783,6 @@ export async function ingestMatrixResults(
         cellId: cell.cellId,
         disposition: "duplicate",
         detail: "implementation intent already consumed",
-      });
-      continue;
-    }
-    const config = configForRepository(deps, cell.repository);
-    if (config === null) {
-      entries.push({
-        cellId: cell.cellId,
-        disposition: "binding_mismatch",
-        detail: "repository is not configured",
       });
       continue;
     }

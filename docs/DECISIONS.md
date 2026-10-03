@@ -2,6 +2,12 @@
 
 Read before changing Sentinel runtime or delivery. These are scoped user exceptions; they do not broadly override higher authority.
 
+## Task-scoped local execution override - 2026-10-03
+
+For the current Sentinel concurrency task, the owner explicitly selected `gpt-6.1-sol` with `ultra` reasoning and Fast mode (`service_tier=fast`, mapped to request tier `priority`) for remaining local execution and new delegation. This supersedes the local DeepSeek default only for this task. Relay the instruction through supported parent controls, preserve current workers and artifacts, and change settings only at supported safe boundaries. A message or resume alone is not evidence that an existing request changed model or tier; distinguish requested settings from actual readback. Do not directly start turns on native multi-agent children or restart shared services.
+
+This override does not change production Sentinel model routing, credentials, review or CI gates, promotion ownership, or the explicit approval boundary for each development-triggered hosted attempt.
+
 ## Owner-directed uncapped issue throughput - 2026-10-02
 
 The owner requested concurrent processing of the GitHub issue backlog, then explicitly directed "lift all the limits for now" at 22:05 UTC after the one-writer, three-PR and 120-start hourly limits were identified. This supersedes the earlier artificial runtime throughput limits: enable isolated concurrent issue implementation, remove hourly and weekly start caps, unfinished-PR and concurrent-review caps, the eight-item review-drain cap, and the ordinary-run hourly delay. Reconsider stored waits caused solely by those retired caps; preserve durable admission and settlement history. The trusted default is `liveStartLimits: { perHour: null, perSevenDays: null }`; a wholly null or invalid policy still does not enable inference.
