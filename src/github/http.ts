@@ -35,6 +35,8 @@ export interface HttpRequestV1 {
   redirect?: "error" | "manual";
   /** Preserve raw bytes for bounded archive downloads. */
   responseType?: "bytes";
+  /** Positive finite override that may only shorten the transport bound. */
+  deadlineMs?: number;
 }
 
 export interface HttpResponseV1 {
@@ -177,7 +179,16 @@ export function fromFetch(
   const deadlineMs = options.deadlineMs ?? DEFAULT_HTTP_DEADLINE_MS;
   const maxBodyBytes = options.maxBodyBytes ?? DEFAULT_HTTP_MAX_BODY_BYTES;
   return async (request: HttpRequestV1): Promise<HttpResponseV1> => {
-    const deadline = createDeadline(deadlineMs);
+    const requestDeadline = request.deadlineMs;
+    if (
+      requestDeadline !== undefined &&
+      (!Number.isFinite(requestDeadline) || requestDeadline <= 0)
+    ) {
+      throw new Error("invalid HTTP request deadline");
+    }
+    const deadline = createDeadline(
+      Math.min(deadlineMs, requestDeadline ?? deadlineMs),
+    );
     const controller = new AbortController();
     try {
       const fetchPromise = fetchFn(request.url, {
