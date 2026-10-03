@@ -66,6 +66,56 @@ Deno.test("observe auth parser keeps header values out of diagnostics", () => {
   );
 });
 
+Deno.test(
+  "observe keeps malformed credentials and forbidden responses as auth_failed",
+  async () => {
+    const config = await loadObserveConfig();
+    const keyBytes = Uint8Array.from({ length: 32 }, (_, index) => index + 1);
+    const cases = [
+      {
+        name: "empty auth-header value",
+        authHeaders: parseObserveAuthHeaders('{"authorization":""}'),
+        expectedDetail: "gateway credentials are unavailable",
+        expectedRequests: 0,
+      },
+      {
+        name: "permission-related 403",
+        authHeaders: { authorization: "Bearer test" },
+        expectedDetail: "gateway authentication failed",
+        expectedRequests: 1,
+      },
+    ];
+
+    for (const testCase of cases) {
+      const root = await Deno.makeTempDir({
+        prefix: "sentinel-observe-auth-failure-test-",
+        dir: Deno.cwd(),
+      });
+      let requests = 0;
+      try {
+        const result = await runReadOnlyObservation({
+          config,
+          authHeaders: testCase.authHeaders,
+          keyBytes,
+          storeRoot: root,
+          transport: () => {
+            requests++;
+            return Promise.resolve(new Response(null, { status: 403 }));
+          },
+        });
+        assert.equal(result.ok, false, testCase.name);
+        if (result.ok) continue;
+        assert.equal(result.error.kind, "auth_failed", testCase.name);
+        assert.notEqual(result.error.kind, "auth_expired", testCase.name);
+        assert.equal(result.error.detail, testCase.expectedDetail);
+        assert.equal(requests, testCase.expectedRequests);
+      } finally {
+        await Deno.remove(root, { recursive: true });
+      }
+    }
+  },
+);
+
 Deno.test("read-only observation retains no plaintext for an empty index", async () => {
   const config = await loadObserveConfig();
   const root = await Deno.makeTempDir({
