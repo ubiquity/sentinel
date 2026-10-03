@@ -529,6 +529,14 @@ export const OWNER_DEVELOPMENT_INSTALL_CONCURRENCY_RETRY_PRIOR_GENERATION = 58;
 export const OWNER_DEVELOPMENT_INSTALL_CONCURRENCY_RETRY_REVISION =
   "c79b2b87a6a2dd0adc201895af10806ef7a9c600" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_CONCURRENCY_RETRY_GENERATION = 59;
+/**
+ * Exact audited planner successor, installed only after its predecessor's own
+ * generation 59 healthy settlement. Failure restores that saved c79 proof once
+ * at generation 61; the earlier 0fc generation 60 rollback remains terminal.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_CONCURRENCY_PLANNER_REVISION =
+  "ee9aa0c010148af8d08bca637523ebfbc1988e21" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_CONCURRENCY_PLANNER_GENERATION = 60;
 /** Monotonic rollback target the failed generation 45 candidate rolled to. */
 export const OWNER_DEVELOPMENT_INSTALL_ROLLBACK_TARGET_GENERATION =
   OWNER_DEVELOPMENT_INSTALL_ASSIGN_FIRST_GENERATION + 2;
@@ -2765,10 +2773,60 @@ export function planOwnerDevelopmentInstall(
       );
     }
     if (healthy !== null) {
-      return noChange("the owner development installation is complete");
+      const settlement = runtime.lastExecutionProof;
+      if (
+        settlement === null || settlement.outcome !== "healthy" ||
+        settlement.execution.revision !== revision ||
+        settlement.execution.generation !== generation ||
+        settlement.observedAt < healthy.observedAt
+      ) {
+        return waiting(
+          "the current generation 59 healthy settlement is not recorded",
+        );
+      }
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_CONCURRENCY_PLANNER_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_CONCURRENCY_PLANNER_GENERATION,
+        healthy,
+        "install the planner successor after its own generation 59 healthy proof",
+      );
     }
     return waiting(
       "the concurrency retry generation 59 healthy proof is not recorded",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_CONCURRENCY_PLANNER_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_CONCURRENCY_PLANNER_GENERATION
+  ) {
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_CONCURRENCY_RETRY_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_CONCURRENCY_RETRY_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded generation 59 healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_CONCURRENCY_RETRY_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed planner successor to its recorded proven predecessor",
+      );
+    }
+    if (healthy !== null) {
+      return noChange("the owner development installation is complete");
+    }
+    return waiting(
+      "the planner successor generation 60 healthy proof is not recorded",
     );
   }
 

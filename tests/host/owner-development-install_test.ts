@@ -225,6 +225,8 @@ const CONCURRENCY_REVISION =
 // Keep the new pin test-local so RED remains a behavior mismatch.
 const CONCURRENCY_RETRY_REVISION =
   "c79b2b87a6a2dd0adc201895af10806ef7a9c600" as GitSha;
+const CONCURRENCY_PLANNER_REVISION =
+  "ee9aa0c010148af8d08bca637523ebfbc1988e21" as GitSha;
 const ROLLBACK_TARGET_GENERATION = 46;
 
 /** Real production entrypoint, fake GitHub transport, real private Git objects. */
@@ -6524,7 +6526,8 @@ Deno.test(
             executionProof: accepted59,
           }),
         }),
-        status: "no_change",
+        status: "installed",
+        patches: 1,
       },
       {
         state: releaseSnapshot({
@@ -6547,7 +6550,346 @@ Deno.test(
       const fixture = await concurrencyInstallerFixture(
         entry.state,
         entry.refusal,
+        entry.status === "installed"
+          ? CONCURRENCY_PLANNER_REVISION
+          : CONCURRENCY_RETRY_REVISION,
+      );
+      try {
+        assert.equal(await fixture.run(), 0);
+        assert.equal(
+          fixture.reports.at(-1)?.status,
+          entry.status,
+          entry.refusal,
+        );
+        assert.equal(fixture.patches(), entry.patches ?? 0, entry.refusal);
+        if (entry.status === "installed") {
+          assert.equal(
+            fixture.reports.at(-1)?.candidateRevision,
+            CONCURRENCY_PLANNER_REVISION,
+          );
+          assert.equal(fixture.reports.at(-1)?.candidateGeneration, 60);
+        } else if (entry.refusal !== "parent" && entry.refusal !== "readback") {
+          assert.equal(await fixture.head(), fixture.beforeHead);
+        }
+        if (
+          entry.status !== "installed" &&
+          (entry.refusal === undefined || entry.refusal === "artifact")
+        ) {
+          assert.equal(fixture.requests.length, 0);
+        }
+      } finally {
+        await fixture.close();
+      }
+    }
+  },
+);
+
+Deno.test(
+  "owner install runtime60: own healthy59 installs the exact planner once with saved bootstrap proof",
+  async () => {
+    const prior = hostedProof({
+      runId: 37134515396,
+      purpose: "bootstrap",
+      releaseId: null,
+      revision: CONCURRENCY_RETRY_REVISION,
+      generation: 59,
+      outcome: "healthy",
+    });
+    const state = releaseSnapshot({
+      runtime: runtimeRecord({
+        revision: CONCURRENCY_RETRY_REVISION,
+        generation: 59,
+        healthyProof: prior,
+        executionProof: prior,
+      }),
+      hostedReleases: [acceptedRelease()],
+      cooldowns: [cooldown(NOW - 1)],
+    });
+    const fixture = await concurrencyInstallerFixture(
+      state,
+      undefined,
+      CONCURRENCY_PLANNER_REVISION,
+    );
+    try {
+      assert.equal(await fixture.run(), 0);
+      assert.equal(fixture.reports.at(-1)?.status, "installed");
+      assert.equal(
+        fixture.reports.at(-1)?.candidateRevision,
+        CONCURRENCY_PLANNER_REVISION,
+      );
+      assert.equal(fixture.reports.at(-1)?.candidateGeneration, 60);
+      assert.equal(fixture.patches(), 1);
+      const read = await fixture.read();
+      if (!read.ok || read.value.status !== "found") {
+        throw new Error("missing installed planner");
+      }
+      assert.equal(
+        read.value.snapshot.hostedRuntimes[0].activeRevision,
+        CONCURRENCY_PLANNER_REVISION,
+      );
+      assert.equal(read.value.snapshot.hostedRuntimes[0].generation, 60);
+      assert.deepEqual(
+        read.value.snapshot.hostedRuntimes[0].lastHealthyProof,
+        prior,
+      );
+      assert.deepEqual(
+        read.value.snapshot.hostedReleases,
+        state.hostedReleases,
+      );
+      assert.deepEqual(
+        read.value.snapshot.githubCooldowns,
+        state.githubCooldowns,
+      );
+      const recorded = JSON.parse(
+        (await fixture.message()).trim().split("\n").at(-1)!,
+      );
+      assert.equal(recorded.stateHead, fixture.beforeHead);
+      assert.equal(recorded.priorRevision, CONCURRENCY_RETRY_REVISION);
+      assert.equal(recorded.priorGeneration, 59);
+      assert.equal(recorded.nextRevision, CONCURRENCY_PLANNER_REVISION);
+      assert.equal(recorded.nextGeneration, 60);
+      assert.deepEqual(recorded.priorHealthyProof, prior);
+      assert.equal(await fixture.run(), 0);
+      assert.equal(fixture.reports.at(-1)?.status, "waiting");
+      assert.equal(fixture.patches(), 1);
+    } finally {
+      await fixture.close();
+    }
+  },
+);
+
+Deno.test(
+  "owner install runtime60: exact failed60 restores only saved healthyc79 at terminal61 once",
+  async () => {
+    const prior = healthyProof(CONCURRENCY_RETRY_REVISION, 59, 37134515396);
+    const runtime = runtimeRecord({
+      revision: CONCURRENCY_PLANNER_REVISION,
+      generation: 60,
+      healthyProof: prior,
+      executionProof: failedProof(CONCURRENCY_PLANNER_REVISION, 60, 1102),
+    });
+    const state = releaseSnapshot({
+      runtime,
+      hostedReleases: [acceptedRelease()],
+    });
+    const fixture = await concurrencyInstallerFixture(
+      state,
+      undefined,
+      CONCURRENCY_PLANNER_REVISION,
+    );
+    try {
+      assert.equal(await fixture.run(), 0);
+      assert.equal(fixture.reports.at(-1)?.status, "rolled_back");
+      assert.equal(
+        fixture.reports.at(-1)?.candidateRevision,
         CONCURRENCY_RETRY_REVISION,
+      );
+      assert.equal(fixture.reports.at(-1)?.candidateGeneration, 61);
+      assert.equal(fixture.patches(), 1);
+      assert.ok(
+        !fixture.requests.some((request) =>
+          request.path.includes("/compare/") ||
+          request.path.includes("/check-runs")
+        ),
+      );
+      const read = await fixture.read();
+      if (!read.ok || read.value.status !== "found") {
+        throw new Error("missing planner rollback");
+      }
+      assert.deepEqual(
+        read.value.snapshot.hostedRuntimes[0].lastHealthyProof,
+        prior,
+      );
+      assert.deepEqual(
+        read.value.snapshot.hostedReleases,
+        state.hostedReleases,
+      );
+      assert.equal(await fixture.run(), 0);
+      assert.equal(fixture.reports.at(-1)?.status, "no_change");
+      assert.equal(fixture.patches(), 1);
+    } finally {
+      await fixture.close();
+    }
+    for (
+      const proof of [
+        null,
+        healthyProof(CONCURRENCY_PRIOR_REVISION, 58),
+        healthyProof(CONCURRENCY_RETRY_REVISION, 58),
+        healthyProof(UNRELATED, 59),
+        healthyProof(CONCURRENCY_PLANNER_REVISION, 60),
+      ]
+    ) {
+      assert.equal(
+        planOwnerDevelopmentInstall(
+          releaseSnapshot({ runtime: { ...runtime, lastHealthyProof: proof } }),
+          NOW,
+        ).status,
+        "waiting",
+      );
+    }
+    for (
+      const proof of [
+        null,
+        notStartedProof(CONCURRENCY_PLANNER_REVISION, 60),
+        failedProof(CONCURRENCY_PLANNER_REVISION, 59),
+        failedProof(UNRELATED, 60),
+      ]
+    ) {
+      assert.equal(
+        planOwnerDevelopmentInstall(
+          releaseSnapshot({
+            runtime: { ...runtime, lastExecutionProof: proof },
+          }),
+          NOW,
+        ).status,
+        "waiting",
+      );
+    }
+  },
+);
+
+Deno.test(
+  "owner install runtime60: actual consumer refuses current ordinary stale proof CI conflicts and preserves distinct terminal pointers",
+  async () => {
+    const prior = healthyProof(CONCURRENCY_RETRY_REVISION, 59, 37134515396);
+    const runtime = runtimeRecord({
+      revision: CONCURRENCY_RETRY_REVISION,
+      generation: 59,
+      healthyProof: prior,
+      executionProof: prior,
+    });
+    const healthy = releaseSnapshot({ runtime });
+    const accepted60 = healthyProof(CONCURRENCY_PLANNER_REVISION, 60, 1103);
+    const restored61 = healthyProof(CONCURRENCY_RETRY_REVISION, 61, 1104);
+    const cases: {
+      state: ReleaseStateSnapshotV1;
+      refusal?: Parameters<typeof concurrencyInstallerFixture>[1];
+      status: string;
+      patches?: number;
+    }[] = [
+      {
+        state: releaseSnapshot({
+          runtime: { ...runtime, lastHealthyProof: null },
+        }),
+        status: "waiting",
+      },
+      {
+        state: releaseSnapshot({
+          runtime: {
+            ...runtime,
+            lastHealthyProof: healthyProof(CONCURRENCY_PRIOR_REVISION, 58),
+          },
+        }),
+        status: "waiting",
+      },
+      {
+        state: releaseSnapshot({
+          runtime: { ...runtime, lastExecutionProof: null },
+        }),
+        status: "waiting",
+      },
+      {
+        state: releaseSnapshot({
+          runtime: {
+            ...runtime,
+            lastExecutionProof: failedProof(CONCURRENCY_RETRY_REVISION, 59),
+          },
+        }),
+        status: "waiting",
+      },
+      {
+        state: releaseSnapshot({
+          runtime: {
+            ...runtime,
+            lastExecutionProof: parseHostedRunProofV1({
+              ...prior,
+              observedAt: T0 + 2500,
+            }),
+          },
+        }),
+        status: "waiting",
+      },
+      {
+        state: releaseSnapshot({
+          runtime: {
+            ...runtime,
+            execution: parseHostedExecutionIntentV1({
+              ...executionIntent(CONCURRENCY_RETRY_REVISION, 59),
+              id: "37136320870:1:repair",
+              runId: 37136320870,
+            }),
+          },
+        }),
+        status: "waiting",
+      },
+      {
+        state: releaseSnapshot({
+          runtime,
+          hostedReleases: [requestedRelease()],
+        }),
+        status: "waiting",
+      },
+      {
+        state: releaseSnapshot({ runtime, cooldowns: [cooldown(null)] }),
+        status: "waiting",
+      },
+      {
+        state: releaseSnapshot({ runtime, cooldowns: [cooldown(NOW + 1)] }),
+        status: "waiting",
+      },
+      {
+        state: releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: CONCURRENCY_PLANNER_REVISION,
+            generation: 60,
+            healthyProof: accepted60,
+            executionProof: accepted60,
+          }),
+        }),
+        status: "no_change",
+      },
+      {
+        state: releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: CONCURRENCY_RETRY_REVISION,
+            generation: 61,
+            healthyProof: restored61,
+            executionProof: restored61,
+          }),
+        }),
+        status: "no_change",
+      },
+      {
+        state: releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: CONCURRENCY_PRIOR_REVISION,
+            generation: 60,
+            healthyProof: healthyProof(CONCURRENCY_PRIOR_REVISION, 60),
+          }),
+        }),
+        status: "no_change",
+      },
+      {
+        state: releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: UNRELATED,
+            generation: 62,
+            healthyProof: healthyProof(UNRELATED, 62),
+          }),
+        }),
+        status: "no_change",
+      },
+      { state: healthy, refusal: "ancestry", status: "waiting" },
+      { state: healthy, refusal: "ci", status: "waiting" },
+      { state: healthy, refusal: "artifact", status: "waiting" },
+      { state: healthy, refusal: "parent", status: "failed" },
+      { state: healthy, refusal: "readback", status: "failed", patches: 1 },
+    ];
+    for (const entry of cases) {
+      const fixture = await concurrencyInstallerFixture(
+        entry.state,
+        entry.refusal,
+        CONCURRENCY_PLANNER_REVISION,
       );
       try {
         assert.equal(await fixture.run(), 0);
