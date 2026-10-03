@@ -229,7 +229,15 @@ async function concurrencyInstallerFixture(
   snapshot: ReleaseStateSnapshotV1,
   refusal?: "ancestry" | "ci" | "parent" | "readback" | "artifact",
 ) {
-  const directory = await Deno.makeTempDir({ prefix: "sentinel-owner57-" });
+  // The declared test permission reads only the workspace and system paths;
+  // keep the fixture root inside the checkout so chdir and its real Git
+  // objects stay readable without widening the harness scope.
+  const directory = await Deno.realPath(
+    await Deno.makeTempDir({
+      prefix: "sentinel-owner57-",
+      dir: ".",
+    }),
+  );
   const remote = `${directory}/remote.git`;
   const originalCommand = Deno.Command;
   const originalFetch = globalThis.fetch;

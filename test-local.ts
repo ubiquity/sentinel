@@ -78,7 +78,13 @@ const steps: { name: string; args: string[] }[] = [
       `--allow-read=.,/usr,/bin,${Deno.execPath()}`,
       "--allow-run",
       "--allow-write",
-      "--allow-env=PATH,NODE_V8_COVERAGE",
+      // The harness children run with a cleared environment, so permitting
+      // these GitHub entrypoint names exposes no ambient credential: the
+      // concurrency installer fixture reads/writes its own fake values for
+      // them through Deno.env.
+      "--allow-env=PATH,NODE_V8_COVERAGE,GITHUB_REPOSITORY,GITHUB_REF," +
+      "GITHUB_JOB,GITHUB_SHA,GITHUB_WORKFLOW_SHA,GITHUB_TOKEN," +
+      "SENTINEL_SUPERVISOR_TOKEN",
       "tests/contracts/",
       "tests/state/",
       "tests/budget/",
