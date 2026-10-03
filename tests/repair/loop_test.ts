@@ -920,9 +920,9 @@ Deno.test(
             submittedAt: T0 + 1000,
             completedAt: observation.completedAt,
             observedAt: observation.receivedAt,
-            taskAcceptance: null,
           },
         );
+        assert.equal(Object.hasOwn(legacy, "taskAcceptance"), false);
         const originalHash = await sha256Hex(canonicalStringify(legacy));
         const record = workRecord("issue-1", {
           ...reviewWaitIssueRecord(head),
@@ -957,6 +957,14 @@ Deno.test(
           null,
         );
         assert.ok(written.ok && written.value.status === "applied");
+        const storedLegacy = (await rig.snapshot()).reviews.find((receipt) =>
+          receipt.id === legacy.id
+        )!;
+        assert.equal(Object.hasOwn(storedLegacy, "taskAcceptance"), false);
+        assert.equal(
+          await sha256Hex(canonicalStringify(storedLegacy)),
+          originalHash,
+        );
         rig.github.reviewObservationsByKey.set(operationKey, observation);
         rig.github.unboundReviewKeys.add(nextKey);
         rig.github.releasedHead = head;
@@ -974,6 +982,7 @@ Deno.test(
         assert.equal(state.work[0]!.target.head, head);
         assert.equal(rig.model.requests.length, 0);
         assert.equal(rig.github.calls.includes("merge"), false);
+        assert.equal(state.releaseRequests.length, 0);
         assert.equal(rig.github.lastReviewTask?.digest, FAKE_ISSUE_TASK_DIGEST);
         assert.deepEqual(
           state.reservations.filter((charge) => charge.attempt < 3),
@@ -990,6 +999,13 @@ Deno.test(
             ),
           ),
           originalHash,
+        );
+        assert.equal(
+          Object.hasOwn(
+            state.reviews.find((receipt) => receipt.id === legacy.id)!,
+            "taskAcceptance",
+          ),
+          false,
         );
 
         rig.github.unboundReviewKeys.delete(nextKey);
@@ -1012,6 +1028,7 @@ Deno.test(
           1,
         );
         assert.equal(state.releaseRequests.length, 1);
+        assert.equal(state.work[0]!.target.head, head);
         assert.equal(
           await sha256Hex(
             canonicalStringify(
@@ -1019,6 +1036,13 @@ Deno.test(
             ),
           ),
           originalHash,
+        );
+        assert.equal(
+          Object.hasOwn(
+            state.reviews.find((receipt) => receipt.id === legacy.id)!,
+            "taskAcceptance",
+          ),
+          false,
         );
       } finally {
         await rig.ctx.cleanup();

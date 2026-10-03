@@ -4999,7 +4999,8 @@ async function recoverMissingTaskReview(
     existing !== undefined && (
       existing.requestId !== receipt.requestId ||
       existing.resultId !== receipt.resultId ||
-      existing.outcome !== "completed" || existing.taskAcceptance !== null ||
+      existing.outcome !== "completed" ||
+      (existing.taskAcceptance ?? null) !== null ||
       existing.pullRequest.head !== receipt.pullRequest.head ||
       existing.pullRequest.base !== receipt.pullRequest.base ||
       existing.pullRequest.number !== receipt.pullRequest.number ||
