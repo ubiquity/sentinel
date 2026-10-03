@@ -9,11 +9,12 @@ import {
   tryParseMatrixPlanV1,
 } from "../contracts/matrix.ts";
 import type { RepositoryConfigV1 } from "../contracts/repository-config.ts";
-import type { RepairCycleDepsV1 } from "../repair/loop.ts";
+import { createRunBounds, type RepairCycleDepsV1 } from "../repair/loop.ts";
 import {
   type ActionsRepairHostDepsV1,
   type ActionsTargetCyclesInputV1,
   type ActionsTargetCyclesResultV1,
+  childRunDeadlineV1,
   runActionsRepairHost,
   runActionsTargetCycles,
 } from "./actions.ts";
@@ -298,6 +299,16 @@ export async function runActionsMatrixHost(
         const github = input.composeGithub(config);
         result = await runMatrixCell(
           {
+            clock: input.clock,
+            bounds: createRunBounds(targetDeps(input, config), {
+              deadline: Math.min(
+                input.deadline,
+                childRunDeadlineV1(host.execution.createdAt),
+              ),
+              runStartedAt: host.execution.createdAt,
+              modelStartsEnabled: input.modelStartsEnabled,
+            }),
+            sessionBound: config.sessionBound,
             state: {
               readRepair: () => input.state.readRepair(),
               readRelease: () => input.state.readRelease(),

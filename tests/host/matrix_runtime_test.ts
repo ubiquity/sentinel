@@ -43,7 +43,7 @@ import type { WorkRecordV1 } from "../../src/contracts/work-record.ts";
 import { DurableGitHubCooldownGate } from "../../src/repair/github-cooldown.ts";
 import { implementationIntentKey } from "../../src/repair/keys.ts";
 import type { RepairCycleDepsV1 } from "../../src/repair/loop.ts";
-import { runRepairCycle } from "../../src/repair/loop.ts";
+import { createRunBounds, runRepairCycle } from "../../src/repair/loop.ts";
 import {
   ingestMatrixResults,
   type MatrixIngestOptionsV1,
@@ -198,6 +198,9 @@ interface CellContextV1 {
   cell: MatrixCellPlanV1;
   repositoryDir: string;
   deps: {
+    clock: FakeClock;
+    bounds: { runDeadline: number; modelCutoff: number };
+    sessionBound: { maxDurationMs: number; maxOutputChars: number };
     state: RigV1["store"];
     github: ListedGithub;
     model: OverlappingModel;
@@ -424,6 +427,12 @@ async function makeRig(
         cell,
         repositoryDir: repo,
         deps: {
+          clock,
+          bounds: createRunBounds(deps, {
+            deadline: DEADLINE,
+            runStartedAt: T0,
+          }),
+          sessionBound: configs[0]!.sessionBound!,
           state: store,
           github,
           model,

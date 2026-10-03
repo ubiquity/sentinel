@@ -50,6 +50,7 @@ import {
   tryParseMatrixPlanV1,
 } from "../contracts/matrix.ts";
 import type {
+  Clock,
   GitHubPort,
   ImplementationPort,
   ModelRunReceiptV1,
@@ -67,6 +68,7 @@ import {
   handleModelReceipt,
   isMatrixImplementationReadyV1,
   loadRepairContext,
+  OPERATION_MARGIN_MS,
   prepareImplementationStart,
   type RepairCycleDepsV1,
   type RunBoundsV1,
@@ -321,6 +323,11 @@ export async function planMatrixWave(
 // ---------------------------------------------------------------------------
 
 export interface MatrixCellDepsV1 {
+  /** Trusted fresh clock and original shared run bounds; never artifact claims. */
+  clock: Clock;
+  bounds: RunBoundsV1;
+  /** Full configured session maximum, with the ordinary publication margin. */
+  sessionBound: RepositoryConfigV1["sessionBound"];
   /** Read-only authoritative state view; the cell can never write state. */
   state: StateReadView;
   /**
@@ -387,7 +394,7 @@ export async function runMatrixCell(
     receipt: null,
     bundle: null,
     detail,
-    completedAt: now,
+    completedAt: deps.clock.now(),
   });
 
   // Trusted actual identity, never the grant's own claim.
@@ -505,6 +512,21 @@ export async function runMatrixCell(
       reservation.purpose !== "retry")
   ) {
     return refuse("not_started", "planned reservation is not reserved");
+  }
+
+  // Source and durable-intent reads were awaited wall-clock work. Recheck at
+  // the final start boundary with the full configured session and margin.
+  const startsAt = deps.clock.now();
+  if (
+    deps.sessionBound === null ||
+    startsAt >= deps.bounds.modelCutoff ||
+    startsAt + deps.sessionBound.maxDurationMs + OPERATION_MARGIN_MS >
+      deps.bounds.runDeadline
+  ) {
+    return refuse(
+      "not_started",
+      "implementation start is past the model cutoff or no longer fits the run bounds",
+    );
   }
 
   // Exactly one model session; the port owns the isolated, credential-free

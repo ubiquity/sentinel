@@ -31,6 +31,10 @@ import {
   runActionsMatrixHost,
 } from "../../src/host/matrix-actions.ts";
 import { runActionsRepairHost } from "../../src/host/actions.ts";
+import {
+  OPERATION_MARGIN_MS,
+  REPAIR_MODEL_CUTOFF_MS,
+} from "../../src/repair/loop.ts";
 import { FakeClock, FakeGithub, MemoryState } from "../repair/helpers.ts";
 import { GitHubApiClient } from "../../src/github/client.ts";
 import { issueWire } from "../github/helpers.ts";
@@ -839,6 +843,136 @@ Deno.test("matrix actions: actual fresh intake plans both targets, isolated cell
     await r.cleanup();
   }
 });
+for (
+  const scenario of [
+    {
+      name: "source read reaches model cutoff",
+      boundary: "source",
+      elapsed: REPAIR_MODEL_CUTOFF_MS,
+      starts: 0,
+    },
+    {
+      name: "intent read leaves insufficient full session margin",
+      boundary: "state",
+      elapsed: 110 * 60_000 - 1_800_000 - OPERATION_MARGIN_MS + 1,
+      starts: 0,
+    },
+    {
+      name: "source read reaches absolute deadline",
+      boundary: "source",
+      elapsed: 110 * 60_000,
+      starts: 0,
+    },
+    {
+      name: "intent read leaves exactly full session margin",
+      boundary: "state",
+      elapsed: 110 * 60_000 - 1_800_000 - OPERATION_MARGIN_MS,
+      starts: 1,
+    },
+    {
+      name: "source read stays just inside session margin",
+      boundary: "source",
+      elapsed: 110 * 60_000 - 1_800_000 - OPERATION_MARGIN_MS - 1,
+      starts: 1,
+    },
+  ]
+) {
+  Deno.test("matrix actions deadline: " + scenario.name, async () => {
+    const r = await rig();
+    try {
+      const planned = await runActionsMatrixHost({
+        ...await r.job("deadline-plan", "matrix_plan"),
+        model: {
+          modelId: "gpt-reserve",
+          runModel: () => Promise.reject(new Error("planner cannot infer")),
+        },
+      });
+      assert.ok("plan" in planned);
+      const cell = planned.plan.cells.find((entry) =>
+        entry.repository.name === "sentinel"
+      )!;
+      assert.ok(cell);
+      const before = await r.store.readRepair();
+      assert.ok(before.ok && before.value.status === "found");
+      const deps = await r.job("deadline-cell", "matrix_cell");
+      const artifactRoot = r.root + "/deadline-cell/.sentinel-matrix";
+      await Deno.mkdir(artifactRoot);
+      await Deno.writeTextFile(
+        artifactRoot + "/plan.json",
+        JSON.stringify(planned.plan),
+      );
+      const github = r.github.get("ubiquity/sentinel")!;
+      const readIssue = github.readIssue.bind(github);
+      let armed = false, advanced = false, modelCalls = 0;
+      const advance = () => {
+        if (advanced) return;
+        r.clock.advance(T0 + 10000 + scenario.elapsed - r.clock.now());
+        advanced = true;
+      };
+      github.readIssue = async (number) => {
+        const result = await readIssue(number);
+        armed = true;
+        if (scenario.boundary === "source") advance();
+        return result;
+      };
+      const result = await runActionsMatrixHost({
+        ...deps,
+        state: {
+          readRelease: () => r.store.readRelease(),
+          writeRepair: (snapshot, expected) =>
+            r.store.writeRepair(snapshot, expected),
+          readRepair: async () => {
+            const read = await r.store.readRepair();
+            if (armed && scenario.boundary === "state") advance();
+            return read;
+          },
+        },
+        model: {
+          modelId: "gpt-reserve",
+          runModel: () => {
+            modelCalls++;
+            return Promise.resolve(
+              portError("unavailable", "bounded fake model outcome"),
+            );
+          },
+        },
+        carrier: { planDigest: planned.planDigest, cellId: cell.cellId },
+      });
+      assert.ok("cellId" in result);
+      assert.ok(
+        advanced,
+        "the real cell awaited the advancing source/state boundary",
+      );
+      assert.equal(
+        modelCalls,
+        scenario.starts,
+        "late cells must start zero model sessions",
+      );
+      assert.equal(
+        result.status,
+        scenario.starts === 0 ? "not_started" : "failed",
+      );
+      assert.equal(result.receipt, null);
+      assert.equal(result.bundle, null);
+      if (scenario.starts === 0) {
+        assert.equal(result.completedAt, r.clock.now());
+        assert.match(result.detail!, /cutoff|run bounds/);
+      }
+      assert.deepEqual(
+        JSON.parse(await Deno.readTextFile(artifactRoot + "/result.json")),
+        result,
+      );
+      assert.deepEqual(
+        await r.store.readRepair(),
+        before,
+        "cell refusal preserves reservation, history and intent",
+      );
+    } finally {
+      await r.cleanup();
+    }
+  });
+}
+
 Deno.test("matrix actions: ordinary missing-health and verification purposes produce zero model admissions", async () => {
   for (
     const purpose of [
