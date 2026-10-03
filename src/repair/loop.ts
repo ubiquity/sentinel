@@ -5998,7 +5998,7 @@ async function executeMerge(
       ),
     );
   }
-  return handleMergeOutcome(deps, context, record, merged.value, receipt);
+  return handleMergeOutcome(deps, context, withIntent, merged.value, receipt);
 }
 
 /**
@@ -6027,7 +6027,7 @@ async function handleMergeOutcome(
     // counted as a newly delivered repair.
     const semantic = await deliveryTaskRefusal(deps, record, receipt);
     if (semantic === "wait") {
-      return waitRelease(deps, context, cleared, now);
+      return waitRelease(deps, context, record, now);
     }
     if (semantic !== null) {
       return persistWork(

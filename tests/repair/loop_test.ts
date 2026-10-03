@@ -3143,6 +3143,147 @@ Deno.test("delivery matches an existing release request by source PR/head and re
   }
 });
 
+Deno.test("trusted merge survives a transient post-merge task read", async () => {
+  const rig = await makeRig("merge-task-read", {
+    summaries: false,
+    github: {
+      mergeOutcome: { outcome: "merged", head: SHA3, mergeSha: SHA2 },
+      candidateLifecycle: {
+        refs: { "refs/heads/sentinel/repair/issue-1": SHA3 },
+        pullRequests: [exactOpenPr(7, SHA3, "sentinel/repair/issue-1")],
+      },
+    },
+  });
+  try {
+    const record = deliveryRecord(SHA3);
+    const receipt = completedReceipt(7, SHA3, SHA1, {
+      id: await reviewReceiptId(reviewOperationKey(7, SHA3, 1), SHA3),
+    });
+    const written = await rig.store.writeRepair(
+      seededSnapshot([record], { reviews: [receipt] }),
+      null,
+    );
+    assert.ok(written.ok && written.value.status === "applied");
+
+    let savedIntent: WorkRecordV1["intent"] = null;
+    let merged = false;
+    let failPostMergeRead = false;
+    let refreshes = 0;
+    const merge = rig.github.mergePullRequest.bind(rig.github);
+    rig.github.mergePullRequest = async (request) => {
+      savedIntent = (await rig.snapshot()).work[0].intent;
+      assert.equal(savedIntent?.kind, "merge", "intent precedes mutation");
+      const result = await merge(request);
+      merged = true;
+      failPostMergeRead = true;
+      return result;
+    };
+    const readIssue = rig.github.readIssue.bind(rig.github);
+    rig.github.readIssue = async (number) => {
+      if (failPostMergeRead) {
+        failPostMergeRead = false;
+        return portError("unavailable", "transient post-merge task read");
+      }
+      return await readIssue(number);
+    };
+    const readRef = rig.github.readRef.bind(rig.github);
+    rig.github.readRef = (ref) =>
+      merged && ref === "refs/heads/development"
+        ? Promise.resolve(portOk({ ref, sha: SHA2 }))
+        : readRef(ref);
+    rig.github.prepareBaseRefresh = () => {
+      refreshes++;
+      return Promise.resolve(portError("unavailable", "unexpected refresh"));
+    };
+
+    rig.clock.advance(2000);
+    const first = await rig.entry();
+    assert.equal(first.status, "idle", JSON.stringify(first));
+    let state = await rig.snapshot();
+    assert.equal(rig.github.calls.filter((call) => call === "merge").length, 1);
+    assert.equal(state.releaseRequests.length, 0);
+    assert.deepEqual(
+      state.work[0].intent,
+      savedIntent,
+      "the exact trusted merge intent survives the transient read",
+    );
+    assert.deepEqual(state.work[0].target, record.target);
+    assert.equal(state.work[0].wait?.reason, "unavailable");
+    assert.equal(refreshes, 0);
+
+    rig.clock.advance(state.work[0].wait!.until! - rig.clock.now());
+    const resumed = await rig.entry();
+    assert.equal(resumed.status, "idle", JSON.stringify(resumed));
+    state = await rig.snapshot();
+    assert.equal(state.work[0].nextStep, "delivery");
+    assert.equal(state.work[0].blocker, null);
+    assert.equal(state.work[0].intent, null);
+    assert.equal(state.releaseRequests.length, 1);
+    const request = state.releaseRequests[0];
+    assert.equal(request.revision, SHA2);
+    assert.deepEqual(request.source, {
+      pullRequest: 7,
+      reviewRequestId: receipt.requestId,
+      reviewReceiptId: receipt.id,
+      head: SHA3,
+      base: SHA1,
+    });
+
+    const accepted = monitoredReleaseRecord(
+      "merge-task-read-accepted",
+      "accepted",
+    );
+    const identity = { gitSha: SHA2, revisionId: "dep-merged" };
+    const releaseState: ReleaseStateSnapshotV1 = {
+      version: "v1",
+      kind: "release_state_snapshot",
+      stateHead: null,
+      sequence: 1,
+      updatedAt: rig.clock.now(),
+      hostedRuntimes: [],
+      hostedReleases: [],
+      githubCooldowns: [],
+      releases: [monitoredReleaseRecord(accepted.id, "accepted", {
+        requestId: request.id,
+        requestRevision: request.revision,
+        candidate: { identity, buildTransactionId: "txn-merged" },
+        observed: { ...accepted.observed, identity },
+        acceptance: {
+          ...accepted.acceptance!,
+          identity,
+          samples: accepted.acceptance!.samples.map((sample) => ({
+            ...sample,
+            identity,
+          })),
+        },
+      })],
+    };
+    const acceptedWrite = await rig.releaseStore.writeRelease(
+      releaseState,
+      null,
+    );
+    assert.ok(acceptedWrite.ok && acceptedWrite.value.status === "applied");
+    rig.clock.advance(state.work[0].wait!.until! - rig.clock.now());
+    const delivered = await rig.entry();
+    assert.equal(delivered.status, "idle", JSON.stringify(delivered));
+    state = await rig.snapshot();
+    assert.equal(state.work[0].nextStep, "done");
+    assert.deepEqual(state.releaseRequests, [request]);
+    assert.equal(rig.github.calls.filter((call) => call === "merge").length, 1);
+    assert.equal(
+      rig.github.calls.filter((call) => call === "closeIssue:1").length,
+      1,
+    );
+    assert.equal(refreshes, 0);
+    assert.equal(rig.model.requests.length, 0);
+    assert.equal(rig.github.reviewRequestIdentities.length, 0);
+    assert.deepEqual(state.reviews, [receipt]);
+    assert.deepEqual(state.reservations, []);
+  } finally {
+    await rig.ctx.cleanup();
+  }
+});
+
 Deno.test("merged-but-ambiguous merge reconciliation builds one release request with the merged revision", async () => {
   const rig = await makeRig("rrmissing", {
     summaries: false,
