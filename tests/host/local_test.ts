@@ -58,7 +58,9 @@ Deno.test("local repository config parses with fixed local scope", () => {
     replay: "replay_capture",
     test: "test_ci",
   });
-  assert.equal(config.liveStartLimits?.perHour, 120);
+  // Owner update, 2026-10-02: both rolling caps are explicitly null
+  // (uncapped), never a fake huge number.
+  assert.equal(config.liveStartLimits?.perHour, null);
   assert.equal(config.liveStartLimits?.perSevenDays, null);
   // 30 minutes: a larger target's session must be able to finish. The bound
   // matches this same template's own `test_ci` command allowance.

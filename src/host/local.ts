@@ -269,6 +269,12 @@ export function createLocalRepositoryConfig(): RepositoryConfigV1 {
       "src/host/actions-release.ts",
       "src/host/actions-supervisor.ts",
       "src/host/actions.ts",
+      "src/contracts/matrix.ts",
+      "src/host/matrix.ts",
+      "src/host/matrix-git.ts",
+      "src/host/matrix-actions.ts",
+      "src/host/matrix-artifact-port.ts",
+      "src/host/matrix-artifacts.ts",
       "src/host/hosted-cooldown.ts",
       "src/host/hosted-runtime.ts",
       "src/host/local-release.ts",
@@ -282,7 +288,10 @@ export function createLocalRepositoryConfig(): RepositoryConfigV1 {
     ],
     build: { projectId: null, acceptance: null },
     secretRef: "secret://host/injected/sentinel-local-owner",
-    liveStartLimits: { perHour: 120, perSevenDays: null },
+    // Owner update, 2026-10-02: all artificial throughput caps are lifted.
+    // Both rolling caps are explicitly null (uncapped), never a fake huge
+    // number; durable reservation accounting and unique admission remain.
+    liveStartLimits: { perHour: null, perSevenDays: null },
     // 30 minutes, matching this same template's own `test_ci` command
     // allowance (1_800_000). A 20-minute bound cut three of four ai.ubq.fi
     // sessions off at exactly 1_200_000 ms while a larger codebase's session
@@ -1621,7 +1630,8 @@ export function composeLocalGitHub(input: LocalGitHubInputV1): GitHubPort {
     ownerRunId: input.invocationId,
     snapshot: snapshotSource,
     reviewer,
-    maxActiveReviews: 1,
+    // Explicit uncapped review concurrency: no artificial in-flight bound.
+    maxActiveReviews: null,
   });
   const host = composeGitHubHost({
     repository,
@@ -3509,8 +3519,8 @@ const STATUS_MAX_TEXT_BYTES = 50_000;
 const STATUS_MAX_DETAIL_ITEMS = 200;
 /** Conservative workflow-dispatch transport bound (GitHub documents 65,535). */
 const STATUS_MAX_DISPATCH_BYTES = 65_535;
-/** Fixed report admission semantics: 120 starts per rolling hour, no weekly cap. */
-const STATUS_POLICY_LIMITS = { perHour: 120, perSevenDays: null } as const;
+/** Fixed report admission semantics: both rolling caps explicitly uncapped. */
+const STATUS_POLICY_LIMITS = { perHour: null, perSevenDays: null } as const;
 const STATUS_KNOWN_STEPS = [
   "work",
   "review",

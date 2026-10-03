@@ -174,7 +174,6 @@ function emptyReleaseState(now: number): ReleaseStateSnapshotV1 {
 // repair state. No credentials or environment are read here.
 // ---------------------------------------------------------------------------
 
-const HOUR_MS = 3_600_000;
 const MAX_TRANSITIONS = 8;
 const SELF_REPOSITORY: RepositoryIdentityV1 = {
   owner: "ubiquity",
@@ -734,8 +733,14 @@ function buildRequestedReceipt(
   return parsed.ok ? parsed.value : null;
 }
 
+/**
+ * Ordinary work is due once every release is terminal and the active
+ * revision/generation carries a healthy settled proof. A persisted
+ * `nextOrdinaryAt` is retained as schema/identity bookkeeping only and never
+ * throttles admission: provider and platform limits govern scheduling, while
+ * the active-execution and same-run guards still prevent a second execution.
+ */
 function ordinaryDue(
-  input: HostedSupervisorInputV1,
   runtime: HostedRuntimeRecordV1,
   releases: readonly HostedReleaseRecordV1[],
 ): boolean {
@@ -743,8 +748,7 @@ function ordinaryDue(
   const healthy = runtime.lastHealthyProof;
   return healthy !== null &&
     healthy.execution.revision === runtime.activeRevision &&
-    healthy.execution.generation === runtime.generation &&
-    input.clock.now() >= runtime.nextOrdinaryAt;
+    healthy.execution.generation === runtime.generation;
 }
 
 /**
@@ -879,7 +883,10 @@ export async function runHostedSupervisorPrepare(
         generation: 1,
         lastHealthyProof: null,
         lastExecutionProof: null,
-        nextOrdinaryAt: now + HOUR_MS,
+        // No artificial ordinary-work cooldown: the next scheduled dispatch may run
+        // ordinary work as soon as the previous execution actually settled. The
+        // same run/attempt still cannot start a second execution.
+        nextOrdinaryAt: now,
         execution: null,
         createdAt: now,
         updatedAt: now,
@@ -959,7 +966,7 @@ export async function runHostedSupervisorPrepare(
       continue;
     }
 
-    if (ordinaryDue(input, runtime, releases)) {
+    if (ordinaryDue(runtime, releases)) {
       return await startExecution(
         input,
         cursor,
@@ -968,7 +975,7 @@ export async function runHostedSupervisorPrepare(
         "ordinary",
         runtime.activeRevision,
         null,
-        input.clock.now() + HOUR_MS,
+        input.clock.now(),
       );
     }
     return idle(STATIC_IDLE_NONE);

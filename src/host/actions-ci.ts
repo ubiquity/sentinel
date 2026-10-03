@@ -3,7 +3,7 @@
  *
  * GitHub can park a `pull_request` CI run created by `github-actions[bot]` in
  * `action_required` until a trusted actor approves it. This helper reads the
- * current repair state, selects at most `MAX_CI_APPROVALS_PER_RUN` nonterminal
+ * current repair state, selects all eligible nonterminal
  * scope-0 `ubiquity/sentinel` records that carry a durable PR/head/branch
  * candidate, and asks the real `GitHubApiClient` to approve the ONE exact
  * matching run for each through the existing token, HTTP transport, clock and
@@ -18,16 +18,15 @@ import type {
   GitHubCooldownGateV1,
   StateReadView,
 } from "../contracts/ports.ts";
-import { portOk } from "../contracts/ports.ts";
+import { portError, portOk } from "../contracts/ports.ts";
 import type { RepositoryIdentityV1 } from "../contracts/shared.ts";
 import type { WorkRecordV1 } from "../contracts/work-record.ts";
 import { GitHubApiClient } from "../github/client.ts";
+import { DEFAULT_HTTP_DEADLINE_MS } from "../github/http.ts";
 import type { HttpTransportV1 } from "../github/http.ts";
 
 /** Public GitHub REST API used by the hosted CI approval. */
 export const ACTIONS_CI_API_BASE_URL = "https://api.github.com";
-/** Bounded candidates per run: one exclusive writer, no unbounded scan. */
-export const MAX_CI_APPROVALS_PER_RUN = 3;
 
 const SELF_REPOSITORY: RepositoryIdentityV1 = {
   owner: "ubiquity",
@@ -41,6 +40,8 @@ export interface ActionsCiApprovalInputV1 {
   http: HttpTransportV1;
   token: string;
   clock: Clock;
+  /** Existing absolute host deadline; never restarted for approval. */
+  deadline: number;
   /** Trusted API base for tests; production uses the public API. */
   apiBaseUrl?: string;
 }
@@ -51,7 +52,7 @@ export interface ActionsCiApprovalSummaryV1 {
   unavailable: number;
 }
 
-/** Approve at most three exact self-target candidate runs. Never throws. */
+/** Approve eligible exact self-target candidate runs. Never throws. */
 export async function runActionsCiApproval(
   input: ActionsCiApprovalInputV1,
 ): Promise<ActionsCiApprovalSummaryV1> {
@@ -61,27 +62,59 @@ export async function runActionsCiApproval(
     unavailable: 0,
   };
   try {
+    if (
+      !Number.isFinite(input.deadline) || input.clock.now() >= input.deadline
+    ) {
+      summary.unavailable = 1;
+      return summary;
+    }
     const read = await input.state.readRepair();
     if (!read.ok || read.value.status !== "found") {
       summary.unavailable = 1;
       return summary;
     }
-    const candidates = read.value.snapshot.work
-      .filter(isSelfCandidate)
-      .slice(0, MAX_CI_APPROVALS_PER_RUN);
+    const candidates = read.value.snapshot.work.filter(isSelfCandidate);
     if (candidates.length === 0) return summary;
+    const gate: GitHubCooldownGateV1 = {
+      beforeRequest: async (installationId) => {
+        if (input.clock.now() >= input.deadline) {
+          return portError("unavailable", "CI approval deadline reached");
+        }
+        const result = await input.gate.beforeRequest(installationId);
+        if (input.clock.now() >= input.deadline) {
+          return portError("unavailable", "CI approval deadline reached");
+        }
+        return result;
+      },
+      recordRateLimit: (installationId, rateLimit) =>
+        input.gate.recordRateLimit(installationId, rateLimit),
+    };
+    const http: HttpTransportV1 = (request) => {
+      const remaining = Math.min(
+        DEFAULT_HTTP_DEADLINE_MS,
+        input.deadline - input.clock.now(),
+      );
+      if (!(remaining > 0)) {
+        return Promise.reject(new Error("CI approval deadline reached"));
+      }
+      return input.http({ ...request, deadlineMs: remaining });
+    };
     const client = new GitHubApiClient({
       repository: { ...SELF_REPOSITORY },
       apiBaseUrl: input.apiBaseUrl ?? ACTIONS_CI_API_BASE_URL,
-      http: input.http,
+      http,
       auth: {
         authorizationHeader: () =>
           Promise.resolve(portOk(`Bearer ${input.token}`)),
       },
-      cooldownGate: input.gate,
+      cooldownGate: gate,
       clock: input.clock,
     });
     for (const record of candidates) {
+      if (input.clock.now() >= input.deadline) {
+        summary.unavailable++;
+        break;
+      }
       const pr = record.target.pr;
       const head = record.target.head;
       const headRef = record.target.branch;
@@ -109,8 +142,7 @@ export async function runActionsCiApproval(
 function isSelfCandidate(record: WorkRecordV1): boolean {
   // New-format candidate records are approved ONLY with an exact preserved
   // descriptor bound to the target and a verified published head equal to the
-  // requested head. The check runs BEFORE the bounded slice so an ineligible
-  // new-format record never consumes one of the three approval slots; legacy
+  // requested head. Ineligible new-format records never reach the API; legacy
   // records keep their normal exact API PR/head/branch verification below.
   const candidateState = record.target.candidateState;
   if (candidateState !== undefined) {

@@ -42,8 +42,14 @@ export type StabilityMetricV1 =
   | "stream_failure_rate";
 
 export interface LiveStartLimitsV1 {
-  /** Rolling one-hour model-start cap (required before inference is enabled). */
-  perHour: number;
+  /**
+   * Rolling one-hour model-start cap, or explicit null for no hourly admission
+   * cap. Null is never a wildcard and never a permissive fallback: it only
+   * bypasses the hourly checks. The `liveStartLimits` record itself stays
+   * required before inference is enabled — a null record still means
+   * inference is not enabled. Missing/undefined/malformed values stay invalid.
+   */
+  perHour: number | null;
   /**
    * Rolling seven-day model-start cap, or explicit null for no weekly
    * admission cap. Null is never a wildcard and never a permissive fallback:
@@ -283,6 +289,7 @@ export function parseRepositoryConfigV1(input: unknown): RepositoryConfigV1 {
 
   if (
     liveStartLimits !== null &&
+    liveStartLimits.perHour !== null &&
     liveStartLimits.perSevenDays !== null &&
     liveStartLimits.perHour > liveStartLimits.perSevenDays
   ) {
@@ -397,10 +404,12 @@ function parseAcceptance(input: unknown, path: string): AcceptanceIdentityV1 {
 function parseLiveStartLimits(input: unknown, path: string): LiveStartLimitsV1 {
   const obj = expectRecord(input, path);
   expectExactKeys(obj, LIMITS_KEYS, path);
-  const perHour = expectCount(obj.perHour, `${path}.perHour`);
-  // Explicit null means no weekly admission cap. A missing, undefined or
-  // malformed weekly value stays invalid: the frozen key check rejects a
+  // Explicit null on either cap is the owner's uncapped policy. A missing,
+  // undefined or malformed value stays invalid: the frozen key check rejects a
   // missing key and expectCount rejects every non-numeric present value.
+  const perHour = obj.perHour === null
+    ? null
+    : expectCount(obj.perHour, `${path}.perHour`);
   const perSevenDays = obj.perSevenDays === null
     ? null
     : expectCount(obj.perSevenDays, `${path}.perSevenDays`);
@@ -504,9 +513,11 @@ function parseStabilityThreshold(
 /**
  * Global budget policy is one owner configuration across all repositories.
  * This refuses to infer a policy when configured limits conflict; per-repo
- * independent caps are never used. Agreement covers both `perHour` and the
- * nullable `perSevenDays`: explicit null (no weekly cap) is one policy, and a
- * null/numeric mix across repositories is a conflict, never a fallback.
+ * independent caps are never used. Agreement covers both nullable fields:
+ * explicit null (no cap) is one policy, and a null/numeric mix across
+ * repositories is a conflict, never a fallback. A wholly null
+ * `liveStartLimits` record is not a policy at all: it keeps inference
+ * disabled.
  */
 export type GlobalLiveStartLimitsV1 =
   | { status: "disabled" }
