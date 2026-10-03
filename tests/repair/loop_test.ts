@@ -50,6 +50,7 @@ import {
   candidatePreservationRef,
   implementationIntentKey,
   pushIntentKey,
+  reviewOperationKey,
   reviewReceiptId,
   workItemIdForIncident,
   workItemIdForIssue,
@@ -3486,7 +3487,9 @@ Deno.test("merged-but-ambiguous merge reconciliation builds one release request 
     const seed = seededSnapshot(
       [deliveryRecord(SHA3)],
       {
-        reviews: [completedReceipt(7, SHA3, SHA1)],
+        reviews: [completedReceipt(7, SHA3, SHA1, {
+          id: await reviewReceiptId(reviewOperationKey(7, SHA3, 1), SHA3),
+        })],
       },
     );
     const written = await rig.store.writeRepair(seed, null);
