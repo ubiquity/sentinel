@@ -61,6 +61,13 @@ export const MATRIX_RESULT_PATH = ".sentinel-matrix/result.json";
 export const MATRIX_RESULTS_DIR = ".sentinel-matrix/results";
 /** Bound on one result artifact so a hostile file cannot exhaust the ingester. */
 export const MAX_MATRIX_ARTIFACT_BYTES = 2 * 1024 * 1024;
+/** Shared producer/importer bound on one candidate Git bundle. */
+export const MAX_MATRIX_BUNDLE_BYTES = 64 * 1024 * 1024;
+/** Finite allowance for two ZIP headers, metadata and deflate/stored framing. */
+export const MAX_MATRIX_ARCHIVE_OVERHEAD_BYTES = 1024 * 1024;
+/** One bundle plus one result JSON, including bounded ZIP overhead. */
+export const MAX_MATRIX_ARCHIVE_BYTES = MAX_MATRIX_BUNDLE_BYTES +
+  MAX_MATRIX_ARTIFACT_BYTES + MAX_MATRIX_ARCHIVE_OVERHEAD_BYTES;
 
 const MAX_ID_CHARS = 256;
 const MAX_TEXT_CHARS = 100_000;

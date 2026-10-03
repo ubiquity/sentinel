@@ -13,18 +13,35 @@ import {
   matrixDigestV1,
   type MatrixPlanV1,
 } from "../../src/contracts/matrix.ts";
-import { portOk, type StateReadView } from "../../src/contracts/ports.ts";
+import {
+  type ModelRunRequestV1,
+  portOk,
+  type StateReadView,
+} from "../../src/contracts/ports.ts";
 import {
   parseReleaseStateSnapshotV1,
   parseRepairStateSnapshotV1,
 } from "../../src/contracts/state-snapshots.ts";
-import { fromFetch } from "../../src/github/http.ts";
-import { createActionsMatrixArtifactTransport } from "../../src/host/matrix-artifacts.ts";
+import { fetchHttpTransport } from "../../src/github/http.ts";
+import {
+  createActionsMatrixArtifactHttpTransport,
+  createActionsMatrixArtifactTransport,
+} from "../../src/host/matrix-artifacts.ts";
 import {
   candidatePreservationRef,
   implementationIntentKey,
 } from "../../src/repair/keys.ts";
-import { REPO, SHA1, SHA2, T0, workRecord } from "../state/helpers.ts";
+import {
+  gitRun,
+  REPO,
+  reviewReceipt,
+  SHA1,
+  SHA2,
+  SHA3,
+  T0,
+  testGitEnv,
+  workRecord,
+} from "../state/helpers.ts";
 
 const LAUNCHER = "1".repeat(40) as GitSha;
 const RUNTIME = "2".repeat(40) as GitSha;
@@ -59,7 +76,7 @@ async function fixture(paginated = false) {
     prefix: "matrix-transport-test-",
   });
   const cellId = await matrixCellIdV1(WAVE, "artifact-task", RESERVATION);
-  const request = {
+  const request: ModelRunRequestV1 = {
     taskId: "artifact-task" as never,
     repository: REPO,
     base: SHA1,
@@ -339,7 +356,7 @@ async function fixture(paginated = false) {
     updated_at: ISO,
   };
   const calls: { url: string; auth: boolean }[] = [];
-  const http = fromFetch((url, init) => {
+  const http = createActionsMatrixArtifactHttpTransport((url, init) => {
     const parsed = new URL(url);
     calls.push({ url, auth: Boolean(init?.headers?.authorization) });
     const reply = (body: unknown, headers: Record<string, string> = {}) =>
@@ -739,6 +756,199 @@ Deno.test("matrix artifacts: post-ingest candidate preservation hydrates on fres
         "c".repeat(64);
       await assert.rejects(() => rig.transport.recover(rig.input));
     });
+  } finally {
+    await Deno.remove(rig.tmp, { recursive: true });
+  }
+});
+
+Deno.test("matrix artifacts: production artifact HTTP recovers incompressible nine MiB bundle within finite limit", async () => {
+  const rig = await fixture();
+  try {
+    const payload = new Uint8Array(9 * 1024 * 1024);
+    for (let offset = 0; offset < payload.length; offset += 65_536) {
+      crypto.getRandomValues(payload.subarray(offset, offset + 65_536));
+    }
+    const repository = rig.tmp + "/source";
+    const gitHome = rig.tmp + "/git-home";
+    await Deno.mkdir(repository);
+    await Deno.mkdir(gitHome);
+    const environment = testGitEnv(gitHome);
+    const git = async (args: string[]) => {
+      const result = await gitRun(repository, args, environment);
+      assert.equal(result.ok, true, result.stderr);
+      return result.stdout.trim();
+    };
+    await git(["init", "--initial-branch", "fixture"]);
+    await git(["commit", "--allow-empty", "-m", "base"]);
+    const base = await git(["rev-parse", "HEAD"]) as GitSha;
+    await Deno.writeFile(repository + "/blob.bin", payload);
+    await git(["add", "blob.bin"]);
+    await git(["commit", "-m", "candidate"]);
+    const head = await git(["rev-parse", "HEAD"]) as GitSha;
+    const bundlePath = rig.tmp + "/candidate.bundle";
+    await git(["bundle", "create", bundlePath, "HEAD", "^" + base]);
+    const bundle = await Deno.readFile(bundlePath);
+    rig.cell.expectedBase = base;
+    rig.cell.request.base = base;
+    rig.cell.requestDigest = await matrixDigestV1(rig.cell.request);
+    rig.input.requests[0].expectedBase = base;
+    rig.repair.work[0].target.base = base;
+    rig.repair.work[0].intent!.observedBase = base;
+    rig.repair.reservations[0].head = base;
+    rig.result.requestDigest = rig.cell.requestDigest;
+    rig.result.bundle!.head = head;
+    rig.result.receipt!.candidate!.head = head;
+    rig.result.receipt!.candidate!.changedPaths = ["blob.bin"];
+    rig.plannerMarker.planDigest = await matrixDigestV1(rig.plan);
+    rig.logs.set(401, ISO + " " + JSON.stringify(rig.plannerMarker) + "\n");
+    await rig.setArchive(
+      501,
+      rig.planName,
+      await zip([
+        { name: "plan.json", content: bytes(rig.plan) },
+      ]),
+    );
+    rig.result.bundle!.digest = await digest(bundle);
+    rig.cellMarker.bundleDigest = rig.result.bundle!.digest;
+    rig.cellMarker.resultDigest = await matrixDigestV1(rig.result);
+    rig.logs.set(402, ISO + " " + JSON.stringify(rig.cellMarker) + "\n");
+    const archive = await zip([
+      { name: "result.json", content: bytes(rig.result) },
+      { name: rig.result.bundle!.file, content: bundle },
+    ]);
+    assert.ok(archive.length > 8 * 1024 * 1024);
+    await rig.setArchive(502, rig.cellName, archive);
+    const recovered = await rig.transport.recover(rig.input);
+    const actual = await Deno.readFile(
+      recovered[0].bundlesDir + "/" + rig.result.bundle!.file,
+    );
+    assert.equal(actual.length, bundle.length);
+    assert.equal(await digest(actual), rig.result.bundle!.digest);
+    await git([
+      "bundle",
+      "verify",
+      recovered[0].bundlesDir + "/" + rig.result.bundle!.file,
+    ]);
+    const beforeOversize = rig.calls.length;
+    rig.artifacts[1].size_in_bytes = (64 + 2 + 1) * 1024 * 1024 + 1;
+    await assert.rejects(() => rig.transport.recover(rig.input));
+    assert.equal(
+      rig.calls.slice(beforeOversize).some((call) =>
+        new URL(call.url).pathname.endsWith("/archive/502")
+      ),
+      false,
+    );
+    const ordinary = fetchHttpTransport(() =>
+      Promise.resolve(new Response(bundle.slice()))
+    );
+    await assert.rejects(() =>
+      ordinary({
+        method: "GET",
+        url: "https://api.github.com/archive",
+        headers: new Map(),
+        body: null,
+        responseType: "bytes",
+      })
+    );
+  } finally {
+    await Deno.remove(rig.tmp, { recursive: true });
+  }
+});
+
+Deno.test("matrix artifacts: review correction checkout binds prior candidate before and new candidate after ingestion", async (t) => {
+  const rig = await fixture();
+  try {
+    const finding = {
+      id: "correction-finding",
+      severity: "P1",
+      path: "fix.ts",
+      message: "preserve requested behavior",
+    };
+    rig.repair.work[0].target.head = SHA2;
+    rig.repair.work[0].target.pr = 12;
+    rig.repair.work[0].createdAt = T0 - 10_000;
+    rig.repair.reviews.push(reviewReceipt("correction-review", {
+      pullRequest: { number: 12, head: SHA2, base: SHA1 },
+      outcome: "completed",
+      observedReviewer: "chatgpt-codex-connector[bot]",
+      resultId: "correction-result",
+      summary: "one required correction",
+      findings: [{
+        ...finding,
+        fingerprint: await matrixDigestV1(finding),
+        resolved: false,
+        resolutionEvidence: null,
+      }],
+      unresolvedSeverities: ["P1"],
+      submittedAt: T0 - 2_000,
+      completedAt: T0 - 1_000,
+      observedAt: T0 - 500,
+    }));
+    rig.cell.request.checkoutBase = SHA2;
+    rig.cell.request.reviewFindings = [{
+      severity: "P1",
+      path: finding.path,
+      message: finding.message,
+    }];
+    rig.cell.requestDigest = await matrixDigestV1(rig.cell.request);
+    rig.result.requestDigest = rig.cell.requestDigest;
+    rig.result.bundle!.head = SHA3;
+    rig.result.receipt!.candidate!.head = SHA3;
+    rig.plannerMarker.planDigest = await matrixDigestV1(rig.plan);
+    rig.logs.set(401, ISO + " " + JSON.stringify(rig.plannerMarker) + "\n");
+    rig.cellMarker.resultDigest = await matrixDigestV1(rig.result);
+    rig.logs.set(402, ISO + " " + JSON.stringify(rig.cellMarker) + "\n");
+    await rig.setArchive(
+      501,
+      rig.planName,
+      await zip([
+        { name: "plan.json", content: bytes(rig.plan) },
+      ]),
+    );
+    await rig.setArchive(
+      502,
+      rig.cellName,
+      await zip([
+        { name: "result.json", content: bytes(rig.result) },
+        { name: rig.result.bundle!.file, content: rig.bundle },
+      ]),
+    );
+    parseRepairStateSnapshotV1(rig.repair);
+    const first = await rig.transport.recover(rig.input);
+    assert.equal(first[0].results[0].bundle!.head, SHA3);
+    await t.step("wrong authoritative prior head refuses", async () => {
+      rig.repair.work[0].target.head = SHA3;
+      await assert.rejects(() => rig.transport.recover(rig.input));
+      rig.repair.work[0].target.head = SHA2;
+    });
+    await t.step(
+      "post-ingest new head does not replace prior checkout identity",
+      async () => {
+        const task = rig.repair.work[0];
+        task.target.head = SHA3;
+        task.target.candidateState = { preserved: null, publishedHead: SHA2 };
+        task.intent = {
+          kind: "candidate_preservation",
+          key: rig.cell.intentKey,
+          startedAt: T0 + 1_000,
+          branch: await candidatePreservationRef(
+            REPO,
+            task.id,
+            rig.cell.intentKey,
+          ),
+          expectedHead: SHA3,
+          observedBase: SHA1,
+          pr: null,
+          requestId: RESERVATION,
+          resultId: null,
+        };
+        rig.repair.reservations[0].outcome = "submitted";
+        rig.repair.reservations[0].settledAt = T0 + 1_000;
+        parseRepairStateSnapshotV1(rig.repair);
+        const recovered = await rig.transport.recover(rig.input);
+        assert.equal(recovered[0].results[0].bundle!.head, SHA3);
+      },
+    );
   } finally {
     await Deno.remove(rig.tmp, { recursive: true });
   }
