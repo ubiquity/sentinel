@@ -21,7 +21,8 @@
  * - Expiry is explicit: each entry stores `sourceExpiresAt` (the producer
  *   manifest expiry) and `expiresAt` (the accepted local retention bound,
  *   `retainedAt + retentionMaxAgeMs`). An entry past `expiresAt` is purged on
- *   access and reads as absent (`null`), never served beyond its bound.
+ *   access and before capacity admission, and reads as absent (`null`), never
+ *   served beyond its bound.
  * - Metadata is persisted so a restarted store instance observes the same
  *   retained evidence; totals are re-derived from disk at construction.
  */
@@ -474,6 +475,13 @@ export class LocalArtifactStore implements ArtifactStoreV1 {
           "orphaned artifact bytes exist without metadata",
         );
       }
+      for await (const entry of Deno.readDir(this.entriesDir)) {
+        if (!entry.isFile || !entry.name.endsWith(".json")) continue;
+        const metadata = await this.readMetadata(
+          `${this.entriesDir}/${entry.name}`,
+        );
+        if (nowMs >= metadata.expiresAt) await this.removeEntry(metadata);
+      }
       if (
         this.usedBytes + input.ciphertext.byteLength > this.limits.totalMaxBytes
       ) {
@@ -712,10 +720,10 @@ export class LocalArtifactStore implements ArtifactStoreV1 {
 
   private async removeEntry(metadata: MetadataRecordV1): Promise<void> {
     try {
-      this.usedBytes = Math.max(0, this.usedBytes - metadata.sizeBytes);
       const key = await entryKey(metadata.ref);
-      await removeIfPresent(`${this.entriesDir}/${key}.json`);
       await removeIfPresent(`${this.entriesDir}/${key}.bin`);
+      await removeIfPresent(`${this.entriesDir}/${key}.json`);
+      this.usedBytes = Math.max(0, this.usedBytes - metadata.sizeBytes);
     } catch (error) {
       if (!(error instanceof Deno.errors.NotFound)) throw error;
     }
