@@ -995,6 +995,76 @@ export class GitHubApiClient {
   }
 
   /**
+   * Ordinary-only capability proof for the exact admitted commit. Complete,
+   * authenticated Git trees prove absence; unknown identity or transport never does.
+   */
+  async verifyMatrixOrdinaryRevision(
+    revision: GitSha,
+  ): Promise<PortResultV1<boolean>> {
+    if (!this.isHostedSelfScope() || !isGitSha(revision)) {
+      return portError("invalid", HOSTED_EXECUTION_SCOPE);
+    }
+    const deadline = createDeadline(HOSTED_EXECUTION_READ_DEADLINE_MS);
+    try {
+      const repo = repoPath(this.repository);
+      const commit = await this.actionsReleaseGet(
+        `/repos/${repo}/git/commits/${revision}`,
+        {},
+        deadline,
+      );
+      if (!commit.ok) return commit;
+      const parsed = parseWith(commit.value, (value) => {
+        const obj = expectRecord(value, "$");
+        if (expectGitSha(obj.sha, "$.sha") !== revision) {
+          fail(
+            "$.sha",
+            "invalid_value",
+            "commit does not bind admitted revision",
+          );
+        }
+        const tree = expectRecord(obj.tree, "$.tree");
+        return expectGitSha(tree.sha, "$.tree.sha");
+      });
+      if (!parsed.ok) return parsed;
+      let treeSha = parsed.value;
+      const path = ["src", "host", "matrix-actions.ts"];
+      for (const [index, name] of path.entries()) {
+        if (deadline.fired()) return this.hostedExecutionTimeout();
+        const tree = await this.actionsReleaseGet(
+          `/repos/${repo}/git/trees/${treeSha}`,
+          {},
+          deadline,
+        );
+        if (!tree.ok) return tree;
+        const entry = parseWith(
+          tree.value,
+          (value) => parseMatrixTreeEntry(value, treeSha, name, this.maxItems),
+        );
+        if (!entry.ok) return entry;
+        if (entry.value === null) return portOk(false);
+        const last = index === path.length - 1;
+        if (
+          last
+            ? entry.value.type !== "blob" ||
+              (entry.value.mode !== "100644" && entry.value.mode !== "100755")
+            : entry.value.type !== "tree" || entry.value.mode !== "040000"
+        ) {
+          return portError(
+            "invalid",
+            "ordinary matrix entrypoint is not a normal source file",
+          );
+        }
+        treeSha = entry.value.sha;
+      }
+      return portOk(true);
+    } catch {
+      return portError("unavailable", HOSTED_EXECUTION_UNAVAILABLE);
+    } finally {
+      deadline.dispose();
+    }
+  }
+
+  /**
    * Exact self production open request: the merged PR and its two-parent merge
    * commit are revalidated, then the requested revision must be an ancestor of
    * the current development ref within the SAME deadline. No workflow listing
@@ -2890,6 +2960,54 @@ async function sha256Hex(text: string): Promise<string> {
   return [...new Uint8Array(digest)]
     .map((byte) => byte.toString(16).padStart(2, "0"))
     .join("");
+}
+
+/** Strict complete nonrecursive tree proof, without mutable-ref selection. */
+function parseMatrixTreeEntry(
+  value: unknown,
+  treeSha: GitSha,
+  name: string,
+  maxItems: number,
+): { sha: GitSha; type: string; mode: string } | null {
+  const obj = expectRecord(value, "$");
+  if (
+    expectGitSha(obj.sha, "$.sha") !== treeSha ||
+    expectBoolean(obj.truncated, "$.truncated")
+  ) {
+    fail(
+      "$",
+      "invalid_value",
+      "matrix capability tree is incomplete or foreign",
+    );
+  }
+  const entries = expectArray(obj.tree, "$.tree", maxItems, (item) => item);
+  const names = new Set<string>();
+  let selected: { sha: GitSha; type: string; mode: string } | null = null;
+  for (const [index, value] of entries.entries()) {
+    const at = `$.tree[${index}]`;
+    const entry = expectRecord(value, at);
+    const path = expectNonEmptyString(entry.path, `${at}.path`, MaxText.path);
+    if (path.includes("/") || names.has(path)) {
+      fail(`${at}.path`, "invalid_value", "tree entry path is ambiguous");
+    }
+    names.add(path);
+    const sha = expectGitSha(entry.sha, `${at}.sha`);
+    const type = expectEnum(
+      entry.type,
+      ["tree", "blob", "commit"],
+      `${at}.type`,
+    );
+    const mode = expectNonEmptyString(entry.mode, `${at}.mode`, 6);
+    if (
+      (type === "tree" && mode !== "040000") ||
+      (type === "blob" && !["100644", "100755", "120000"].includes(mode)) ||
+      (type === "commit" && mode !== "160000")
+    ) {
+      fail(at, "invalid_value", "tree entry type and mode disagree");
+    }
+    if (path === name) selected = { sha, type, mode };
+  }
+  return selected;
 }
 
 function sameOrigin(first: string, second: string): boolean {

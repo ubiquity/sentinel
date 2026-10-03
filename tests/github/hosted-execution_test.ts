@@ -1151,3 +1151,196 @@ Deno.test("hosted execution: paginated native jobs reject incomplete conflicting
     });
   }
 });
+
+const MATRIX_ROOT_SHA = "5".repeat(40);
+const MATRIX_SRC_SHA = "6".repeat(40);
+const MATRIX_HOST_SHA = "7".repeat(40);
+const MATRIX_COMMIT_PATH = "/repos/" + REPO + "/git/commits/" + REVISION;
+const matrixTreePath = (sha: string) => "/repos/" + REPO + "/git/trees/" + sha;
+
+function scriptMatrixCapability(rig: RigV1, capable = true): void {
+  rig.http.on("GET", MATRIX_COMMIT_PATH, () =>
+    response(200, {
+      sha: REVISION,
+      tree: { sha: MATRIX_ROOT_SHA },
+    }));
+  rig.http.on("GET", matrixTreePath(MATRIX_ROOT_SHA), () =>
+    response(200, {
+      sha: MATRIX_ROOT_SHA,
+      truncated: false,
+      tree: [{
+        path: "src",
+        type: "tree",
+        mode: "040000",
+        sha: MATRIX_SRC_SHA,
+      }],
+    }));
+  rig.http.on("GET", matrixTreePath(MATRIX_SRC_SHA), () =>
+    response(200, {
+      sha: MATRIX_SRC_SHA,
+      truncated: false,
+      tree: [{
+        path: "host",
+        type: "tree",
+        mode: "040000",
+        sha: MATRIX_HOST_SHA,
+      }],
+    }));
+  rig.http.on("GET", matrixTreePath(MATRIX_HOST_SHA), () =>
+    response(200, {
+      sha: MATRIX_HOST_SHA,
+      truncated: false,
+      tree: capable
+        ? [{
+          path: "matrix-actions.ts",
+          type: "blob",
+          mode: "100644",
+          sha: "8".repeat(40),
+        }]
+        : [],
+    }));
+}
+
+Deno.test("ordinary matrix source: authenticated complete immutable trees prove capability or definitive absence", async (t) => {
+  for (const capable of [false, true]) {
+    await t.step(String(capable), async () => {
+      const rig = makeRig();
+      scriptMatrixCapability(rig, capable);
+      const result = await rig.client.verifyMatrixOrdinaryRevision(REVISION);
+      assert.ok(result.ok, JSON.stringify(result));
+      if (result.ok) assert.equal(result.value, capable);
+      assert.equal(rig.http.calls.length, 4);
+      assert.ok(
+        rig.http.calls.every((call) =>
+          call.method === "GET" && !call.url.includes("development") &&
+          call.headers.get("authorization") === "Bearer test-token"
+        ),
+      );
+    });
+  }
+});
+
+Deno.test("ordinary matrix source: unknown commit tree path or type proof never becomes support or absence", async (t) => {
+  for (
+    const defect of [
+      "commit404",
+      "tree404",
+      "wrong_commit",
+      "missing_commit_tree",
+      "wrong_root",
+      "truncated",
+      "malformed",
+      "unknown_truncation",
+      "duplicate_path",
+      "recursive_path",
+      "symlink",
+      "directory",
+      "submodule",
+      "wrong_mode",
+      "wrong_src",
+      "malformed_other_entry",
+    ]
+  ) {
+    await t.step(defect, async () => {
+      const rig = makeRig();
+      scriptMatrixCapability(rig);
+      const entry = {
+        path: "matrix-actions.ts",
+        type: "blob",
+        mode: "100644",
+        sha: "8".repeat(40),
+      };
+      if (defect === "commit404") {
+        rig.http.on("GET", MATRIX_COMMIT_PATH, () => response(404, {}));
+      } else if (defect === "wrong_commit") {
+        rig.http.on(
+          "GET",
+          MATRIX_COMMIT_PATH,
+          () =>
+            response(200, { sha: LAUNCHER, tree: { sha: MATRIX_ROOT_SHA } }),
+        );
+      } else if (defect === "missing_commit_tree") {
+        rig.http.on(
+          "GET",
+          MATRIX_COMMIT_PATH,
+          () => response(200, { sha: REVISION }),
+        );
+      } else if (defect === "tree404") {
+        rig.http.on(
+          "GET",
+          matrixTreePath(MATRIX_ROOT_SHA),
+          () => response(404, {}),
+        );
+      } else if (
+        defect === "wrong_root" || defect === "truncated" ||
+        defect === "unknown_truncation" || defect === "malformed"
+      ) {
+        rig.http.on(
+          "GET",
+          matrixTreePath(MATRIX_ROOT_SHA),
+          () =>
+            response(200, {
+              sha: defect === "wrong_root" ? LAUNCHER : MATRIX_ROOT_SHA,
+              truncated: defect === "truncated"
+                ? true
+                : defect === "unknown_truncation"
+                ? "false"
+                : false,
+              tree: defect === "malformed" ? null : [{
+                path: "src",
+                type: "tree",
+                mode: "040000",
+                sha: MATRIX_SRC_SHA,
+              }],
+            }),
+        );
+      } else if (defect === "wrong_src") {
+        rig.http.on(
+          "GET",
+          matrixTreePath(MATRIX_SRC_SHA),
+          () =>
+            response(200, { sha: MATRIX_HOST_SHA, truncated: false, tree: [] }),
+        );
+      } else {
+        if (defect === "symlink") entry.mode = "120000";
+        if (defect === "directory") {
+          entry.type = "tree";
+          entry.mode = "040000";
+        }
+        if (defect === "submodule") {
+          entry.type = "commit";
+          entry.mode = "160000";
+        }
+        if (defect === "wrong_mode") entry.mode = "999999";
+        if (defect === "recursive_path") entry.path = "host/matrix-actions.ts";
+        const tree = defect === "duplicate_path"
+          ? [entry, entry]
+          : defect === "malformed_other_entry"
+          ? [entry, { ...entry, path: "other", sha: "bad" }]
+          : [entry];
+        rig.http.on(
+          "GET",
+          matrixTreePath(MATRIX_HOST_SHA),
+          () => response(200, { sha: MATRIX_HOST_SHA, truncated: false, tree }),
+        );
+      }
+      const result = await rig.client.verifyMatrixOrdinaryRevision(REVISION);
+      assert.equal(result.ok, false, defect);
+      assert.ok(rig.http.calls.every((call) => call.method === "GET"));
+    });
+  }
+});
+
+Deno.test("ordinary matrix source: existing scoped cooldown gate refuses later tree reads", async () => {
+  const rig = makeRig();
+  scriptMatrixCapability(rig);
+  rig.http.on("GET", MATRIX_COMMIT_PATH, () => {
+    rig.gate.deny = true;
+    return response(200, { sha: REVISION, tree: { sha: MATRIX_ROOT_SHA } });
+  });
+  const result = await rig.client.verifyMatrixOrdinaryRevision(REVISION);
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.error.kind, "rate_limited");
+  assert.equal(rig.http.calls.length, 1);
+  assert.ok(rig.gate.admissions.every((scope) => scope === 0));
+});

@@ -232,6 +232,10 @@ export interface HostedSupervisorEvidencePortV1 {
     savedIntent: HostedExecutionIntentV1,
   ): Promise<PortResultV1<HostedExecutionSettlementV1 | null>>;
   verifyRevision(revision: GitSha): Promise<PortResultV1<boolean>>;
+  /** Ordinary-only proof of the exact admitted revision's native matrix entrypoint. */
+  verifyMatrixOrdinaryRevision?(
+    revision: GitSha,
+  ): Promise<PortResultV1<boolean>>;
   verifyRequest(request: ReleaseRequestV1): Promise<PortResultV1<boolean>>;
   /**
    * Trusted, independent read of the source issue's exact task statement,
@@ -1146,6 +1150,35 @@ export async function runHostedSupervisorPrepare(
     }
 
     if (ordinaryDue(runtime, releases)) {
+      const verify = input.evidence.verifyMatrixOrdinaryRevision;
+      if (verify === undefined) {
+        return pending("ordinary matrix capability proof is unavailable");
+      }
+      let verified: PortResultV1<boolean>;
+      try {
+        verified = await verify.call(input.evidence, runtime.activeRevision);
+      } catch {
+        return pending("ordinary matrix capability proof is unavailable");
+      }
+      if (
+        verified === null || typeof verified !== "object" ||
+        !verified.ok || typeof verified.value !== "boolean"
+      ) {
+        return pending("ordinary matrix capability proof is unavailable");
+      }
+      // Keep the original cursor/head for the eventual CAS. A capability read
+      // cannot authorize stale admission after any pointer or generation move.
+      const current = await readCursor(input);
+      if (
+        current === null || current.head !== cursor.head ||
+        canonicalStringify(current.snapshot) !==
+          canonicalStringify(cursor.snapshot)
+      ) {
+        return pending(STATIC_CONFLICT);
+      }
+      if (!verified.value) {
+        return idle("active runtime does not support ordinary matrix work");
+      }
       return await startExecution(
         input,
         cursor,
@@ -1318,6 +1351,8 @@ export async function runHostedSupervisorHost(
   const evidence: HostedSupervisorEvidencePortV1 = {
     readExecution: (saved) => client.readHostedExecution(saved),
     verifyRevision: (revision) => client.verifyHostedRevision(revision),
+    verifyMatrixOrdinaryRevision: (revision) =>
+      client.verifyMatrixOrdinaryRevision(revision),
     verifyRequest: (request) => client.verifyHostedReleaseRequest(request),
     // The trusted source-issue statement is read over the same authenticated
     // native client (and the same cooldown gate) as every other supervisor
