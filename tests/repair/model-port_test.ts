@@ -996,6 +996,81 @@ Deno.test(
 );
 
 Deno.test(
+  "issue95: completed descendant candidates reject pending edits through the model port",
+  async (t) => {
+    for (const pending of ["clean", "unstaged", "staged", "untracked"]) {
+      await t.step(pending, async () => {
+        const root = await Deno.makeTempDir({ prefix: "sentinel-descendant-" });
+        const home = `${root}/home`;
+        await Deno.mkdir(home);
+        const env = testGitEnv(home);
+        const run = async (args: string[]) => {
+          const result = await gitRun(root, args, env);
+          assert.ok(result.ok, result.stderr);
+          return result.stdout;
+        };
+        try {
+          await run(["init", "-q"]);
+          await Deno.writeTextFile(`${root}/src.ts`, "before\n");
+          await run(["add", "-A"]);
+          await run(["commit", "-q", "-m", "base"]);
+          const base = (await run(["rev-parse", "HEAD"])).trim() as GitSha;
+          await Deno.writeTextFile(`${root}/src.ts`, "committed\n");
+          await run(["add", "-A"]);
+          await run(["commit", "-q", "-m", "model descendant"]);
+          const head = (await run(["rev-parse", "HEAD"])).trim() as GitSha;
+          if (pending === "untracked") {
+            await Deno.writeTextFile(`${root}/later.ts`, "pending\n");
+          } else if (pending !== "clean") {
+            await Deno.writeTextFile(`${root}/src.ts`, "pending\n");
+            if (pending === "staged") await run(["add", "src.ts"]);
+          }
+          const statusArgs = ["status", "--porcelain=v1", "-z"];
+          const beforeStatus = await run(statusArgs);
+          const session = new FakeCodexSession();
+          const port = new CodexImplementationPort({
+            openSession: () => Promise.resolve(session),
+            checkoutDir: root,
+            checkout: new LocalCheckoutResolver(root, base),
+            commitCandidate: new LocalCandidateCommitter(root),
+            modelProvider: "sentinel-host",
+            receiptVerifier: createRequestRuntimeReceiptVerifier(
+              "sentinel-host",
+            ),
+          });
+          const result = await port.runModel({
+            taskId: asWorkItemId(`issue95-${pending}`),
+            repository: { ...REPO },
+            base,
+            issue: { number: 95, title: "Preserve final edits", body: "" },
+            evidence: [],
+            model: "gpt-reserve",
+            reasoning: "max",
+            maxDurationMs: 5_000,
+            maxOutputChars: 10_000,
+          });
+          assert.equal(result.ok, pending === "clean", JSON.stringify(result));
+          if (result.ok) {
+            assert.equal(result.value.candidate?.head, head);
+          } else {
+            assert.equal(result.error.kind, "unavailable");
+            assert.equal(
+              result.error.detail,
+              "candidate checkout could not be committed",
+            );
+          }
+          assert.equal((await run(["rev-parse", "HEAD"])).trim(), head);
+          assert.equal(await run(statusArgs), beforeStatus);
+          assert.equal(session.closed, true);
+        } finally {
+          await Deno.remove(root, { recursive: true });
+        }
+      });
+    }
+  },
+);
+
+Deno.test(
   "local candidate committer: stages sandbox edits and creates one descendant",
   async () => {
     const root = await Deno.makeTempDir({ prefix: "sentinel-model-commit-" });
