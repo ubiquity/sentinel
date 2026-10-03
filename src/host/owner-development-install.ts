@@ -497,8 +497,17 @@ export const OWNER_DEVELOPMENT_INSTALL_OWNER_REPAIR_GENERATION = 53;
  * proven owner-repair revision once at generation 55, without an automatic retry.
  */
 export const OWNER_DEVELOPMENT_INSTALL_RUNTIME_RECOVERY_REVISION =
-  "275fee6dba74800b47e555f3f316b60be566ccb4" as GitSha;
+  "a6c40a95ceb93fbdf1f85343409393c68d4fe13c" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_RUNTIME_RECOVERY_GENERATION = 54;
+/**
+ * Exact corrected successor, installed only after the runtime-recovery
+ * generation 54 healthy proof. Failure restores that proven revision once at
+ * generation 56; the distinct generation 55 rollback target stays terminal.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_RUNTIME_RECOVERY_SUCCESSOR_REVISION =
+  "275fee6dba74800b47e555f3f316b60be566ccb4" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_RUNTIME_RECOVERY_SUCCESSOR_GENERATION =
+  55;
 /** Monotonic rollback target the failed generation 45 candidate rolled to. */
 export const OWNER_DEVELOPMENT_INSTALL_ROLLBACK_TARGET_GENERATION =
   OWNER_DEVELOPMENT_INSTALL_ASSIGN_FIRST_GENERATION + 2;
@@ -2578,10 +2587,51 @@ export function planOwnerDevelopmentInstall(
       );
     }
     if (healthy !== null) {
-      return noChange("the owner development installation is complete");
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_RUNTIME_RECOVERY_SUCCESSOR_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_RUNTIME_RECOVERY_SUCCESSOR_GENERATION,
+        healthy,
+        "install the runtime recovery successor after the generation 54 healthy proof",
+      );
     }
     return waiting(
       "the runtime recovery generation 54 healthy proof is not recorded",
+    );
+  }
+
+  if (
+    revision ===
+      OWNER_DEVELOPMENT_INSTALL_RUNTIME_RECOVERY_SUCCESSOR_REVISION &&
+    generation ===
+      OWNER_DEVELOPMENT_INSTALL_RUNTIME_RECOVERY_SUCCESSOR_GENERATION
+  ) {
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_RUNTIME_RECOVERY_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_RUNTIME_RECOVERY_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded runtime recovery healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_RUNTIME_RECOVERY_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed runtime recovery successor to its recorded proven predecessor",
+      );
+    }
+    if (healthy !== null) {
+      return noChange("the owner development installation is complete");
+    }
+    return waiting(
+      "the runtime recovery successor generation 55 healthy proof is not recorded",
     );
   }
 
