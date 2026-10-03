@@ -189,7 +189,10 @@ function emptyReleaseState(now: number): ReleaseStateSnapshotV1 {
 // repair state. No credentials or environment are read here.
 // ---------------------------------------------------------------------------
 
-const HOUR_MS = 3_600_000;
+// Owner direction 2026-10-03: the ordinary cadence is one minute, not one
+// hour. A start still requires the exact prior execution to settle and the
+// 5-minute dispatch schedule remains the effective floor.
+const ORDINARY_INTERVAL_MS = 60_000;
 const MAX_TRANSITIONS = 8;
 const SELF_REPOSITORY: RepositoryIdentityV1 = {
   owner: "ubiquity",
@@ -1045,7 +1048,7 @@ export async function runHostedSupervisorPrepare(
         generation: 1,
         lastHealthyProof: null,
         lastExecutionProof: null,
-        nextOrdinaryAt: now + HOUR_MS,
+        nextOrdinaryAt: now + ORDINARY_INTERVAL_MS,
         execution: null,
         createdAt: now,
         updatedAt: now,
@@ -1147,7 +1150,7 @@ export async function runHostedSupervisorPrepare(
         "ordinary",
         runtime.activeRevision,
         null,
-        input.clock.now() + HOUR_MS,
+        input.clock.now() + ORDINARY_INTERVAL_MS,
       );
     }
 

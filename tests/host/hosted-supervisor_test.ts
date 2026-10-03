@@ -60,6 +60,7 @@ const ROOT = decodeURIComponent(HERE.pathname).replace(
 );
 
 const HOUR_MS = 3_600_000;
+const ORDINARY_MS = 60_000;
 const LAUNCHER = "1".repeat(40) as GitSha;
 const CANDIDATE = "2".repeat(40) as GitSha;
 const DIGEST = "a".repeat(64);
@@ -513,7 +514,7 @@ Deno.test("hosted supervisor core: bootstrap is written once, replayed and settl
   }
 });
 
-Deno.test("hosted supervisor core: ordinary cadence advances once per hour with no duplicate execution", async () => {
+Deno.test("hosted supervisor core: ordinary cadence advances on the configured interval with no duplicate execution", async () => {
   const rig = await makeRig();
   try {
     await bootstrapHealthy(rig);
@@ -530,7 +531,7 @@ Deno.test("hosted supervisor core: ordinary cadence advances once per hour with 
     const state = await rig.snapshot();
     assert.equal(
       state.hostedRuntimes[0].nextOrdinaryAt,
-      ordinary.createdAt + HOUR_MS,
+      ordinary.createdAt + ORDINARY_MS,
     );
     rig.evidence.settlements.set(ordinary.id, runProof(ordinary, "healthy"));
     assert.equal((await rig.finalize(identity)).status, "idle");
@@ -828,7 +829,7 @@ Deno.test("hosted supervisor core: an exact ordinary not_started settlement rest
     rig.clock.advance(HOUR_MS);
     const ordinary = requireRun(await rig.prepare(identity));
     const originalDue = (await rig.snapshot()).hostedRuntimes[0].nextOrdinaryAt;
-    assert.equal(originalDue, ordinary.createdAt + HOUR_MS);
+    assert.equal(originalDue, ordinary.createdAt + ORDINARY_MS);
     const skipped = skippedProof(ordinary);
     rig.evidence.settlements.set(ordinary.id, skipped);
     assert.equal((await rig.finalize(identity)).status, "idle");
@@ -1138,7 +1139,7 @@ Deno.test("hosted supervisor core: a missing current health proof plans model-di
     assert.equal(ordinary.revision, LAUNCHER);
     assert.equal(
       (await rig.snapshot()).hostedRuntimes[0].nextOrdinaryAt,
-      ordinary.createdAt + HOUR_MS,
+      ordinary.createdAt + ORDINARY_MS,
     );
   } finally {
     await rig.cleanup();
