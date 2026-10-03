@@ -694,6 +694,15 @@ export class LocalCheckoutResolver implements CheckoutResolverV1 {
       headSha,
     ]);
     if (ancestor === null || ancestor.trim() !== "") return null;
+    // Candidate identity is commit-only. Reject a dirty checkout rather than
+    // binding a receipt to base..HEAD while leaving working-tree edits out.
+    const status = await this.git([
+      "status",
+      "--porcelain=v1",
+      "-z",
+      "--untracked-files=all",
+    ]);
+    if (status === null || status.length !== 0) return null;
     const files = await this.git([
       "diff",
       "--no-renames",
