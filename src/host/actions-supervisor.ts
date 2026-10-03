@@ -904,7 +904,27 @@ function ordinaryDue(
   return healthy !== null &&
     healthy.execution.revision === runtime.activeRevision &&
     healthy.execution.generation === runtime.generation &&
-    input.clock.now() >= runtime.nextOrdinaryAt;
+    input.clock.now() >= ordinaryDueAt(runtime);
+}
+
+/**
+ * Exact due time for the next ordinary start. The recorded `nextOrdinaryAt`
+ * normally equals one interval after the last ordinary start; a record written
+ * under the previous one-hour interval is additionally clamped to one interval
+ * after its own last ordinary start, so the owner-directed cadence applies
+ * without hand-editing state. The clamp only ever makes a healthy record due
+ * earlier, never later: a not_started restore still keeps its observation time
+ * when that is earlier.
+ */
+function ordinaryDueAt(runtime: HostedRuntimeRecordV1): number {
+  const last = runtime.lastExecutionProof;
+  if (last === null || last.execution.purpose !== "ordinary") {
+    return runtime.nextOrdinaryAt;
+  }
+  return Math.min(
+    runtime.nextOrdinaryAt,
+    last.execution.createdAt + ORDINARY_INTERVAL_MS,
+  );
 }
 
 /**
