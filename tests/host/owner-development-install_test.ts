@@ -212,7 +212,7 @@ const OWNER_REPAIR53_REVISION =
   "573d862429ab49eefbfcb99bd1878926024af96d" as GitSha;
 const OWNER_REPAIR53_GENERATION = 53;
 // Keep the new rung's exact pins test-local so RED is a semantic plan failure.
-const RUNTIME54_REVISION = "90e9a838366ebc7e91ecd4aaa6a3eba48fd38fd0" as GitSha;
+const RUNTIME54_REVISION = "a6c40a95ceb93fbdf1f85343409393c68d4fe13c" as GitSha;
 const RUNTIME54_GENERATION = 54;
 const ROLLBACK_TARGET_GENERATION = 46;
 
@@ -5079,7 +5079,7 @@ Deno.test(
 );
 
 Deno.test(
-  "owner install runtime54: the public planner installs exact 90e9 generation 54 only from proven idle 573d generation 53",
+  "owner install runtime54: the public planner installs exact a6c4 generation 54 only from proven idle 573d generation 53",
   () => {
     const proven53 = healthyProof(OWNER_REPAIR53_REVISION, 53, 701);
     const runtime = runtimeRecord({
@@ -5204,7 +5204,7 @@ Deno.test(
 );
 
 Deno.test(
-  "owner install runtime54: an exact failed 90e9 generation 54 applies one rollback to proven 573d generation 55 and never retries",
+  "owner install runtime54: an exact failed a6c4 generation 54 applies one rollback to proven 573d generation 55 and never retries",
   () => {
     const proven53 = healthyProof(OWNER_REPAIR53_REVISION, 53, 711);
     const failed54 = failedProof(RUNTIME54_REVISION, RUNTIME54_GENERATION, 712);
