@@ -221,7 +221,7 @@ const RUNTIME55_GENERATION = 55;
 const CONCURRENCY_PRIOR_REVISION =
   "0fcdb5505417798e3ec7626333d4621fff67c26d" as GitSha;
 const CONCURRENCY_REVISION =
-  "73a836f71ffa621126808d882873ebaf0ca40b5a" as GitSha;
+  "219971b4647224fb9d2b3232f761aa48336dd583" as GitSha;
 const ROLLBACK_TARGET_GENERATION = 46;
 
 /** Real production entrypoint, fake GitHub transport, real private Git objects. */
