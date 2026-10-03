@@ -1116,28 +1116,61 @@ Deno.test(
       );
       try {
         const completedAt = rig.clock.now() + 1000;
+        const currentKey = reviewOperationKey(
+          7,
+          head,
+          acceptance === null ? 3 : 1,
+        );
+        const nextKey = reviewOperationKey(7, head, 4);
+        if (acceptance === null) {
+          // The retired round ceiling no longer suppresses this unused retry.
+          rig.github.releasedHead = head;
+          rig.github.unboundReviewKeys.add(nextKey);
+        }
         rig.github.reviewObservationsByKey.set(
-          acceptance === null
-            ? `review:7:${head}:attempt-3`
-            : `review:7:${head}`,
+          currentKey,
           acceptedObservation(head, acceptance, completedAt),
         );
         const outcome = await rig.run();
         assert.equal(outcome.status, "idle", JSON.stringify(outcome));
         const state = await rig.snapshot();
         const work = state.work[0]!;
-        assert.equal(work.nextStep, "blocked", label);
-        assert.equal(work.blocker?.message, detail, label);
-        assert.equal(work.blocker?.kind, kind, label);
         if (acceptance === null) {
-          assert.equal(rig.github.reviewRequestIdentities.length, 0, label);
-          assert.equal(state.reservations.length, 0, label);
+          assert.equal(work.nextStep, "review", label);
+          assert.equal(work.blocker, null, label);
+          assert.equal(work.counters.reviewRounds, 4, label);
+          assert.equal(rig.github.reviewRequestIdentities.length, 1, label);
+          assert.equal(
+            rig.github.reviewRequestIdentities[0]!.operationKey,
+            nextKey,
+          );
+          assert.equal(state.reservations.length, 1, label);
+          assert.equal(state.reservations[0]!.purpose, "review_request");
+          assert.equal(state.reservations[0]!.attempt, 4);
+          assert.equal(state.reservations[0]!.outcome, "submitted");
+          assert.equal(state.reservations[0]!.head, head);
+          const receiptId = await reviewReceiptId(currentKey, head);
+          const retained = state.reviews.find((receipt) =>
+            receipt.id === receiptId
+          );
+          assert.ok(
+            retained,
+            "the original change-only receipt remains durable",
+          );
+          assert.equal(retained.taskAcceptance, null);
+          assert.equal(retained.outcome, "completed");
           assert.equal(
             rig.github.calls.some((call) => call.startsWith("closeIssue:")),
             false,
             label,
           );
+        } else {
+          assert.equal(work.nextStep, "blocked", label);
+          assert.equal(work.blocker?.message, detail, label);
+          assert.equal(work.blocker?.kind, kind, label);
         }
+        assert.equal(rig.model.requests.length, 0);
+        assert.equal(work.target.head, head);
         assert.equal(
           rig.github.calls.includes("merge"),
           false,
@@ -8167,13 +8200,13 @@ Deno.test(
 );
 
 Deno.test(
-  "review no-verdict: the round allowance blocks the task with the observed reason",
+  "review no-verdict: the retired round allowance does not authorize or block the task",
   async () => {
     const { rig, work } = await rigAtReviewWait("review-no-verdict-blocked");
     try {
       const reason =
         "structured review unavailable: the review reported insufficient evidence";
-      // The plan's three review rounds are already consumed for this head.
+      // Three no-verdict attempts remain charged after the ceiling is retired.
       rig.clock.advance(15 * 60_000 + 1);
       for (let round = 0; round < 2; round += 1) {
         rig.github.reviewStatus = "unavailable";
@@ -8188,23 +8221,47 @@ Deno.test(
       let state = await rig.snapshot();
       assert.equal(state.work[0]!.counters.reviewRounds, 3);
       const requestsBefore = rig.github.reviewRequestIdentities.length;
-      const chargesBefore = state.reservations.length;
+      const chargesBefore = structuredClone(state.reservations);
+      const implementationsBefore = rig.model.requests.length;
 
-      const blocked = await rig.run();
-      assert.equal(blocked.status, "idle", JSON.stringify(blocked));
+      const continued = await rig.run();
+      assert.equal(continued.status, "idle", JSON.stringify(continued));
       state = await rig.snapshot();
       const record = state.work[0]!;
-      // No fourth round exists: the task is blocked with the exact reason
-      // instead of polling a terminal disposition forever.
-      assert.equal(record.nextStep, "blocked");
-      assert.equal(record.blocker?.kind, "review_quota");
-      assert.ok(
-        record.blocker?.message.includes(reason),
-        `blocker names the observed reason: ${record.blocker?.message}`,
+      assert.equal(record.nextStep, "review");
+      assert.equal(record.blocker, null);
+      assert.equal(record.wait?.reason, "review_pending");
+      assert.equal(record.counters.reviewRounds, 4);
+      assert.equal(record.target.head, work.target.head);
+      assert.equal(
+        rig.github.reviewRequestIdentities.length,
+        requestsBefore + 1,
       );
-      assert.equal(record.wait, null);
-      assert.equal(rig.github.reviewRequestIdentities.length, requestsBefore);
-      assert.equal(state.reservations.length, chargesBefore);
+      assert.equal(
+        rig.github.reviewRequestIdentities.at(-1)!.operationKey,
+        reviewOperationKey(7, work.target.head!, 4),
+      );
+      assert.equal(state.reservations.length, chargesBefore.length + 1);
+      for (const charge of chargesBefore) {
+        assert.deepEqual(
+          state.reservations.find((item) => item.id === charge.id),
+          charge,
+        );
+      }
+      const added = state.reservations.filter((charge) =>
+        !chargesBefore.some((prior) => prior.id === charge.id)
+      );
+      assert.equal(added[0]!.purpose, "review_request");
+      assert.equal(added[0]!.attempt, 4);
+      assert.equal(added[0]!.outcome, "submitted");
+      assert.equal(added[0]!.head, work.target.head);
+      assert.equal(rig.model.requests.length, implementationsBefore);
+      assert.equal(rig.github.calls.includes("merge"), false);
+      assert.equal(
+        rig.github.calls.some((call) => call.startsWith("closeIssue:")),
+        false,
+      );
+      assert.equal(state.releaseRequests.length, 0);
     } finally {
       await rig.ctx.cleanup();
     }

@@ -49,6 +49,7 @@ const RUN = { runId: 71, runAttempt: 2, launcherSha: LAUNCHER };
 const WAVE = "71:2:repair";
 const RESERVATION = "a".repeat(64);
 const ISO = new Date(T0).toISOString();
+const ROOT = decodeURIComponent(new URL("../../", import.meta.url).pathname);
 const bytes = (value: unknown) =>
   new TextEncoder().encode(canonicalStringify(value));
 async function digest(value: Uint8Array) {
@@ -70,11 +71,12 @@ async function zip(
   return await writer.close();
 }
 async function fixture(paginated = false) {
-  await Deno.mkdir("/tmp/matrix-artifacts-tests", { recursive: true });
   const tmp = await Deno.makeTempDir({
-    dir: "/tmp/matrix-artifacts-tests",
+    dir: ROOT,
     prefix: "matrix-transport-test-",
   });
+  const checkout = `${tmp}/checkout`;
+  await Deno.mkdir(checkout);
   const cellId = await matrixCellIdV1(WAVE, "artifact-task", RESERVATION);
   const request: ModelRunRequestV1 = {
     taskId: "artifact-task" as never,
@@ -411,13 +413,24 @@ async function fixture(paginated = false) {
     }
     throw new Error("unexpected fake route");
   });
-  const transport = createActionsMatrixArtifactTransport({
+  const artifactTransport = createActionsMatrixArtifactTransport({
     state,
     token: "fake-local-token",
     http,
     clock: { now: () => T0 + 10_000 },
     artifactRoot: `${tmp}/recovered`,
   });
+  const transport: typeof artifactTransport = {
+    async recover(input) {
+      const originalCwd = Deno.cwd();
+      Deno.chdir(checkout);
+      try {
+        return await artifactTransport.recover(input);
+      } finally {
+        Deno.chdir(originalCwd);
+      }
+    },
+  };
   const input = {
     requests: [{
       taskId: work.id,
