@@ -229,14 +229,18 @@ async function concurrencyInstallerFixture(
   snapshot: ReleaseStateSnapshotV1,
   refusal?: "ancestry" | "ci" | "parent" | "readback" | "artifact",
 ) {
-  const directory = await Deno.makeTempDir({ prefix: "sentinel-owner57-" });
+  const directory = await Deno.makeTempDir({
+    prefix: "sentinel-owner57-",
+    dir: Deno.cwd(),
+  });
   const remote = `${directory}/remote.git`;
   const originalCommand = Deno.Command;
   const originalFetch = globalThis.fetch;
   const originalLog = console.log;
   const originalNow = Date.now;
   const originalCwd = Deno.cwd();
-  const environment = {
+  const originalEnvironmentGet = Deno.env.get;
+  const environment: Record<string, string> = {
     GITHUB_REPOSITORY: "ubiquity/sentinel",
     GITHUB_REF: "refs/heads/sentinel-supervisor",
     GITHUB_JOB: "prepare",
@@ -245,9 +249,6 @@ async function concurrencyInstallerFixture(
     GITHUB_TOKEN: "offline-native-token",
     SENTINEL_SUPERVISOR_TOKEN: "offline-app-token-value",
   };
-  const savedEnvironment = Object.fromEntries(
-    Object.keys(environment).map((name) => [name, Deno.env.get(name)]),
-  );
   const gitEnvironment = {
     PATH: Deno.env.get("PATH") ?? "/usr/bin:/bin",
     HOME: directory,
@@ -575,9 +576,11 @@ async function concurrencyInstallerFixture(
     };
     console.log = (value: unknown) => reports.push(JSON.parse(String(value)));
     Date.now = () => NOW;
-    for (const [name, value] of Object.entries(environment)) {
-      Deno.env.set(name, value);
-    }
+    Deno.env.get = (name) => {
+      if (Object.hasOwn(environment, name)) return environment[name];
+      assert.ok(name === "PATH" || name === "NODE_V8_COVERAGE");
+      return originalEnvironmentGet(name);
+    };
     Deno.chdir(directory);
     return {
       initialHead,
@@ -603,10 +606,7 @@ async function concurrencyInstallerFixture(
         console.log = originalLog;
         Date.now = originalNow;
         Deno.chdir(originalCwd);
-        for (const [name, value] of Object.entries(savedEnvironment)) {
-          if (value === undefined) Deno.env.delete(name);
-          else Deno.env.set(name, value);
-        }
+        Deno.env.get = originalEnvironmentGet;
         await Deno.remove(directory, { recursive: true });
       },
     };
@@ -616,10 +616,7 @@ async function concurrencyInstallerFixture(
     console.log = originalLog;
     Date.now = originalNow;
     Deno.chdir(originalCwd);
-    for (const [name, value] of Object.entries(savedEnvironment)) {
-      if (value === undefined) Deno.env.delete(name);
-      else Deno.env.set(name, value);
-    }
+    Deno.env.get = originalEnvironmentGet;
     await Deno.remove(directory, { recursive: true });
     throw error;
   }
