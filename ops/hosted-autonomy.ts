@@ -92,6 +92,23 @@ import {
 import { reviewAuthorizesMerge } from "../src/repair/review-gate.ts";
 import { RETIRED_MERGED_MESSAGE } from "../src/repair/selection.ts";
 import type { GitSha } from "../src/contracts/brands.ts";
+import { RollingStartBudget } from "../src/budget/mod.ts";
+import { GitHubApiClient } from "../src/github/client.ts";
+import { portOk } from "../src/contracts/ports.ts";
+import {
+  fetchHttpTransport,
+  type HttpTransportV1,
+} from "../src/github/http.ts";
+import { HostedRepairCooldownGate } from "../src/host/hosted-cooldown.ts";
+import { parseCooldownModeV1 } from "../src/contracts/cooldown-mode.ts";
+import {
+  createActionsMatrixArtifactHttpTransport,
+  createActionsMatrixArtifactTransport,
+} from "../src/host/matrix-artifacts.ts";
+import {
+  type HistoricalMatrixQuarantineDepsV1,
+  runHistoricalMatrixQuarantine,
+} from "../src/host/matrix-actions.ts";
 import type { RepositoryIdentityV1 } from "../src/contracts/shared.ts";
 import {
   extractSelfFailureSignature,
@@ -352,6 +369,7 @@ export type HostedAutonomyReasonV1 =
   | "write_unavailable"
   | "readback_unverified"
   | "identity_rejected"
+  | "historical_quarantine_incomplete"
   | "unexpected_failure";
 
 export interface HostedAutonomyResultV1 {
@@ -492,6 +510,52 @@ export interface HostedAutonomyDepsV1 {
    */
   githubFor(repository: RepositoryIdentityV1): HostedAutonomyGitHubV1 | null;
   clock: { now(): number };
+  /** Present on protected maintenance; rejection-only, before retry/delivery. */
+  historicalMatrix?: HistoricalMatrixQuarantineDepsV1;
+}
+
+/** Existing native token and read-only artifact route; no release writer or model. */
+export function createHostedHistoricalMatrixQuarantine(input: {
+  state: StateReadView & RepairStateWriter;
+  clock: { now(): number };
+  token: string;
+  artifactRoot: string;
+  http?: HttpTransportV1;
+  artifactHttp?: HttpTransportV1;
+  cooldownMode?: string;
+}): HistoricalMatrixQuarantineDepsV1 {
+  const client = new GitHubApiClient({
+    repository: { owner: "ubiquity", name: "sentinel", installationId: 0 },
+    apiBaseUrl: "https://api.github.com",
+    http: input.http ?? fetchHttpTransport(),
+    clock: input.clock,
+    auth: {
+      authorizationHeader: () =>
+        Promise.resolve(portOk(`Bearer ${input.token}`)),
+    },
+    cooldownGate: new HostedRepairCooldownGate({
+      state: input.state,
+      clock: input.clock,
+      mode: parseCooldownModeV1(input.cooldownMode),
+    }),
+  });
+  return {
+    state: input.state,
+    clock: input.clock,
+    budget: new RollingStartBudget({
+      state: input.state,
+      clock: input.clock,
+      configs: [],
+    }),
+    readExecution: (execution) => client.readHostedExecution(execution),
+    transport: createActionsMatrixArtifactTransport({
+      state: input.state,
+      clock: input.clock,
+      token: input.token,
+      artifactRoot: input.artifactRoot,
+      http: input.artifactHttp ?? createActionsMatrixArtifactHttpTransport(),
+    }),
+  };
 }
 
 function skipped(
@@ -1514,6 +1578,15 @@ export async function runHostedAutonomy(
   deps: HostedAutonomyDepsV1,
 ): Promise<HostedAutonomyResultV1> {
   const actions: string[] = [];
+  if (deps.historicalMatrix) {
+    let count: number;
+    try {
+      count = await runHistoricalMatrixQuarantine(deps.historicalMatrix);
+    } catch {
+      throw new HistoricalQuarantineIncomplete();
+    }
+    if (count > 0) actions.push(`historical-matrix:quarantined:${count}`);
+  }
   const revisions: string[] = [];
   const initial = await readRepairSafely(deps.state);
   if (initial === null || !initial.ok || initial.value.status !== "found") {
@@ -2376,6 +2449,12 @@ export async function runHostedAutonomy(
   return skipped(reason, observedHead, actions);
 }
 
+class HistoricalQuarantineIncomplete extends Error {
+  constructor() {
+    super("historical matrix quarantine incomplete");
+  }
+}
+
 /**
  * Parse one raw `GET /pulls/{number}` response into the remote merge facts the
  * helper needs. GitHub assigns `merge_commit_sha` only once a pull is merged,
@@ -2905,17 +2984,23 @@ export function revisionIntegratedIntoBase(
 const GIT_SHA_PATTERN = /^[0-9a-f]{40}$/;
 
 /** Hosted entry point: identity first, then the two bounded passes. */
-export async function runHostedAutonomyMain(): Promise<number> {
+export async function runHostedAutonomyMain(input?: {
+  /** Trusted in-process test transport; native checkout identity remains mandatory. */
+  env: Readonly<Record<string, string | undefined>>;
+  deps: HostedAutonomyDepsV1;
+}): Promise<number> {
+  const env = (key: string) =>
+    input === undefined ? readEnv(key) : input.env[key] ?? null;
   const facts = await readCheckoutFacts();
   const validated = validateIssue48QuotaHostedIdentity({
-    repository: readEnv("GITHUB_REPOSITORY"),
-    ref: readEnv("GITHUB_REF"),
-    job: readEnv("GITHUB_JOB"),
-    runId: readEnv("GITHUB_RUN_ID"),
-    runAttempt: readEnv("GITHUB_RUN_ATTEMPT"),
-    workflowRef: readEnv("GITHUB_WORKFLOW_REF"),
-    sha: readEnv("GITHUB_SHA"),
-    workflowSha: readEnv("GITHUB_WORKFLOW_SHA"),
+    repository: env("GITHUB_REPOSITORY"),
+    ref: env("GITHUB_REF"),
+    job: env("GITHUB_JOB"),
+    runId: env("GITHUB_RUN_ID"),
+    runAttempt: env("GITHUB_RUN_ATTEMPT"),
+    workflowRef: env("GITHUB_WORKFLOW_REF"),
+    sha: env("GITHUB_SHA"),
+    workflowSha: env("GITHUB_WORKFLOW_SHA"),
     checkoutHead: facts.head,
     checkoutClean: facts.clean,
   });
@@ -2924,8 +3009,8 @@ export async function runHostedAutonomyMain(): Promise<number> {
   // token authenticates every repository-visible code-change op (merge, issue
   // closure, CI approval) so it is attributed to ubiquity-sentinel[bot], while
   // the native Actions token keeps owning the state refs it has always owned.
-  const stateToken = readEnv("GITHUB_TOKEN");
-  const apiToken = readEnv("SENTINEL_SUPERVISOR_TOKEN") ?? stateToken;
+  const stateToken = env("GITHUB_TOKEN");
+  const apiToken = env("SENTINEL_SUPERVISOR_TOKEN") ?? stateToken;
   if (
     stateToken === null || stateToken.length === 0 ||
     apiToken === null || apiToken.length === 0
@@ -2934,45 +3019,69 @@ export async function runHostedAutonomyMain(): Promise<number> {
   }
   let result: HostedAutonomyResultV1;
   try {
-    const scratch = `${Deno.cwd()}/.hosted-autonomy`;
-    Deno.mkdirSync(scratch, { recursive: true, mode: 0o700 });
-    const runner = new DenoGitRunner(
-      `${scratch}/git-home`,
-      githubGitAuthEnv(stateToken),
+    if (input) {
+      result = await runHostedAutonomy(input.deps);
+    } else {
+      const scratch = `${Deno.cwd()}/.hosted-autonomy`;
+      Deno.mkdirSync(scratch, { recursive: true, mode: 0o700 });
+      const runner = new DenoGitRunner(
+        `${scratch}/git-home`,
+        githubGitAuthEnv(stateToken),
+      );
+      const state = createRepairStateStore({
+        scratchDir: `${scratch}/state`,
+        remoteUrl: ISSUE48_QUOTA_REMOTE_URL,
+        runner,
+      });
+      // One surface per exact repository identity: the durable snapshot may
+      // carry work for several repositories, and each record is delivered under
+      // its OWN repository, never under the self repository.
+      const surfaces = new Map<string, HostedAutonomyGitHubV1>();
+      const githubFor = (
+        repository: RepositoryIdentityV1,
+      ): HostedAutonomyGitHubV1 => {
+        const key = hostedRepositoryKey(repository);
+        const cached = surfaces.get(key);
+        if (cached !== undefined) return cached;
+        const created = createHostedAutonomyGitHub(apiToken, repository);
+        surfaces.set(key, created);
+        return created;
+      };
+      const artifactRoot = await Deno.makeTempDir({
+        prefix: "sentinel-maintenance-matrix-",
+      });
+      try {
+        result = await runHostedAutonomy({
+          state,
+          githubFor,
+          clock: { now: () => Date.now() },
+          historicalMatrix: createHostedHistoricalMatrixQuarantine({
+            state,
+            clock: { now: () => Date.now() },
+            token: stateToken,
+            artifactRoot,
+            cooldownMode: env("SENTINEL_COOLDOWN_MODE") ?? undefined,
+          }),
+        });
+      } finally {
+        await Deno.remove(artifactRoot, { recursive: true });
+      }
+    }
+  } catch (error) {
+    result = failed(
+      error instanceof HistoricalQuarantineIncomplete
+        ? "historical_quarantine_incomplete"
+        : "unexpected_failure",
+      null,
     );
-    const state = createRepairStateStore({
-      scratchDir: `${scratch}/state`,
-      remoteUrl: ISSUE48_QUOTA_REMOTE_URL,
-      runner,
-    });
-    // One surface per exact repository identity: the durable snapshot may
-    // carry work for several repositories, and each record is delivered under
-    // its OWN repository, never under the self repository.
-    const surfaces = new Map<string, HostedAutonomyGitHubV1>();
-    const githubFor = (
-      repository: RepositoryIdentityV1,
-    ): HostedAutonomyGitHubV1 => {
-      const key = hostedRepositoryKey(repository);
-      const cached = surfaces.get(key);
-      if (cached !== undefined) return cached;
-      const created = createHostedAutonomyGitHub(apiToken, repository);
-      surfaces.set(key, created);
-      return created;
-    };
-    result = await runHostedAutonomy({
-      state,
-      githubFor,
-      clock: { now: () => Date.now() },
-    });
-  } catch {
-    result = failed("unexpected_failure", null);
   }
   return report(result);
 }
 
 /** The two reasons that mean the helper itself could not run safely. */
 export function isHardAutonomyFailure(reason: HostedAutonomyReasonV1): boolean {
-  return reason === "identity_rejected" || reason === "unexpected_failure";
+  return reason === "identity_rejected" || reason === "unexpected_failure" ||
+    reason === "historical_quarantine_incomplete";
 }
 
 function report(result: HostedAutonomyResultV1): number {
