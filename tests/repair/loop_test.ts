@@ -8307,62 +8307,68 @@ Deno.test(
   async () => {
     const taskId = asWorkItemId("issue-rejected");
     const branch = candidateBranch(taskId);
-    const rig = await makeRig("merge-gate-rejected", {
-      summaries: false,
-      github: {
-        candidateLifecycle: {
-          ...positiveLifecycle(),
-          refs: { [`refs/heads/${branch}`]: SHA3 },
-          pullRequests: [exactOpenPr(7, SHA3, branch)],
+    for (const hasP1 of [false, true]) {
+      const rig = await makeRig(`merge-gate-${hasP1 ? "rejected" : "clean"}`, {
+        summaries: false,
+        github: {
+          candidateLifecycle: {
+            ...positiveLifecycle(),
+            refs: { [`refs/heads/${branch}`]: SHA3 },
+            pullRequests: [exactOpenPr(7, SHA3, branch)],
+          },
         },
-      },
-    });
-    try {
-      const rejected = completedReceipt(7, SHA3, SHA1, {
-        findings: [{
-          id: "finding-1",
-          severity: "P1",
-          path: "src/app.ts",
-          message: "required fix",
-          fingerprint: "a".repeat(64),
-          resolved: false,
-          resolutionEvidence: null,
-        }],
-        unresolvedSeverities: ["P1"],
       });
-      const seeded = await rig.store.writeRepair(
-        seededSnapshot([
-          workRecord("issue-rejected", {
-            source: { kind: "issue", id: "902", revision: SHA1 },
-            related: { incidentId: null, issueNumber: 902 },
-            target: {
-              base: SHA1,
-              branch,
-              checkpoint: null,
-              head: SHA3,
-              pr: 7,
-            },
-            nextStep: "delivery",
-            wait: null,
-          }),
-        ], { reviews: [rejected] }),
-        null,
-      );
-      assert.ok(seeded.ok && seeded.value.status === "applied");
+      try {
+        const proof = completedReceipt(7, SHA3, SHA1, {
+          id: await reviewReceiptId(reviewOperationKey(7, SHA3, 1), SHA3),
+          findings: hasP1
+            ? [{
+              id: "finding-1",
+              severity: "P1",
+              path: "src/app.ts",
+              message: "required fix",
+              fingerprint: "a".repeat(64),
+              resolved: false,
+              resolutionEvidence: null,
+            }]
+            : [],
+          unresolvedSeverities: hasP1 ? ["P1"] : [],
+        });
+        const seeded = await rig.store.writeRepair(
+          seededSnapshot([
+            workRecord("issue-rejected", {
+              source: { kind: "issue", id: "1", revision: SHA1 },
+              related: { incidentId: null, issueNumber: 1 },
+              target: {
+                base: SHA1,
+                branch,
+                checkpoint: null,
+                head: SHA3,
+                pr: 7,
+              },
+              nextStep: "delivery",
+              wait: null,
+              counters: { attempts: 1, retries: 0, reviewRounds: 1 },
+            }),
+          ], { reviews: [proof] }),
+          null,
+        );
+        assert.ok(seeded.ok && seeded.value.status === "applied");
 
-      const outcome = await rig.run();
-      assert.equal(
-        outcome.status,
-        "state_error",
-        "a completed but non-authorizing verdict is a contradiction, not a merge",
-      );
-      assert.equal(
-        rig.github.calls.filter((call) => call === "mergePr").length,
-        0,
-        "the P1-bearing receipt never authorizes a merge",
-      );
-    } finally {
-      await rig.ctx.cleanup();
+        const outcome = await rig.run();
+        assert.equal(
+          outcome.status,
+          hasP1 ? "state_error" : "idle",
+          JSON.stringify(outcome),
+        );
+        assert.equal(
+          rig.github.calls.filter((call) => call === "merge").length,
+          hasP1 ? 0 : 1,
+          "only the paired clean receipt authorizes a merge",
+        );
+      } finally {
+        await rig.ctx.cleanup();
+      }
     }
   },
 );
