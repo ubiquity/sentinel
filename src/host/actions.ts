@@ -54,6 +54,7 @@ import {
 } from "./hosted-runtime.ts";
 import type { HostedExecutionIntentV1 } from "../contracts/hosted-supervisor.ts";
 import type { MatrixRunIdentityV1 } from "../contracts/matrix.ts";
+import type { MatrixArtifactTransportV1 } from "./matrix-artifact-port.ts";
 import { parseReleaseStateSnapshotV1 } from "../contracts/state-snapshots.ts";
 import { fetchHttpTransport, type HttpTransportV1 } from "../github/http.ts";
 import { runRepairEntrypoint } from "../main.ts";
@@ -236,6 +237,7 @@ export interface ActionsTargetCyclesInputV1 {
     artifactRoot: string;
     sourcePathFor: (config: RepositoryConfigV1) => string;
     expectedProvider: string;
+    createArtifactTransport: () => Promise<MatrixArtifactTransportV1>;
   };
   /**
    * Prepare one target's own private state before its port is composed: its
@@ -387,6 +389,8 @@ export interface ActionsRepairHostDepsV1 {
   job?: "matrix_plan" | "matrix_cell";
   /** Fake external ports/transports for the actual hosted composition checks. */
   http?: HttpTransportV1;
+  /** Fake external artifact HTTP boundary; production uses its bounded binary factory. */
+  artifactHttp?: HttpTransportV1;
   /** Deterministic state transport injection; production always uses the Git store. */
   state?: StateReadView & RepairStateWriter;
   model?: ImplementationPort;
@@ -963,6 +967,23 @@ export async function runActionsRepairHost(
         artifactRoot: joinPath(sourceDir, "..", ".sentinel-matrix"),
         sourcePathFor: mirrorPathFor,
         expectedProvider: modelRoute.provider,
+        createArtifactTransport: async () => {
+          const {
+            createActionsMatrixArtifactTransport,
+            createActionsMatrixArtifactHttpTransport,
+          } = await import("./matrix-artifacts.ts");
+          return createActionsMatrixArtifactTransport({
+            state: {
+              readRepair: () => state.readRepair(),
+              readRelease: () => state.readRelease(),
+            },
+            token: githubToken,
+            http: deps.artifactHttp ??
+              createActionsMatrixArtifactHttpTransport(),
+            clock,
+            artifactRoot: joinPath(sourceDir, "..", ".sentinel-matrix"),
+          });
+        },
       },
       prepareTarget,
       composeGithub: composeTargetGithub,

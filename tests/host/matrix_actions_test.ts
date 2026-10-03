@@ -1,5 +1,7 @@
 /** Real hosted matrix composition over separate temporary Git repositories and fake external ports. */
 import assert from "node:assert/strict";
+import { Uint8ArrayReader, Uint8ArrayWriter, ZipWriter } from "@zip.js/zip.js";
+import { createActionsMatrixArtifactHttpTransport } from "../../src/host/matrix-artifacts.ts";
 import type { GitSha } from "../../src/contracts/brands.ts";
 import {
   HOSTED_RUNTIME_ID,
@@ -15,7 +17,10 @@ import type {
 } from "../../src/contracts/ports.ts";
 import { portError, portOk } from "../../src/contracts/ports.ts";
 import type { MatrixCellResultV1 } from "../../src/contracts/matrix.ts";
-import { matrixDigestV1 } from "../../src/contracts/matrix.ts";
+import {
+  matrixDigestV1,
+  MAX_MATRIX_ARTIFACT_BYTES,
+} from "../../src/contracts/matrix.ts";
 import { parseReleaseStateSnapshotV1 } from "../../src/contracts/state-snapshots.ts";
 import {
   createReleaseStateStore,
@@ -494,17 +499,182 @@ Deno.test("matrix actions: actual fresh intake plans both targets, isolated cell
       ).length,
       2,
     );
-    const waves = [{
-      plan: planner.plan,
+    const artifactCalls: string[] = [];
+    const encode = (value: unknown) =>
+      new TextEncoder().encode(JSON.stringify(value));
+    async function byteDigest(value: Uint8Array) {
+      return [
+        ...new Uint8Array(await crypto.subtle.digest("SHA-256", value.slice())),
+      ].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+    }
+    async function zip(entries: { name: string; content: Uint8Array }[]) {
+      const writer = new ZipWriter(new Uint8ArrayWriter(), {
+        useWebWorkers: false,
+      });
+      for (const entry of entries) {
+        await writer.add(entry.name, new Uint8ArrayReader(entry.content), {
+          unixMode: 0o100600,
+        });
+      }
+      return await writer.close();
+    }
+    const archives = new Map<number, Uint8Array>();
+    const artifactRows: Record<string, unknown>[] = [];
+    const provenance = {
+      id: 71,
+      repository_id: 123,
+      head_repository_id: 123,
+      head_branch: "sentinel-supervisor",
+      head_sha: r.sha,
+    };
+    async function archiveRow(id: number, name: string, bytes: Uint8Array) {
+      archives.set(id, bytes);
+      artifactRows.push({
+        id,
+        name,
+        size_in_bytes: bytes.length,
+        expired: false,
+        digest: "sha256:" + await byteDigest(bytes),
+        workflow_run: provenance,
+      });
+    }
+    await archiveRow(
+      501,
+      "sentinel-matrix-plan-71-1",
+      await zip([{ name: "plan.json", content: encode(planner.plan) }]),
+    );
+    for (const [index, result] of results.entries()) {
+      await archiveRow(
+        502 + index,
+        "sentinel-matrix-cell-71-1-" + result.cellId,
+        await zip([{ name: "result.json", content: encode(result) }, {
+          name: result.bundle!.file,
+          content: await Deno.readFile(archive + "/" + result.bundle!.file),
+        }]),
+      );
+    }
+    const iso = new Date(planner.plan.plannedAt).toISOString();
+    const plannerMarker = {
+      kind: "sentinel_matrix_plan",
+      waveId: planner.plan.waveId,
+      run: planner.plan.run,
+      runtimeSha: r.sha,
+      generation: 1,
       planDigest: planner.planDigest,
-      results,
-      bundlesDir: archive,
-      provenance: {
-        run: planner.plan.run,
-        plannerJobId: 102,
-        cellJobIds: [103, 104],
-      },
-    }];
+      prepared: planner.prepared,
+    };
+    const logs = new Map<number, string>([[
+      401,
+      iso + " " + JSON.stringify(plannerMarker) + "\n",
+    ]]);
+    const job = (id: number, name: string, step: string) => ({
+      id,
+      name,
+      run_id: 71,
+      run_attempt: 1,
+      head_sha: r.sha,
+      status: "completed",
+      conclusion: "success",
+      started_at: iso,
+      completed_at: iso,
+      steps: [{
+        name: step,
+        number: 1,
+        status: "completed",
+        conclusion: "success",
+        started_at: iso,
+        completed_at: iso,
+      }],
+    });
+    const jobs = [job(401, "matrix_plan", "Plan isolated issue matrix")];
+    for (const [index, result] of results.entries()) {
+      jobs.push(
+        job(
+          402 + index,
+          "matrix_cell (" + result.cellId + ")",
+          "Run isolated issue cell",
+        ),
+      );
+      logs.set(
+        402 + index,
+        iso + " " +
+          JSON.stringify({
+            kind: "sentinel_matrix_cell",
+            run: result.run,
+            runtimeSha: result.runtimeSha,
+            generation: result.generation,
+            cellId: result.cellId,
+            reservationId: result.reservationId,
+            resultDigest: await matrixDigestV1(result),
+            bundleDigest: result.bundle!.digest,
+            status: result.status,
+          }) + "\n",
+      );
+    }
+    function artifactHttp(available: boolean) {
+      return createActionsMatrixArtifactHttpTransport((url, init) => {
+        artifactCalls.push(url);
+        const parsed = new URL(url);
+        const reply = (body: unknown) =>
+          Promise.resolve(new Response(JSON.stringify(body)));
+        if (parsed.host.endsWith("blob.core.windows.net")) {
+          assert.equal(init?.headers?.authorization, undefined);
+          assert.equal(init?.redirect, "error");
+          return Promise.resolve(
+            new Response(
+              parsed.pathname.startsWith("/archive/")
+                ? archives.get(Number(parsed.pathname.split("/").at(-1)))!
+                  .slice()
+                : logs.get(Number(parsed.pathname.split("/").at(-1)))!,
+            ),
+          );
+        }
+        assert.equal(init?.headers?.authorization, "Bearer fake-read-token");
+        assert.equal(init?.redirect, "manual");
+        const attempt = parsed.pathname.match(/\/runs\/(\d+)\/attempts\/1$/);
+        if (attempt) {
+          return reply({
+            id: Number(attempt[1]),
+            run_attempt: 1,
+            workflow_id: HOSTED_SUPERVISOR_WORKFLOW_ID,
+            path: HOSTED_SUPERVISOR_WORKFLOW_PATH,
+            event: "workflow_dispatch",
+            head_branch: "sentinel-supervisor",
+            head_sha: r.sha,
+            repository: { id: 123, full_name: "ubiquity/sentinel" },
+            head_repository: { id: 123, full_name: "ubiquity/sentinel" },
+            status: "in_progress",
+            run_started_at: iso,
+            updated_at: iso,
+          });
+        }
+        if (parsed.pathname.endsWith("/artifacts")) {
+          const rows = available && !parsed.pathname.includes("/runs/72/")
+            ? artifactRows
+            : [];
+          return reply({ total_count: rows.length, artifacts: rows });
+        }
+        if (parsed.pathname.endsWith("/jobs")) {
+          return reply({ total_count: jobs.length, jobs });
+        }
+        const selected = parsed.pathname.match(/\/artifacts\/(\d+)\/zip$/) ??
+          parsed.pathname.match(/\/jobs\/(\d+)\/logs$/);
+        if (selected) {
+          return Promise.resolve(
+            new Response(null, {
+              status: 302,
+              headers: {
+                location:
+                  "https://productionresultssa1.blob.core.windows.net/" +
+                  (parsed.pathname.endsWith("/zip") ? "archive/" : "log/") +
+                  selected[1],
+              },
+            }),
+          );
+        }
+        throw Error("unexpected native artifact API route");
+      });
+    }
     const originalPreservers = [...r.github.values()].map((port) =>
       port.preserveCandidate.bind(port)
     );
@@ -520,46 +690,69 @@ Deno.test("matrix actions: actual fresh intake plans both targets, isolated cell
       carrier?: { planDigest: string },
     ) {
       const deps = await r.job(name, "repair");
-      await runActionsRepairHost({
-        ...deps,
-        model: {
-          modelId: "gpt-reserve",
-          runModel: () => {
-            throw Error("aggregate must not implement");
-          },
-        },
-        runTargetCycles: (input) =>
-          runActionsMatrixAggregateCycles({
-            ...input,
-            modelStartsEnabled: false,
-          }, {
-            recover: (request) => {
-              assert.equal(
-                request.requests.length,
-                2,
-                "submitted preservation intents remain artifact recovery requests",
-              );
-              if (!available) {
-                return Promise.all(input.configs.map(async (entry) => {
-                  await input.prepareTarget?.(entry);
-                  const candidate = results.find((result) =>
-                    result.repository.name === entry.repository.name
-                  )!;
-                  assert.equal(
-                    (await gitRun(input.host!.sourcePathFor(entry), [
-                      "cat-file",
-                      "-e",
-                      candidate.bundle!.head + "^{commit}",
-                    ], r.env)).ok,
-                    false,
-                  );
-                })).then(() => []);
-              }
-              return Promise.resolve(available ? waves : []);
+      if (name === "later-run") {
+        deps.composeGithub = (config) => {
+          const port = r.github.get(
+            config.repository.owner + "/" + config.repository.name,
+          )!;
+          const source = deps.workDir + "/.sentinel-actions-state/" +
+            (config.repository.name === "sentinel"
+              ? "source"
+              : "sources/ubiquity-ai.ubq.fi");
+          const original =
+            originalPreservers[config.repository.name === "sentinel" ? 0 : 1]!;
+          port.preserveCandidate = async (request) => {
+            assert.equal(
+              (await gitRun(source, [
+                "cat-file",
+                "-e",
+                request.candidate.head + "^{commit}",
+              ], r.env)).ok,
+              true,
+              "real authenticated old-wave transport must hydrate before publication",
+            );
+            return original(request);
+          };
+          return port;
+        };
+      }
+      const oldCwd = Deno.cwd();
+      Deno.chdir(deps.workDir);
+      try {
+        await runActionsRepairHost({
+          ...deps,
+          artifactHttp: artifactHttp(available),
+          model: {
+            modelId: "gpt-reserve",
+            runModel: () => {
+              throw Error("aggregate must not implement");
             },
-          }, carrier),
-      });
+          },
+          runTargetCycles: (input) =>
+            runActionsMatrixAggregateCycles(
+              { ...input, modelStartsEnabled: false },
+              undefined,
+              carrier,
+            ),
+        });
+      } finally {
+        Deno.chdir(oldCwd);
+      }
     }
+    const digestControl = await r.store.readRepair();
+    assert.ok(digestControl.ok && digestControl.value.status === "found");
+    await assert.rejects(
+      aggregate("native-digest-conflict", true, { planDigest: "f".repeat(64) }),
+      /differs from native planner output/,
+    );
+    const afterDigestControl = await r.store.readRepair();
+    assert.ok(
+      afterDigestControl.ok && afterDigestControl.value.status === "found",
+    );
+    assert.equal(
+      afterDigestControl.value.snapshot.sequence,
+      digestControl.value.snapshot.sequence,
+    );
     await aggregate("aggregate", true, { planDigest: planner.planDigest });
     const ingested = await r.store.readRepair();
     assert.ok(ingested.ok && ingested.value.status === "found");
@@ -610,6 +803,13 @@ Deno.test("matrix actions: actual fresh intake plans both targets, isolated cell
       2,
       "later-wave hydration never starts another implementation",
     );
+    assert.ok(
+      artifactCalls.some((url) =>
+        new URL(url).pathname === "/repos/ubiquity/sentinel/actions/artifacts"
+      ),
+      "actual consumer must enumerate authenticated prior waves",
+    );
+    assert.ok(artifactCalls.some((url) => url.includes("/runs/71/attempts/1")));
     const after = await r.store.readRepair();
     assert.ok(after.ok && after.value.status === "found");
     assert.ok(
@@ -774,6 +974,90 @@ Deno.test("matrix actions: one wave durably admits 128 fresh issues through real
       memory.repair!.work.filter((row) => row.intent?.kind === "implementation")
         .length,
       128,
+    );
+  } finally {
+    await r.cleanup();
+  }
+});
+
+Deno.test("matrix actions: manifest byte budget leaves overflow issues unreserved for a later wave", async () => {
+  const r = await rig();
+  try {
+    const memory = new MemoryState();
+    const release = await r.store.readRelease();
+    assert.ok(release.ok && release.value.status === "found");
+    memory.setRelease(release.value.snapshot);
+    const rows = Array.from({ length: 128 }, (_, index) => ({
+      ...issue(index + 1),
+      body: "X".repeat(17 * 1024),
+    }));
+    const source = r.github.get("ubiquity/sentinel")!;
+    source.listOpenIssues = () => Promise.resolve(portOk(rows));
+    source.readIssue = (number) =>
+      Promise.resolve(portOk(rows[number - 1] ?? null));
+    r.github.get("ubiquity/ai.ubq.fi")!.listOpenIssues = () =>
+      Promise.resolve(portOk([]));
+    const model: ImplementationPort = {
+      modelId: "gpt-reserve",
+      runModel: () => {
+        throw Error("planning cannot infer");
+      },
+    };
+    let first: Awaited<ReturnType<typeof runActionsMatrixHost>> | null = null;
+    try {
+      first = await runActionsMatrixHost({
+        ...await r.job("large-manifest", "matrix_plan"),
+        state: memory,
+        model,
+      });
+    } catch (error) {
+      console.log(
+        JSON.stringify({
+          kind: "manifest_byte_failure",
+          reservations: memory.repair?.reservations.length,
+          intents: memory.repair?.work.filter((row) => row.intent !== null)
+            .length,
+        }),
+      );
+      throw error;
+    }
+    assert.ok("plan" in first);
+    assert.ok(first.prepared > 0 && first.prepared < 128);
+    assert.ok(
+      (await Deno.stat(r.root + "/large-manifest/.sentinel-matrix/plan.json"))
+        .size <= MAX_MATRIX_ARTIFACT_BYTES,
+    );
+    assert.equal(memory.repair!.reservations.length, first.prepared);
+    assert.equal(
+      memory.repair!.work.filter((row) => row.intent?.kind === "implementation")
+        .length,
+      first.prepared,
+    );
+    assert.ok(
+      memory.repair!.work.filter((row) => row.intent === null).every((row) =>
+        row.counters.attempts === 0
+      ),
+    );
+    const firstCharges = structuredClone(memory.repair!.reservations);
+    await r.advanceRun(72);
+    const nextRelease = await r.store.readRelease();
+    assert.ok(nextRelease.ok && nextRelease.value.status === "found");
+    memory.setRelease(nextRelease.value.snapshot);
+    const second = await runActionsMatrixHost({
+      ...await r.job("later-manifest", "matrix_plan"),
+      state: memory,
+      model,
+    });
+    assert.ok("plan" in second);
+    assert.equal(first.prepared + second.prepared, 128);
+    assert.equal(memory.repair!.reservations.length, 128);
+    assert.equal(
+      new Set(memory.repair!.reservations.map((row) => row.id)).size,
+      128,
+    );
+    assert.deepEqual(
+      memory.repair!.reservations.slice(0, firstCharges.length),
+      firstCharges,
     );
   } finally {
     await r.cleanup();

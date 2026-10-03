@@ -11,9 +11,8 @@
  * state update. No snapshot travels; only the bounded candidate delta does.
  */
 import type { GitSha } from "../contracts/brands.ts";
+import { MAX_MATRIX_BUNDLE_BYTES } from "../contracts/matrix.ts";
 import { DenoReplayRuntime } from "../replay/runtime.ts";
-
-const MAX_BUNDLE_BYTES = 64 * 1024 * 1024;
 
 const BUNDLE_NAME = /^[0-9a-f]{64}\.bundle$/;
 
@@ -152,7 +151,9 @@ export function createGitBundleExporter(input: {
       if (code !== 0) return null;
       try {
         const info = await Deno.lstat(path);
-        if (!info.isFile || info.isSymlink || info.size > MAX_BUNDLE_BYTES) {
+        if (
+          !info.isFile || info.isSymlink || info.size > MAX_MATRIX_BUNDLE_BYTES
+        ) {
           return null;
         }
         const bytes = await Deno.readFile(path);
@@ -180,7 +181,9 @@ export function createGitBundleImporter(input: {
       let bytes: Uint8Array;
       try {
         const info = await Deno.lstat(path);
-        if (!info.isFile || info.isSymlink || info.size > MAX_BUNDLE_BYTES) {
+        if (
+          !info.isFile || info.isSymlink || info.size > MAX_MATRIX_BUNDLE_BYTES
+        ) {
           return false;
         }
         bytes = await Deno.readFile(path);

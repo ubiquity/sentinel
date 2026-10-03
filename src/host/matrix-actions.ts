@@ -28,7 +28,6 @@ import {
   createGitBundleImporter,
 } from "./matrix-git.ts";
 import type { MatrixArtifactTransportV1 } from "./matrix-artifact-port.ts";
-import { fetchHttpTransport } from "../github/http.ts";
 
 export interface MatrixNativeCarrierV1 {
   /** Digest supplied by native needs.matrix_plan.outputs, outside artifact contents. */
@@ -336,23 +335,7 @@ async function transportFor(
   injected?: MatrixArtifactTransportV1,
 ): Promise<MatrixArtifactTransportV1> {
   if (injected !== undefined) return injected;
-  const token = Deno.env.get("GITHUB_TOKEN");
-  if (token === undefined || token.length === 0) {
-    throw new Error("matrix artifact authentication is unavailable");
-  }
-  const { createActionsMatrixArtifactTransport } = await import(
-    "./matrix-artifacts.ts"
-  );
-  return createActionsMatrixArtifactTransport({
-    state: {
-      readRepair: () => input.state.readRepair(),
-      readRelease: () => input.state.readRelease(),
-    },
-    token,
-    http: fetchHttpTransport(),
-    clock: input.clock,
-    artifactRoot: hostOf(input).artifactRoot,
-  });
+  return await hostOf(input).createArtifactTransport();
 }
 /** Authenticating/importing receipts precedes ordinary publication/review/delivery. */
 export async function runActionsMatrixAggregateCycles(
@@ -388,7 +371,6 @@ export async function runActionsMatrixAggregateCycles(
     requests,
     runtimeSha: input.controllerSha,
     launcherSha: host.run.launcherSha,
-    currentRun: host.run,
   });
   for (const wave of waves) {
     if (

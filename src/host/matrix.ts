@@ -24,6 +24,7 @@
  * existing receipt, candidate, replay and review consumers.
  */
 import { canonicalStringify } from "../contracts/canonical.ts";
+import { deriveReservationId } from "../budget/mod.ts";
 import type { GitSha } from "../contracts/brands.ts";
 import {
   MATRIX_CELL_PATH,
@@ -200,6 +201,14 @@ export async function planMatrixWave(
   );
   const attemptedIds = new Set<string>();
   const cells: MatrixCellPlanV1[] = [];
+  const manifest = (entries: MatrixCellPlanV1[]): MatrixPlanV1 => ({
+    version: MATRIX_PLAN_VERSION,
+    kind: "matrix_plan",
+    waveId: options.waveId,
+    run: options.run,
+    plannedAt: options.plannedAt,
+    cells: entries,
+  });
   let attempted = 0;
   let deferred = 0;
   let notReady = 0;
@@ -229,6 +238,36 @@ export async function planMatrixWave(
       context,
       record,
       config,
+      async (request) => {
+        const reservationId = await deriveReservationId({
+          repository: record.repository,
+          taskId: record.id,
+          head: request.base,
+          attempt: record.counters.attempts + 1,
+          purpose: record.counters.attempts === 0 ? "implementation" : "retry",
+        });
+        const candidate: MatrixCellPlanV1 = {
+          cellId: await matrixCellIdV1(
+            options.waveId,
+            record.id,
+            reservationId,
+          ),
+          taskId: record.id,
+          repository: record.repository,
+          reservationId,
+          intentKey: implementationIntentKey(reservationId),
+          expectedBase: request.base,
+          runtimeSha: options.runtimeSha,
+          generation: options.generation,
+          requestDigest: await matrixDigestV1(request),
+          request,
+        };
+        // Use exactly the publisher's formatting and UTF-8 byte count BEFORE
+        // any reservation/attempt/intent is saved. Smaller later tasks may fit.
+        return new TextEncoder().encode(
+          JSON.stringify(manifest([...cells, candidate]), null, 2) + "\n",
+        ).length <= MAX_MATRIX_ARTIFACT_BYTES;
+      },
     );
     if (outcome.kind !== "prepared") {
       deferred++;
@@ -269,14 +308,7 @@ export async function planMatrixWave(
   }
 
   return {
-    plan: {
-      version: MATRIX_PLAN_VERSION,
-      kind: "matrix_plan",
-      waveId: options.waveId,
-      run: options.run,
-      plannedAt: options.plannedAt,
-      cells,
-    },
+    plan: manifest(cells),
     attempted,
     prepared: cells.length,
     notReady,

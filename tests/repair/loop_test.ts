@@ -1138,10 +1138,11 @@ Deno.test(
 /** Cheap refusal controls use the same loop and budget, without real Git copies. */
 async function missingTaskMemoryRig(
   options: ConstructorParameters<typeof FakeGithub>[0] = {},
+  initialRounds = 2,
 ) {
   const head = SHA2;
-  const operationKey = `review:7:${head}:attempt-2`;
-  const nextKey = `review:7:${head}:attempt-3`;
+  const operationKey = reviewOperationKey(7, head, initialRounds);
+  const nextKey = reviewOperationKey(7, head, initialRounds + 1);
   const github = new RelationsFakeGithub({
     baseSha: SHA1,
     candidateLifecycle: {
@@ -1182,19 +1183,20 @@ async function missingTaskMemoryRig(
       message: TASK_ACCEPTANCE_MISSING_DETAIL,
       since: T0 + 3000,
     },
-    counters: { attempts: 1, retries: 0, reviewRounds: 2 },
+    counters: { attempts: 1, retries: 0, reviewRounds: initialRounds },
     updatedAt: T0 + 3000,
   });
-  const charges = [1, 2].map((attempt) =>
-    reservation(`memory-prior-${attempt}`, {
-      taskId: record.id,
-      head,
-      attempt,
-      purpose: "review_request",
-      outcome: "submitted",
-      settledAt: T0 + 1000,
-    })
-  );
+  const charges = Array.from({ length: initialRounds }, (_, index) => index + 1)
+    .map((attempt) =>
+      reservation(`memory-prior-${attempt}`, {
+        taskId: record.id,
+        head,
+        attempt,
+        purpose: "review_request",
+        outcome: "submitted",
+        settledAt: T0 + 1000,
+      })
+    );
   const seeded = await rig.state.writeRepair(
     seededSnapshot([record], {
       updatedAt: T0 + 3000,
@@ -1223,7 +1225,6 @@ async function missingTaskMemoryRig(
 Deno.test("missing task review recovery: refusal controls preserve failed gates and charges", async () => {
   for (
     const control of [
-      "exhausted",
       "unfulfilled",
       "uncertain",
       "wrong-task",
@@ -1247,12 +1248,6 @@ Deno.test("missing task review recovery: refusal controls preserve failed gates 
   ) {
     const rig = await missingTaskMemoryRig();
     let state = structuredClone(await rig.snapshot());
-    if (control === "exhausted") {
-      state.work[0] = workRecord("issue-1", {
-        ...state.work[0],
-        counters: { ...state.work[0]!.counters, reviewRounds: 3 },
-      });
-    }
     if (
       ["unfulfilled", "uncertain", "wrong-task", "wrong-digest"].includes(
         control,
@@ -8897,3 +8892,24 @@ Deno.test(
     }
   },
 );
+
+Deno.test("missing task review recovery: three prior rounds allow a fourth task-bound review without accepting the legacy verdict", async () => {
+  const rig = await missingTaskMemoryRig({}, 3);
+  const original = canonicalStringify(rig.legacy);
+  await rig.run(1);
+  const state = await rig.snapshot();
+  assert.equal(state.work[0]!.counters.reviewRounds, 4);
+  assert.equal(rig.github.reviewRequestIdentities.length, 1);
+  assert.equal(
+    rig.github.reviewRequestIdentities[0]!.operationKey,
+    rig.nextKey,
+  );
+  assert.equal(state.reservations.length, 4);
+  assert.deepEqual(state.reservations.slice(0, 3), rig.charges);
+  assert.equal(
+    canonicalStringify(state.reviews.find((row) => row.id === rig.legacy.id)),
+    original,
+  );
+  assert.equal(rig.github.calls.includes("merge"), false);
+  assert.equal(rig.model.requests.length, 0);
+});

@@ -2822,6 +2822,7 @@ export async function prepareImplementationStart(
   context: LoopContextV1,
   record: WorkRecordV1,
   config: RepositoryConfigV1,
+  beforeAdmission?: (request: ModelRunRequestV1) => Promise<boolean>,
 ): Promise<StepResultV1 | PreparedImplementationV1> {
   // No NEW model work after the 90-minute cutoff (or at/after the total run
   // deadline): the start is rejected before any reservation is made (nothing
@@ -2958,6 +2959,30 @@ export async function prepareImplementationStart(
       kind: "deferred",
       detail:
         "implementation start is past the model cutoff or no longer fits the run bounds",
+    };
+  }
+
+  const rejectedHead = headRejectedByReview(context.snapshot, record);
+  const findings = correctionFindings(context.snapshot, record);
+  const request: ModelRunRequestV1 = {
+    taskId: record.id,
+    repository: record.repository,
+    base: record.target.base,
+    ...(rejectedHead && record.target.head !== null
+      ? { checkoutBase: record.target.head }
+      : {}),
+    issue,
+    evidence: record.evidence,
+    ...(findings === null ? {} : { reviewFindings: findings }),
+    model: implementationModelId(deps),
+    reasoning: REASONING,
+    maxDurationMs: bound.maxDurationMs,
+    maxOutputChars: bound.maxOutputChars,
+  };
+  if (beforeAdmission !== undefined && !await beforeAdmission(request)) {
+    return {
+      kind: "deferred",
+      detail: "implementation cannot fit its immutable dispatch artifact",
     };
   }
 
@@ -3130,23 +3155,6 @@ export async function prepareImplementationStart(
     };
   }
 
-  const rejectedHead = headRejectedByReview(context.snapshot, withIntent);
-  const findings = correctionFindings(context.snapshot, withIntent);
-  const request: ModelRunRequestV1 = {
-    taskId: withIntent.id,
-    repository: withIntent.repository,
-    base: withIntent.target.base,
-    ...(rejectedHead && withIntent.target.head !== null
-      ? { checkoutBase: withIntent.target.head }
-      : {}),
-    issue,
-    evidence: withIntent.evidence,
-    ...(findings === null ? {} : { reviewFindings: findings }),
-    model: implementationModelId(deps),
-    reasoning: REASONING,
-    maxDurationMs: bound.maxDurationMs,
-    maxOutputChars: bound.maxOutputChars,
-  };
   return {
     kind: "prepared",
     record: withIntent,
