@@ -2011,6 +2011,7 @@ export async function runHostedAutonomy(
     closedIssues,
     closedUnmerged,
   ).slice(0, 5);
+  let retirementResult: HostedAutonomyResultV1 | null = null;
   if (retirements.length > 0) {
     const now = deps.clock.now();
     if (!Number.isSafeInteger(now) || now < snapshot.updatedAt) {
@@ -2054,7 +2055,7 @@ export async function runHostedAutonomy(
     for (const plan of retirements) {
       actions.push(`retire:${plan.id}:issue=${plan.issueNumber}`);
     }
-    return {
+    retirementResult = {
       kind: "hosted_autonomy",
       status: "applied",
       reason: "retired_records",
@@ -2063,6 +2064,8 @@ export async function runHostedAutonomy(
       actions,
       revisions,
     };
+    snapshot = readback.value.snapshot;
+    observedHead = readback.value.head;
   }
   // A foreign record's delivery evidence is its OWN merged pull request: the
   // trusted release path is bound to the self scope by design and can never
@@ -2162,6 +2165,19 @@ export async function runHostedAutonomy(
         actions.push(`close:${plan.id}:issue=${plan.issueNumber}:refused`);
         continue;
       }
+      if (!isHostedSelf(record.repository)) {
+        let checksGreen = false;
+        try {
+          checksGreen = scope.surface !== null && record.target.head !== null &&
+            await scope.surface.hasAllChecksGreen(record.target.head) === true;
+        } catch {
+          checksGreen = false;
+        }
+        if (!checksGreen) {
+          actions.push(`close:${plan.id}:issue=${plan.issueNumber}:refused`);
+          continue;
+        }
+      }
       let closed = false;
       if (scope.surface !== null) {
         try {
@@ -2235,6 +2251,8 @@ export async function runHostedAutonomy(
       };
     }
   }
+
+  if (retirementResult !== null) return retirementResult;
 
   // ---- self-observation pass ---------------------------------------------
   // Runs LAST and is fully optional: every read is bounded and state-free, its

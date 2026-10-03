@@ -16,6 +16,7 @@ import type {
   RepairStateWriter,
   StateReadView,
 } from "../../src/contracts/ports.ts";
+import { portError } from "../../src/contracts/ports.ts";
 import {
   parseReleaseStateSnapshotV1,
   parseRepairStateSnapshotV1,
@@ -2234,6 +2235,283 @@ Deno.test(
     await Deno.remove(rig.tmp, { recursive: true });
   },
 );
+
+async function retirementClosureRig(merged = false, review = foreignReceipt()) {
+  const retiring = deliveryRecord({
+    nextStep: "work",
+    target: {
+      base: BASE,
+      branch: "sentinel/retiring",
+      checkpoint: null,
+      head: null,
+      pr: null,
+    },
+  });
+  const unrelated = deliveryRecord({
+    id: "preserved-unrelated" as WorkItemId,
+    source: { kind: "issue", id: "999", revision: SHA1 },
+    related: { incidentId: null, issueNumber: 999 },
+    nextStep: "done",
+  });
+  const charge = reservation("preserved-foreign-charge", {
+    repository: FOREIGN_REPO,
+    taskId: FOREIGN_TARGET,
+    head: HEAD,
+    outcome: "submitted",
+    settledAt: T0 + 2000,
+  });
+  const { rig, github } = await makeRig("retirement-closure", {
+    repair: repairSnapshot(
+      [retiring, foreignRecord(), unrelated],
+      [review],
+      [],
+      [charge],
+    ),
+    pull: foreignPullFacts({
+      state: merged ? "closed" : "open",
+      merged,
+      mergeCommitSha: merged ? MERGE : null,
+    }),
+    afterMerge: foreignPullFacts(),
+  });
+  const closedAt: { repository: RepositoryIdentityV1; issueNumber: number }[] =
+    [];
+  const checkedHeads: string[] = [];
+  const foreign = {
+    ...github,
+    hasAllChecksGreen: (head: string) => {
+      checkedHeads.push(head);
+      return github.hasAllChecksGreen(head);
+    },
+    readIssueTask: (number: number) =>
+      Promise.resolve(repositoryTask(FOREIGN_REPO, number)),
+    closeIssue: (number: number) => {
+      closedAt.push({ repository: FOREIGN_REPO, issueNumber: number });
+      return github.closeIssue(number);
+    },
+  };
+  rig.githubFor = (repository) =>
+    isSelfRepository(repository)
+      ? {
+        ...github,
+        readIssueOpen: () => Promise.resolve(false),
+        readIssueTask: (number) =>
+          Promise.resolve(repositoryTask(SELF_REPO, number)),
+      }
+      : foreign;
+  return { rig, foreign, closedAt, checkedHeads, retiring, unrelated };
+}
+
+Deno.test("hosted autonomy: verified retirement continues foreign closure on the new CAS head", async () => {
+  const { rig, closedAt, checkedHeads, retiring, unrelated } =
+    await retirementClosureRig();
+  try {
+    const before = await rig.state.readRepair();
+    assert.ok(before.ok && before.value.status === "found");
+    if (!before.ok || before.value.status !== "found") {
+      throw new Error("unreadable");
+    }
+    const writes: {
+      parent: GitSha | null;
+      next: RepairStateSnapshotV1;
+      head: GitSha | null;
+    }[] = [];
+    const write = rig.state.writeRepair.bind(rig.state);
+    rig.state.writeRepair = async (next, parent) => {
+      const result = await write(next, parent);
+      writes.push({
+        parent,
+        next,
+        head: result.ok && result.value.status === "applied"
+          ? result.value.head
+          : null,
+      });
+      return result;
+    };
+    const result = await run(rig);
+    const after = await rig.state.readRepair();
+    assert.ok(after.ok && after.value.status === "found");
+    if (!after.ok || after.value.status !== "found") {
+      throw new Error("unreadable");
+    }
+    assert.equal(
+      after.value.snapshot.work.find((record) => record.id === retiring.id)
+        ?.blocker?.message,
+      HOSTED_AUTONOMY_RETIRED,
+    );
+    assert.equal(
+      rig.merges,
+      1,
+      "the reviewed foreign candidate merged before retirement",
+    );
+    assert.ok(
+      result.actions.includes(`delivery:${FOREIGN_TARGET}:foreign_merged`),
+      JSON.stringify(result),
+    );
+    assert.deepEqual(
+      rig.closed,
+      [SHARED_ISSUE_NUMBER],
+      "verified retirement must not defer the ready foreign closure",
+    );
+    assert.deepEqual(closedAt, [{
+      repository: FOREIGN_REPO,
+      issueNumber: SHARED_ISSUE_NUMBER,
+    }]);
+    assert.deepEqual(checkedHeads, [HEAD, HEAD]);
+    assert.equal(result.reason, "closed_issues");
+    assert.equal(rig.writes, 2);
+    assert.equal(rig.merges, 1);
+    assert.deepEqual(writes.map((entry) => entry.parent), [
+      before.value.head,
+      writes[0].head,
+    ]);
+    assert.equal(writes[1].next.stateHead, writes[0].head);
+    assert.equal(result.beforeHead, writes[0].head);
+    assert.equal(result.appliedHead, after.value.head);
+    assert.equal(
+      after.value.snapshot.sequence,
+      before.value.snapshot.sequence + 2,
+    );
+    const delivered = after.value.snapshot.work.find((record) =>
+      record.id === FOREIGN_TARGET
+    );
+    assert.equal(delivered?.nextStep, "done");
+    assert.deepEqual(
+      delivered?.target,
+      before.value.snapshot.work.find((record) => record.id === FOREIGN_TARGET)
+        ?.target,
+    );
+    assert.deepEqual(
+      after.value.snapshot.reviews,
+      before.value.snapshot.reviews,
+    );
+    assert.deepEqual(
+      after.value.snapshot.reservations,
+      before.value.snapshot.reservations,
+    );
+    assert.deepEqual(after.value.snapshot.releaseRequests, []);
+    assert.deepEqual(
+      after.value.snapshot.work.find((record) => record.id === unrelated.id),
+      unrelated,
+    );
+    await run(rig);
+    assert.equal(rig.writes, 2);
+    assert.equal(rig.merges, 1);
+    assert.deepEqual(rig.closed, [SHARED_ISSUE_NUMBER]);
+  } finally {
+    await Deno.remove(rig.tmp, { recursive: true });
+  }
+});
+
+Deno.test("hosted autonomy: retirement continuation refuses unverified readback and foreign checks", async (t) => {
+  for (
+    const mode of [
+      "unavailable-readback",
+      "wrong-head",
+      "wrong-snapshot",
+      "unavailable-checks",
+      "failed-checks",
+      "stale-task",
+      "adverse-review",
+    ]
+  ) {
+    await t.step(mode, async () => {
+      const { rig, foreign } = await retirementClosureRig(
+        true,
+        mode === "adverse-review"
+          ? foreignReceipt({
+            findings: [finding("P1")],
+            unresolvedSeverities: ["P1"],
+          })
+          : foreignReceipt(),
+      );
+      try {
+        const read = rig.state.readRepair.bind(rig.state);
+        const before = await read();
+        assert.ok(before.ok && before.value.status === "found");
+        if (!before.ok || before.value.status !== "found") {
+          throw new Error("unreadable");
+        }
+        const beforeSnapshot = before.value.snapshot;
+        if (mode === "unavailable-checks") {
+          foreign.hasAllChecksGreen = () =>
+            Promise.reject(new Error("checks unavailable"));
+        } else if (mode === "failed-checks") {
+          foreign.hasAllChecksGreen = () => Promise.resolve(false);
+        } else if (mode === "stale-task") {
+          foreign.readIssueTask = async () => {
+            const task = {
+              issueNumber: SHARED_ISSUE_NUMBER,
+              title: FOREIGN_TASK_TITLE,
+              body: FOREIGN_TASK_BODY + " changed",
+            };
+            return { ...task, digest: await reviewTaskStatementDigest(task) };
+          };
+        } else if (mode !== "adverse-review") {
+          rig.state.readRepair = async () => {
+            const actual = await read();
+            if (
+              rig.writes !== 1 || !actual.ok || actual.value.status !== "found"
+            ) {
+              return actual;
+            }
+            if (mode === "unavailable-readback") {
+              return portError(
+                "unavailable",
+                "retirement readback unavailable",
+              );
+            }
+            return {
+              ...actual,
+              value: {
+                ...actual.value,
+                ...(mode === "wrong-head"
+                  ? { head: BASE }
+                  : { snapshot: beforeSnapshot }),
+              },
+            };
+          };
+        }
+        const result = await run(rig);
+        assert.equal(
+          result.reason,
+          [
+              "unavailable-checks",
+              "failed-checks",
+              "stale-task",
+              "adverse-review",
+            ].includes(mode)
+            ? "retired_records"
+            : "readback_unverified",
+        );
+        assert.equal(rig.writes, 1);
+        assert.equal(rig.merges, 0);
+        assert.deepEqual(rig.closed, []);
+        const after = await read();
+        assert.ok(after.ok && after.value.status === "found");
+        if (!after.ok || after.value.status !== "found") {
+          throw new Error("unreadable");
+        }
+        assert.equal(
+          after.value.snapshot.work.find((record) =>
+            record.id === FOREIGN_TARGET
+          )?.nextStep,
+          "delivery",
+        );
+        assert.deepEqual(
+          after.value.snapshot.reviews,
+          before.value.snapshot.reviews,
+        );
+        assert.deepEqual(
+          after.value.snapshot.reservations,
+          before.value.snapshot.reservations,
+        );
+      } finally {
+        await Deno.remove(rig.tmp, { recursive: true });
+      }
+    });
+  }
+});
 
 Deno.test(
   "hosted autonomy: an accepted release closes the delivered issue and marks the record done",

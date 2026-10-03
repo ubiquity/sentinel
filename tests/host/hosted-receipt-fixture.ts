@@ -175,6 +175,13 @@ function fixtureEvidence(
     readExecution: (saved: HostedExecutionIntentV1) =>
       Promise.resolve(portOk(fixtureProof(saved, input.phase))),
     verifyRevision: () => Promise.resolve(portOk(true)),
+    verifyMatrixOrdinaryRevision: (revision) =>
+      Promise.resolve(
+        portOk(
+          revision === input.priorRevision ||
+            revision === input.request.revision,
+        ),
+      ),
     verifyRequest: (request: ReleaseRequestV1) =>
       Promise.resolve(portOk(request.id === input.request.id)),
     // The trusted live source-issue read the protected consumers require
