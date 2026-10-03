@@ -2620,8 +2620,6 @@ Deno.test("hosted matrix launcher: aggregate receives only native digest JSON", 
 });
 
 Deno.test("hosted runtime: real child bootstrap empty stdin aggregate", async () => {
-  const revision = "be9946b2e8ef1570df9b07307ca07dfafc471b86";
-  const launcher = "0b36c2258cec767d49d953c113de6b4e23cf80f1";
   // Retain this private fixture and both complete child streams for diagnosis.
   const root = await Deno.makeTempDir({
     prefix: "sentinel-hosted-runtime-bootstrap57-",
@@ -2630,6 +2628,12 @@ Deno.test("hosted runtime: real child bootstrap empty stdin aggregate", async ()
   await Deno.chmod(root, 0o700);
   await Deno.mkdir(`${root}/git-home`);
   const env = testGitEnv(`${root}/git-home`);
+  // CI may contain only HEAD. Historical failed-runtime proof stays private;
+  // this permanent regression exercises the current checkout's real consumer.
+  const current = await gitRun(ROOT, ["rev-parse", "HEAD"], env);
+  assert.ok(current.ok, current.stderr);
+  const revision = current.stdout.trim();
+  const launcher = revision;
   const frozen = `${root}/frozen`;
   const cloned = await gitRun(root, [
     "clone",
@@ -2649,7 +2653,7 @@ Deno.test("hosted runtime: real child bootstrap empty stdin aggregate", async ()
   assert.ok(detached.ok, detached.stderr);
   const frozenHead = await gitRun(frozen, ["rev-parse", "HEAD"], env);
   assert.equal(frozenHead.stdout.trim(), revision);
-  // Only this owned correction may overlay the immutable attempted runtime.
+  // Preserve a local aggregate correction over the immutable current snapshot.
   const aggregateSource = await Deno.readTextFile(
     `${ROOT}/src/host/matrix-actions.ts`,
   );
@@ -2830,6 +2834,7 @@ console.log(JSON.stringify({ kind: "bootstrap_fixture", result, modelCalls, http
       {
         revision,
         launcher,
+        snapshotOrigin: "current-checkout",
         sourceTree: sourceTree.stdout.trim(),
         aggregateDigest,
         argv: [Deno.execPath(), ...argv],
