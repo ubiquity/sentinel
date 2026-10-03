@@ -14,7 +14,9 @@ import {
   type MatrixCellPlanV1,
   matrixDigestV1,
   type MatrixRunIdentityV1,
+  MAX_MATRIX_ARCHIVE_BYTES,
   MAX_MATRIX_ARTIFACT_BYTES,
+  MAX_MATRIX_BUNDLE_BYTES,
   parseMatrixCellResultV1,
   parseMatrixPlanV1,
 } from "../contracts/matrix.ts";
@@ -27,6 +29,9 @@ import {
 } from "../repair/keys.ts";
 import {
   createDeadline,
+  DEFAULT_HTTP_MAX_BODY_BYTES,
+  type FetchLikeV1,
+  fromFetch,
   type HttpResponseV1,
   type HttpTransportV1,
 } from "../github/http.ts";
@@ -37,8 +42,6 @@ import type {
 } from "./matrix-artifact-port.ts";
 
 const API = `https://api.github.com/repos/${REPOSITORY}/actions`;
-const MAX_ARCHIVE_BYTES = 8 * 1024 * 1024;
-const MAX_BUNDLE_BYTES = 64 * 1024 * 1024;
 const MAX_ITEMS = 10_000;
 const MARKER_KEYS = {
   sentinel_matrix_plan: [
@@ -112,6 +115,18 @@ function storageUrl(location: string | null): string {
     !/^productionresultssa[0-9]+\.blob\.core\.windows\.net$/.test(url.hostname)
   ) refuse();
   return url.toString();
+}
+
+/** Dedicated bounded archive bytes; ordinary metadata/log bodies retain 8 MiB. */
+export function createActionsMatrixArtifactHttpTransport(
+  fetchFn: FetchLikeV1 = globalThis.fetch as unknown as FetchLikeV1,
+): HttpTransportV1 {
+  const text = fromFetch(fetchFn);
+  const archive = fromFetch(fetchFn, {
+    maxBodyBytes: MAX_MATRIX_ARCHIVE_BYTES,
+  });
+  return (request) =>
+    request.responseType === "bytes" ? archive(request) : text(request);
 }
 
 /** No shared-state or external write capability is accepted by this factory. */
@@ -241,8 +256,8 @@ export function createActionsMatrixArtifactTransport(options: {
           );
           if (
             new TextEncoder().encode(response.bodyText).length >
-              MAX_ARCHIVE_BYTES ||
-            (response.bodyBytes?.length ?? 0) > MAX_ARCHIVE_BYTES
+              DEFAULT_HTTP_MAX_BODY_BYTES ||
+            (response.bodyBytes?.length ?? 0) > MAX_MATRIX_ARCHIVE_BYTES
           ) refuse();
           return response;
         };
@@ -305,7 +320,7 @@ export function createActionsMatrixArtifactTransport(options: {
             !/^sha256:[0-9a-f]{64}$/.test(artifact.digest) ||
             !Number.isSafeInteger(artifact.size_in_bytes) ||
             (artifact.size_in_bytes as number) <= 0 ||
-            (artifact.size_in_bytes as number) > MAX_ARCHIVE_BYTES
+            (artifact.size_in_bytes as number) > MAX_MATRIX_ARCHIVE_BYTES
           ) refuse();
           const response = await download(
             `/artifacts/${positive(artifact.id)}/zip`,
@@ -328,7 +343,7 @@ export function createActionsMatrixArtifactTransport(options: {
               const name = entry.filename;
               const type = (entry.externalFileAttributes >>> 16) & 0xf000;
               const limit = name.endsWith(".bundle")
-                ? MAX_BUNDLE_BYTES
+                ? MAX_MATRIX_BUNDLE_BYTES
                 : MAX_MATRIX_ARTIFACT_BYTES;
               if (
                 files.size >= 2 || files.has(name) ||
@@ -579,8 +594,7 @@ export function createActionsMatrixArtifactTransport(options: {
               await matrixDigestV1(cell.request) !== cell.requestDigest ||
               cell.request.taskId !== cell.taskId ||
               !sameRepo(cell.request.repository, cell.repository) ||
-              (cell.request.checkoutBase ?? cell.request.base) !==
-                cell.expectedBase
+              cell.request.base !== cell.expectedBase
             ) refuse();
             ids.add(cell.cellId);
             const request = requested.get(cell.reservationId);
@@ -591,6 +605,25 @@ export function createActionsMatrixArtifactTransport(options: {
               cell.intentKey !== request.intentKey ||
               cell.expectedBase !== request.expectedBase ||
               seen.has(cell.reservationId)
+            ) refuse();
+            const task = snapshot.work.find((row) =>
+              row.id === cell.taskId &&
+              sameRepo(row.repository, cell.repository)
+            )!;
+            if (
+              task.intent?.kind === "implementation" &&
+              cell.request.checkoutBase !== undefined &&
+              (task.source.kind !== "issue" ||
+                cell.request.checkoutBase !== task.target.head ||
+                task.target.pr === null ||
+                (cell.request.reviewFindings?.length ?? 0) === 0 ||
+                !snapshot.reviews.some((review) =>
+                  sameRepo(review.repository, task.repository) &&
+                  review.pullRequest.number === task.target.pr &&
+                  review.pullRequest.head === cell.request.checkoutBase &&
+                  review.outcome === "completed" &&
+                  review.unresolvedSeverities.length > 0
+                ))
             ) refuse();
             const reservation = snapshot.reservations.find((row) =>
               row.id === cell.reservationId
