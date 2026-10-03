@@ -1050,3 +1050,90 @@ Deno.test("hosted workflow: forwards the configured model route and secret to ru
   assert.ok(!envBlock.includes("SENTINEL_SUPERVISOR_APP_PRIVATE_KEY"));
   assert.ok(!grantedEnv.has("SENTINEL_SUPERVISOR_APP_PRIVATE_KEY"));
 });
+
+Deno.test("hosted workflow: matrix261jobs paginate before exact repair finalize settlement", async () => {
+  const rig = await makeRig();
+  try {
+    scriptCompare(rig);
+    const prepared = await rig.run("prepare", RUN_ID);
+    assert.ok(prepared.execution !== null);
+    if (prepared.execution === null) throw new Error("missing saved intent");
+    rig.clock.advance(OBSERVED - T0);
+    scriptFinalize(rig, prepared.execution);
+    const jobs: Record<string, unknown>[] = Array.from(
+      { length: 260 },
+      (_, index) => ({
+        id: 10000 + index,
+        name: "matrix_cell (" + index + ")",
+        run_id: RUN_ID,
+        run_attempt: 1,
+        head_sha: rig.launcherSha,
+        status: "completed",
+        conclusion: "success",
+        started_at: iso(JOB_STARTED),
+        completed_at: iso(JOB_FINISHED),
+        steps: [],
+      }),
+    );
+    jobs.push({
+      id: JOB_ID,
+      name: "repair",
+      run_id: RUN_ID,
+      run_attempt: 1,
+      head_sha: rig.launcherSha,
+      status: "completed",
+      conclusion: "success",
+      started_at: iso(JOB_STARTED),
+      completed_at: iso(JOB_FINISHED),
+      steps: [{
+        name: "Run selected Sentinel runtime",
+        status: "completed",
+        conclusion: "success",
+        started_at: iso(STEP_STARTED),
+        completed_at: iso(STEP_FINISHED),
+      }],
+    });
+    rig.http.on("GET", JOBS_PATH, (request) => {
+      const page = Number(new URL(request.url).searchParams.get("page") ?? "1");
+      return response(
+        200,
+        {
+          total_count: jobs.length,
+          jobs: jobs.slice((page - 1) * 100, page * 100),
+        },
+        page < 3
+          ? {
+            link: "<https://api.github.com" + JOBS_PATH +
+              "?per_page=100&page=" + (page + 1) + '>; rel="next"',
+          }
+          : {},
+      );
+    });
+    const finalized = await rig.run("finalize", RUN_ID);
+    assert.equal(finalized.status, "idle");
+    const snapshot = await rig.releaseSnapshot();
+    assert.equal(
+      snapshot.hostedRuntimes[0].execution,
+      null,
+      "complete matrix wave must clear saved execution",
+    );
+    assert.equal(
+      snapshot.hostedRuntimes[0].lastExecutionProof?.outcome,
+      "healthy",
+    );
+    assert.equal(
+      rig.http.calls.filter((call) => new URL(call.url).pathname === JOBS_PATH)
+        .length,
+      3,
+    );
+    const next = await rig.run("prepare", RUN_ID + 1);
+    assert.equal(
+      next.status,
+      "run",
+      "settled matrix must not strand the next prepare",
+    );
+    assert.equal(next.execution?.purpose, "ordinary");
+  } finally {
+    await rig.cleanup();
+  }
+});
