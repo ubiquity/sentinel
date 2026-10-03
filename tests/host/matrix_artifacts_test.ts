@@ -20,7 +20,10 @@ import {
 } from "../../src/contracts/state-snapshots.ts";
 import { fromFetch } from "../../src/github/http.ts";
 import { createActionsMatrixArtifactTransport } from "../../src/host/matrix-artifacts.ts";
-import { implementationIntentKey } from "../../src/repair/keys.ts";
+import {
+  candidatePreservationRef,
+  implementationIntentKey,
+} from "../../src/repair/keys.ts";
 import { REPO, SHA1, SHA2, T0, workRecord } from "../state/helpers.ts";
 
 const LAUNCHER = "1".repeat(40) as GitSha;
@@ -654,6 +657,88 @@ Deno.test("matrix artifacts: unrelated historical launcher wave cannot block adm
     const recovered = await rig.transport.recover(input);
     assert.equal(recovered.length, 1);
     assert.equal(recovered[0].results.length, 1);
+  } finally {
+    await Deno.remove(rig.tmp, { recursive: true });
+  }
+});
+
+Deno.test("matrix artifacts: post-ingest candidate preservation hydrates on fresh runner without replay", async (t) => {
+  const rig = await fixture();
+  try {
+    const first = await rig.transport.recover(rig.input);
+    await Deno.remove(first[0].bundlesDir, { recursive: true });
+    const task = rig.repair.work[0];
+    const startedAt = T0 + 1_000;
+    const intent = {
+      kind: "candidate_preservation" as const,
+      key: rig.cell.intentKey,
+      startedAt,
+      branch: await candidatePreservationRef(REPO, task.id, rig.cell.intentKey),
+      expectedHead: rig.result.bundle!.head,
+      observedBase: SHA1,
+      pr: null,
+      requestId: RESERVATION,
+      resultId: null,
+    };
+    const target = {
+      ...task.target,
+      head: rig.result.bundle!.head,
+      checkpoint: null,
+      candidateState: { preserved: null, publishedHead: null },
+    };
+    rig.repair.work[0] = workRecord(task.id, {
+      ...task,
+      target,
+      intent,
+      updatedAt: startedAt,
+    });
+    rig.repair.reservations[0] = {
+      ...rig.repair.reservations[0],
+      outcome: "submitted",
+      settledAt: startedAt,
+    };
+    rig.repair.updatedAt = startedAt;
+    parseRepairStateSnapshotV1(rig.repair);
+    const before = canonicalStringify(rig.repair);
+    const recovered = await rig.transport.recover(rig.input);
+    assert.equal(recovered[0].results.length, 1);
+    assert.notEqual(recovered[0].bundlesDir, first[0].bundlesDir);
+    assert.deepEqual(
+      await Deno.readFile(
+        recovered[0].bundlesDir + "/" + rig.result.bundle!.file,
+      ),
+      rig.bundle,
+    );
+    assert.equal(canonicalStringify(rig.repair), before);
+    for (const outcome of ["reserved", "ambiguous"] as const) {
+      await t.step(
+        outcome + " cannot authorize candidate hydration",
+        async () => {
+          rig.repair.reservations[0].outcome = outcome;
+          rig.repair.reservations[0].settledAt = outcome === "reserved"
+            ? null
+            : startedAt;
+          await assert.rejects(() => rig.transport.recover(rig.input));
+          rig.repair.reservations[0].outcome = "submitted";
+          rig.repair.reservations[0].settledAt = startedAt;
+        },
+      );
+    }
+    await t.step(
+      "persisted candidate mismatch refuses authentic bundle",
+      async () => {
+        rig.repair.work[0].target.head = SHA1;
+        rig.repair.work[0].intent!.expectedHead = SHA1;
+        await assert.rejects(() => rig.transport.recover(rig.input));
+        rig.repair.work[0].target.head = rig.result.bundle!.head;
+        rig.repair.work[0].intent!.expectedHead = rig.result.bundle!.head;
+      },
+    );
+    await t.step("wrong preservation operation ref refuses", async () => {
+      rig.repair.work[0].intent!.branch = "refs/heads/sentinel-candidates/" +
+        "c".repeat(64);
+      await assert.rejects(() => rig.transport.recover(rig.input));
+    });
   } finally {
     await Deno.remove(rig.tmp, { recursive: true });
   }
