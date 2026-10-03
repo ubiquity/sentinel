@@ -181,7 +181,7 @@ const RELATIVE_PATH_PATTERN =
 export const REVIEW_RESULT_OUTPUT_SCHEMA = {
   type: "object",
   additionalProperties: false,
-  required: ["verdict", "summary", "findings"],
+  required: ["verdict", "summary", "findings", "taskAcceptance"],
   properties: {
     verdict: {
       type: "string",
@@ -233,11 +233,11 @@ export const REVIEW_RESULT_OUTPUT_SCHEMA = {
       },
     },
     taskAcceptance: {
-      type: "object",
+      type: ["object", "null"],
       additionalProperties: false,
       required: ["issueNumber", "taskDigest", "verdict", "evidence"],
       description:
-        "Required exactly when the prompt contains a TASK STATEMENT section: copy its issueNumber and taskDigest verbatim and judge the exact candidate change against that task. Omit this property only when no TASK STATEMENT section was supplied. fulfilled requires concrete evidence that the change implements the task; already_satisfied_at_base requires evidence that the base already meets it; not_fulfilled requires evidence that the change does not; uncertain requires evidence that the exact evidence is insufficient (its evidence array may be empty).",
+        "Always include this property. Use null when no TASK STATEMENT section was supplied or the assessment is unavailable. Otherwise, copy its issueNumber and taskDigest verbatim and judge the exact candidate change against that task. fulfilled requires concrete evidence that the change implements the task; already_satisfied_at_base requires evidence that the base already meets it; not_fulfilled requires evidence that the change does not; uncertain requires evidence that the exact evidence is insufficient (its evidence array may be empty).",
       properties: {
         issueNumber: { type: "integer", minimum: 1 },
         taskDigest: {
