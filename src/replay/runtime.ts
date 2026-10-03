@@ -57,6 +57,8 @@ export interface ReplayCommandInputV1 {
   executable: string;
   /** Exact argv elements; no shell is ever involved. */
   args: string[];
+  /** Optional bounded trusted input; absent preserves ignored stdin. */
+  stdin?: string;
   cwd: string;
   /** Complete child environment (the runtime clears everything else). */
   env: Readonly<Record<string, string>>;
@@ -208,7 +210,7 @@ export class DenoReplayRuntime implements ReplayRuntimeV1 {
         // so signaling -pid reaches exactly this run's descendants and
         // nothing else. Never signal a non-recorded pid.
         detached: true,
-        stdio: ["ignore", "pipe", "pipe"],
+        stdio: [input.stdin === undefined ? "ignore" : "pipe", "pipe", "pipe"],
         env: { ...input.env, NODE_V8_COVERAGE: "" },
       });
     } catch (error) {
@@ -258,6 +260,12 @@ export class DenoReplayRuntime implements ReplayRuntimeV1 {
             ? describeThrow(event.error)
             : "no pid was recorded"),
       };
+    }
+
+    if (input.stdin !== undefined && child.stdin !== null) {
+      // The bounded caller input is closed once; early child exit may refuse it.
+      child.stdin.on("error", () => {});
+      child.stdin.end(input.stdin);
     }
 
     let closeCode: number | null = null;

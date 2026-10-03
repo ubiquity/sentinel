@@ -189,7 +189,6 @@ function emptyReleaseState(now: number): ReleaseStateSnapshotV1 {
 // repair state. No credentials or environment are read here.
 // ---------------------------------------------------------------------------
 
-const HOUR_MS = 3_600_000;
 const MAX_TRANSITIONS = 8;
 const SELF_REPOSITORY: RepositoryIdentityV1 = {
   owner: "ubiquity",
@@ -891,8 +890,14 @@ function buildRequestedReceipt(
   return parsed.ok ? parsed.value : null;
 }
 
+/**
+ * Ordinary work is due once every release is terminal and the active
+ * revision/generation carries a healthy settled proof. A persisted
+ * `nextOrdinaryAt` is retained as schema/identity bookkeeping only and never
+ * throttles admission: provider and platform limits govern scheduling, while
+ * the active-execution and same-run guards still prevent a second execution.
+ */
 function ordinaryDue(
-  input: HostedSupervisorInputV1,
   runtime: HostedRuntimeRecordV1,
   releases: readonly HostedReleaseRecordV1[],
 ): boolean {
@@ -900,8 +905,7 @@ function ordinaryDue(
   const healthy = runtime.lastHealthyProof;
   return healthy !== null &&
     healthy.execution.revision === runtime.activeRevision &&
-    healthy.execution.generation === runtime.generation &&
-    input.clock.now() >= runtime.nextOrdinaryAt;
+    healthy.execution.generation === runtime.generation;
 }
 
 /**
@@ -1045,7 +1049,10 @@ export async function runHostedSupervisorPrepare(
         generation: 1,
         lastHealthyProof: null,
         lastExecutionProof: null,
-        nextOrdinaryAt: now + HOUR_MS,
+        // No artificial ordinary-work cooldown: the next scheduled dispatch may run
+        // ordinary work as soon as the previous execution actually settled. The
+        // same run/attempt still cannot start a second execution.
+        nextOrdinaryAt: now,
         execution: null,
         createdAt: now,
         updatedAt: now,
@@ -1138,7 +1145,7 @@ export async function runHostedSupervisorPrepare(
       continue;
     }
 
-    if (ordinaryDue(input, runtime, releases)) {
+    if (ordinaryDue(runtime, releases)) {
       return await startExecution(
         input,
         cursor,
@@ -1147,7 +1154,7 @@ export async function runHostedSupervisorPrepare(
         "ordinary",
         runtime.activeRevision,
         null,
-        input.clock.now() + HOUR_MS,
+        input.clock.now(),
       );
     }
 
@@ -1158,12 +1165,11 @@ export async function runHostedSupervisorPrepare(
     ) {
       // The active revision carries no current health proof, so one
       // verification execution is scheduled. It is deliberately NOT an
-      // `ordinary` execution: only `ordinary` may start model work, and the
-      // missing-proof condition must never turn waiting time before
-      // `nextOrdinaryAt` into an early model-enabled run. The existing
-      // admission deadline is preserved: this verification neither brings the
-      // ordinary run forward nor pushes it back, and the ordinary cadence
-      // stays owned by `ordinaryDue`.
+      // `ordinary` execution: only `ordinary` may start model work, so a
+      // missing proof can never become a model-enabled run. The ordinary
+      // cadence stays owned by `ordinaryDue`, which starts ordinary work as
+      // soon as a healthy proof for the active revision/generation settles;
+      // this verification neither brings that forward nor pushes it back.
       return await startExecution(
         input,
         cursor,
@@ -1271,7 +1277,7 @@ function supervisorJob(value: string | undefined): HostedRuntimeJobV1 {
  * Real production composition: exact native identity and the clean protected
  * source are proved BEFORE any auth, API, output or state work, then the
  * existing core prepare/finalize runs with the authenticated native client
- * behind the shared cooldown gate. Prepare writes only `run`/`revision`;
+ * behind the shared cooldown gate. Prepare writes `run`/`revision`/`modelStartsEnabled`;
  * finalize writes no outputs and never starts a model.
  */
 export async function runHostedSupervisorHost(
@@ -1374,6 +1380,31 @@ export async function runHostedSupervisorHost(
   if (!isGitSha(outcome.execution.revision)) throw new Error(STATIC_RESULT);
   await writeOutput("run", "true");
   await writeOutput("revision", outcome.execution.revision);
+  // Only ordinary work with the exact current healthy pointer may fan out.
+  // Verification retains the installed runtime's existing repair entrypoint.
+  let modelStartsEnabled = false;
+  if (outcome.execution.purpose === "ordinary") {
+    const current = await input.state.readRelease();
+    if (!current.ok || current.value.status !== "found") {
+      throw new Error(STATIC_RESULT);
+    }
+    const runtimes = current.value.snapshot.hostedRuntimes;
+    const runtime = runtimes.length === 1 ? runtimes[0] : undefined;
+    if (
+      runtime === undefined || runtime.execution === null ||
+      canonicalStringify(runtime.execution) !==
+        canonicalStringify(outcome.execution) ||
+      runtime.activeRevision !== outcome.execution.revision ||
+      runtime.generation !== outcome.execution.generation
+    ) {
+      throw new Error(STATIC_RESULT);
+    }
+    const healthy = runtime.lastHealthyProof;
+    modelStartsEnabled = healthy !== null &&
+      healthy.execution.revision === runtime.activeRevision &&
+      healthy.execution.generation === runtime.generation;
+  }
+  await writeOutput("modelStartsEnabled", String(modelStartsEnabled));
   return {
     job,
     status: "run",

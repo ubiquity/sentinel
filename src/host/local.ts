@@ -112,6 +112,8 @@ const REVIEW_SESSION_DEADLINE_MS = 1_200_000;
 /** Applied runtime implementation model identity (fixed, not overridable). */
 const IMPLEMENTATION_MODEL = "gpt-5.6-luna";
 const IMPLEMENTATION_REASONING = "max";
+/** Private bound for the reported implementation model id (diagnostic only). */
+const MAX_MODEL_CHARS = 256;
 
 const UNAVAILABLE_DETAIL = "local target does not provide this capability";
 
@@ -240,7 +242,10 @@ export function createLocalRepositoryConfig(): RepositoryConfigV1 {
     ],
     build: { projectId: null, acceptance: null },
     secretRef: "secret://host/injected/sentinel-local-owner",
-    liveStartLimits: { perHour: 120, perSevenDays: null },
+    // Owner update, 2026-10-02: all artificial throughput caps are lifted.
+    // Both rolling caps are explicitly null (uncapped), never a fake huge
+    // number; durable reservation accounting and unique admission remain.
+    liveStartLimits: { perHour: null, perSevenDays: null },
     sessionBound: { maxDurationMs: 1_200_000, maxOutputChars: 4_000_000 },
     retention: null,
     stabilityPolicy: null,
@@ -3017,8 +3022,8 @@ const STATUS_MAX_TEXT_BYTES = 50_000;
 const STATUS_MAX_DETAIL_ITEMS = 200;
 /** Conservative workflow-dispatch transport bound (GitHub documents 65,535). */
 const STATUS_MAX_DISPATCH_BYTES = 65_535;
-/** Fixed report admission semantics: 120 starts per rolling hour, no weekly cap. */
-const STATUS_POLICY_LIMITS = { perHour: 120, perSevenDays: null } as const;
+/** Fixed report admission semantics: both rolling caps explicitly uncapped. */
+const STATUS_POLICY_LIMITS = { perHour: null, perSevenDays: null } as const;
 const STATUS_KNOWN_STEPS = [
   "work",
   "review",
@@ -3050,6 +3055,13 @@ export interface LocalStatusInputV1 {
   login: string | null;
   /** Applied trusted repository configuration. */
   config: RepositoryConfigV1;
+  /**
+   * Exact implementation model this run was configured with, reported for
+   * diagnostics only. Absent or malformed values keep the fixed applied model
+   * identity; a present valid value is what the envelope reports. This input
+   * never selects or changes the model route, defaults or inference policy.
+   */
+  modelId?: string;
   startedAt: number;
   finishedAt: number;
   outcome: RepairCycleOutcomeV1;
@@ -3125,7 +3137,9 @@ function statusIdentity(input: LocalStatusInputV1): LocalStatusIdentityV1 {
       controllerSha,
       targetBaseSha,
       login,
-      model: IMPLEMENTATION_MODEL,
+      model: isBoundedStatusText(input.modelId, MAX_MODEL_CHARS)
+        ? input.modelId
+        : IMPLEMENTATION_MODEL,
       reasoning: IMPLEMENTATION_REASONING,
       limits: {
         perHour: STATUS_POLICY_LIMITS.perHour,

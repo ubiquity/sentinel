@@ -51,7 +51,9 @@ Deno.test("local repository config parses with fixed local scope", () => {
     replay: "replay_capture",
     test: "test_ci",
   });
-  assert.equal(config.liveStartLimits?.perHour, 120);
+  // Owner update, 2026-10-02: both rolling caps are explicitly null
+  // (uncapped), never a fake huge number.
+  assert.equal(config.liveStartLimits?.perHour, null);
   assert.equal(config.liveStartLimits?.perSevenDays, null);
   assert.equal(config.sessionBound?.maxDurationMs, 1_200_000);
   assert.equal(config.sessionBound?.maxOutputChars, 4_000_000);

@@ -126,7 +126,12 @@ const HOSTED_TERMINAL_LOOKING = /"kind"\s*:\s*"hosted_runtime_terminal"/;
 const MAX_DIAGNOSTIC_LINE_CHARS = 2_048;
 const MAX_HOSTED_DIAGNOSTICS = 64;
 
-export type HostedRuntimeJobV1 = "prepare" | "repair" | "finalize";
+export type HostedRuntimeJobV1 =
+  | "prepare"
+  | "repair"
+  | "finalize"
+  | "matrix_plan"
+  | "matrix_cell";
 
 /** Core run identity plus the exact protected job this process runs in. */
 export interface HostedRuntimeIdentityV1 {
@@ -233,6 +238,8 @@ export interface HostedRuntimeLauncherInputV1 {
    * and a throwing sink is swallowed. Absent means no streaming at all.
    */
   onDiagnostic?: (diagnostic: HostedModelDiagnosticV1) => void;
+  /** Native workflow JSON only: planDigest and optional cellId, never credentials. */
+  stdin?: string;
 }
 
 export type HostedRuntimeLauncherStatusV1 =
@@ -265,6 +272,8 @@ export interface HostedRuntimeLauncherResultV1 {
    * default; they never attest health, terminal, settlement or any authority.
    */
   diagnostics: HostedModelDiagnosticV1[];
+  /** Authenticated native matrix log carrier; never aggregate terminal proof. */
+  matrixCarrier?: Record<string, unknown>;
 }
 
 /** Fixed private launcher scratch inside the ignored launcher checkout. */
@@ -292,7 +301,10 @@ export async function runHostedRuntimeLauncher(
 async function launchHostedRuntime(
   input: HostedRuntimeLauncherInputV1,
 ): Promise<HostedRuntimeLauncherResultV1> {
-  const identity = parseHostedEnvironment(input.env, "repair");
+  const identity = parseHostedEnvironment(
+    input.env,
+    runtimeJob(input.env.GITHUB_JOB),
+  );
   const dirs = await resolveRuntimeDirectories(
     input.launcherDir,
     input.runtimeDir,
@@ -328,6 +340,10 @@ async function launchHostedRuntime(
     throw new Error(HOSTED_RUNTIME_STATIC_EXECUTION);
   }
 
+  if (identity.job !== "repair" && execution.purpose !== "ordinary") {
+    throw new Error(HOSTED_RUNTIME_STATIC_EXECUTION);
+  }
+  const stdin = nativeMatrixStdin(input.stdin, identity.job);
   const startedAt = input.clock.now();
   if (!isNonNegativeSafeInteger(startedAt)) {
     throw new Error(HOSTED_RUNTIME_STATIC_ENV);
@@ -346,7 +362,14 @@ async function launchHostedRuntime(
 
   const run = await input.process.run({
     executable: input.denoExecutable,
-    args: ["run", "-A", HOSTED_RUNTIME_CHILD_ENTRYPOINT],
+    args: [
+      "run",
+      "-A",
+      identity.job === "repair"
+        ? HOSTED_RUNTIME_CHILD_ENTRYPOINT
+        : "src/host/matrix-actions.ts",
+    ],
+    ...(stdin === undefined ? {} : { stdin }),
     cwd: dirs.runtime,
     env: childEnv,
     maxDurationMs: HOSTED_RUNTIME_DEADLINE_MS,
@@ -360,6 +383,9 @@ async function launchHostedRuntime(
   // fabricated to hide it.
   if (!isNonNegativeSafeInteger(finishedAt) || finishedAt < startedAt) {
     return unavailableResult();
+  }
+  if (identity.job === "matrix_plan" || identity.job === "matrix_cell") {
+    return resolveMatrixLauncherResult(run, execution, identity.job, stdin);
   }
   const resolved = resolveLauncherResult({
     run,
@@ -806,6 +832,11 @@ function buildChildEnvironment(
     const value = env[key];
     if (isNonEmptyText(value)) child[key] = value;
   }
+  if (identity.job === "matrix_plan") {
+    const output = env.GITHUB_OUTPUT;
+    if (!isNonEmptyText(output)) throw new Error(HOSTED_RUNTIME_STATIC_ENV);
+    child.GITHUB_OUTPUT = output;
+  }
   return child;
 }
 
@@ -892,6 +923,167 @@ async function runBoundedGit(
   }
 }
 
+/** Native role selects a fixed entrypoint; no override may impersonate repair. */
+function runtimeJob(
+  value: string | undefined,
+): "repair" | "matrix_plan" | "matrix_cell" {
+  if (
+    value === "repair" || value === "matrix_plan" || value === "matrix_cell"
+  ) return value;
+  failIdentity();
+}
+
+function nativeMatrixStdin(
+  value: string | undefined,
+  job: HostedRuntimeJobV1,
+): string | undefined {
+  if (job === "matrix_plan") {
+    if (value !== undefined) failIdentity();
+    return undefined;
+  }
+  if (value === undefined || value.trim() === "") {
+    if (job === "matrix_cell") failIdentity();
+    return undefined;
+  }
+  if (new TextEncoder().encode(value).byteLength > 512) failIdentity();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    failIdentity();
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    failIdentity();
+  }
+  const obj = parsed as Record<string, unknown>;
+  const keys = job === "matrix_cell"
+    ? ["planDigest", "cellId"]
+    : ["planDigest"];
+  if (
+    !hasExactKeys(obj, keys) || !isDigest(obj.planDigest) ||
+    (job === "matrix_cell" && !isDigest(obj.cellId))
+  ) failIdentity();
+  return JSON.stringify(obj);
+}
+
+async function readNativeMatrixStdin(): Promise<string | undefined> {
+  const parts: Uint8Array[] = [];
+  let total = 0;
+  for await (const part of Deno.stdin.readable) {
+    total += part.byteLength;
+    if (total > 512) failIdentity();
+    parts.push(part);
+  }
+  if (total === 0) return undefined;
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const part of parts) {
+    bytes.set(part, offset);
+    offset += part.byteLength;
+  }
+  return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+}
+
+function isDigest(value: unknown): value is string {
+  return typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
+}
+
+function resolveMatrixLauncherResult(
+  run: ReplayCommandResultV1,
+  execution: HostedExecutionIntentV1,
+  job: "matrix_plan" | "matrix_cell",
+  stdin: string | undefined,
+): HostedRuntimeLauncherResultV1 {
+  if (
+    run.outcome !== "exited" || !run.settled || run.truncated ||
+    run.exitCode === null
+  ) return unavailableResult();
+  const kind = job === "matrix_plan"
+    ? "sentinel_matrix_plan"
+    : "sentinel_matrix_cell";
+  const found: Record<string, unknown>[] = [];
+  for (const line of new TextDecoder().decode(run.stdout).split("\n")) {
+    if (line.length > 4096) continue;
+    let value: unknown;
+    try {
+      value = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      continue;
+    }
+    const obj = value as Record<string, unknown>;
+    if (obj.kind !== kind) continue;
+    const keys = job === "matrix_plan"
+      ? [
+        "kind",
+        "waveId",
+        "run",
+        "runtimeSha",
+        "generation",
+        "planDigest",
+        "prepared",
+      ]
+      : [
+        "kind",
+        "run",
+        "runtimeSha",
+        "generation",
+        "cellId",
+        "reservationId",
+        "resultDigest",
+        "bundleDigest",
+        "status",
+      ];
+    if (
+      !hasExactKeys(obj, keys) || obj.runtimeSha !== execution.revision ||
+      obj.generation !== execution.generation
+    ) return unavailableResult();
+    const native = obj.run;
+    if (
+      typeof native !== "object" || native === null || Array.isArray(native)
+    ) return unavailableResult();
+    const identity = native as Record<string, unknown>;
+    if (
+      !hasExactKeys(identity, ["runId", "runAttempt", "launcherSha"]) ||
+      identity.runId !== execution.runId ||
+      identity.runAttempt !== execution.runAttempt ||
+      identity.launcherSha !== execution.launcherSha
+    ) return unavailableResult();
+    if (job === "matrix_plan") {
+      if (
+        obj.waveId !== execution.id || !isDigest(obj.planDigest) ||
+        typeof obj.prepared !== "number" ||
+        !Number.isSafeInteger(obj.prepared) ||
+        obj.prepared < 0 || obj.prepared > 256
+      ) return unavailableResult();
+    } else {
+      const selection = JSON.parse(stdin ?? "{}") as Record<string, unknown>;
+      if (
+        obj.cellId !== selection.cellId || !isDigest(obj.cellId) ||
+        typeof obj.reservationId !== "string" ||
+        obj.reservationId.length === 0 ||
+        obj.reservationId.length > 256 ||
+        Array.from(obj.reservationId).some((char) => char.charCodeAt(0) < 32) ||
+        !isDigest(obj.resultDigest) ||
+        (obj.bundleDigest !== null && !isDigest(obj.bundleDigest)) ||
+        !["completed", "failed", "not_started"].includes(String(obj.status))
+      ) return unavailableResult();
+    }
+    found.push(obj);
+  }
+  if (found.length !== 1) return unavailableResult();
+  return {
+    status: run.exitCode === 0 ? "healthy" : "failed",
+    terminal: null,
+    detail: run.exitCode === 0
+      ? HOSTED_RUNTIME_HEALTHY_DETAIL
+      : HOSTED_RUNTIME_FAILED_DETAIL,
+    diagnostics: [],
+    matrixCarrier: found[0],
+  };
+}
 function executionIdOf(identity: HostedRuntimeIdentityV1): string {
   return `${identity.runId}:${identity.runAttempt}:repair`;
 }
@@ -947,7 +1139,7 @@ export async function runHostedRuntimeMain(): Promise<
   try {
     // Only the named keys are read: the eight identity fields plus the four
     // existing process inputs. No unrestricted env access is required.
-    const env = {
+    const env: Record<string, string | undefined> = {
       ...readHostedIdentityEnv(),
       HOME: Deno.env.get("HOME"),
       PATH: Deno.env.get("PATH"),
@@ -964,7 +1156,14 @@ export async function runHostedRuntimeMain(): Promise<
     };
     // Native identity is the first check: a malformed job identity fails
     // before any credential, checkout or state setup.
-    parseHostedEnvironment(env, "repair");
+    const job = runtimeJob(env.GITHUB_JOB);
+    parseHostedEnvironment(env, job);
+    if (job === "matrix_plan") {
+      env.GITHUB_OUTPUT = Deno.env.get("GITHUB_OUTPUT");
+    }
+    const stdin = job === "matrix_plan"
+      ? undefined
+      : await readNativeMatrixStdin();
     const launcherDir = Deno.cwd();
     const runtimeDir = joinPath(launcherDir, "..", "runtime");
     const token = env.GITHUB_TOKEN;
@@ -987,6 +1186,7 @@ export async function runHostedRuntimeMain(): Promise<
       denoExecutable: Deno.execPath(),
       process: new DenoReplayRuntime(Deno.execPath()),
       onDiagnostic: logHostedDiagnostic,
+      ...(stdin === undefined ? {} : { stdin }),
     });
     return result;
   } catch {
@@ -1010,6 +1210,9 @@ if (import.meta.main) {
   // complete line was retained, so it is never printed a second time here.
   // Only the trusted parsed terminal is printed; a failed or unavailable run
   // prints no terminal record and exits nonzero.
+  if (result.matrixCarrier !== undefined) {
+    console.log(JSON.stringify(result.matrixCarrier));
+  }
   if (result.terminal !== null) console.log(JSON.stringify(result.terminal));
   if (result.status !== "healthy") {
     console.error(result.detail);

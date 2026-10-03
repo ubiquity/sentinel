@@ -95,7 +95,10 @@ class BorderRuntime implements ReplayRuntimeV1 {
 
   async run(input: ReplayCommandInputV1): Promise<ReplayCommandResultV1> {
     this.calls.push(input);
-    if (input.args.includes(HOSTED_RUNTIME_CHILD_ENTRYPOINT)) {
+    if (
+      input.args.includes(HOSTED_RUNTIME_CHILD_ENTRYPOINT) ||
+      input.args.includes("src/host/matrix-actions.ts")
+    ) {
       if (this.throwOnChild) throw new Error("forced child border failure");
       if (this.realChild) return await this.real.run(input);
       if (this.child === null) throw new Error("no canned child result");
@@ -1743,6 +1746,177 @@ Deno.test("streams sanitized hosted diagnostics before runtime exit", async () =
       true,
       "the real fixture child must have executed",
     );
+  } finally {
+    await rig.cleanup();
+  }
+});
+
+Deno.test("hosted matrix launcher: native plan role reads one repair intent without a terminal", async () => {
+  const rig = await makeRig();
+  try {
+    await seedRelease(rig);
+    const planDigest = "d".repeat(64);
+    const carrier = {
+      kind: "sentinel_matrix_plan",
+      waveId: rig.execution.id,
+      run: {
+        runId: RUN_ID,
+        runAttempt: RUN_ATTEMPT,
+        launcherSha: rig.identity.launcherSha,
+      },
+      runtimeSha: rig.execution.revision,
+      generation: rig.execution.generation,
+      planDigest,
+      prepared: 1,
+    };
+    rig.process.child = exited(JSON.stringify(carrier) + "\n");
+    const result = await launch(rig, {
+      env: {
+        ...rig.env,
+        GITHUB_JOB: "matrix_plan",
+        GITHUB_OUTPUT: "/tmp/native-output",
+      },
+    });
+    assert.equal(result.status, "healthy", JSON.stringify(result));
+    assert.equal(result.terminal, null);
+    assert.deepEqual(
+      (result as unknown as { matrixCarrier: unknown }).matrixCarrier,
+      carrier,
+    );
+    const child = rig.process.calls.find((call) =>
+      call.args.includes("src/host/matrix-actions.ts")
+    );
+    assert.ok(child);
+    assert.equal(child.env.GITHUB_JOB, "matrix_plan");
+    assert.equal(child.env.GITHUB_OUTPUT, "/tmp/native-output");
+    assert.equal(await rig.releaseHead() !== null, true);
+  } finally {
+    await rig.cleanup();
+  }
+});
+
+Deno.test("hosted matrix launcher: native cell stdin and carrier never settle aggregate repair", async () => {
+  const rig = await makeRig();
+  try {
+    await seedRelease(rig);
+    const head = await rig.releaseHead();
+    const cellId = "c".repeat(64);
+    const stdin = JSON.stringify({ planDigest: "d".repeat(64), cellId });
+    const carrier = {
+      kind: "sentinel_matrix_cell",
+      run: {
+        runId: RUN_ID,
+        runAttempt: RUN_ATTEMPT,
+        launcherSha: rig.identity.launcherSha,
+      },
+      runtimeSha: rig.execution.revision,
+      generation: rig.execution.generation,
+      cellId,
+      reservationId: "reservation-1",
+      resultDigest: "e".repeat(64),
+      bundleDigest: "f".repeat(64),
+      status: "completed",
+    };
+    rig.process.child = exited(
+      JSON.stringify(carrier) + "\n" + childLine(rig.execution),
+    );
+    const input = Object.assign({
+      env: { ...rig.env, GITHUB_JOB: "matrix_cell" },
+    }, { stdin });
+    const result = await launch(rig, input);
+    assert.equal(result.status, "healthy", JSON.stringify(result));
+    assert.equal(
+      result.terminal,
+      null,
+      "cell may never mint the repair terminal",
+    );
+    const child = rig.process.calls.find((call) =>
+      call.args.includes("src/host/matrix-actions.ts")
+    );
+    assert.ok(child);
+    assert.equal(
+      (child as ReplayCommandInputV1 & { stdin?: string }).stdin,
+      stdin,
+    );
+    assert.equal("GITHUB_OUTPUT" in child.env, false);
+    assert.equal(child.env.GITHUB_JOB, "matrix_cell");
+    assert.equal(
+      await rig.releaseHead(),
+      head,
+      "only aggregate owns settlement",
+    );
+    for (
+      const forged of [
+        { ...carrier, run: { ...carrier.run, runAttempt: RUN_ATTEMPT + 1 } },
+        { ...carrier, runtimeSha: OTHER_REVISION },
+        { ...carrier, generation: 2 },
+        { ...carrier, cellId: "a".repeat(64) },
+        { ...carrier, rawModelOutput: "do not disclose" },
+      ]
+    ) {
+      rig.process.child = exited(JSON.stringify(forged));
+      const refused = await launch(rig, input);
+      assert.equal(refused.status, "unavailable");
+      assert.equal(refused.terminal, null);
+      assert.equal(refused.matrixCarrier, undefined);
+    }
+  } finally {
+    await rig.cleanup();
+  }
+});
+
+Deno.test("hosted matrix identity: explicit native roles share read-only repair identity", async () => {
+  const rig = await makeRig();
+  try {
+    await seedRelease(rig);
+    const head = await rig.releaseHead();
+    for (const job of ["matrix_plan", "matrix_cell"] as const) {
+      const identity = parseHostedEnvironment(
+        { ...rig.env, GITHUB_JOB: job },
+        job,
+      );
+      assert.equal(identity.job, job);
+      assert.throws(() =>
+        parseHostedEnvironment({ ...rig.env, GITHUB_JOB: "repair" }, job)
+      );
+      assert.equal(
+        (await readHostedRuntimeExecution({
+          state: rig.release,
+          identity,
+          controllerSha: rig.execution.revision,
+        })).id,
+        rig.execution.id,
+      );
+      await assert.rejects(readHostedRuntimeExecution({
+        state: rig.release,
+        identity: { ...identity, runAttempt: RUN_ATTEMPT + 1 },
+        controllerSha: rig.execution.revision,
+      }));
+      assert.equal(await rig.releaseHead(), head);
+    }
+  } finally {
+    await rig.cleanup();
+  }
+});
+
+Deno.test("hosted matrix launcher: aggregate receives only native digest JSON", async () => {
+  const rig = await makeRig();
+  try {
+    await seedRelease(rig);
+    rig.process.child = exited(childLine(rig.execution));
+    const stdin = JSON.stringify({ planDigest: "d".repeat(64) });
+    const result = await launch(rig, { stdin });
+    assert.equal(result.status, "healthy");
+    assert.ok(result.terminal);
+    assert.equal(rig.process.childCalls()[0].stdin, stdin);
+    const before = rig.process.childCalls().length;
+    assert.equal(
+      (await launch(rig, {
+        stdin: JSON.stringify({ planDigest: "bad", secret: "no" }),
+      })).status,
+      "unavailable",
+    );
+    assert.equal(rig.process.childCalls().length, before);
   } finally {
     await rig.cleanup();
   }

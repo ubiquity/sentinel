@@ -34,12 +34,15 @@
  *
  * Admission policy is one trusted complete repository configuration set: the
  * configured repository must belong to the set, and every supplied config
- * must carry an always-enforced positive hourly cap, an optional numeric
- * weekly cap disabled only by explicit null, and session bounds; all shared
- * policy fields must agree exactly. Missing, non-positive or mismatched
- * policies disable admission; no default/fallback caps are guessed. Workflow
- * single-writer serialization and one deployed config are required by the
- * caller — this controller never invents distributed policy negotiation.
+ * must carry a non-null `liveStartLimits` record whose caps are each either an
+ * explicit positive integer or explicit null (no cap), plus session bounds;
+ * all shared policy fields must agree exactly. A null `liveStartLimits` record
+ * still means inference is not enabled, never "unlimited"; a null field inside
+ * a present record is the owner's explicit uncapped policy. Missing,
+ * non-positive or mismatched policies disable admission; no default/fallback
+ * caps are guessed. Workflow single-writer serialization and one deployed
+ * config are required by the caller — this controller never invents
+ * distributed policy negotiation.
  *
  * The controller contains no inference transport and no retry loop; after an
  * ambiguous or conflicting write the caller reconciles by rereading.
@@ -524,11 +527,11 @@ export class RollingStartBudget implements BudgetControllerV1 {
         );
       }
       const limits = parsed.liveStartLimits;
-      // Hour is always a finite positive safe integer for admission. The
-      // weekly cap is enforced only when numeric: explicit null means no
-      // weekly admission cap, never a wildcard and never Infinity/zero.
+      // Each cap is enforced only when numeric: explicit null means no cap
+      // for that window, never a wildcard and never Infinity/zero. A present
+      // numeric cap must stay a positive integer.
       if (
-        limits.perHour < 1 ||
+        (limits.perHour !== null && limits.perHour < 1) ||
         (limits.perSevenDays !== null && limits.perSevenDays < 1)
       ) {
         return disabledPolicy("live start caps must be positive integers");
@@ -729,15 +732,15 @@ export function isCharged(
  * reservations. Windows are (x - windowMs, x]; refunded
  * confirmed_not_submitted reservations never charge. Entries are sorted by
  * their charge timestamp (createdAt) and the earliest x >= now that admits
- * one more start is the max of every enforced per-window result. A numeric
- * weekly cap is enforced; explicit null enforces the hourly cap only.
+ * one more start is the max of every enforced per-window result. A cap that is
+ * explicitly null is not enforced at all: the explicit uncapped policy
+ * records every start durably but never defers one.
  *
  * Exported for deterministic use and boundary tests. Invalid input (a
- * malformed reservation, a non-safe `now`, a non-positive hour cap, a
- * malformed weekly cap, or a numeric hour cap that exceeds a numeric weekly
- * cap) and arithmetic overflow throw one fixed sanitized RangeError that
- * never echoes input values; callers catch it at their boundary and fail
- * closed.
+ * malformed reservation, a non-safe `now`, a non-positive numeric cap, or a
+ * numeric hour cap that exceeds a numeric weekly cap) and arithmetic overflow
+ * throw one fixed sanitized RangeError that never echoes input values; callers
+ * catch it at their boundary and fail closed.
  */
 export function earliestRetryAt(
   reservations: readonly BudgetReservationV1[],
@@ -748,10 +751,11 @@ export function earliestRetryAt(
     throw new RangeError("earliestRetryAt: invalid now");
   }
   if (
-    !isPositiveSafeInt(limits.perHour) ||
+    (limits.perHour !== null && !isPositiveSafeInt(limits.perHour)) ||
     (limits.perSevenDays !== null &&
       !isPositiveSafeInt(limits.perSevenDays)) ||
-    (limits.perSevenDays !== null && limits.perHour > limits.perSevenDays)
+    (limits.perHour !== null && limits.perSevenDays !== null &&
+      limits.perHour > limits.perSevenDays)
   ) {
     throw new RangeError("earliestRetryAt: invalid limits");
   }
@@ -772,12 +776,14 @@ export function earliestRetryAt(
     .map((r) => r.createdAt)
     .sort((a, b) => b - a);
   let retryAt = now;
-  retryAt = Math.max(
-    retryAt,
-    perWindowRetryAt(descending, limits.perHour, HOUR_WINDOW_MS, now),
-  );
-  // A numeric weekly cap still defers; explicit null has no weekly admission
-  // cap, so only the hourly result bounds admission.
+  // Each numeric cap still defers; explicit null has no admission cap for
+  // that window, so only the enforced windows bound admission.
+  if (limits.perHour !== null) {
+    retryAt = Math.max(
+      retryAt,
+      perWindowRetryAt(descending, limits.perHour, HOUR_WINDOW_MS, now),
+    );
+  }
   if (limits.perSevenDays !== null) {
     retryAt = Math.max(
       retryAt,
