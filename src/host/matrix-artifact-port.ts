@@ -6,7 +6,10 @@ import type {
   MatrixRunIdentityV1,
 } from "../contracts/matrix.ts";
 import type { RepositoryIdentityV1 } from "../contracts/shared.ts";
-import type { HostedRunProofV1 } from "../contracts/hosted-supervisor.ts";
+import type {
+  HostedExecutionIntentV1,
+  HostedRunProofV1,
+} from "../contracts/hosted-supervisor.ts";
 import type { WorkRecordV1 } from "../contracts/work-record.ts";
 import type { BudgetReservationV1 } from "../contracts/budget-reservation.ts";
 import type { ModelRunRequestV1 } from "../contracts/ports.ts";
@@ -47,6 +50,10 @@ export interface MatrixAuthenticatedWaveV1 {
   };
 }
 export interface MatrixArtifactTransportV1 {
+  /** Exact current attempt and exhaustive native jobs must all be completed. */
+  confirmCompletedExecution?(
+    execution: HostedExecutionIntentV1,
+  ): Promise<boolean>;
   /** Selects only the exact freshly saved, natively settled execution. */
   rejectHistorical?(input: {
     proof: HostedRunProofV1;
