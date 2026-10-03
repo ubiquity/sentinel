@@ -90,6 +90,7 @@ import {
   type ReviewTaskStatementV1,
 } from "../src/contracts/review-receipt.ts";
 import { reviewAuthorizesMerge } from "../src/repair/review-gate.ts";
+import { RETIRED_MERGED_MESSAGE } from "../src/repair/selection.ts";
 import type { GitSha } from "../src/contracts/brands.ts";
 import type { RepositoryIdentityV1 } from "../src/contracts/shared.ts";
 import {
@@ -105,6 +106,7 @@ import {
 import { canonicalStringify } from "../src/contracts/canonical.ts";
 import {
   candidateBranch,
+  candidatePreservationRef,
   releaseRequestId,
   reviewOperationKey,
 } from "../src/repair/keys.ts";
@@ -371,6 +373,8 @@ export interface HostedAutonomyPullV1 {
   headSha: string | null;
   baseRef: string | null;
   author: string | null;
+  /** Required only when recovering a historical cleared publication. */
+  mergedBy?: string | null;
   parents: readonly string[];
   revisionOnBaseBranch: boolean;
 }
@@ -1038,6 +1042,49 @@ async function readTrustedTask(
   } catch {
     return "unavailable";
   }
+}
+
+/** Recover only the PR erased by the merged/base-refresh disposition. */
+async function historicalMergedPublication(
+  snapshot: RepairStateSnapshotV1,
+  record: HostedAutonomyRecordV1,
+): Promise<HostedAutonomyRecordV1 | null> {
+  const head = record.target.head;
+  const base = record.target.base;
+  const preserved = record.target.candidateState?.preserved;
+  if (
+    isHostedSelf(record.repository) || record.nextStep !== "blocked" ||
+    record.blocker?.kind !== "other" ||
+    record.blocker.message !== RETIRED_MERGED_MESSAGE ||
+    record.target.pr !== null || record.source.kind !== "issue" ||
+    record.related.issueNumber === null ||
+    record.source.id !== String(record.related.issueNumber) ||
+    head === null || base === null || preserved == null ||
+    record.target.branch !== candidateBranch(record.id) ||
+    preserved.head !== head || preserved.base !== base ||
+    record.target.candidateState?.publishedHead !== head ||
+    !intentClosable(record, snapshot.reservations)
+  ) return null;
+  if (
+    preserved.ref !== await candidatePreservationRef(
+      record.repository,
+      record.id,
+      preserved.operationKey,
+    )
+  ) return null;
+  const numbers = new Set(
+    snapshot.reviews.filter((review) =>
+      sameRepository(review.repository, record.repository) &&
+      review.pullRequest.head === head && review.pullRequest.base === base &&
+      review.taskAcceptance?.issueNumber === record.related.issueNumber &&
+      record.evidence.some((evidence) =>
+        evidence.kind === "review_receipt" &&
+        evidence.ref === `artifact:review-receipt/${review.id}`
+      )
+    ).map((review) => review.pullRequest.number),
+  );
+  if (numbers.size !== 1) return null;
+  return { ...record, target: { ...record.target, pr: [...numbers][0] } };
 }
 
 /** Verified merge facts: the exact revision a foreign record delivered. */
@@ -2073,7 +2120,11 @@ export async function runHostedAutonomy(
   // The exact facts are re-read here for every foreign record with an
   // authorizing receipt; the ones the delivery pass verified in this same run
   // are already present and are not read twice.
-  for (const record of snapshot.work) {
+  const recovered = new Map<string, HostedAutonomyRecordV1>();
+  for (const original of snapshot.work) {
+    const record = await historicalMergedPublication(snapshot, original) ??
+      original;
+    if (record !== original) recovered.set(record.id, record);
     if (record.nextStep === "done") continue;
     if (isHostedSelf(record.repository)) continue;
     const issueNumber = record.related.issueNumber;
@@ -2102,6 +2153,13 @@ export async function runHostedAutonomy(
     }
     const pull = await readPull(scope, pullRequest);
     if (pull === null) continue;
+    if (
+      recovered.has(record.id) && (
+        pull.number !== pullRequest ||
+        pull.author !== HOSTED_AUTONOMY_TRUSTED_APP_AUTHOR ||
+        pull.mergedBy !== HOSTED_AUTONOMY_TRUSTED_APP_AUTHOR
+      )
+    ) continue;
     const evidence = verifiedMergedDelivery(record, pull, scope.baseBranch);
     if (evidence === null) continue;
     foreignMerged.set(key, evidence);
@@ -2110,11 +2168,15 @@ export async function runHostedAutonomy(
   // evidence is present, immediately before the closure plan that may close
   // its issue: issue text that drifted after the delivery read is a different
   // task and never authorizes this closure.
+  const closureSnapshot = {
+    ...snapshot,
+    work: snapshot.work.map((record) => recovered.get(record.id) ?? record),
+  };
   const closureTasks = new Map<
     string,
     ReviewTaskStatementV1 | null | "unavailable"
   >();
-  for (const record of snapshot.work) {
+  for (const record of closureSnapshot.work) {
     if (record.nextStep === "done") continue;
     const issueNumber = record.related.issueNumber;
     const pullRequest = record.target.pr;
@@ -2138,14 +2200,14 @@ export async function runHostedAutonomy(
     );
   }
   const closures = planHostedClosures(
-    snapshot,
+    closureSnapshot,
     released,
     foreignMerged,
     closureTasks,
   ).slice(0, 5);
   if (closures.length > 0) {
     for (const plan of closures) {
-      const record = snapshot.work.find((item) =>
+      const record = closureSnapshot.work.find((item) =>
         item.id === plan.id && sameRepository(item.repository, plan.repository)
       );
       if (record === undefined) continue;
@@ -2166,6 +2228,18 @@ export async function runHostedAutonomy(
         continue;
       }
       if (!isHostedSelf(record.repository)) {
+        if (recovered.has(record.id)) {
+          const pull = await readPull(scope, record.target.pr!);
+          if (
+            pull === null || pull.number !== record.target.pr ||
+            pull.author !== HOSTED_AUTONOMY_TRUSTED_APP_AUTHOR ||
+            pull.mergedBy !== HOSTED_AUTONOMY_TRUSTED_APP_AUTHOR ||
+            verifiedMergedDelivery(record, pull, scope.baseBranch) === null
+          ) {
+            actions.push(`close:${plan.id}:issue=${plan.issueNumber}:refused`);
+            continue;
+          }
+        }
         let checksGreen = false;
         try {
           checksGreen = scope.surface !== null && record.target.head !== null &&
@@ -2208,7 +2282,14 @@ export async function runHostedAutonomy(
       let next: RepairStateSnapshotV1;
       try {
         next = applyHostedClosures(
-          snapshot,
+          {
+            ...snapshot,
+            work: snapshot.work.map((record) =>
+              applied.some((plan) => plan.id === record.id)
+                ? recovered.get(record.id) ?? record
+                : record
+            ),
+          },
           observedHead as GitSha,
           applied,
           now,
@@ -2311,6 +2392,7 @@ export function parseHostedAutonomyPull(
   const head = obj["head"] as Record<string, unknown> | undefined;
   const base = obj["base"] as Record<string, unknown> | undefined;
   const user = obj["user"] as Record<string, unknown> | undefined;
+  const merger = obj["merged_by"] as Record<string, unknown> | undefined;
   const merged = obj["merged"] === true;
   const mergeCommitSha = obj["merge_commit_sha"];
   const headSha = head?.["sha"];
@@ -2325,6 +2407,9 @@ export function parseHostedAutonomyPull(
     headSha,
     baseRef,
     author: typeof user?.["login"] === "string" ? String(user["login"]) : null,
+    ...(obj["merged_by"] === undefined ? {} : {
+      mergedBy: typeof merger?.["login"] === "string" ? merger["login"] : null,
+    }),
     parents: [],
     revisionOnBaseBranch: false,
   };

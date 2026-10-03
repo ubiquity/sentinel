@@ -33,6 +33,7 @@ import {
 } from "../../src/contracts/review-receipt.ts";
 import {
   candidateBranch,
+  candidatePreservationRef,
   releaseRequestId,
   reviewOperationKey,
 } from "../../src/repair/keys.ts";
@@ -730,6 +731,300 @@ async function readRequests(rig: RigV1) {
   if (!read.ok || read.value.status !== "found") throw new Error("unreadable");
   return read.value.snapshot.releaseRequests;
 }
+
+Deno.test("hosted autonomy: a damaged foreign merged PR is recovered only for verified closure", async () => {
+  const original = foreignRecord();
+  const receipt = foreignReceipt();
+  const record = foreignRecord({
+    nextStep: "blocked",
+    blocker: {
+      kind: "other",
+      message: "pull request was merged outside the trusted review path",
+      since: T0 + 4000,
+    },
+    target: {
+      ...original.target,
+      pr: null,
+      candidateState: {
+        preserved: {
+          ref: await candidatePreservationRef(
+            original.repository,
+            original.id,
+            `base_refresh:${FOREIGN_PR}:${HEAD}:${BASE}`,
+          ),
+          head: HEAD,
+          base: BASE,
+          operationKey: `base_refresh:${FOREIGN_PR}:${HEAD}:${BASE}`,
+        },
+        publishedHead: HEAD,
+      },
+    },
+    evidence: [{
+      kind: "review_receipt",
+      ref: `artifact:review-receipt/${receipt.id}`,
+    }],
+  });
+  const charge = reservation("retained-foreign-charge", {
+    taskId: record.id,
+    outcome: "submitted",
+    settledAt: T0 + 3000,
+  });
+  const { rig, github } = await makeRig("foreign-damaged-pr", {
+    repair: repairSnapshot([record], [receipt], [], [charge]),
+    pull: {
+      ...foreignPullFacts({ author: "ubiquity-sentinel[bot]" }),
+      mergedBy: "ubiquity-sentinel[bot]",
+    } as HostedAutonomyPullV1,
+  });
+  try {
+    const result = await run(rig, github);
+    assert.equal(result.status, "applied", JSON.stringify(result));
+    assert.deepEqual(rig.closed, [FOREIGN_TASK.issueNumber]);
+    assert.equal(rig.merges, 0);
+    assert.equal(rig.writes, 1, "recovery and closure share the existing CAS");
+    const read = await rig.state.readRepair();
+    assert.ok(read.ok && read.value.status === "found");
+    if (!read.ok || read.value.status !== "found") {
+      throw new Error("no repair state");
+    }
+    const state = read.value.snapshot;
+    assert.equal(state.work[0].nextStep, "done");
+    assert.deepEqual(state.work[0].target, {
+      ...record.target,
+      pr: FOREIGN_PR,
+    });
+    assert.deepEqual(state.work[0].source, record.source);
+    assert.deepEqual(state.work[0].counters, record.counters);
+    assert.deepEqual(state.work[0].evidence, record.evidence);
+    assert.deepEqual(state.reviews, [receipt]);
+    assert.deepEqual(state.reservations, [charge]);
+    assert.deepEqual(state.releaseRequests, []);
+    const again = await run(rig, github);
+    assert.equal(again.status, "skipped");
+    assert.equal(rig.closed.length, 1);
+    assert.equal(rig.writes, 1);
+    for (
+      const control of [
+        "missing-receipt",
+        "ambiguous-pr",
+        "wrong-scope",
+        "wrong-review-head",
+        "wrong-review-base",
+        "wrong-task",
+        "wrong-reviewer",
+        "quality-only",
+        "p1",
+        "missing-merger",
+        "alternate-merger",
+        "alternate-author",
+        "wrong-pr",
+        "wrong-pull-head",
+        "wrong-parents",
+        "not-integrated",
+        "unmerged",
+        "wrong-branch",
+        "red-checks",
+        "unavailable-checks",
+        "task-drift",
+        "unavailable-task",
+        "unsettled-intent",
+        "missing-preservation",
+        "unpublished-head",
+        "wrong-preserved-ref",
+        "unrelated-blocker",
+        "self-scope",
+      ]
+    ) {
+      let damaged = record;
+      let reviews = [receipt];
+      const pull: HostedAutonomyPullV1 = {
+        ...foreignPullFacts({ author: "ubiquity-sentinel[bot]" }),
+        mergedBy: "ubiquity-sentinel[bot]",
+      };
+      const reviewOverrides: Record<string, unknown> = {};
+      if (control === "missing-receipt") reviews = [];
+      if (control === "ambiguous-pr") {
+        const other = foreignReceipt({
+          id: `review-receipt:${"c".repeat(64)}`,
+          pullRequest: { ...receipt.pullRequest, number: FOREIGN_PR + 1 },
+        });
+        reviews.push(other);
+        damaged = foreignRecord({
+          ...record,
+          evidence: [...record.evidence, {
+            kind: "review_receipt",
+            ref: `artifact:review-receipt/${other.id}`,
+          }],
+        });
+      }
+      if (control === "wrong-scope") {
+        reviewOverrides.repository = { ...FOREIGN_REPO, installationId: 8 };
+      }
+      if (control === "wrong-review-head") {
+        reviewOverrides.pullRequest = { ...receipt.pullRequest, head: SHA1 };
+      }
+      if (control === "wrong-review-base") {
+        reviewOverrides.pullRequest = { ...receipt.pullRequest, base: SHA1 };
+      }
+      if (control === "wrong-task") {
+        reviewOverrides.taskAcceptance = {
+          ...receipt.taskAcceptance!,
+          issueNumber: 121,
+        };
+      }
+      if (control === "wrong-reviewer") {
+        reviewOverrides.expectedReviewer = "github-actions[bot]";
+        reviewOverrides.observedReviewer = "github-actions[bot]";
+      }
+      if (control === "quality-only") reviewOverrides.taskAcceptance = null;
+      if (control === "p1") {
+        reviewOverrides.findings = [finding("P1")];
+        reviewOverrides.unresolvedSeverities = ["P1"];
+      }
+      if (Object.keys(reviewOverrides).length > 0) {
+        reviews = [foreignReceipt(reviewOverrides)];
+      }
+      if (control === "missing-merger") delete pull.mergedBy;
+      if (control === "alternate-merger") pull.mergedBy = "0x4007";
+      if (control === "alternate-author") pull.author = "github-actions[bot]";
+      if (control === "wrong-pr") pull.number++;
+      if (control === "wrong-pull-head") pull.headSha = SHA1;
+      if (control === "wrong-parents") pull.parents = [BASE, SHA1];
+      if (control === "not-integrated") pull.revisionOnBaseBranch = false;
+      if (control === "unmerged") {
+        pull.merged = false;
+        pull.mergeCommitSha = null;
+      }
+      if (control === "wrong-branch") pull.baseRef = "other";
+      if (control === "unsettled-intent") {
+        damaged = foreignRecord({
+          ...record,
+          intent: {
+            kind: "implementation",
+            key: "implementation:unsettled",
+            startedAt: T0,
+            branch: record.target.branch,
+            expectedHead: HEAD,
+            observedBase: BASE,
+            pr: null,
+            requestId: "unknown-reservation",
+            resultId: null,
+          },
+        });
+      }
+      if (control === "missing-preservation") {
+        damaged = foreignRecord({
+          ...record,
+          target: {
+            ...record.target,
+            candidateState: { preserved: null, publishedHead: HEAD },
+          },
+        });
+      }
+      if (control === "unpublished-head") {
+        damaged = foreignRecord({
+          ...record,
+          target: {
+            ...record.target,
+            candidateState: {
+              ...record.target.candidateState!,
+              publishedHead: null,
+            },
+          },
+        });
+      }
+      if (control === "wrong-preserved-ref") {
+        damaged = foreignRecord({
+          ...record,
+          target: {
+            ...record.target,
+            candidateState: {
+              ...record.target.candidateState!,
+              preserved: {
+                ...record.target.candidateState!.preserved!,
+                ref: `refs/heads/sentinel-candidates/${"f".repeat(64)}`,
+              },
+            },
+          },
+        });
+      }
+      if (control === "unrelated-blocker") {
+        damaged = foreignRecord({
+          ...record,
+          blocker: {
+            kind: "other",
+            message: "unrelated terminal blocker",
+            since: T0,
+          },
+        });
+      }
+      if (control === "self-scope") {
+        damaged = foreignRecord({
+          ...record,
+          repository: SELF_REPO,
+          target: {
+            ...record.target,
+            candidateState: {
+              ...record.target.candidateState!,
+              preserved: {
+                ...record.target.candidateState!.preserved!,
+                ref: await candidatePreservationRef(
+                  SELF_REPO,
+                  record.id,
+                  record.target.candidateState!.preserved!.operationKey,
+                ),
+              },
+            },
+          },
+        });
+        reviews = [foreignReceipt({ repository: SELF_REPO })];
+      }
+      const negative = await makeRig(`foreign-damaged-${control}`, {
+        repair: repairSnapshot([damaged], reviews, [], [charge]),
+        pull,
+        foreignCheckGreen: control !== "red-checks",
+        issueTask: control === "unavailable-task"
+          ? () => Promise.resolve(null)
+          : control === "task-drift"
+          ? () =>
+            Promise.resolve({
+              ...FOREIGN_TASK,
+              digest: "d".repeat(64) as never,
+            })
+          : undefined,
+      });
+      const reads: number[] = [];
+      const readPull = negative.github.readPull;
+      negative.github.readPull = (number, branch) => {
+        reads.push(number);
+        return number === FOREIGN_PR
+          ? readPull(number, branch)
+          : Promise.resolve(null);
+      };
+      if (control === "unavailable-checks") {
+        negative.github.hasAllChecksGreen = () =>
+          Promise.reject(new Error("unavailable checks"));
+      }
+      try {
+        const before = await negative.rig.state.readRepair();
+        await run(negative.rig, negative.github);
+        assert.deepEqual(negative.rig.closed, [], control);
+        assert.equal(negative.rig.merges, 0, control);
+        assert.equal(negative.rig.writes, 0, control);
+        assert.deepEqual(
+          await negative.rig.state.readRepair(),
+          before,
+          control,
+        );
+        assert.ok(reads.every((number) => number === FOREIGN_PR), control);
+      } finally {
+        await Deno.remove(negative.rig.tmp, { recursive: true });
+      }
+    }
+  } finally {
+    await Deno.remove(rig.tmp, { recursive: true });
+  }
+});
 
 Deno.test(
   "hosted autonomy: a merged reviewed head records the deterministic release request",
@@ -1883,11 +2178,13 @@ Deno.test(
       base: { ref: "development" },
       user: { login: "github-actions[bot]" },
       number: 51,
+      merged_by: { login: "ubiquity-sentinel[bot]" },
     });
     assert.equal(merged?.merged, true);
     assert.equal(merged?.mergeCommitSha, MERGE);
     assert.equal(merged?.headSha, HEAD);
     assert.equal(merged?.baseRef, "development");
+    assert.equal(merged?.mergedBy, "ubiquity-sentinel[bot]");
     // A merged pull must still name the merge commit it was merged as.
     assert.equal(
       parseHostedAutonomyPull({

@@ -5856,7 +5856,7 @@ async function executeBaseRefreshIntent(
         deps,
         context,
         clearIntent(
-          markTerminalBlocked(record, "other", RETIRED_MERGED_MESSAGE, at),
+          markBlocked(record, "other", RETIRED_MERGED_MESSAGE, at),
           at,
         ),
       );
