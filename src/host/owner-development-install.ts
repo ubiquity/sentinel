@@ -497,7 +497,7 @@ export const OWNER_DEVELOPMENT_INSTALL_OWNER_REPAIR_GENERATION = 53;
  * proven owner-repair revision once at generation 55, without an automatic retry.
  */
 export const OWNER_DEVELOPMENT_INSTALL_RUNTIME_RECOVERY_REVISION =
-  "a6c40a95ceb93fbdf1f85343409393c68d4fe13c" as GitSha;
+  "275fee6dba74800b47e555f3f316b60be566ccb4" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_RUNTIME_RECOVERY_GENERATION = 54;
 /** Monotonic rollback target the failed generation 45 candidate rolled to. */
 export const OWNER_DEVELOPMENT_INSTALL_ROLLBACK_TARGET_GENERATION =
