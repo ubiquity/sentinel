@@ -362,6 +362,7 @@ export async function runActionsMatrixAggregateCycles(
   const requests = read.value.snapshot.work.flatMap((record) => {
     const intent = record.intent;
     if (
+      record.nextStep !== "work" ||
       (intent?.kind !== "implementation" &&
         intent?.kind !== "candidate_preservation") ||
       intent.requestId === null
