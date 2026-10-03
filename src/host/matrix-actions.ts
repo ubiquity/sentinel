@@ -9,7 +9,11 @@ import {
   tryParseMatrixPlanV1,
 } from "../contracts/matrix.ts";
 import type { RepositoryConfigV1 } from "../contracts/repository-config.ts";
-import { createRunBounds, type RepairCycleDepsV1 } from "../repair/loop.ts";
+import {
+  createRunBounds,
+  prepareMatrixIntakeV1,
+  type RepairCycleDepsV1,
+} from "../repair/loop.ts";
 import {
   type ActionsRepairHostDepsV1,
   type ActionsTargetCyclesInputV1,
@@ -209,11 +213,27 @@ export async function runActionsMatrixHost(
     runTargetCycles: async (input) => {
       const host = hostOf(input);
       if (job === "matrix_plan") {
-        // Actual intake and lifecycle reconciliation with ZERO implementation/review starts.
+        const deadline = Math.min(
+          input.deadline,
+          childRunDeadlineV1(host.execution.createdAt),
+        );
+        // Only source intake and fresh branch assignment precede the manifest.
+        // The serialized aggregate retains unrelated lifecycle reconciliation.
         const cycles = await runActionsTargetCycles({
           ...input,
+          deadline,
           modelStartsEnabled: false,
           externalImplementations: true,
+          runCycle: async (deps, options) => {
+            const outcome = await prepareMatrixIntakeV1(deps, {
+              ...options,
+              runStartedAt: host.execution.createdAt,
+            });
+            if (outcome.status === "state_error") {
+              throw new Error("matrix intake authoritative state failed");
+            }
+            return outcome;
+          },
         });
         const configs = input.configs.filter((config) =>
           cycles.addressed.includes(
@@ -232,7 +252,8 @@ export async function runActionsMatrixHost(
             run: host.run,
             runtimeSha: input.controllerSha,
             generation: host.execution.generation,
-            deadline: input.deadline,
+            deadline,
+            runStartedAt: host.execution.createdAt,
             plannedAt: input.clock.now(),
             modelStartsEnabled: input.modelStartsEnabled,
             githubForRepository: (repository) =>
