@@ -4,7 +4,32 @@
  */
 
 import assert from "node:assert/strict";
-import { asGitSha, type GitSha } from "../../src/contracts/brands.ts";
+import { RollingStartBudget } from "../../src/budget/mod.ts";
+import {
+  asGitSha,
+  asWorkItemId,
+  type GitSha,
+} from "../../src/contracts/brands.ts";
+import { portOk } from "../../src/contracts/ports.ts";
+import { parseRepairStateSnapshotV1 } from "../../src/contracts/state-snapshots.ts";
+import { createCandidatePreserver } from "../../src/host/actions-candidates.ts";
+import {
+  candidateBranch,
+  candidatePreservationRef,
+  implementationIntentKey,
+} from "../../src/repair/keys.ts";
+import { DurableGitHubCooldownGate } from "../../src/repair/github-cooldown.ts";
+import { runRepairCycle } from "../../src/repair/loop.ts";
+import { createRepairStateStore } from "../../src/state/mod.ts";
+import {
+  FakeClock,
+  FakeGithub,
+  FakeIncidents,
+  FakeModel,
+  FakeReplay,
+  repairConfigs,
+} from "../repair/helpers.ts";
+import { REPO, reservation, SHA1, T0, workRecord } from "../state/helpers.ts";
 import {
   generatedArtifactOnly,
   GitReviewSnapshot,
@@ -1164,6 +1189,211 @@ Deno.test(
 );
 
 Deno.test(
+  "lifecycle105: real metadata refusal settles preservation while a failed Git process retains its bounded retry",
+  async (test) => {
+    for (const boundary of ["metadata", "process"] as const) {
+      await test.step(boundary, async () => {
+        await withRepo(async (repo) => {
+          await Deno.writeTextFile(
+            `${repo}/candidate.ts`,
+            "export const fixed = false;\n",
+          );
+          const base = await commitAll(repo, "base");
+          await Deno.writeTextFile(
+            `${repo}/candidate.ts`,
+            "export const fixed = true;\n",
+          );
+          const head = await commitAll(repo, "Fixes #105");
+          const stateRemote = `${repo}/state.git`;
+          await git(repo, ["init", "-q", "--bare", stateRemote]);
+          const state = createRepairStateStore({
+            scratchDir: `${repo}/state-scratch`,
+            remoteUrl: stateRemote,
+          });
+          const clock = new FakeClock(T0);
+          const id = asWorkItemId("issue-105");
+          const reservationId = "bd".repeat(32);
+          const operationKey = implementationIntentKey(reservationId);
+          const ref = await candidatePreservationRef(REPO, id, operationKey);
+          const record = workRecord(id, {
+            source: { kind: "issue", id: "105", revision: SHA1 },
+            related: { incidentId: null, issueNumber: 105 },
+            target: {
+              base,
+              branch: candidateBranch(id),
+              checkpoint: { branch: candidateBranch(id), sha: head },
+              head,
+              pr: 7,
+              candidateState: { preserved: null, publishedHead: base },
+            },
+            nextStep: "work",
+            counters: { attempts: 1, retries: 0, reviewRounds: 0 },
+            intent: {
+              kind: "candidate_preservation",
+              key: operationKey,
+              startedAt: T0,
+              branch: ref,
+              expectedHead: head,
+              observedBase: base,
+              pr: null,
+              requestId: reservationId,
+              resultId: null,
+            },
+          });
+          const charge = reservation(reservationId, {
+            repository: REPO,
+            taskId: id,
+            attempt: 1,
+            head: base,
+            purpose: "implementation",
+            outcome: "submitted",
+            settledAt: T0,
+          });
+          const seeded = await state.writeRepair(
+            parseRepairStateSnapshotV1({
+              version: "v1",
+              kind: "repair_state_snapshot",
+              stateHead: null,
+              sequence: 1,
+              updatedAt: T0,
+              incidents: [],
+              evidence: [],
+              work: [record],
+              reservations: [charge],
+              reviews: [],
+              replays: [],
+              releaseRequests: [],
+              githubCooldowns: [],
+            }),
+            null,
+          );
+          assert.ok(seeded.ok && seeded.value.status === "applied");
+          const gate = new DurableGitHubCooldownGate({ state, clock });
+          const github = new FakeGithub({
+            baseSha: base,
+            openIssues: [],
+            candidateLifecycle: {
+              refs: {
+                [ref]: null,
+                [`refs/heads/${candidateBranch(id)}`]: base,
+              },
+            },
+          });
+          const preserve = createCandidatePreserver({
+            state,
+            gate,
+            token: "fixture-token",
+            http: () => {
+              throw new Error("unexpected HTTP transport");
+            },
+            clock,
+            sourcePath: repo,
+            repository: REPO,
+            scratch: `${repo}/proof`,
+            trustedPath: PATH,
+            gitExecutable: boundary === "metadata" ? "git" : "/usr/bin/false",
+            remoteUrl: `file://${repo}`,
+            port: github,
+            protectedPaths: [],
+            ensureLocalCandidate: async (_taskId, requestedHead) => {
+              assert.equal(
+                (await git(repo, ["rev-parse", `${requestedHead}^{commit}`]))
+                  .trim(),
+                head,
+              );
+              return portOk(undefined);
+            },
+          });
+          let preservationCalls = 0;
+          github.preserveCandidate = async (request) => {
+            preservationCalls++;
+            const result = await preserve(request);
+            assert.equal(result.ok, false);
+            if (!result.ok) {
+              assert.equal(
+                result.error.kind,
+                boundary === "metadata" ? "invalid" : "unavailable",
+              );
+            }
+            if (!result.ok && boundary === "metadata") {
+              contains(
+                result.error.detail,
+                "issue-closing",
+                "the real preserver must reach the deterministic metadata predicate",
+              );
+            }
+            return result;
+          };
+          const configs = repairConfigs({
+            adapter: { kind: "github" },
+            protectedPaths: [],
+          });
+          const model = new FakeModel();
+          const run = () =>
+            runRepairCycle({
+              clock,
+              state,
+              configs,
+              controllerSha: SHA1,
+              github,
+              githubCooldown: gate,
+              incidents: new FakeIncidents({ summaries: [], evidence: null }),
+              replay: new FakeReplay(),
+              model,
+              budget: new RollingStartBudget({ clock, state, configs }),
+            }, {
+              deadline: clock.now() + 60 * 60_000,
+              stepLimit: 4,
+              modelStartsEnabled: false,
+            });
+          await run();
+          const read = await state.readRepair();
+          assert.ok(read.ok && read.value.status === "found");
+          if (!read.ok || read.value.status !== "found") {
+            throw new Error("missing fixture state");
+          }
+          const result = read.value.snapshot.work[0]!;
+          assert.equal(preservationCalls, 1);
+          assert.deepEqual(
+            result.target,
+            record.target,
+            "immutable candidate and publication identities remain exact",
+          );
+          assert.deepEqual(
+            read.value.snapshot.reservations,
+            [charge],
+            "the original submitted attempt stays charged",
+          );
+          assert.equal(model.requests.length, 0);
+          assert.equal(github.pushes.length, 0);
+          if (boundary === "metadata") {
+            assert.equal(
+              result.nextStep,
+              "blocked",
+              "a proved immutable metadata refusal must not retry forever",
+            );
+            assert.equal(result.intent, null);
+            assert.equal(result.wait, null);
+          } else {
+            assert.equal(result.nextStep, "work");
+            assert.deepEqual(result.intent, record.intent);
+            assert.equal(result.wait?.reason, "unavailable");
+            assert.equal(result.wait?.until, T0 + 5 * 60_000);
+          }
+          clock.advance(5 * 60_000 + 1);
+          await run();
+          assert.equal(
+            preservationCalls,
+            boundary === "metadata" ? 1 : 2,
+            "only transport uncertainty is observed again",
+          );
+        });
+      });
+    }
+  },
+);
+
+Deno.test(
   "publication: issue-closing commit metadata rejects every ordinary form",
   async () => {
     await withRepo(async (repo) => {
@@ -1188,6 +1418,7 @@ Deno.test(
         );
         assert.ok(!result.ok, `issue-closing metadata must reject: ${form}`);
         if (result.ok) assert.fail("expected rejection");
+        assert.equal(result.error.kind, "invalid");
         contains(result.error.detail, "issue-closing");
       }
     });

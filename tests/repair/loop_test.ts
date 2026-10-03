@@ -5005,6 +5005,76 @@ function candidateAccounting(record: WorkRecordV1): unknown {
   };
 }
 
+for (const boundary of ["fixture", "original replay"] as const) {
+  Deno.test(
+    `lifecycle94: recovered ${boundary} transport is observed again after the existing poll interval`,
+    async () => {
+      const rig = await makeRig(`retry94-${boundary.replaceAll(" ", "-")}`, {
+        github: { candidateLifecycle: positiveLifecycle() },
+      });
+      try {
+        let unavailable = true;
+        let observations = 0;
+        const resolve = rig.replay.resolveTestIds.bind(rig.replay);
+        const replay = rig.replay.runReplay.bind(rig.replay);
+        rig.replay.resolveTestIds = (ref, digest) => {
+          if (boundary !== "fixture") return resolve(ref, digest);
+          observations++;
+          if (!unavailable) return resolve(ref, digest);
+          rig.clock.advance(CHECK_POLL_MS + 17);
+          return Promise.resolve(
+            portError("unavailable", "fixture transport unavailable"),
+          );
+        };
+        rig.replay.runReplay = (request) => {
+          if (boundary !== "original replay" || request.revision !== SHA2) {
+            return replay(request);
+          }
+          observations++;
+          if (!unavailable) return replay(request);
+          rig.clock.advance(CHECK_POLL_MS + 17);
+          return Promise.resolve(
+            portError("unavailable", "original replay transport unavailable"),
+          );
+        };
+        await rig.run();
+        const parked = await rig.snapshot();
+        const record = parked.work[0]!;
+        assert.equal(observations, 1);
+        assert.equal(record.wait?.reason, "unavailable");
+        assert.equal(rig.model.requests.length, 0);
+        assert.equal(parked.reservations.length, 0);
+        const evidence = structuredClone(parked.evidence);
+        const target = structuredClone(record.target);
+        unavailable = false;
+        rig.clock.advance(CHECK_POLL_MS + 1);
+        const outcome = await rig.run();
+        assert.ok(
+          observations > 1,
+          `recovered ${boundary} must be retried: ${JSON.stringify(outcome)}`,
+        );
+        assert.equal(record.wait?.until, record.wait!.since + CHECK_POLL_MS);
+        assert.equal(
+          record.wait?.since,
+          T0 + CHECK_POLL_MS + 17,
+          "retry starts from the completed failed observation",
+        );
+        const recovered = await rig.snapshot();
+        assert.deepEqual(recovered.evidence, evidence);
+        assert.equal(recovered.work[0]!.target.base, target.base);
+        assert.equal(
+          rig.model.requests.length,
+          1,
+          "one normal admission after evidence recovers",
+        );
+        assert.equal(recovered.work[0]!.nextStep, "review");
+      } finally {
+        await rig.ctx.cleanup();
+      }
+    },
+  );
+}
+
 Deno.test(
   "candidate lifecycle: a missing preserved descriptor without intent defers safely",
   async () => {
@@ -8128,6 +8198,10 @@ Deno.test(
         },
       },
     });
+    rig.github.readIssue = (number) =>
+      Promise.resolve(portOk(issueRecord(number, {
+        relations: { openBlockers: [], subIssueCount: 0 },
+      })));
     try {
       // The live stall shape: an EXPIRED review_pending wait paired with a
       // review_request intent that names a closed-unmerged PR, with a settled
@@ -8138,6 +8212,7 @@ Deno.test(
             workRecord("issue-140-wait", {
               source: { kind: "issue", id: "140", revision: SHA1 },
               related: { incidentId: null, issueNumber: 140 },
+              counters: { attempts: 1, retries: 0, reviewRounds: 1 },
               target: {
                 base: SHA1,
                 branch,
@@ -8182,13 +8257,62 @@ Deno.test(
       );
       assert.ok(seeded.ok && seeded.value.status === "applied");
 
-      const outcome = await rig.run();
-      assert.equal(outcome.status, "idle", JSON.stringify(outcome));
+      const configs = repairConfigs({
+        sessionBound: { maxDurationMs: 240_000, maxOutputChars: 200_000 },
+      });
+      const outcome = await runRepairCycle({
+        clock: rig.clock,
+        state: rig.store,
+        configs,
+        controllerSha: SHA1,
+        github: rig.github,
+        githubCooldown: new DurableGitHubCooldownGate({
+          state: rig.store,
+          clock: rig.clock,
+        }),
+        incidents: rig.incidents,
+        replay: rig.replay,
+        model: rig.model,
+        budget: new RollingStartBudget({
+          clock: rig.clock,
+          state: rig.store,
+          configs,
+        }),
+      }, { deadline: rig.clock.now() + 60 * 60_000, stepLimit: 3 });
       const state = await rig.snapshot();
       const record = state.work[0];
-      // The dead wait and the dead intent are both gone: the record is no
-      // longer pinned ahead of the publish reconciliation.
-      assert.equal(record.wait, null, "the dead review wait is cleared");
+      assert.equal(
+        rig.github.reviewRequestIdentities.length,
+        1,
+        `eligible native issue relations reach replacement review admission: ${
+          JSON.stringify({
+            outcome,
+            nextStep: record.nextStep,
+            intent: record.intent?.kind,
+            wait: record.wait,
+            pr: record.target.pr,
+            blocker: record.blocker,
+            calls: rig.github.calls.filter((call) =>
+              /listOpenIssues|readPr|readRef|push|createPr|requestReview/.test(
+                call,
+              )
+            ),
+          })
+        }`,
+      );
+      assert.equal(outcome.status, "idle", JSON.stringify(outcome));
+      assert.equal(record.nextStep, "review");
+      // Recovery replaces the expired wait with the new PR's bounded review
+      // observation; the old operation never owns that replacement.
+      assert.equal(record.wait?.reason, "review_pending");
+      assert.equal(record.wait?.since, T0);
+      assert.equal(record.wait?.until, T0 + 15 * 60_000);
+      assert.equal(record.target.head, SHA3);
+      assert.equal(
+        rig.github.reviewRequestIdentities[0]?.prNumber,
+        record.target.pr,
+      );
+      assert.equal(rig.github.reviewRequestIdentities[0]?.expectedHead, SHA3);
       assert.ok(
         record.intent === null || record.intent.key !== `review:7:${SHA3}`,
         "the dead review intent is cleared",
@@ -8199,6 +8323,16 @@ Deno.test(
       const charge = state.reservations.find((r) => r.id === requestId);
       assert.ok(charge !== undefined, "the dead request charge is retained");
       assert.equal(charge.outcome, "submitted");
+      assert.equal(
+        state.reservations.filter((r) => r.id === requestId).length,
+        1,
+      );
+      assert.equal(charge.head, SHA3);
+      assert.equal(charge.attempt, 1);
+      assert.equal(charge.createdAt, T0 - 95_000);
+      assert.equal(charge.settledAt, T0 - 90_000);
+      assert.equal(rig.model.requests.length, 0);
+      assert.equal(rig.github.calls.includes("mergePr"), false);
     } finally {
       await rig.ctx.cleanup();
     }

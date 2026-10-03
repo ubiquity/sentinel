@@ -47,6 +47,7 @@ import type {
 } from "./contracts/ports.ts";
 import {
   OPERATION_MARGIN_MS,
+  type PostDrainReviewContinuationV1,
   REPAIR_RUN_CEILING_MS,
   type RepairCycleOutcomeV1,
   type ReplayFixtureIdentitySourceV1,
@@ -173,6 +174,9 @@ export async function runRepairEntrypoint(
   let outcome: RepairCycleOutcomeV1 | null = null;
   let cycleError: unknown = null;
   let cycleThrew = false;
+  const postDrain: { continuation: PostDrainReviewContinuationV1 | null } = {
+    continuation: null,
+  };
   try {
     outcome = await runRepairCycle(
       {
@@ -193,6 +197,9 @@ export async function runRepairEntrypoint(
         stepLimit: options.stepLimit,
         runStartedAt,
         modelStartsEnabled: options.modelStartsEnabled,
+      },
+      (continuation) => {
+        postDrain.continuation = continuation;
       },
     );
   } catch (error) {
@@ -237,6 +244,18 @@ export async function runRepairEntrypoint(
     });
   }
   if (cycleThrew) throw cycleError;
+  if (
+    report !== null && postDrain.continuation !== null &&
+    outcome?.status === "idle"
+  ) {
+    const completedKeys = report.operations.filter((operation) =>
+      operation.processSettled && operation.durable &&
+      operation.outcome !== "faulted" &&
+      (operation.phase === "ready" || operation.phase === "published")
+    ).map((operation) => operation.operationKey);
+    const continued = await postDrain.continuation(completedKeys);
+    if (continued !== null) outcome = continued;
+  }
   return outcome!;
 }
 
