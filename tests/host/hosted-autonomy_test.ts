@@ -5052,18 +5052,21 @@ Deno.test("historical malformed wave: actual maintenance entrypoint blocks prepa
 });
 
 Deno.test("historical malformed wave: missing archive and malformed parser never quarantine", async () => {
-  for (const mode of ["missing", "parser", "missing-proof"] as const) {
+  for (
+    const mode of [
+      "missing",
+      "parser",
+      "missing-proof",
+      "valid-applicable",
+    ] as const
+  ) {
     const f = await historicalMalformedRig();
     try {
       const before = await f.rig.state.readRepair();
       if (mode === "missing") {
         f.setFault("missing");
-        const outcome = await f.run();
-        assert(
-          !outcome.actions.some((action) =>
-            action.startsWith("historical-matrix:quarantined:")
-          ),
-        );
+        assert.equal(await f.runMain(), 1);
+        await assert.rejects(f.run);
       } else if (mode === "missing-proof") {
         f.historicalMatrix.state = {
           ...f.rig.state,
@@ -5076,19 +5079,27 @@ Deno.test("historical malformed wave: missing archive and malformed parser never
             });
           },
         };
-        const outcome = await f.run();
-        assert(
-          !outcome.actions.some((action) =>
-            action.startsWith("historical-matrix:quarantined:")
-          ),
-        );
+        assert.equal(await f.runMain(), 1);
+        await assert.rejects(f.run);
         assert.equal(f.calls.length, 0);
+      } else if (mode === "valid-applicable") {
+        f.plan.plannedAt = T0 + 1000;
+        await f.refreshPlan();
+        assert.equal(await f.runMain(), 1);
+        await assert.rejects(f.run);
       } else {
         Object.assign(f.plan, { kind: "invalid_fixture_kind" });
         await f.refreshPlan();
         await assert.rejects(f.run);
       }
       assert.deepEqual(await f.rig.state.readRepair(), before);
+      const workflow = await Deno.readTextFile(
+        new URL("../../.github/workflows/supervisor.yml", import.meta.url),
+      );
+      assert.match(
+        workflow,
+        /prepare:\s*\n\s*needs: maintenance\s*\n\s*if: always\(\) && needs\.maintenance\.result == 'success'/,
+      );
     } finally {
       await Deno.remove(f.rig.tmp, { recursive: true });
     }
@@ -5131,12 +5142,7 @@ Deno.test("historical malformed wave: successor bootstrap overwrites proof and a
     assert(prepared.status === "run", JSON.stringify(prepared));
     assert.equal(prepared.execution.purpose, "bootstrap");
     assert.notEqual(prepared.execution.launcherSha, f.execution.launcherSha);
-    const reaffirmed = await f.run();
-    assert(
-      !reaffirmed.actions.some((action) =>
-        action.startsWith("historical-matrix:quarantined:")
-      ),
-    );
+    await assert.rejects(f.run);
     const sibling = f.records[17];
     const request = {
       taskId: sibling.id,
@@ -5482,5 +5488,247 @@ Deno.test("historical malformed wave: successor bootstrap overwrites proof and a
     );
   } finally {
     await Deno.remove(f.rig.tmp, { recursive: true });
+  }
+});
+
+async function historicalWithNewerCurrent(mode = "settled") {
+  const f = await historicalMalformedRig();
+  const release = createReleaseStateStore({
+    scratchDir: `${f.rig.tmp}/newer-release`,
+    remoteUrl: `${f.rig.tmp}/remote.git`,
+  });
+  const evidence = {
+    readExecution: f.client.readHostedExecution.bind(f.client),
+    verifyRevision: () => Promise.resolve(portOk(true)),
+    verifyRequest: () => Promise.resolve(portOk(false)),
+  };
+  assert.equal(
+    (await runHostedSupervisorFinalize({
+      state: release,
+      clock: f.clock,
+      run: f.nativeRun,
+      evidence,
+    })).status,
+    "idle",
+  );
+  const saved = await release.readRelease();
+  assert(saved.ok && saved.value.status === "found");
+  f.clock.now = () => T0 + 70_000;
+  const current = {
+    ...f.execution,
+    id: "73:1:repair",
+    runId: 73,
+    runAttempt: 1,
+    launcherSha: "4".repeat(40) as GitSha,
+    createdAt: T0 + 61_000,
+  };
+  const seeded = await release.writeRelease({
+    ...saved.value.snapshot,
+    stateHead: saved.value.head,
+    sequence: saved.value.snapshot.sequence + 1,
+    updatedAt: f.clock.now(),
+    hostedRuntimes: [{
+      ...saved.value.snapshot.hostedRuntimes[0],
+      execution: current,
+      updatedAt: f.clock.now(),
+    }],
+  }, saved.value.head);
+  assert(seeded.ok && seeded.value.status === "applied");
+  const iso = (at: number) => new Date(at).toISOString();
+  const jobs = ["maintenance", "prepare", "matrix_plan"].map((name, i) => ({
+    id: 2401 + i,
+    name,
+    run_id: mode === "wrong-job" && i === 2 ? 99 : 73,
+    run_attempt: 1,
+    head_sha: current.launcherSha,
+    status: mode === "pending" && i === 2 ? "in_progress" : "completed",
+    conclusion: mode === "pending" && i === 2
+      ? null
+      : i === 2
+      ? "cancelled"
+      : "success",
+    started_at: iso(T0 + 62_000),
+    completed_at: mode === "pending" && i === 2 ? null : iso(T0 + 65_000),
+    steps: [],
+  }));
+  const currentHttp: HttpTransportV1 = (request) => {
+    const url = new URL(request.url);
+    if (url.pathname.includes("/runs/73/")) {
+      assert.equal(
+        request.headers.get("authorization"),
+        "Bearer offline-native-token",
+      );
+      if (mode === "unavailable") {
+        return Promise.resolve({
+          status: 503,
+          headers: new Headers(),
+          bodyText: "",
+        });
+      }
+      const value = url.pathname.endsWith("/jobs")
+        ? {
+          total_count: mode === "truncated" ? jobs.length + 1 : jobs.length,
+          jobs: mode === "duplicate" ? [jobs[0], jobs[1], jobs[0]] : jobs,
+        }
+        : {
+          id: 73,
+          run_attempt: 1,
+          workflow_id: 357012162,
+          path: ".github/workflows/supervisor.yml",
+          event: "workflow_dispatch",
+          head_branch: "sentinel-supervisor",
+          head_sha: mode === "foreign" ? BASE : current.launcherSha,
+          repository: { id: 123, full_name: "ubiquity/sentinel" },
+          head_repository: { id: 123, full_name: "ubiquity/sentinel" },
+          status: mode === "pending" ? "in_progress" : "completed",
+          conclusion: mode === "pending" ? null : "cancelled",
+          run_started_at: iso(T0 + 61_000),
+          updated_at: iso(T0 + 65_000),
+        };
+      return Promise.resolve({
+        status: 200,
+        headers: new Headers(),
+        bodyText: JSON.stringify(value),
+      });
+    }
+    return f.http(request);
+  };
+  const reader = new GitHubApiClient({
+    repository: SELF_REPO,
+    apiBaseUrl: "https://api.github.com",
+    http: currentHttp,
+    clock: f.clock,
+    auth: {
+      authorizationHeader: () =>
+        Promise.resolve(portOk("Bearer offline-native-token")),
+    },
+    cooldownGate: new HostedRepairCooldownGate({
+      state: f.rig.state,
+      clock: f.clock,
+    }),
+  });
+  const observed: number[] = [];
+  f.historicalMatrix.readExecution = async (execution) => {
+    observed.push(execution.runId);
+    const result = await reader.readHostedExecution(execution);
+    if (
+      execution.runId === 73 && mode === "wrong-binding" && result.ok &&
+      result.value !== null
+    ) {
+      return portOk({ ...result.value, execution: f.execution });
+    }
+    if (execution.runId === 73 && mode === "custody") {
+      f.rig.state.readRelease = () =>
+        Promise.resolve(
+          portError("unavailable", "injected current custody drift"),
+        );
+    }
+    if (execution.runId === 73 && mode === "old-proof-missing") {
+      f.rig.state.readRelease = async () => {
+        const read = await release.readRelease();
+        if (!read.ok || read.value.status !== "found") return read;
+        return portOk({
+          ...read.value,
+          snapshot: {
+            ...read.value.snapshot,
+            hostedRuntimes: read.value.snapshot.hostedRuntimes.map((row) => ({
+              ...row,
+              lastExecutionProof: null,
+            })),
+          },
+        });
+      };
+    }
+    return result;
+  };
+  f.historicalMatrix.transport = createActionsMatrixArtifactTransport({
+    state: f.rig.state,
+    clock: f.clock,
+    token: "offline-native-token",
+    artifactRoot: `${f.rig.tmp}/artifacts`,
+    http: currentHttp,
+  });
+  return { ...f, release, reader, current, observed, evidence };
+}
+
+Deno.test("historical newer current: settled cancellation protects separately saved older wave before prepare", async () => {
+  const f = await historicalWithNewerCurrent();
+  try {
+    const releaseBefore = await f.release.readRelease();
+    const outcome = await f.run();
+    assert(outcome.actions.includes("historical-matrix:quarantined:17"));
+    assert.deepEqual(f.observed, [73, 71]);
+    assert.deepEqual(await f.release.readRelease(), releaseBefore);
+    const after = await f.rig.state.readRepair();
+    assert(after.ok && after.value.status === "found");
+    for (let i = 0; i < 17; i++) {
+      const original = f.records[i];
+      const work: WorkRecordV1 = after.value.snapshot.work.find((row) =>
+        row.id === original.id
+      )!;
+      assert.equal(work.nextStep, "blocked");
+      assert.deepEqual({
+        ...work,
+        nextStep: original.nextStep,
+        blocker: original.blocker,
+        wait: original.wait,
+        updatedAt: original.updatedAt,
+      }, original);
+      const charge: ReturnType<typeof reservation> = after.value.snapshot
+        .reservations.find((row) => row.id === f.charges[i].id)!;
+      assert.equal(charge.outcome, "ambiguous");
+      assert.deepEqual({
+        ...charge,
+        outcome: f.charges[i].outcome,
+        settledAt: null,
+      }, f.charges[i]);
+    }
+    const prepared = await runHostedSupervisorPrepare({
+      state: f.release,
+      clock: f.clock,
+      run: { runId: 74, runAttempt: 1, launcherSha: f.current.launcherSha },
+      evidence: {
+        ...f.evidence,
+        readExecution: f.reader.readHostedExecution.bind(f.reader),
+      },
+    });
+    assert.equal(prepared.status, "run", JSON.stringify(prepared));
+    const replaced = await f.release.readRelease();
+    assert(replaced.ok && replaced.value.status === "found");
+    assert.equal(
+      replaced.value.snapshot.hostedRuntimes[0].lastExecutionProof?.execution
+        .id,
+      "73:1:repair",
+    );
+    assert.deepEqual(await f.rig.state.readRepair(), after);
+  } finally {
+    await Deno.remove(f.rig.tmp, { recursive: true });
+  }
+});
+
+Deno.test("historical newer current: unfinished foreign unavailable or drifting current cannot write", async () => {
+  for (
+    const mode of [
+      "pending",
+      "unavailable",
+      "foreign",
+      "wrong-job",
+      "wrong-binding",
+      "custody",
+      "truncated",
+      "duplicate",
+      "old-proof-missing",
+    ]
+  ) {
+    const f = await historicalWithNewerCurrent(mode);
+    try {
+      const before = await f.rig.state.readRepair();
+      assert.equal(await f.runMain(), 1);
+      assert.deepEqual(await f.rig.state.readRepair(), before);
+      assert(!f.observed.includes(71));
+      assert.equal(f.rig.merges, 0);
+    } finally {
+      await Deno.remove(f.rig.tmp, { recursive: true });
+    }
   }
 });
