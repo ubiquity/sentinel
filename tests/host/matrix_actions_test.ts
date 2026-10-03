@@ -502,12 +502,14 @@ Deno.test("matrix actions: actual fresh intake plans both targets, isolated cell
     const artifactCalls: string[] = [];
     const encode = (value: unknown) =>
       new TextEncoder().encode(JSON.stringify(value));
-    async function byteDigest(value: Uint8Array) {
+    const byteDigest = async function (value: Uint8Array) {
       return [
         ...new Uint8Array(await crypto.subtle.digest("SHA-256", value.slice())),
       ].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-    }
-    async function zip(entries: { name: string; content: Uint8Array }[]) {
+    };
+    const zip = async function (
+      entries: { name: string; content: Uint8Array }[],
+    ) {
       const writer = new ZipWriter(new Uint8ArrayWriter(), {
         useWebWorkers: false,
       });
@@ -517,7 +519,7 @@ Deno.test("matrix actions: actual fresh intake plans both targets, isolated cell
         });
       }
       return await writer.close();
-    }
+    };
     const archives = new Map<number, Uint8Array>();
     const artifactRows: Record<string, unknown>[] = [];
     const provenance = {
@@ -527,7 +529,11 @@ Deno.test("matrix actions: actual fresh intake plans both targets, isolated cell
       head_branch: "sentinel-supervisor",
       head_sha: r.sha,
     };
-    async function archiveRow(id: number, name: string, bytes: Uint8Array) {
+    const archiveRow = async function (
+      id: number,
+      name: string,
+      bytes: Uint8Array,
+    ) {
       archives.set(id, bytes);
       artifactRows.push({
         id,
@@ -537,7 +543,7 @@ Deno.test("matrix actions: actual fresh intake plans both targets, isolated cell
         digest: "sha256:" + await byteDigest(bytes),
         workflow_run: provenance,
       });
-    }
+    };
     await archiveRow(
       501,
       "sentinel-matrix-plan-71-1",
@@ -611,7 +617,7 @@ Deno.test("matrix actions: actual fresh intake plans both targets, isolated cell
           }) + "\n",
       );
     }
-    function artifactHttp(available: boolean) {
+    const artifactHttp = function (available: boolean) {
       return createActionsMatrixArtifactHttpTransport((url, init) => {
         artifactCalls.push(url);
         const parsed = new URL(url);
@@ -674,7 +680,7 @@ Deno.test("matrix actions: actual fresh intake plans both targets, isolated cell
         }
         throw Error("unexpected native artifact API route");
       });
-    }
+    };
     const originalPreservers = [...r.github.values()].map((port) =>
       port.preserveCandidate.bind(port)
     );
@@ -684,7 +690,7 @@ Deno.test("matrix actions: actual fresh intake plans both targets, isolated cell
           portError("unavailable", "injected preservation outage"),
         );
     }
-    async function aggregate(
+    const aggregate = async function (
       name: string,
       available: boolean,
       carrier?: { planDigest: string },
@@ -738,7 +744,7 @@ Deno.test("matrix actions: actual fresh intake plans both targets, isolated cell
       } finally {
         Deno.chdir(oldCwd);
       }
-    }
+    };
     const digestControl = await r.store.readRepair();
     assert.ok(digestControl.ok && digestControl.value.status === "found");
     await assert.rejects(
