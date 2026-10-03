@@ -2756,8 +2756,11 @@ function parseHostedJobs(
       );
     }
     ids.add(id);
+    // Fixed job names are short, but a native matrix cell carries its full
+    // 64-hex cell id in the job name (`matrix_cell (<cellId>)`, 78 chars),
+    // so the 64-char label bound cannot apply to the native job list.
     if (
-      expectNonEmptyString(job.name, `${path}.name`, MaxText.label) !== "repair"
+      expectNonEmptyString(job.name, `${path}.name`, MaxText.name) !== "repair"
     ) {
       continue;
     }
