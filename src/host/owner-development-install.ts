@@ -491,6 +491,14 @@ export const OWNER_DEVELOPMENT_INSTALL_RUNTIME_SOURCE_GENERATION = 52;
 export const OWNER_DEVELOPMENT_INSTALL_OWNER_REPAIR_REVISION =
   "573d862429ab49eefbfcb99bd1878926024af96d" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_OWNER_REPAIR_GENERATION = 53;
+/**
+ * Exact integrated loop-recovery and strict-schema revision, installed only
+ * after the owner-repair generation 53 healthy proof. Failure restores that
+ * proven owner-repair revision once at generation 55, without an automatic retry.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_RUNTIME_RECOVERY_REVISION =
+  "90e9a838366ebc7e91ecd4aaa6a3eba48fd38fd0" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_RUNTIME_RECOVERY_GENERATION = 54;
 /** Monotonic rollback target the failed generation 45 candidate rolled to. */
 export const OWNER_DEVELOPMENT_INSTALL_ROLLBACK_TARGET_GENERATION =
   OWNER_DEVELOPMENT_INSTALL_ASSIGN_FIRST_GENERATION + 2;
@@ -2531,10 +2539,49 @@ export function planOwnerDevelopmentInstall(
       );
     }
     if (healthy !== null) {
-      return noChange("the owner development installation is complete");
+      return movePlan(
+        "install",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_RUNTIME_RECOVERY_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_RUNTIME_RECOVERY_GENERATION,
+        healthy,
+        "install the runtime recovery revision after the owner-repair healthy proof",
+      );
     }
     return waiting(
       "the owner-repair generation 53 healthy proof is not recorded",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_RUNTIME_RECOVERY_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_RUNTIME_RECOVERY_GENERATION
+  ) {
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_OWNER_REPAIR_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_OWNER_REPAIR_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded owner-repair healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_OWNER_REPAIR_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed runtime recovery to its recorded proven predecessor",
+      );
+    }
+    if (healthy !== null) {
+      return noChange("the owner development installation is complete");
+    }
+    return waiting(
+      "the runtime recovery generation 54 healthy proof is not recorded",
     );
   }
 
