@@ -34,6 +34,7 @@ import {
   runActionsMatrixHost,
 } from "../../src/host/matrix-actions.ts";
 import { runActionsRepairHost } from "../../src/host/actions.ts";
+import { implementationIntentKey } from "../../src/repair/keys.ts";
 import {
   OPERATION_MARGIN_MS,
   REPAIR_MODEL_CUTOFF_MS,
@@ -398,10 +399,17 @@ async function rig(
     cleanup: () => Deno.remove(root, { recursive: true }),
   };
 }
-for (const unassigned of [false, true]) {
+for (const mode of [false, true, "expensive_reads", "fresh_drift"] as const) {
+  const unassigned = mode === true;
+  const expensiveReads = mode === "expensive_reads";
+  const freshDrift = mode === "fresh_drift";
   Deno.test(
     "matrix actions planner window: " +
-      (unassigned
+      (freshDrift
+        ? "fresh state eligibility is reread per selected candidate"
+        : expensiveReads
+        ? "ready mixed backlog avoids repeated full snapshots"
+        : unassigned
         ? "fresh intake assigns branches before unrelated backlog"
         : "ready work precedes unrelated deterministic backlog"),
     async () => {
@@ -418,9 +426,14 @@ for (const unassigned of [false, true]) {
         };
         const background = Array.from(
           { length: 160 },
-          (_, index) =>
-            workRecord("background-review-" + index, {
-              repository,
+          (_, index) => {
+            const liveIntent = expensiveReads && index % 3 === 2;
+            const requestId = (index + 1).toString(16).padStart(64, "0");
+            const branch = "sentinel/background-" + index;
+            return workRecord("background-review-" + index, {
+              repository: expensiveReads && index === 159
+                ? { ...repository, name: "unconfigured" }
+                : repository,
               source: {
                 kind: "issue",
                 id: String(index + 1000),
@@ -429,16 +442,34 @@ for (const unassigned of [false, true]) {
               related: { incidentId: null, issueNumber: index + 1000 },
               controller: { sha: r.sha },
               failingRevision: null,
-              nextStep: "review",
+              nextStep: liveIntent
+                ? "work"
+                : expensiveReads && index % 3 === 1
+                ? "delivery"
+                : "review",
               counters: { attempts: 1, retries: 0, reviewRounds: 1 },
               target: {
                 base: r.sha,
-                branch: "sentinel/background-" + index,
+                branch,
                 checkpoint: null,
-                head: r.sha,
-                pr: index + 1000,
+                head: liveIntent ? null : r.sha,
+                pr: liveIntent ? null : index + 1000,
               },
-            }),
+              intent: liveIntent
+                ? {
+                  kind: "implementation",
+                  key: implementationIntentKey(requestId),
+                  startedAt: T0,
+                  branch,
+                  expectedHead: null,
+                  observedBase: r.sha,
+                  pr: null,
+                  requestId,
+                  resultId: null,
+                }
+                : null,
+            });
+          },
         );
         const fresh = workRecord("issue-ubiquity-sentinel-1", {
           repository,
@@ -462,6 +493,17 @@ for (const unassigned of [false, true]) {
           settledAt: T0 + 1,
           proofRef: null,
         });
+        const second = workRecord("issue-ubiquity-sentinel-2", {
+          ...fresh,
+          id: "issue-ubiquity-sentinel-2",
+          source: { ...fresh.source, id: "2" },
+          related: { incidentId: null, issueNumber: 2 },
+          target: {
+            ...fresh.target,
+            branch: "sentinel/repair/issue-ubiquity-sentinel-2",
+          },
+        });
+        const expectedCells = expensiveReads ? 2 : 1;
         const seeded = await memory.writeRepair(
           parseRepairStateSnapshotV1({
             version: "v1",
@@ -471,7 +513,11 @@ for (const unassigned of [false, true]) {
             updatedAt: r.clock.now(),
             incidents: [],
             evidence: [],
-            work: unassigned ? background : [fresh, ...background],
+            work: unassigned
+              ? background
+              : expensiveReads || freshDrift
+              ? [fresh, second, ...background]
+              : [fresh, ...background],
             reservations: [historical],
             reviews: [],
             replays: [],
@@ -482,6 +528,56 @@ for (const unassigned of [false, true]) {
         );
         assert.ok(seeded.ok && seeded.value.status === "applied");
         const source = r.github.get("ubiquity/sentinel")!;
+        let fullReads = 0, measureReads = expensiveReads;
+        if (freshDrift) {
+          const write = memory.writeRepair.bind(memory);
+          let changed = false;
+          memory.writeRepair = (snapshot, expected) => {
+            if (
+              !changed &&
+              snapshot.work.some((row) =>
+                row.id === fresh.id && row.intent?.kind === "implementation"
+              )
+            ) {
+              changed = true;
+              snapshot = structuredClone(snapshot);
+              snapshot.work = snapshot.work.map((row) =>
+                row.id === second.id
+                  ? {
+                    ...row,
+                    nextStep: "blocked",
+                    blocker: {
+                      kind: "other",
+                      message: "current eligibility changed",
+                      since: r.clock.now(),
+                    },
+                    wait: null,
+                  }
+                  : row
+              );
+            }
+            return write(snapshot, expected);
+          };
+        }
+        if (expensiveReads || freshDrift) {
+          const read = memory.readRepair.bind(memory);
+          memory.readRepair = () => {
+            if (measureReads) {
+              fullReads++;
+              r.clock.advance(45000);
+            }
+            return read();
+          };
+          const rows = [issue(1), issue(2)];
+          source.listOpenIssues = () => Promise.resolve(portOk(rows));
+          source.readIssue = (number) => {
+            assert.ok(
+              number === 1 || (!freshDrift && number === 2),
+              "only currently eligible tasks may reach preparation",
+            );
+            return Promise.resolve(portOk(rows[number - 1] ?? null));
+          };
+        }
         r.github.get("ubiquity/ai.ubq.fi")!.listOpenIssues = () =>
           Promise.resolve(portOk([]));
         let backgroundReads = 0, modelCalls = 0;
@@ -505,13 +601,35 @@ for (const unassigned of [false, true]) {
           state: memory,
           model,
         });
+        measureReads = false;
+        if (expensiveReads) {
+          console.log(
+            JSON.stringify({
+              kind: "planner_snapshot_cost",
+              fullReads,
+              simulatedElapsedMs: fullReads * 45000,
+            }),
+          );
+        }
         assert.ok("plan" in planned);
         assert.equal(
           planned.prepared,
-          1,
+          expectedCells,
           "fresh work must reach native admission before unrelated deterministic work consumes the session window",
         );
         assert.equal(modelCalls, 0);
+        if (expensiveReads) {
+          assert.ok(
+            fullReads < 50,
+            "ineligible ranked rows must not each cause another full authoritative snapshot",
+          );
+        }
+        if (freshDrift) {
+          assert.equal(
+            memory.repair!.work.find((row) => row.id === second.id)!.nextStep,
+            "blocked",
+          );
+        }
         assert.equal(
           backgroundReads,
           0,
@@ -527,7 +645,7 @@ for (const unassigned of [false, true]) {
           ),
           background,
         );
-        assert.equal(memory.repair!.reservations.length, 2);
+        assert.equal(memory.repair!.reservations.length, expectedCells + 1);
         assert.deepEqual(
           memory.repair!.reservations.find((row) => row.id === historical.id),
           historical,
@@ -555,7 +673,7 @@ for (const unassigned of [false, true]) {
         assert.equal(modelCalls, 1);
         assert.equal(
           memory.repair!.reservations.length,
-          2,
+          expectedCells + 1,
           "cell does not add another charge",
         );
         assert.deepEqual(
@@ -575,7 +693,7 @@ for (const unassigned of [false, true]) {
           0,
           "a current implementation intent cannot be readmitted",
         );
-        assert.equal(memory.repair!.reservations.length, 2);
+        assert.equal(memory.repair!.reservations.length, expectedCells + 1);
         assert.deepEqual(
           memory.repair!.reservations.find((row) => row.id === historical.id),
           historical,
