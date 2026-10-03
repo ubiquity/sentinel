@@ -310,7 +310,7 @@ export async function planMatrixWave(
   }
 
   return {
-    plan: manifest(cells),
+    plan: { ...manifest(cells), plannedAt: deps.clock.now() },
     attempted,
     prepared: cells.length,
     notReady,

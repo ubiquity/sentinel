@@ -715,9 +715,36 @@ for (
   });
 }
 
-Deno.test("matrix actions: actual fresh intake plans both targets, isolated cells overlap, archive recovery publishes on a fresh aggregate", async () => {
+async function freshMatrixArtifacts(noStart17 = false) {
   const r = await rig();
   try {
+    if (noStart17) {
+      for (
+        const [slug, count] of [["ubiquity/sentinel", 9], [
+          "ubiquity/ai.ubq.fi",
+          8,
+        ]] as const
+      ) {
+        const rows = Array.from(
+          { length: count },
+          (_, index) => issue(index + 1),
+        );
+        const port = r.github.get(slug)!;
+        port.listOpenIssues = () => Promise.resolve(portOk(rows));
+        port.readIssue = (number) => {
+          r.clock.advance(100);
+          return Promise.resolve(portOk(rows[number - 1] ?? null));
+        };
+      }
+      const write = r.store.writeRepair.bind(r.store);
+      r.store.writeRepair = async (snapshot, expected) => {
+        const result = await write(snapshot, expected);
+        r.clock.advance(1000);
+        return result;
+      };
+    }
+    const initialPlanTime = r.clock.now();
+    const expectedCells = noStart17 ? 17 : 2;
     let modelCalls = 0, active = 0, peak = 0;
     let unblock: () => void = () => {};
     const overlap = new Promise<void>((resolve) => {
@@ -725,6 +752,7 @@ Deno.test("matrix actions: actual fresh intake plans both targets, isolated cell
     });
     const planner = await runActionsMatrixHost({
       ...await r.job("plan", "matrix_plan"),
+      ...(noStart17 ? { state: r.store } : {}),
       model: {
         modelId: "gpt-reserve",
         runModel: () => {
@@ -735,7 +763,7 @@ Deno.test("matrix actions: actual fresh intake plans both targets, isolated cell
     assert.ok("plan" in planner);
     assert.equal(
       planner.prepared,
-      2,
+      expectedCells,
       "fresh unseeded issues must reach actual matrix admission",
     );
     assert.equal(
@@ -745,6 +773,7 @@ Deno.test("matrix actions: actual fresh intake plans both targets, isolated cell
     const results: MatrixCellResultV1[] = [];
     const archive = r.root + "/archive";
     await Deno.mkdir(archive);
+    if (noStart17) r.clock.advance(T0 + 10000 + 76 * 60_000 - r.clock.now());
     for (const cell of planner.plan.cells) {
       await Deno.mkdir(r.root + "/cell-" + cell.cellId);
     }
@@ -813,22 +842,28 @@ Deno.test("matrix actions: actual fresh intake plans both targets, isolated cell
       });
       assert.ok("cellId" in result);
       results.push(result);
-      assert.ok(result.bundle);
-      await Deno.copyFile(
-        artifactRoot + "/" + result.bundle.file,
-        archive + "/" + result.bundle.file,
-      );
+      if (noStart17) {
+        assert.equal(result.status, "not_started");
+        assert.equal(result.receipt, null);
+        assert.equal(result.bundle, null);
+      } else {
+        assert.ok(result.bundle);
+        await Deno.copyFile(
+          artifactRoot + "/" + result.bundle.file,
+          archive + "/" + result.bundle.file,
+        );
+      }
       await Deno.remove(r.root + "/" + name, { recursive: true });
     }));
-    assert.equal(modelCalls, 2);
-    assert.equal(peak, 2);
+    assert.equal(modelCalls, noStart17 ? 0 : 2);
+    assert.equal(peak, noStart17 ? 0 : 2);
     const before = await r.store.readRepair();
     assert.ok(before.ok && before.value.status === "found");
     assert.equal(
       before.value.snapshot.reservations.filter((row) =>
         row.purpose === "implementation"
       ).length,
-      2,
+      expectedCells,
     );
     const artifactCalls: string[] = [];
     const encode = (value: unknown) =>
@@ -884,10 +919,15 @@ Deno.test("matrix actions: actual fresh intake plans both targets, isolated cell
       await archiveRow(
         502 + index,
         "sentinel-matrix-cell-71-1-" + result.cellId,
-        await zip([{ name: "result.json", content: encode(result) }, {
-          name: result.bundle!.file,
-          content: await Deno.readFile(archive + "/" + result.bundle!.file),
-        }]),
+        await zip([
+          { name: "result.json", content: encode(result) },
+          ...(result.bundle
+            ? [{
+              name: result.bundle!.file,
+              content: await Deno.readFile(archive + "/" + result.bundle!.file),
+            }]
+            : []),
+        ]),
       );
     }
     const iso = new Date(planner.plan.plannedAt).toISOString();
@@ -904,7 +944,7 @@ Deno.test("matrix actions: actual fresh intake plans both targets, isolated cell
       401,
       iso + " " + JSON.stringify(plannerMarker) + "\n",
     ]]);
-    const job = (id: number, name: string, step: string) => ({
+    const job = (id: number, name: string, step: string, at = iso) => ({
       id,
       name,
       run_id: 71,
@@ -912,29 +952,31 @@ Deno.test("matrix actions: actual fresh intake plans both targets, isolated cell
       head_sha: r.sha,
       status: "completed",
       conclusion: "success",
-      started_at: iso,
-      completed_at: iso,
+      started_at: at,
+      completed_at: at,
       steps: [{
         name: step,
         number: 1,
         status: "completed",
         conclusion: "success",
-        started_at: iso,
-        completed_at: iso,
+        started_at: at,
+        completed_at: at,
       }],
     });
     const jobs = [job(401, "matrix_plan", "Plan isolated issue matrix")];
     for (const [index, result] of results.entries()) {
+      const at = noStart17 ? new Date(result.completedAt).toISOString() : iso;
       jobs.push(
         job(
           402 + index,
           "matrix_cell (" + result.cellId + ")",
           "Run isolated issue cell",
+          at,
         ),
       );
       logs.set(
         402 + index,
-        iso + " " +
+        at + " " +
           JSON.stringify({
             kind: "sentinel_matrix_cell",
             run: result.run,
@@ -943,7 +985,7 @@ Deno.test("matrix actions: actual fresh intake plans both targets, isolated cell
             cellId: result.cellId,
             reservationId: result.reservationId,
             resultDigest: await matrixDigestV1(result),
-            bundleDigest: result.bundle!.digest,
+            bundleDigest: result.bundle?.digest ?? null,
             status: result.status,
           }) + "\n",
       );
@@ -1078,6 +1120,110 @@ Deno.test("matrix actions: actual fresh intake plans both targets, isolated cell
     };
     const digestControl = await r.store.readRepair();
     assert.ok(digestControl.ok && digestControl.value.status === "found");
+    if (noStart17) {
+      const setPlan = async (plan: typeof planner.plan) => {
+        const bytes = await zip([{ name: "plan.json", content: encode(plan) }]);
+        archives.set(501, bytes);
+        artifactRows[0].size_in_bytes = bytes.length;
+        artifactRows[0].digest = "sha256:" + await byteDigest(bytes);
+        logs.set(
+          401,
+          iso + " " +
+            JSON.stringify({
+              ...plannerMarker,
+              planDigest: await matrixDigestV1(plan),
+            }) + "\n",
+        );
+      };
+      for (
+        const [name, plannedAt] of [
+          ["early-historical-plan", initialPlanTime],
+          [
+            "reservation-after-plan",
+            Math.max(
+              ...before.value.snapshot.reservations.map((row) => row.createdAt),
+            ) - 1,
+          ],
+          ["future-plan", r.clock.now() + 2000],
+        ] as const
+      ) {
+        await setPlan({ ...planner.plan, plannedAt });
+        await assert.rejects(
+          aggregate(name, true),
+          /matrix artifact provenance/,
+        );
+        assert.deepEqual(
+          await r.store.readRepair(),
+          digestControl,
+          "chronology refusal preserves every charge and intent",
+        );
+      }
+      await setPlan(planner.plan);
+      await assert.rejects(
+        aggregate("no-start-digest-conflict", true, {
+          planDigest: "f".repeat(64),
+        }),
+        /differs from native planner output/,
+      );
+      assert.deepEqual(await r.store.readRepair(), digestControl);
+      await aggregate("aggregate", true, { planDigest: planner.planDigest });
+      const ingested = await r.store.readRepair();
+      assert.ok(ingested.ok && ingested.value.status === "found");
+      assert.equal(ingested.value.snapshot.work.length, 17);
+      assert.ok(
+        ingested.value.snapshot.work.every((row) =>
+          row.nextStep === "blocked" && row.intent?.kind === "implementation" &&
+          row.target.head === null && row.target.pr === null
+        ),
+      );
+      assert.equal(ingested.value.snapshot.reservations.length, 17);
+      assert.ok(
+        ingested.value.snapshot.reservations.every((row) =>
+          row.outcome === "ambiguous" && row.proofRef === null
+        ),
+      );
+      for (const record of before.value.snapshot.work) {
+        const settledRecord: ReturnType<typeof workRecord> = ingested.value
+          .snapshot.work.find((row) => row.id === record.id)!;
+        assert.deepEqual([
+          settledRecord.source,
+          settledRecord.intent,
+          settledRecord.target,
+          settledRecord.counters,
+          settledRecord.evidence,
+        ], [
+          record.source,
+          record.intent,
+          record.target,
+          record.counters,
+          record.evidence,
+        ]);
+      }
+      assert.ok(
+        before.value.snapshot.reservations.every((row) =>
+          row.createdAt <= planner.plan.plannedAt
+        ),
+      );
+      assert.equal(
+        await matrixDigestV1(
+          JSON.parse(
+            await Deno.readTextFile(
+              r.root + "/plan/.sentinel-matrix/plan.json",
+            ),
+          ),
+        ),
+        planner.planDigest,
+      );
+      await aggregate("idempotent", true);
+      assert.deepEqual(await r.store.readRepair(), ingested);
+      assert.equal(modelCalls, 0);
+      assert.ok(
+        [...r.github.values()].every((port) =>
+          !port.calls.some((call) => call.startsWith("push:"))
+        ),
+      );
+      return;
+    }
     await assert.rejects(
       aggregate("native-digest-conflict", true, { planDigest: "f".repeat(64) }),
       /differs from native planner output/,
@@ -1169,7 +1315,11 @@ Deno.test("matrix actions: actual fresh intake plans both targets, isolated cell
   } finally {
     await r.cleanup();
   }
-});
+}
+Deno.test("matrix actions: actual fresh intake plans both targets, isolated cells overlap, archive recovery publishes on a fresh aggregate", () =>
+  freshMatrixArtifacts());
+Deno.test("matrix actions: advancing planner clock recovers seventeen no-start cells", () =>
+  freshMatrixArtifacts(true));
 for (
   const scenario of [
     {
