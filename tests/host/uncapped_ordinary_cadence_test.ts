@@ -1,23 +1,27 @@
 /**
  * Uncapped ordinary-work cadence (owner update 2026-10-02T22:05:51Z: "lift all
- * the limits"). The protected supervisor currently stamps
- * `nextOrdinaryAt = now + HOUR_MS`, so ordinary runtime work is deferred for a
+ * the limits"). This lane ports the validated m19 cadence change onto the
+ * protected launcher: the supervisor used to stamp
+ * `nextOrdinaryAt = now + HOUR_MS`, so ordinary runtime work was deferred for a
  * full hour even though the dispatch workflow runs every five minutes. That
- * cooldown — not any platform limit — is what caps useful issue work per hour.
+ * cooldown — not any platform limit — was what capped useful issue work per
+ * hour.
  *
- * These cases drive the REAL `runHostedSupervisorPrepare` / `Finalize` core
- * over an in-memory release-role store and injected evidence only: no Git,
- * network, model, GitHub or deployment call exists here.
+ * These cases drive the REAL protected `runHostedSupervisorPrepare` /
+ * `runHostedSupervisorFinalize` core over an in-memory release-role store and
+ * injected evidence only: no Git, network, model, GitHub or deployment call
+ * exists here. The protected recovery paths (model-disabled verification for a
+ * missing health proof, same-run replay and active-execution ownership) are
+ * exercised through the same real production entrypoints.
  *
- * RED before implementation: five minutes after a healthy run the next
- * dispatch is still `idle` because `nextOrdinaryAt` sits an hour ahead.
+ * RED before the port: five minutes after a healthy run the next dispatch was
+ * still `idle` because `nextOrdinaryAt` sat an hour ahead, and a legacy
+ * persisted future timestamp deferred ordinary work even longer.
  */
 import assert from "node:assert/strict";
 
 import type { GitSha } from "../../src/contracts/brands.ts";
-import {
-  parseHostedRunProofV1,
-} from "../../src/contracts/hosted-supervisor.ts";
+import { parseHostedRunProofV1 } from "../../src/contracts/hosted-supervisor.ts";
 import type {
   HostedExecutionIntentV1,
   HostedExecutionSettlementV1,
@@ -140,6 +144,7 @@ class MemoryReleaseState implements StateReadView, ReleaseStateWriter {
 class FakeEvidence implements HostedSupervisorEvidencePortV1 {
   readonly settlements = new Map<string, HostedExecutionSettlementV1 | null>();
   readonly revisions = new Set<string>();
+  readonly matrixRevisions = new Set<string>();
 
   readExecution(
     savedIntent: HostedExecutionIntentV1,
@@ -151,6 +156,12 @@ class FakeEvidence implements HostedSupervisorEvidencePortV1 {
 
   verifyRevision(revision: GitSha): Promise<PortResultV1<boolean>> {
     return Promise.resolve(portOk(this.revisions.has(revision)));
+  }
+
+  verifyMatrixOrdinaryRevision(
+    revision: GitSha,
+  ): Promise<PortResultV1<boolean>> {
+    return Promise.resolve(portOk(this.matrixRevisions.has(revision)));
   }
 
   verifyRequest(): Promise<PortResultV1<boolean>> {
@@ -194,28 +205,33 @@ interface RigV1 {
   finalize(runId: number): Promise<HostedSupervisorOutcomeV1>;
 }
 
-/** Bootstrap one generation-1 pointer and settle one healthy run. */
-async function makeHealthyRig(): Promise<RigV1> {
+function makeRig(): RigV1 {
   const clock = new FakeClock(1786000000000);
   const state = new MemoryReleaseState();
   const evidence = new FakeEvidence();
   evidence.revisions.add(LAUNCHER);
+  evidence.matrixRevisions.add(LAUNCHER);
   const input = (runId: number): HostedSupervisorInputV1 => ({
     clock,
     state,
     run: { runId, runAttempt: 1, launcherSha: LAUNCHER },
     evidence,
   });
-  const rig: RigV1 = {
+  return {
     clock,
     state,
     evidence,
     prepare: (runId) => runHostedSupervisorPrepare(input(runId)),
     finalize: (runId) => runHostedSupervisorFinalize(input(runId)),
   };
+}
+
+/** Bootstrap one generation-1 pointer and settle one healthy run. */
+async function makeHealthyRig(): Promise<RigV1> {
+  const rig = makeRig();
   const bootstrap = requireRun(await rig.prepare(1));
   assert.equal(bootstrap.purpose, "bootstrap");
-  evidence.settlements.set(bootstrap.id, runProof(bootstrap));
+  rig.evidence.settlements.set(bootstrap.id, runProof(bootstrap));
   assert.equal((await rig.finalize(1)).status, "idle");
   return rig;
 }
@@ -225,7 +241,7 @@ Deno.test(
   async () => {
     const rig = await makeHealthyRig();
     // The dispatch workflow fires every five minutes; only the artificial
-    // cooldown can keep the next ordinary run idle at this point.
+    // cooldown could keep the next ordinary run idle at this point.
     rig.clock.advance(DISPATCH_MS);
 
     const outcome = await rig.prepare(2);
@@ -302,5 +318,56 @@ Deno.test(
     assert.equal(active.status, "pending", JSON.stringify(active));
     const after = rig.state.current()?.hostedRuntimes[0];
     assert.equal(after?.execution?.id, ordinary.id);
+  },
+);
+
+Deno.test(
+  "uncapped cadence: a missing health proof plans model-disabled verification and ordinary work is due on the next dispatch",
+  async () => {
+    const rig = makeRig();
+    // The only legally reachable runtime without a current health proof is the
+    // first generation; the bootstrap verification must never become a
+    // model-enabled ordinary run.
+    const planned = requireRun(await rig.prepare(1));
+    assert.notEqual(planned.purpose, "ordinary");
+    assert.equal(planned.purpose, "bootstrap");
+    assert.equal(planned.revision, LAUNCHER);
+    let state = rig.state.current();
+    assert.ok(state !== null);
+    const bootstrapped = state.hostedRuntimes[0];
+    assert.ok(bootstrapped);
+    assert.ok(
+      bootstrapped.nextOrdinaryAt <= rig.clock.now(),
+      "no artificial cooldown is stamped at bootstrap",
+    );
+    assert.equal(bootstrapped.lastHealthyProof, null);
+    assert.equal(bootstrapped.execution?.id, planned.id);
+
+    // A healthy verification settles, and the very next dispatch is due for
+    // ordinary work: the verification neither consumes nor defers the cadence.
+    rig.evidence.settlements.set(planned.id, runProof(planned));
+    const ordinary = requireRun(await rig.prepare(2));
+    assert.equal(ordinary.purpose, "ordinary");
+    assert.equal(ordinary.revision, LAUNCHER);
+    state = rig.state.current();
+    assert.ok(state !== null);
+    assert.equal(
+      state.hostedRuntimes[0].lastHealthyProof?.execution.id,
+      planned.id,
+    );
+    assert.ok(state.hostedRuntimes[0].nextOrdinaryAt <= ordinary.createdAt);
+
+    // Same-run replay is idempotent; an active execution still owns the
+    // pointer against a different run.
+    assert.equal(
+      requireRun(await rig.prepare(2)).id,
+      ordinary.id,
+      "same-run replay is idempotent",
+    );
+    assert.equal((await rig.prepare(3)).status, "pending");
+    assert.equal(
+      rig.state.current()?.hostedRuntimes[0].execution?.id,
+      ordinary.id,
+    );
   },
 );

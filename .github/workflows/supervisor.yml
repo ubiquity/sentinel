@@ -138,6 +138,7 @@ jobs:
     outputs:
       run: ${{ steps.prepare.outputs.run }}
       revision: ${{ steps.prepare.outputs.revision }}
+      modelStartsEnabled: ${{ steps.prepare.outputs.modelStartsEnabled }}
     steps:
       - name: Checkout protected supervisor source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -187,7 +188,7 @@ jobs:
           --allow-write
           --allow-run=git
           --allow-net=api.github.com
-          --allow-env=HOME,PATH,GITHUB_TOKEN,SENTINEL_SUPERVISOR_TOKEN,GITHUB_REPOSITORY,GITHUB_REF,GITHUB_SHA,GITHUB_WORKFLOW_SHA,GITHUB_JOB
+          --allow-env=HOME,PATH,GITHUB_TOKEN,SENTINEL_SUPERVISOR_TOKEN,SENTINEL_COOLDOWN_MODE,GITHUB_REPOSITORY,GITHUB_REF,GITHUB_SHA,GITHUB_WORKFLOW_SHA,GITHUB_JOB
           src/host/owner-development-install.ts
       - name: Prepare hosted supervisor run
         id: prepare
@@ -196,11 +197,273 @@ jobs:
           SENTINEL_SUPERVISOR_TOKEN: ${{ steps.app-token.outputs.token }}
         run: deno task supervisor:run
 
-  repair:
+  matrix_plan:
+    name: matrix_plan
     needs: prepare
-    if: ${{ !cancelled() && needs.prepare.result == 'success' && github.ref == 'refs/heads/sentinel-supervisor' && needs.prepare.outputs.run == 'true' }}
+    if: ${{ !cancelled() && needs.prepare.result == 'success' && github.ref == 'refs/heads/sentinel-supervisor' && needs.prepare.outputs.run == 'true' && needs.prepare.outputs.modelStartsEnabled == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    environment:
+      name: sentinel-supervisor
+    permissions:
+      contents: write
+      actions: read
+      issues: write
+      pull-requests: write
+      checks: read
+      statuses: read
+    outputs:
+      matrix: ${{ steps.matrix_plan.outputs.matrix }}
+      planDigest: ${{ steps.matrix_plan.outputs.planDigest }}
+      hasCells: ${{ steps.matrix_plan.outputs.hasCells }}
+      planArtifactDigest: ${{ steps.plan_artifact.outputs.artifact-digest }}
+    concurrency:
+      group: sentinel-repair
+      cancel-in-progress: false
+    steps:
+      - name: Checkout protected launcher source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.sha }}
+          path: launcher
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Checkout selected runtime source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ needs.prepare.outputs.revision }}
+          path: runtime
+          # Full history: a depth-1 checkout keeps a shallow boundary through
+          # the local copy and makes the base-refresh merge see no ancestor.
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        with:
+          deno-version: v2.x
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - name: Install pinned Codex app-server
+        run: npm install --global @openai/codex@0.154.0
+      # GitHub-hosted Linux runners need unprivileged user namespaces for
+      # bubblewrap; same handling as openai/codex-action action.yml 289-315:
+      # https://github.com/openai/codex-action/blob/main/action.yml
+      # Ephemeral runner only; no model profile or host setting changes.
+      - name: Enable Linux user namespaces for bubblewrap
+        continue-on-error: true
+        if: runner.os == 'Linux' && runner.environment == 'github-hosted'
+        run: |
+          set -euo pipefail
+          current_userns=$(sysctl -n kernel.unprivileged_userns_clone 2>/dev/null || true)
+          if [ -n "$current_userns" ] && [ "$current_userns" != "1" ]; then
+            sudo sysctl -w kernel.unprivileged_userns_clone=1
+          fi
+          current_apparmor=$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || true)
+          if [ -n "$current_apparmor" ] && [ "$current_apparmor" != "0" ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+      - name: Resolve the committed target repositories
+        id: targets
+        working-directory: launcher
+        run: |
+          set -euo pipefail
+          repositories=$(jq -r 'join(",")' sentinel.targets.json)
+          if [ -z "$repositories" ]; then
+            echo "sentinel.targets.json names no repository" >&2
+            exit 1
+          fi
+          echo "repositories=$repositories" >> "$GITHUB_OUTPUT"
+      - name: Mint the scoped sentinel App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: Iv23liHUJNXds9mU3j7Q
+          private-key: ${{ secrets.SENTINEL_SUPERVISOR_APP_PRIVATE_KEY }}
+          owner: ubiquity
+          repositories: ${{ steps.targets.outputs.repositories }}
+      - name: Plan isolated issue matrix
+        id: matrix_plan
+        working-directory: launcher
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SENTINEL_SUPERVISOR_TOKEN: ${{ steps.app-token.outputs.token }}
+          UOS_AI_TOKEN: ${{ secrets.UOS_AI_TOKEN }}
+          # Installation scope of the `ubiquity-sentinel` App. A scope key, not
+          # a secret: every committed target except the sentinel self-repository
+          # is repaired under this one App installation, while the sentinel
+          # self-target keeps the reserved no-App scope 0.
+          SENTINEL_APP_INSTALLATION_ID: "155687488"
+          # Model route. Repository/environment vars supply the primary and
+          # fallback route; the DeepSeek key is the documented once-per-run
+          # fallback credential. Blank optional vars stay blank and the
+          # launcher forwards only nonempty values, so an unset var keeps the
+          # existing resolver behavior. The App private key is never bound here.
+          SENTINEL_MODEL_BASE_URL: ${{ vars.SENTINEL_MODEL_BASE_URL }}
+          SENTINEL_MODEL_ID: ${{ vars.SENTINEL_MODEL_ID }}
+          SENTINEL_REVIEW_MODEL_ID: ${{ vars.SENTINEL_REVIEW_MODEL_ID }}
+          SENTINEL_MODEL_FALLBACK: ${{ vars.SENTINEL_MODEL_FALLBACK }}
+          SENTINEL_DEEPSEEK_API_KEY: ${{ secrets.SENTINEL_DEEPSEEK_API_KEY }}
+        run: >-
+          deno run
+          --allow-read
+          --allow-write
+          --allow-run
+          --allow-net="api.github.com,*.blob.core.windows.net"
+          --allow-env=GITHUB_OUTPUT,HOME,PATH,GITHUB_TOKEN,SENTINEL_SUPERVISOR_TOKEN,SENTINEL_COOLDOWN_MODE,SENTINEL_MODEL_BASE_URL,SENTINEL_MODEL_ID,SENTINEL_REVIEW_MODEL_ID,SENTINEL_MODEL_FALLBACK,SENTINEL_DEEPSEEK_API_KEY,SENTINEL_APP_INSTALLATION_ID,UOS_AI_TOKEN,NODE_V8_COVERAGE,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_REPOSITORY,GITHUB_REF,GITHUB_SHA,GITHUB_WORKFLOW_SHA,GITHUB_WORKFLOW_REF,GITHUB_JOB
+          src/host/hosted-runtime.ts
+
+      - name: Upload immutable matrix plan
+        id: plan_artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sentinel-matrix-plan-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .sentinel-matrix/plan.json
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 7
+
+  matrix_cell:
+    name: matrix_cell (${{ matrix.cellId }})
+    needs: [prepare, matrix_plan]
+    if: ${{ !cancelled() && needs.prepare.result == 'success' && github.ref == 'refs/heads/sentinel-supervisor' && needs.prepare.outputs.run == 'true' && needs.matrix_plan.result == 'success' && needs.matrix_plan.outputs.hasCells == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    environment:
+      name: sentinel-supervisor
+    permissions:
+      contents: read
+      actions: read
+      issues: read
+      pull-requests: read
+      checks: read
+      statuses: read
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.matrix_plan.outputs.matrix) }}
+    outputs:
+      cellArtifactDigest: ${{ steps.cell_artifact.outputs.artifact-digest }}
+    steps:
+      - name: Checkout protected launcher source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.sha }}
+          path: launcher
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Checkout selected runtime source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ needs.prepare.outputs.revision }}
+          path: runtime
+          # Full history: a depth-1 checkout keeps a shallow boundary through
+          # the local copy and makes the base-refresh merge see no ancestor.
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        with:
+          deno-version: v2.x
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - name: Install pinned Codex app-server
+        run: npm install --global @openai/codex@0.154.0
+      # GitHub-hosted Linux runners need unprivileged user namespaces for
+      # bubblewrap; same handling as openai/codex-action action.yml 289-315:
+      # https://github.com/openai/codex-action/blob/main/action.yml
+      # Ephemeral runner only; no model profile or host setting changes.
+      - name: Enable Linux user namespaces for bubblewrap
+        continue-on-error: true
+        if: runner.os == 'Linux' && runner.environment == 'github-hosted'
+        run: |
+          set -euo pipefail
+          current_userns=$(sysctl -n kernel.unprivileged_userns_clone 2>/dev/null || true)
+          if [ -n "$current_userns" ] && [ "$current_userns" != "1" ]; then
+            sudo sysctl -w kernel.unprivileged_userns_clone=1
+          fi
+          current_apparmor=$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || true)
+          if [ -n "$current_apparmor" ] && [ "$current_apparmor" != "0" ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+      - name: Resolve the committed target repositories
+        id: targets
+        working-directory: launcher
+        run: |
+          set -euo pipefail
+          repositories=$(jq -r 'join(",")' sentinel.targets.json)
+          if [ -z "$repositories" ]; then
+            echo "sentinel.targets.json names no repository" >&2
+            exit 1
+          fi
+          echo "repositories=$repositories" >> "$GITHUB_OUTPUT"
+      - name: Mint the scoped sentinel App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: Iv23liHUJNXds9mU3j7Q
+          private-key: ${{ secrets.SENTINEL_SUPERVISOR_APP_PRIVATE_KEY }}
+          owner: ubiquity
+          repositories: ${{ steps.targets.outputs.repositories }}
+          permission-contents: read
+          permission-issues: read
+          permission-pull-requests: read
+          permission-checks: read
+      - name: Download immutable matrix plan
+        uses: actions/download-artifact@v4
+        with:
+          name: sentinel-matrix-plan-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .sentinel-matrix
+      - name: Run isolated issue cell
+        id: matrix_cell
+        working-directory: launcher
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SENTINEL_SUPERVISOR_TOKEN: ${{ steps.app-token.outputs.token }}
+          UOS_AI_TOKEN: ${{ secrets.UOS_AI_TOKEN }}
+          # Installation scope of the `ubiquity-sentinel` App. A scope key, not
+          # a secret: every committed target except the sentinel self-repository
+          # is repaired under this one App installation, while the sentinel
+          # self-target keeps the reserved no-App scope 0.
+          SENTINEL_APP_INSTALLATION_ID: "155687488"
+          # Model route. Repository/environment vars supply the primary and
+          # fallback route; the DeepSeek key is the documented once-per-run
+          # fallback credential. Blank optional vars stay blank and the
+          # launcher forwards only nonempty values, so an unset var keeps the
+          # existing resolver behavior. The App private key is never bound here.
+          SENTINEL_MODEL_BASE_URL: ${{ vars.SENTINEL_MODEL_BASE_URL }}
+          SENTINEL_MODEL_ID: ${{ vars.SENTINEL_MODEL_ID }}
+          SENTINEL_REVIEW_MODEL_ID: ${{ vars.SENTINEL_REVIEW_MODEL_ID }}
+          SENTINEL_MODEL_FALLBACK: ${{ vars.SENTINEL_MODEL_FALLBACK }}
+          SENTINEL_DEEPSEEK_API_KEY: ${{ secrets.SENTINEL_DEEPSEEK_API_KEY }}
+        run: |
+          printf '%s\n' '{"planDigest":"${{ needs.matrix_plan.outputs.planDigest }}","cellId":"${{ matrix.cellId }}"}' |
+          deno run \
+          --allow-read \
+          --allow-write \
+          --allow-run \
+          --allow-net="api.github.com,*.blob.core.windows.net" \
+          --allow-env=HOME,PATH,GITHUB_TOKEN,SENTINEL_SUPERVISOR_TOKEN,SENTINEL_COOLDOWN_MODE,SENTINEL_MODEL_BASE_URL,SENTINEL_MODEL_ID,SENTINEL_REVIEW_MODEL_ID,SENTINEL_MODEL_FALLBACK,SENTINEL_DEEPSEEK_API_KEY,SENTINEL_APP_INSTALLATION_ID,UOS_AI_TOKEN,NODE_V8_COVERAGE,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_REPOSITORY,GITHUB_REF,GITHUB_SHA,GITHUB_WORKFLOW_SHA,GITHUB_WORKFLOW_REF,GITHUB_JOB \
+          src/host/hosted-runtime.ts
+
+      - name: Upload settled matrix cell
+        id: cell_artifact
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: sentinel-matrix-cell-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.cellId }}
+          path: |
+            .sentinel-matrix/result.json
+            .sentinel-matrix/${{ matrix.cellId }}.bundle
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 7
+
+  repair:
+    needs: [prepare, matrix_plan, matrix_cell]
+    if: ${{ !cancelled() && needs.prepare.result == 'success' && github.ref == 'refs/heads/sentinel-supervisor' && needs.prepare.outputs.run == 'true' && (needs.prepare.outputs.modelStartsEnabled != 'true' || needs.matrix_plan.result == 'success') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    environment:
+      name: sentinel-supervisor
     permissions:
       contents: write
       actions: write
@@ -208,8 +471,6 @@ jobs:
       pull-requests: write
       checks: read
       statuses: read
-    environment:
-      name: sentinel-supervisor
     concurrency:
       group: sentinel-repair
       cancel-in-progress: false
@@ -288,36 +549,36 @@ jobs:
         working-directory: launcher
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          UOS_AI_TOKEN: ${{ secrets.UOS_AI_TOKEN }}
           SENTINEL_SUPERVISOR_TOKEN: ${{ steps.app-token.outputs.token }}
-          # Explicit DeepSeek-direct fallback selection. It comes from the
-          # repository variable `vars.SENTINEL_MODEL_FALLBACK` (the simplest
-          # source that needs no workflow-dispatch input plumbing): exactly
-          # `deepseek` activates the fallback route when the key below is
-          # non-empty, and any other or unset value keeps the UOS gateway
-          # primary. The trusted resolver owns the decision; nothing is swapped
-          # per request.
-          SENTINEL_MODEL_FALLBACK: ${{ vars.SENTINEL_MODEL_FALLBACK }}
-          # DeepSeek-direct fallback key (the `sentinel-supervisor`
-          # environment secret). It is only ever read by name into the model
-          # client's private token file and is never logged or echoed.
-          SENTINEL_DEEPSEEK_API_KEY: ${{ secrets.SENTINEL_DEEPSEEK_API_KEY }}
-          # Installation scope of the `ubiquity-sentinel` App. It is a scope
-          # key, not a secret: every committed target except the sentinel
-          # self-repository is repaired under this one App installation, while
-          # the sentinel self-target keeps the reserved no-App scope 0.
+          UOS_AI_TOKEN: ${{ secrets.UOS_AI_TOKEN }}
+          # Installation scope of the `ubiquity-sentinel` App. A scope key, not
+          # a secret: every committed target except the sentinel self-repository
+          # is repaired under this one App installation, while the sentinel
+          # self-target keeps the reserved no-App scope 0.
           SENTINEL_APP_INSTALLATION_ID: "155687488"
-        run: >-
-          deno run
-          --allow-read
-          --allow-write
-          --allow-run
-          --allow-net="api.github.com,*.blob.core.windows.net"
-          --allow-env=HOME,PATH,GITHUB_TOKEN,UOS_AI_TOKEN,SENTINEL_MODEL_BASE_URL,SENTINEL_MODEL_ID,SENTINEL_MODEL_FALLBACK,SENTINEL_DEEPSEEK_API_KEY,SENTINEL_APP_INSTALLATION_ID,NODE_V8_COVERAGE,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_REPOSITORY,GITHUB_REF,GITHUB_SHA,GITHUB_WORKFLOW_SHA,GITHUB_WORKFLOW_REF,GITHUB_JOB,SENTINEL_SUPERVISOR_TOKEN,SENTINEL_COOLDOWN_MODE,SENTINEL_REVIEW_MODEL_ID
+          # Model route. Repository/environment vars supply the primary and
+          # fallback route; the DeepSeek key is the documented once-per-run
+          # fallback credential. Blank optional vars stay blank and the
+          # launcher forwards only nonempty values, so an unset var keeps the
+          # existing resolver behavior. The App private key is never bound here.
+          SENTINEL_MODEL_BASE_URL: ${{ vars.SENTINEL_MODEL_BASE_URL }}
+          SENTINEL_MODEL_ID: ${{ vars.SENTINEL_MODEL_ID }}
+          SENTINEL_REVIEW_MODEL_ID: ${{ vars.SENTINEL_REVIEW_MODEL_ID }}
+          SENTINEL_MODEL_FALLBACK: ${{ vars.SENTINEL_MODEL_FALLBACK }}
+          SENTINEL_DEEPSEEK_API_KEY: ${{ secrets.SENTINEL_DEEPSEEK_API_KEY }}
+        run: |
+          if [ '${{ needs.prepare.outputs.modelStartsEnabled }}' = 'true' ]; then
+            printf '%s\n' '{"planDigest":"${{ needs.matrix_plan.outputs.planDigest }}"}'
+          fi | deno run \
+          --allow-read \
+          --allow-write \
+          --allow-run \
+          --allow-net="api.github.com,*.blob.core.windows.net" \
+          --allow-env=HOME,PATH,GITHUB_TOKEN,SENTINEL_SUPERVISOR_TOKEN,SENTINEL_COOLDOWN_MODE,SENTINEL_MODEL_BASE_URL,SENTINEL_MODEL_ID,SENTINEL_REVIEW_MODEL_ID,SENTINEL_MODEL_FALLBACK,SENTINEL_DEEPSEEK_API_KEY,SENTINEL_APP_INSTALLATION_ID,UOS_AI_TOKEN,NODE_V8_COVERAGE,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_REPOSITORY,GITHUB_REF,GITHUB_SHA,GITHUB_WORKFLOW_SHA,GITHUB_WORKFLOW_REF,GITHUB_JOB \
           src/host/hosted-runtime.ts
 
   finalize:
-    needs: [prepare, repair]
+    needs: [prepare, matrix_plan, matrix_cell, repair]
     if: always() && github.ref == 'refs/heads/sentinel-supervisor'
     runs-on: ubuntu-latest
     timeout-minutes: 10

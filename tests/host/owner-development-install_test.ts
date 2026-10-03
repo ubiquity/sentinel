@@ -31,20 +31,39 @@ import { parseReleaseStateSnapshotV1 } from "../../src/contracts/state-snapshots
 import type { ReleaseStateSnapshotV1 } from "../../src/contracts/state-snapshots.ts";
 import {
   buildOwnerDevelopmentInstallSnapshot,
+  OWNER_DEVELOPMENT_INSTALL_ADVANCE_REVISION,
   OWNER_DEVELOPMENT_INSTALL_AGGREGATE_GENERATION,
   OWNER_DEVELOPMENT_INSTALL_AGGREGATE_REVISION,
+  OWNER_DEVELOPMENT_INSTALL_APP_IDENTITY_REVISION,
+  OWNER_DEVELOPMENT_INSTALL_CADENCE_REVISION,
+  OWNER_DEVELOPMENT_INSTALL_CANDIDATE_AUTH_REVISION,
+  OWNER_DEVELOPMENT_INSTALL_DELIVERED_ROUND2_REVISION,
   OWNER_DEVELOPMENT_INSTALL_EXIT_CONTRACT_REVISION,
   OWNER_DEVELOPMENT_INSTALL_FINDINGS_REVISION,
+  OWNER_DEVELOPMENT_INSTALL_FOREIGN_AUTH_REVISION,
+  OWNER_DEVELOPMENT_INSTALL_GUARD_REVISION,
   OWNER_DEVELOPMENT_INSTALL_HISTORY_REVISION,
+  OWNER_DEVELOPMENT_INSTALL_LEDGER_REVISION,
+  OWNER_DEVELOPMENT_INSTALL_MODEL_ROUTE_REVISION,
+  OWNER_DEVELOPMENT_INSTALL_MULTI_TARGET_REVISION,
   OWNER_DEVELOPMENT_INSTALL_ORIGINAL_GENERATION,
   OWNER_DEVELOPMENT_INSTALL_ORIGINAL_REVISION,
+  OWNER_DEVELOPMENT_INSTALL_PRESERVE_SCOPE_REVISION,
   OWNER_DEVELOPMENT_INSTALL_READER_GENERATION,
   OWNER_DEVELOPMENT_INSTALL_READER_REVISION,
+  OWNER_DEVELOPMENT_INSTALL_REASON_CODE_REVISION,
   OWNER_DEVELOPMENT_INSTALL_RECEIPT_REVISION,
   OWNER_DEVELOPMENT_INSTALL_RECOVERY_REVISION,
+  OWNER_DEVELOPMENT_INSTALL_RELEASED_REVISION,
+  OWNER_DEVELOPMENT_INSTALL_RESERVE_MODEL_REVISION,
+  OWNER_DEVELOPMENT_INSTALL_RETIRE_REVISION,
   OWNER_DEVELOPMENT_INSTALL_REVIEW_STEP_REVISION,
   OWNER_DEVELOPMENT_INSTALL_REVIEWER_REVISION,
   OWNER_DEVELOPMENT_INSTALL_ROUND8_REVISION,
+  OWNER_DEVELOPMENT_INSTALL_SCOPE_GATE_REVISION,
+  OWNER_DEVELOPMENT_INSTALL_SETTLEMENT_RECOVERY_REVISION,
+  OWNER_DEVELOPMENT_INSTALL_SETTLEMENT_REVISION,
+  OWNER_DEVELOPMENT_INSTALL_TRIGGER_REVISION,
   ownerDevelopmentInstallCommitMessage,
   ownerDevelopmentInstallFiles,
   planOwnerDevelopmentInstall,
@@ -69,6 +88,135 @@ const ROUND8 = OWNER_DEVELOPMENT_INSTALL_ROUND8_REVISION;
 const FINDINGS = OWNER_DEVELOPMENT_INSTALL_FINDINGS_REVISION;
 const HISTORY = OWNER_DEVELOPMENT_INSTALL_HISTORY_REVISION;
 const RECEIPT = OWNER_DEVELOPMENT_INSTALL_RECEIPT_REVISION;
+const LEDGER = OWNER_DEVELOPMENT_INSTALL_LEDGER_REVISION;
+const SETTLEMENT = OWNER_DEVELOPMENT_INSTALL_SETTLEMENT_REVISION;
+const RELEASED = OWNER_DEVELOPMENT_INSTALL_RELEASED_REVISION;
+const TRIGGER = OWNER_DEVELOPMENT_INSTALL_TRIGGER_REVISION;
+const ADVANCE = OWNER_DEVELOPMENT_INSTALL_ADVANCE_REVISION;
+const CADENCE = OWNER_DEVELOPMENT_INSTALL_CADENCE_REVISION;
+const GUARD = OWNER_DEVELOPMENT_INSTALL_GUARD_REVISION;
+const RETIRE = OWNER_DEVELOPMENT_INSTALL_RETIRE_REVISION;
+const DELIVERED_ROUND2 = OWNER_DEVELOPMENT_INSTALL_DELIVERED_ROUND2_REVISION;
+const APP_IDENTITY = OWNER_DEVELOPMENT_INSTALL_APP_IDENTITY_REVISION;
+const MODEL_ROUTE = OWNER_DEVELOPMENT_INSTALL_MODEL_ROUTE_REVISION;
+const RESERVE_MODEL = OWNER_DEVELOPMENT_INSTALL_RESERVE_MODEL_REVISION;
+const MULTI_TARGET = OWNER_DEVELOPMENT_INSTALL_MULTI_TARGET_REVISION;
+const SCOPE_GATE = OWNER_DEVELOPMENT_INSTALL_SCOPE_GATE_REVISION;
+const CANDIDATE_AUTH = OWNER_DEVELOPMENT_INSTALL_CANDIDATE_AUTH_REVISION;
+const PRESERVE_SCOPE = OWNER_DEVELOPMENT_INSTALL_PRESERVE_SCOPE_REVISION;
+const FOREIGN_AUTH = OWNER_DEVELOPMENT_INSTALL_FOREIGN_AUTH_REVISION;
+const REASON_CODE = OWNER_DEVELOPMENT_INSTALL_REASON_CODE_REVISION;
+const SETTLEMENT_RECOVERY =
+  OWNER_DEVELOPMENT_INSTALL_SETTLEMENT_RECOVERY_REVISION;
+// The quiet-reasoning pins stay test-local exact literals: this suite must also
+// compile against pre-rung production source, where the newly exported
+// constants do not exist, so the expected red is a semantic plan mismatch and
+// never a missing import.
+const QUIET_REASONING = "db16f8af810ee24f434938a3e9dd17c04c3e8084" as GitSha;
+const QUIET_REASONING_GENERATION = 35;
+// The base-fetch pins stay test-local exact literals for the same reason: this
+// suite must compile against pre-rung production source, so the expected red is
+// a semantic plan mismatch and never a missing import.
+const BASE_FETCH = "ae4629faeb75a80c1badf1ff37a58c8be00adf99" as GitSha;
+const BASE_FETCH_GENERATION = 36;
+// The review-model pins stay test-local exact literals for the same reason: this
+// suite must compile against pre-rung production source, so the expected red is
+// a semantic plan mismatch and never a missing import.
+const REVIEW_MODEL = "59940aece2d051b79c8e2e8ab7c611a0d45600b2" as GitSha;
+const REVIEW_MODEL_GENERATION = 37;
+// The successor install pin stays a test-local exact literal for the same
+// reason: this suite must compile against pre-rung production source, so the
+// expected red is a semantic plan mismatch and never a missing import.
+const SUCCESSOR_REVISION = "3b6d3736e353ccfdb6da2902bb5be4184335803d" as GitSha;
+const SUCCESSOR_GENERATION = 38;
+// The publish-gate install pin stays a test-local exact literal for the same
+// reason: this suite must compile against pre-rung production source, so the
+// expected red is a semantic plan mismatch and never a missing import.
+const PUBLISH_GATE_REVISION =
+  "b022ec2fd554254aa7f0e9333d7faf2b09a99a68" as GitSha;
+const PUBLISH_GATE_GENERATION = 39;
+// The closing-keyword install pin stays a test-local exact literal for the
+// same reason: this suite must compile against pre-rung production source, so
+// the expected red is a semantic plan mismatch and never a missing import.
+const CLOSING_KEYWORD_REVISION =
+  "5e2a828420150f46631ea4b0f96a989307b74bdb" as GitSha;
+const CLOSING_KEYWORD_GENERATION = 40;
+// The candidate-loss install pin stays a test-local exact literal for the same
+// reason: this suite must compile against pre-rung production source, so the
+// expected red is a semantic plan mismatch and never a missing import.
+const CANDIDATE_LOSS_REVISION =
+  "09d2efbe962dec3e2f64ed45e76bc05ecbac0ab5" as GitSha;
+const CANDIDATE_LOSS_GENERATION = 41;
+// The closed-PR install pin stays a test-local exact literal for the same
+// reason: this suite must compile against pre-rung production source, so the
+// expected red is a semantic plan mismatch and never a missing import.
+const CLOSED_PR_REVISION = "58ae6135a01a0887e8f167b117c7d69420649dc1" as GitSha;
+const CLOSED_PR_GENERATION = 42;
+// The closed-PR head install pin stays a test-local exact literal for the same
+// reason: this suite must compile against pre-rung production source, so the
+// expected red is a semantic plan mismatch and never a missing import.
+const CLOSED_PR_HEAD_REVISION =
+  "a683d27e95a661e2cf7fba410f4a141257a659f3" as GitSha;
+const CLOSED_PR_HEAD_GENERATION = 43;
+// The assign-first install pin stays a test-local exact literal for the same
+// reason: this suite must compile against pre-rung production source, so the
+// expected red is a semantic plan mismatch and never a missing import.
+const ASSIGN_FIRST_REVISION =
+  "b58cce6d05d29ed493b60ae610b9950f3496386c" as GitSha;
+const ASSIGN_FIRST_GENERATION = 44;
+// The review-phase PR install pin stays a test-local exact literal for the
+// same reason: this suite must compile against pre-rung production source, so
+// the expected red is a semantic plan mismatch and never a missing import.
+const REVIEW_PHASE_PR_REVISION =
+  "529c2d3b81cf66f66d46d6c4cb1a573b3b4ba603" as GitSha;
+const REVIEW_PHASE_PR_GENERATION = 45;
+// The retry pin is the same owner-approved revision re-installed after a real
+// candidate failure rolled the pointer to its recorded prior.
+const REVIEW_PHASE_PR_RETRY_REVISION = REVIEW_PHASE_PR_REVISION;
+const REVIEW_PHASE_PR_RETRY_GENERATION = 47;
+// The livelock-bound install pin stays a test-local exact literal: this suite
+// must compile against pre-rung production source, so the expected red is a
+// semantic plan mismatch and never a missing import.
+const LIVELOCK_BOUND_REVISION =
+  "4304d1acd77d0e49874a2a59398c7fe00b94741c" as GitSha;
+const LIVELOCK_BOUND_GENERATION = 48;
+// The review-wait-bound install pin stays a test-local exact literal for the
+// same reason: this suite must compile against pre-rung production source, so
+// the expected red is a semantic plan mismatch and never a missing import.
+const REVIEW_WAIT_BOUND_REVISION =
+  "d0b9ac8542949ed2d880329f666f638103b0226c" as GitSha;
+const REVIEW_WAIT_BOUND_GENERATION = 49;
+// The cooldown-bound install pin stays a test-local exact literal: this suite
+// must compile against pre-rung production source, so the expected red is a
+// semantic plan mismatch and never a missing import.
+const COOLDOWN_BOUND_REVISION =
+  "46a182b0713f60279b3f1a521849e745ab3432b4" as GitSha;
+const COOLDOWN_BOUND_GENERATION = 50;
+// The child-deadline install pin stays a test-local exact literal: this suite
+// must compile against pre-rung production source, so the expected red is a
+// semantic plan mismatch and never a missing import.
+const CHILD_DEADLINE_REVISION =
+  "1f90f0a0b122bdcd424eb8fa6016a509bd3f6ed5" as GitSha;
+const CHILD_DEADLINE_GENERATION = 51;
+// The generation 52 rung pin stays a test-local exact literal: this suite must
+// also compile against pre-rung production source, where the new constant does
+// not exist, so the expected red is a semantic plan mismatch and never a
+// missing import.
+const RUNTIME52_REVISION = "80cc73a4a38d58a53e215b1b8daaccb8e6fe97b1" as GitSha;
+const RUNTIME52_GENERATION = 52;
+// The owner-repair generation 53 pin stays a test-local exact literal: this
+// suite must also compile against pre-rung production source, where the new
+// constant does not exist, so the expected red is a semantic plan mismatch and
+// never a missing import.
+const OWNER_REPAIR53_REVISION =
+  "573d862429ab49eefbfcb99bd1878926024af96d" as GitSha;
+const OWNER_REPAIR53_GENERATION = 53;
+// Keep the new rung's exact pins test-local so RED is a semantic plan failure.
+const RUNTIME54_REVISION = "a6c40a95ceb93fbdf1f85343409393c68d4fe13c" as GitSha;
+const RUNTIME54_GENERATION = 54;
+const RUNTIME55_REVISION = "275fee6dba74800b47e555f3f316b60be566ccb4" as GitSha;
+const RUNTIME55_GENERATION = 55;
+const ROLLBACK_TARGET_GENERATION = 46;
 
 function hostedProof(input: {
   runId: number;
@@ -754,21 +902,322 @@ Deno.test(
     if (receiptPlan.status !== "install") throw new Error("expected install");
     assert.equal(receiptPlan.move.nextRevision, RECEIPT);
     assert.equal(receiptPlan.move.nextGeneration, 15);
-    // The receipt-submission generation is the fixed end of the chain.
+    // The receipt-submission healthy proof authorizes the ledger install.
     const receiptHealthy = healthyProof(RECEIPT, 15, 86);
+    const ledgerPlan = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: RECEIPT,
+          generation: 15,
+          healthyProof: receiptHealthy,
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(ledgerPlan.status, "install");
+    if (ledgerPlan.status !== "install") throw new Error("expected install");
+    assert.equal(ledgerPlan.move.nextRevision, LEDGER);
+    assert.equal(ledgerPlan.move.nextGeneration, 16);
+    // The ledger healthy proof authorizes the settlement install, and the
+    // settlement generation is the fixed end of the chain.
+    const ledgerHealthy = healthyProof(LEDGER, 16, 87);
+    const settlementPlan = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: LEDGER,
+          generation: 16,
+          healthyProof: ledgerHealthy,
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(settlementPlan.status, "install");
+    if (settlementPlan.status !== "install") {
+      throw new Error("expected install");
+    }
+    assert.equal(settlementPlan.move.nextRevision, SETTLEMENT);
+    assert.equal(settlementPlan.move.nextGeneration, 17);
+    const settlementHealthy = healthyProof(SETTLEMENT, 17, 88);
+    const settlementHealthyPlan = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: SETTLEMENT,
+          generation: 17,
+          healthyProof: settlementHealthy,
+        }),
+      }),
+      NOW,
+    );
+    // The settlement healthy proof cannot authorize the two-generation jump to
+    // the trigger revision the snapshot builder always rejects; the separate
+    // hosted promotion owns the 17 -> 18 movement, so this waits.
+    assert.equal(settlementHealthyPlan.status, "waiting");
+    // The released generation the promotion accepted installs the trigger.
+    const releasedPlan = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: RELEASED,
+          generation: 18,
+          healthyProof: healthyProof(RELEASED, 18, 89),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(releasedPlan.status, "install");
+    if (releasedPlan.status !== "install") throw new Error("expected install");
+    assert.equal(releasedPlan.move.nextRevision, TRIGGER);
+    assert.equal(releasedPlan.move.nextGeneration, 19);
+    // The trigger healthy proof authorizes the base-advance install.
+    const triggerHealthy = healthyProof(TRIGGER, 19, 90);
+    const advancePlan = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: TRIGGER,
+          generation: 19,
+          healthyProof: triggerHealthy,
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(advancePlan.status, "install");
+    if (advancePlan.status !== "install") throw new Error("expected install");
+    assert.equal(advancePlan.move.nextRevision, ADVANCE);
+    assert.equal(advancePlan.move.nextGeneration, 20);
+    // The base-advance healthy proof authorizes the cadence install.
+    const advanceHealthy = healthyProof(ADVANCE, 20, 91);
+    const cadencePlan = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: ADVANCE,
+          generation: 20,
+          healthyProof: advanceHealthy,
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(cadencePlan.status, "install");
+    if (cadencePlan.status !== "install") throw new Error("expected install");
+    assert.equal(cadencePlan.move.nextRevision, CADENCE);
+    assert.equal(cadencePlan.move.nextGeneration, 21);
+    // The cadence healthy proof authorizes the guard install.
+    const cadenceHealthy = healthyProof(CADENCE, 21, 92);
+    const guardPlan = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: CADENCE,
+          generation: 21,
+          healthyProof: cadenceHealthy,
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(guardPlan.status, "install");
+    if (guardPlan.status !== "install") throw new Error("expected install");
+    assert.equal(guardPlan.move.nextRevision, GUARD);
+    assert.equal(guardPlan.move.nextGeneration, 22);
+    // The guard healthy proof authorizes the retirement install.
+    const guardHealthy = healthyProof(GUARD, 22, 93);
+    const retirePlan = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: GUARD,
+          generation: 22,
+          healthyProof: guardHealthy,
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(retirePlan.status, "install");
+    if (retirePlan.status !== "install") throw new Error("expected install");
+    assert.equal(retirePlan.move.nextRevision, RETIRE);
+    assert.equal(retirePlan.move.nextGeneration, 23);
+    // The retirement generation itself is a no-op (its install already ran).
     assert.equal(
       planOwnerDevelopmentInstall(
         releaseSnapshot({
           runtime: runtimeRecord({
-            revision: RECEIPT,
-            generation: 15,
-            healthyProof: receiptHealthy,
+            revision: RETIRE,
+            generation: 23,
+            healthyProof: healthyProof(RETIRE, 23, 94),
           }),
         }),
         NOW,
       ).status,
       "no_change",
     );
+    // The delivered round-2 revision past the retirement link authorizes the
+    // App identity install; its own healthy proof is the authority.
+    const appPlan = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: DELIVERED_ROUND2,
+          generation: 24,
+          healthyProof: healthyProof(DELIVERED_ROUND2, 24, 95),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(appPlan.status, "install");
+    if (appPlan.status !== "install") throw new Error("expected install");
+    assert.equal(appPlan.move.nextRevision, APP_IDENTITY);
+    assert.equal(appPlan.move.nextGeneration, 25);
+    // The App identity healthy proof authorizes the model-route install.
+    const routePlan = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: APP_IDENTITY,
+          generation: 25,
+          healthyProof: healthyProof(APP_IDENTITY, 25, 96),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(routePlan.status, "install");
+    if (routePlan.status !== "install") throw new Error("expected install");
+    assert.equal(routePlan.move.nextRevision, MODEL_ROUTE);
+    assert.equal(routePlan.move.nextGeneration, 26);
+    // The model-route healthy proof authorizes the reserve-model install.
+    const reservePlan = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: MODEL_ROUTE,
+          generation: 26,
+          healthyProof: healthyProof(MODEL_ROUTE, 26, 97),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(reservePlan.status, "install");
+    if (reservePlan.status !== "install") throw new Error("expected install");
+    assert.equal(reservePlan.move.nextRevision, RESERVE_MODEL);
+    assert.equal(reservePlan.move.nextGeneration, 27);
+    // The reserve-model healthy proof authorizes the multi-target install.
+    const multiTargetPlan = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: RESERVE_MODEL,
+          generation: 27,
+          healthyProof: healthyProof(RESERVE_MODEL, 27, 98),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(multiTargetPlan.status, "install");
+    if (multiTargetPlan.status !== "install") {
+      throw new Error("expected install");
+    }
+    assert.equal(multiTargetPlan.move.nextRevision, MULTI_TARGET);
+    assert.equal(multiTargetPlan.move.nextGeneration, 28);
+    // The multi-target healthy proof authorizes the scope-gate install.
+    const scopeGatePlan = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: MULTI_TARGET,
+          generation: 28,
+          healthyProof: healthyProof(MULTI_TARGET, 28, 99),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(scopeGatePlan.status, "install");
+    if (scopeGatePlan.status !== "install") {
+      throw new Error("expected install");
+    }
+    assert.equal(scopeGatePlan.move.nextRevision, SCOPE_GATE);
+    assert.equal(scopeGatePlan.move.nextGeneration, 29);
+    // The scope-gate healthy proof authorizes the target-scoped auth install.
+    const authPlan = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: SCOPE_GATE,
+          generation: 29,
+          healthyProof: healthyProof(SCOPE_GATE, 29, 100),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(authPlan.status, "install");
+    if (authPlan.status !== "install") throw new Error("expected install");
+    assert.equal(authPlan.move.nextRevision, CANDIDATE_AUTH);
+    assert.equal(authPlan.move.nextGeneration, 30);
+    // The candidate-auth healthy proof authorizes the preservation-scope
+    // install.
+    const preservePlan = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: CANDIDATE_AUTH,
+          generation: 30,
+          healthyProof: healthyProof(CANDIDATE_AUTH, 30, 101),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(preservePlan.status, "install");
+    if (preservePlan.status !== "install") throw new Error("expected install");
+    assert.equal(preservePlan.move.nextRevision, PRESERVE_SCOPE);
+    assert.equal(preservePlan.move.nextGeneration, 31);
+    // The preserve-scope healthy proof authorizes the foreign-auth install.
+    const auth2Plan = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: PRESERVE_SCOPE,
+          generation: 31,
+          healthyProof: healthyProof(PRESERVE_SCOPE, 31, 102),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(auth2Plan.status, "install");
+    if (auth2Plan.status !== "install") throw new Error("expected install");
+    assert.equal(auth2Plan.move.nextRevision, FOREIGN_AUTH);
+    assert.equal(auth2Plan.move.nextGeneration, 32);
+    // The foreign-auth healthy proof authorizes the reason-code install.
+    const reasonPlan = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: FOREIGN_AUTH,
+          generation: 32,
+          healthyProof: healthyProof(FOREIGN_AUTH, 32, 103),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(reasonPlan.status, "install");
+    if (reasonPlan.status !== "install") throw new Error("expected install");
+    assert.equal(reasonPlan.move.nextRevision, REASON_CODE);
+    assert.equal(reasonPlan.move.nextGeneration, 33);
+    // The reason-code healthy proof authorizes the settlement recovery install
+    // to the fixed owner-approved pin.
+    const reasonSettled = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: REASON_CODE,
+          generation: 33,
+          healthyProof: healthyProof(REASON_CODE, 33, 104),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(reasonSettled.status, "install");
+    if (reasonSettled.status !== "install") throw new Error("expected install");
+    assert.equal(reasonSettled.move.nextRevision, SETTLEMENT_RECOVERY);
+    assert.equal(reasonSettled.move.nextGeneration, 34);
+    // The settlement recovery healthy proof authorizes the fixed
+    // quiet-reasoning install, the last link of the chain.
+    const quietPlan = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: SETTLEMENT_RECOVERY,
+          generation: 34,
+          healthyProof: healthyProof(SETTLEMENT_RECOVERY, 34, 105),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(quietPlan.status, "install");
+    if (quietPlan.status !== "install") throw new Error("expected install");
+    assert.equal(quietPlan.move.nextRevision, QUIET_REASONING);
+    assert.equal(quietPlan.move.nextGeneration, QUIET_REASONING_GENERATION);
     const exitFailed = planOwnerDevelopmentInstall(
       releaseSnapshot({
         runtime: runtimeRecord({
@@ -922,6 +1371,2524 @@ Deno.test(
       ).status,
       "waiting",
     );
+  },
+);
+
+Deno.test(
+  "owner install: settlement recovery revision preserves install and rollback gates",
+  () => {
+    const reasonHealthy = healthyProof(REASON_CODE, 33, 111);
+    // The fixed owner-approved pin: only the recorded generation 33 healthy
+    // proof authorizes exactly one move to the settlement recovery revision.
+    assert.equal(
+      SETTLEMENT_RECOVERY,
+      "83a7cd8162d808887a27ad733c64db6e3a7c77ac",
+    );
+    const fixed = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: REASON_CODE,
+          generation: 33,
+          healthyProof: reasonHealthy,
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(fixed.status, "install");
+    if (fixed.status !== "install") throw new Error("expected install");
+    assert.equal(fixed.move.priorRevision, REASON_CODE);
+    assert.equal(fixed.move.priorGeneration, 33);
+    assert.equal(fixed.move.nextRevision, SETTLEMENT_RECOVERY);
+    assert.equal(fixed.move.nextGeneration, 34);
+    assert.equal(
+      canonicalStringify(fixed.move.priorHealthyProof),
+      canonicalStringify(reasonHealthy),
+    );
+
+    // A healthy proof bound to another revision or generation never
+    // authorizes the fixed pin.
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: REASON_CODE,
+            generation: 33,
+            healthyProof: healthyProof(SETTLEMENT_RECOVERY, 33, 112),
+          }),
+        }),
+        NOW,
+      ).status,
+      "waiting",
+    );
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: REASON_CODE,
+            generation: 33,
+            healthyProof: healthyProof(REASON_CODE, 34, 113),
+          }),
+        }),
+        NOW,
+      ).status,
+      "waiting",
+    );
+
+    // An in-flight execution, a non-terminal release and an active cooldown
+    // each keep the pin a zero-write wait.
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: REASON_CODE,
+            generation: 33,
+            healthyProof: reasonHealthy,
+            execution: executionIntent(REASON_CODE, 33),
+          }),
+        }),
+        NOW,
+      ).status,
+      "waiting",
+    );
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: REASON_CODE,
+            generation: 33,
+            healthyProof: reasonHealthy,
+          }),
+          hostedReleases: [requestedRelease()],
+        }),
+        NOW,
+      ).status,
+      "waiting",
+    );
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: REASON_CODE,
+            generation: 33,
+            healthyProof: reasonHealthy,
+          }),
+          cooldowns: [cooldown(NOW + 1)],
+        }),
+        NOW,
+      ).status,
+      "waiting",
+    );
+
+    // The installed generation 34 pointer is stable only with its own bound
+    // healthy proof; that proof authorizes the fixed quiet-reasoning install
+    // to generation 35.
+    const settlementHealthy = healthyProof(SETTLEMENT_RECOVERY, 34, 114);
+    const quietInstall = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: SETTLEMENT_RECOVERY,
+          generation: 34,
+          healthyProof: settlementHealthy,
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(quietInstall.status, "install");
+    if (quietInstall.status !== "install") throw new Error("expected install");
+    assert.equal(quietInstall.move.priorRevision, SETTLEMENT_RECOVERY);
+    assert.equal(quietInstall.move.priorGeneration, 34);
+    assert.equal(quietInstall.move.nextRevision, QUIET_REASONING);
+    assert.equal(quietInstall.move.nextGeneration, QUIET_REASONING_GENERATION);
+    assert.equal(
+      canonicalStringify(quietInstall.move.priorHealthyProof),
+      canonicalStringify(settlementHealthy),
+    );
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: SETTLEMENT_RECOVERY,
+            generation: 34,
+            healthyProof: reasonHealthy,
+          }),
+        }),
+        NOW,
+      ).status,
+      "waiting",
+    );
+
+    // A failed generation 34 candidate settles exactly once by rolling back to
+    // the genuine prior revision with a monotonic generation 35.
+    const failedSettlement = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: SETTLEMENT_RECOVERY,
+          generation: 34,
+          healthyProof: reasonHealthy,
+          executionProof: failedProof(SETTLEMENT_RECOVERY, 34, 115),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(failedSettlement.status, "rollback");
+    if (failedSettlement.status !== "rollback") {
+      throw new Error("expected rollback");
+    }
+    assert.equal(failedSettlement.move.priorRevision, SETTLEMENT_RECOVERY);
+    assert.equal(failedSettlement.move.priorGeneration, 34);
+    assert.equal(failedSettlement.move.nextRevision, REASON_CODE);
+    assert.equal(failedSettlement.move.nextGeneration, 35);
+    assert.equal(
+      canonicalStringify(failedSettlement.move.priorHealthyProof),
+      canonicalStringify(reasonHealthy),
+    );
+    // Without the recorded reason-code healthy proof the rollback waits.
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: SETTLEMENT_RECOVERY,
+            generation: 34,
+            executionProof: failedProof(SETTLEMENT_RECOVERY, 34, 116),
+          }),
+        }),
+        NOW,
+      ).status,
+      "waiting",
+    );
+  },
+);
+
+Deno.test(
+  "owner install: quiet reasoning revision preserves install and rollback gates",
+  () => {
+    const settlementHealthy = healthyProof(SETTLEMENT_RECOVERY, 34, 121);
+    // The fixed owner-approved pin: only the recorded generation 34 healthy
+    // proof authorizes exactly one move to the quiet reasoning revision.
+    const install = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: SETTLEMENT_RECOVERY,
+          generation: 34,
+          healthyProof: settlementHealthy,
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(install.status, "install");
+    if (install.status !== "install") throw new Error("expected install");
+    assert.equal(install.move.action, "install");
+    assert.equal(install.move.priorRevision, SETTLEMENT_RECOVERY);
+    assert.equal(install.move.priorGeneration, 34);
+    assert.equal(install.move.nextRevision, QUIET_REASONING);
+    assert.equal(install.move.nextGeneration, QUIET_REASONING_GENERATION);
+    assert.equal(install.move.nextGeneration, install.move.priorGeneration + 1);
+    assert.equal(
+      canonicalStringify(install.move.priorHealthyProof),
+      canonicalStringify(settlementHealthy),
+    );
+
+    // A healthy proof bound to another revision or generation, and no
+    // recorded proof at all, never authorize the fixed pin.
+    for (
+      const healthy of [
+        healthyProof(QUIET_REASONING, 34, 122),
+        healthyProof(SETTLEMENT_RECOVERY, 35, 123),
+        null,
+      ]
+    ) {
+      assert.equal(
+        planOwnerDevelopmentInstall(
+          releaseSnapshot({
+            runtime: runtimeRecord({
+              revision: SETTLEMENT_RECOVERY,
+              generation: 34,
+              healthyProof: healthy,
+            }),
+          }),
+          NOW,
+        ).status,
+        "waiting",
+      );
+    }
+
+    // An in-flight execution, a non-terminal release and an active cooldown
+    // each keep the pin a zero-write wait.
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: SETTLEMENT_RECOVERY,
+            generation: 34,
+            healthyProof: settlementHealthy,
+            execution: executionIntent(SETTLEMENT_RECOVERY, 34),
+          }),
+        }),
+        NOW,
+      ).status,
+      "waiting",
+    );
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: SETTLEMENT_RECOVERY,
+            generation: 34,
+            healthyProof: settlementHealthy,
+          }),
+          hostedReleases: [requestedRelease()],
+        }),
+        NOW,
+      ).status,
+      "waiting",
+    );
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: SETTLEMENT_RECOVERY,
+            generation: 34,
+            healthyProof: settlementHealthy,
+          }),
+          cooldowns: [cooldown(NOW + 1)],
+        }),
+        NOW,
+      ).status,
+      "waiting",
+    );
+
+    // The installed generation 35 pointer is stable only with its own bound
+    // healthy proof; that proof authorizes the fixed base fetch install to
+    // generation 36.
+    const quietHealthy = healthyProof(QUIET_REASONING, 35, 124);
+    const baseFetchInstall = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: QUIET_REASONING,
+          generation: QUIET_REASONING_GENERATION,
+          healthyProof: quietHealthy,
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(baseFetchInstall.status, "install");
+    if (baseFetchInstall.status !== "install") {
+      throw new Error("expected install");
+    }
+    assert.equal(baseFetchInstall.move.priorRevision, QUIET_REASONING);
+    assert.equal(
+      baseFetchInstall.move.priorGeneration,
+      QUIET_REASONING_GENERATION,
+    );
+    assert.equal(baseFetchInstall.move.nextRevision, BASE_FETCH);
+    assert.equal(baseFetchInstall.move.nextGeneration, BASE_FETCH_GENERATION);
+    assert.equal(
+      canonicalStringify(baseFetchInstall.move.priorHealthyProof),
+      canonicalStringify(quietHealthy),
+    );
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: QUIET_REASONING,
+            generation: QUIET_REASONING_GENERATION,
+            healthyProof: settlementHealthy,
+          }),
+        }),
+        NOW,
+      ).status,
+      "waiting",
+    );
+
+    // A failed generation 35 candidate settles exactly once by rolling back
+    // to the exact previously proven generation 34 revision with a monotonic
+    // generation 36, authorized by its recorded healthy proof.
+    const failed = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: QUIET_REASONING,
+          generation: QUIET_REASONING_GENERATION,
+          healthyProof: settlementHealthy,
+          executionProof: failedProof(
+            QUIET_REASONING,
+            QUIET_REASONING_GENERATION,
+            125,
+          ),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(failed.status, "rollback");
+    if (failed.status !== "rollback") throw new Error("expected rollback");
+    assert.equal(failed.move.action, "rollback");
+    assert.equal(failed.move.priorRevision, QUIET_REASONING);
+    assert.equal(failed.move.priorGeneration, QUIET_REASONING_GENERATION);
+    assert.equal(failed.move.nextRevision, SETTLEMENT_RECOVERY);
+    assert.equal(failed.move.nextGeneration, 36);
+    assert.equal(failed.move.nextGeneration, failed.move.priorGeneration + 1);
+    assert.equal(
+      canonicalStringify(failed.move.priorHealthyProof),
+      canonicalStringify(settlementHealthy),
+    );
+
+    // A failure that does not bind the exact pointer, a no-execution
+    // settlement and a missing recorded prior never roll back.
+    const waits = [
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: QUIET_REASONING,
+          generation: QUIET_REASONING_GENERATION,
+          healthyProof: settlementHealthy,
+          executionProof: failedProof(QUIET_REASONING, 34, 126),
+        }),
+      }),
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: QUIET_REASONING,
+          generation: QUIET_REASONING_GENERATION,
+          healthyProof: settlementHealthy,
+          executionProof: notStartedProof(
+            QUIET_REASONING,
+            QUIET_REASONING_GENERATION,
+          ),
+        }),
+      }),
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: QUIET_REASONING,
+          generation: QUIET_REASONING_GENERATION,
+          executionProof: failedProof(
+            QUIET_REASONING,
+            QUIET_REASONING_GENERATION,
+            127,
+          ),
+        }),
+      }),
+    ];
+    for (const state of waits) {
+      const plan = planOwnerDevelopmentInstall(state, NOW);
+      assert.notEqual(plan.status, "rollback");
+      assert.equal(plan.status, "waiting");
+    }
+
+    // The post-rollback generation 36 pointer is terminal: it is outside the
+    // one-shot chain and never reattempts either movement.
+    for (
+      const healthy of [
+        healthyProof(SETTLEMENT_RECOVERY, 36, 128),
+        null,
+      ]
+    ) {
+      assert.equal(
+        planOwnerDevelopmentInstall(
+          releaseSnapshot({
+            runtime: runtimeRecord({
+              revision: SETTLEMENT_RECOVERY,
+              generation: 36,
+              healthyProof: healthy,
+            }),
+          }),
+          NOW,
+        ).status,
+        "no_change",
+      );
+    }
+  },
+);
+
+Deno.test(
+  "owner install: base fetch revision preserves install and rollback gates",
+  () => {
+    const quietHealthy = healthyProof(QUIET_REASONING, 35, 131);
+    // The fixed owner-approved pin: only the recorded generation 35 healthy
+    // proof authorizes exactly one move to the base fetch revision.
+    const install = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: QUIET_REASONING,
+          generation: QUIET_REASONING_GENERATION,
+          healthyProof: quietHealthy,
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(install.status, "install");
+    if (install.status !== "install") throw new Error("expected install");
+    assert.equal(install.move.action, "install");
+    assert.equal(install.move.priorRevision, QUIET_REASONING);
+    assert.equal(install.move.priorGeneration, QUIET_REASONING_GENERATION);
+    assert.equal(install.move.nextRevision, BASE_FETCH);
+    assert.equal(install.move.nextGeneration, BASE_FETCH_GENERATION);
+    assert.equal(install.move.nextGeneration, install.move.priorGeneration + 1);
+    assert.equal(
+      canonicalStringify(install.move.priorHealthyProof),
+      canonicalStringify(quietHealthy),
+    );
+
+    // A healthy proof bound to another revision or generation, and no
+    // recorded proof at all, never authorize the fixed pin.
+    for (
+      const healthy of [
+        healthyProof(BASE_FETCH, 35, 132),
+        healthyProof(QUIET_REASONING, 36, 133),
+        null,
+      ]
+    ) {
+      assert.equal(
+        planOwnerDevelopmentInstall(
+          releaseSnapshot({
+            runtime: runtimeRecord({
+              revision: QUIET_REASONING,
+              generation: QUIET_REASONING_GENERATION,
+              healthyProof: healthy,
+            }),
+          }),
+          NOW,
+        ).status,
+        "waiting",
+      );
+    }
+
+    // An in-flight execution, a non-terminal release and an active cooldown
+    // each keep the pin a zero-write wait.
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: QUIET_REASONING,
+            generation: QUIET_REASONING_GENERATION,
+            healthyProof: quietHealthy,
+            execution: executionIntent(
+              QUIET_REASONING,
+              QUIET_REASONING_GENERATION,
+            ),
+          }),
+        }),
+        NOW,
+      ).status,
+      "waiting",
+    );
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: QUIET_REASONING,
+            generation: QUIET_REASONING_GENERATION,
+            healthyProof: quietHealthy,
+          }),
+          hostedReleases: [requestedRelease()],
+        }),
+        NOW,
+      ).status,
+      "waiting",
+    );
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: QUIET_REASONING,
+            generation: QUIET_REASONING_GENERATION,
+            healthyProof: quietHealthy,
+          }),
+          cooldowns: [cooldown(NOW + 1)],
+        }),
+        NOW,
+      ).status,
+      "waiting",
+    );
+
+    // The installed generation 36 pointer is stable only with its own bound
+    // healthy proof; that proof authorizes the fixed review model install to
+    // generation 37.
+    const baseFetchHealthy = healthyProof(BASE_FETCH, 36, 134);
+    const reviewModelInstall = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: BASE_FETCH,
+          generation: BASE_FETCH_GENERATION,
+          healthyProof: baseFetchHealthy,
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(reviewModelInstall.status, "install");
+    if (reviewModelInstall.status !== "install") {
+      throw new Error("expected install");
+    }
+    assert.equal(reviewModelInstall.move.priorRevision, BASE_FETCH);
+    assert.equal(
+      reviewModelInstall.move.priorGeneration,
+      BASE_FETCH_GENERATION,
+    );
+    assert.equal(reviewModelInstall.move.nextRevision, REVIEW_MODEL);
+    assert.equal(
+      reviewModelInstall.move.nextGeneration,
+      REVIEW_MODEL_GENERATION,
+    );
+    assert.equal(
+      canonicalStringify(reviewModelInstall.move.priorHealthyProof),
+      canonicalStringify(baseFetchHealthy),
+    );
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: BASE_FETCH,
+            generation: BASE_FETCH_GENERATION,
+            healthyProof: quietHealthy,
+          }),
+        }),
+        NOW,
+      ).status,
+      "waiting",
+    );
+
+    // A failed generation 36 candidate settles exactly once by rolling back
+    // to the exact previously proven generation 35 revision with a monotonic
+    // generation 37, authorized by its recorded healthy proof.
+    const failed = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: BASE_FETCH,
+          generation: BASE_FETCH_GENERATION,
+          healthyProof: quietHealthy,
+          executionProof: failedProof(BASE_FETCH, BASE_FETCH_GENERATION, 135),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(failed.status, "rollback");
+    if (failed.status !== "rollback") throw new Error("expected rollback");
+    assert.equal(failed.move.action, "rollback");
+    assert.equal(failed.move.priorRevision, BASE_FETCH);
+    assert.equal(failed.move.priorGeneration, BASE_FETCH_GENERATION);
+    assert.equal(failed.move.nextRevision, QUIET_REASONING);
+    assert.equal(failed.move.nextGeneration, 37);
+    assert.equal(failed.move.nextGeneration, failed.move.priorGeneration + 1);
+    assert.equal(
+      canonicalStringify(failed.move.priorHealthyProof),
+      canonicalStringify(quietHealthy),
+    );
+
+    // A failure that does not bind the exact pointer, a no-execution
+    // settlement and a missing recorded prior never roll back.
+    const waits = [
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: BASE_FETCH,
+          generation: BASE_FETCH_GENERATION,
+          healthyProof: quietHealthy,
+          executionProof: failedProof(BASE_FETCH, 35, 136),
+        }),
+      }),
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: BASE_FETCH,
+          generation: BASE_FETCH_GENERATION,
+          healthyProof: quietHealthy,
+          executionProof: notStartedProof(BASE_FETCH, BASE_FETCH_GENERATION),
+        }),
+      }),
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: BASE_FETCH,
+          generation: BASE_FETCH_GENERATION,
+          executionProof: failedProof(BASE_FETCH, BASE_FETCH_GENERATION, 137),
+        }),
+      }),
+    ];
+    for (const state of waits) {
+      const plan = planOwnerDevelopmentInstall(state, NOW);
+      assert.notEqual(plan.status, "rollback");
+      assert.equal(plan.status, "waiting");
+    }
+
+    // The post-rollback generation 37 pointer is terminal: it is outside the
+    // one-shot chain and never reattempts either movement.
+    for (
+      const healthy of [
+        healthyProof(QUIET_REASONING, 37, 138),
+        null,
+      ]
+    ) {
+      assert.equal(
+        planOwnerDevelopmentInstall(
+          releaseSnapshot({
+            runtime: runtimeRecord({
+              revision: QUIET_REASONING,
+              generation: 37,
+              healthyProof: healthy,
+            }),
+          }),
+          NOW,
+        ).status,
+        "no_change",
+      );
+    }
+  },
+);
+
+Deno.test(
+  "owner install: review model revision preserves install and rollback gates",
+  () => {
+    const baseFetchHealthy = healthyProof(BASE_FETCH, 36, 141);
+    // The fixed owner-approved pin: only the recorded generation 36 healthy
+    // proof authorizes exactly one move to the review model revision.
+    const install = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: BASE_FETCH,
+          generation: BASE_FETCH_GENERATION,
+          healthyProof: baseFetchHealthy,
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(install.status, "install");
+    if (install.status !== "install") throw new Error("expected install");
+    assert.equal(install.move.action, "install");
+    assert.equal(install.move.priorRevision, BASE_FETCH);
+    assert.equal(install.move.priorGeneration, BASE_FETCH_GENERATION);
+    assert.equal(install.move.nextRevision, REVIEW_MODEL);
+    assert.equal(install.move.nextGeneration, REVIEW_MODEL_GENERATION);
+    assert.equal(install.move.nextGeneration, install.move.priorGeneration + 1);
+    assert.equal(
+      canonicalStringify(install.move.priorHealthyProof),
+      canonicalStringify(baseFetchHealthy),
+    );
+
+    // A healthy proof bound to another revision or generation, and no
+    // recorded proof at all, never authorize the fixed pin.
+    for (
+      const healthy of [
+        healthyProof(REVIEW_MODEL, 36, 142),
+        healthyProof(BASE_FETCH, 37, 143),
+        null,
+      ]
+    ) {
+      assert.equal(
+        planOwnerDevelopmentInstall(
+          releaseSnapshot({
+            runtime: runtimeRecord({
+              revision: BASE_FETCH,
+              generation: BASE_FETCH_GENERATION,
+              healthyProof: healthy,
+            }),
+          }),
+          NOW,
+        ).status,
+        "waiting",
+      );
+    }
+
+    // An in-flight execution, a non-terminal release and an active cooldown
+    // each keep the pin a zero-write wait.
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: BASE_FETCH,
+            generation: BASE_FETCH_GENERATION,
+            healthyProof: baseFetchHealthy,
+            execution: executionIntent(BASE_FETCH, BASE_FETCH_GENERATION),
+          }),
+        }),
+        NOW,
+      ).status,
+      "waiting",
+    );
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: BASE_FETCH,
+            generation: BASE_FETCH_GENERATION,
+            healthyProof: baseFetchHealthy,
+          }),
+          hostedReleases: [requestedRelease()],
+        }),
+        NOW,
+      ).status,
+      "waiting",
+    );
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: BASE_FETCH,
+            generation: BASE_FETCH_GENERATION,
+            healthyProof: baseFetchHealthy,
+          }),
+          cooldowns: [cooldown(NOW + 1)],
+        }),
+        NOW,
+      ).status,
+      "waiting",
+    );
+
+    // The review model generation 37 healthy proof authorizes exactly one
+    // move to the fixed owner-approved successor runtime revision.
+    const reviewModelHealthy = healthyProof(REVIEW_MODEL, 37, 144);
+    const successorInstall = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: REVIEW_MODEL,
+          generation: REVIEW_MODEL_GENERATION,
+          healthyProof: reviewModelHealthy,
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(successorInstall.status, "install");
+    if (successorInstall.status !== "install") {
+      throw new Error("expected successor install");
+    }
+    assert.equal(successorInstall.move.action, "install");
+    assert.equal(successorInstall.move.priorRevision, REVIEW_MODEL);
+    assert.equal(
+      successorInstall.move.priorGeneration,
+      REVIEW_MODEL_GENERATION,
+    );
+    assert.equal(successorInstall.move.nextRevision, SUCCESSOR_REVISION);
+    assert.equal(successorInstall.move.nextGeneration, SUCCESSOR_GENERATION);
+    assert.equal(
+      successorInstall.move.nextGeneration,
+      successorInstall.move.priorGeneration + 1,
+    );
+    assert.equal(
+      canonicalStringify(successorInstall.move.priorHealthyProof),
+      canonicalStringify(reviewModelHealthy),
+    );
+
+    // A healthy proof bound to another revision or generation, and no
+    // recorded proof at all, never authorize the successor pin.
+    for (
+      const healthy of [
+        baseFetchHealthy,
+        healthyProof(SUCCESSOR_REVISION, 37, 149),
+        healthyProof(REVIEW_MODEL, 38, 150),
+        null,
+      ]
+    ) {
+      assert.equal(
+        planOwnerDevelopmentInstall(
+          releaseSnapshot({
+            runtime: runtimeRecord({
+              revision: REVIEW_MODEL,
+              generation: REVIEW_MODEL_GENERATION,
+              healthyProof: healthy,
+            }),
+          }),
+          NOW,
+        ).status,
+        "waiting",
+      );
+    }
+
+    // An in-flight execution of the authorized successor install stays a
+    // zero-write wait.
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: REVIEW_MODEL,
+            generation: REVIEW_MODEL_GENERATION,
+            healthyProof: reviewModelHealthy,
+            execution: executionIntent(REVIEW_MODEL, REVIEW_MODEL_GENERATION),
+          }),
+        }),
+        NOW,
+      ).status,
+      "waiting",
+    );
+
+    // The installed successor generation 38 pointer is stable only with its
+    // own bound healthy proof, and that exact proof authorizes exactly one
+    // move to the fixed owner-approved successor runtime revision.
+    const successorHealthy = healthyProof(SUCCESSOR_REVISION, 38, 151);
+    const publishGateInstall = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: SUCCESSOR_REVISION,
+          generation: SUCCESSOR_GENERATION,
+          healthyProof: successorHealthy,
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(publishGateInstall.status, "install");
+    if (publishGateInstall.status !== "install") {
+      throw new Error("expected publish gate install");
+    }
+    assert.equal(publishGateInstall.move.action, "install");
+    assert.equal(publishGateInstall.move.priorRevision, SUCCESSOR_REVISION);
+    assert.equal(
+      publishGateInstall.move.priorGeneration,
+      SUCCESSOR_GENERATION,
+    );
+    assert.equal(publishGateInstall.move.nextRevision, PUBLISH_GATE_REVISION);
+    assert.equal(
+      publishGateInstall.move.nextGeneration,
+      PUBLISH_GATE_GENERATION,
+    );
+    assert.equal(
+      publishGateInstall.move.nextGeneration,
+      publishGateInstall.move.priorGeneration + 1,
+    );
+    assert.equal(
+      canonicalStringify(publishGateInstall.move.priorHealthyProof),
+      canonicalStringify(successorHealthy),
+    );
+    for (
+      const healthy of [
+        reviewModelHealthy,
+        healthyProof(SUCCESSOR_REVISION, 39, 152),
+        null,
+      ]
+    ) {
+      assert.equal(
+        planOwnerDevelopmentInstall(
+          releaseSnapshot({
+            runtime: runtimeRecord({
+              revision: SUCCESSOR_REVISION,
+              generation: SUCCESSOR_GENERATION,
+              healthyProof: healthy,
+            }),
+          }),
+          NOW,
+        ).status,
+        "waiting",
+      );
+    }
+
+    // The installed publish-gate generation 39 pointer is stable only with
+    // its own bound healthy proof, and that exact proof authorizes exactly one
+    // move to the fixed owner-approved successor runtime revision.
+    const publishGateHealthy = healthyProof(PUBLISH_GATE_REVISION, 39, 157);
+    const closingKeywordInstall = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: PUBLISH_GATE_REVISION,
+          generation: PUBLISH_GATE_GENERATION,
+          healthyProof: publishGateHealthy,
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(closingKeywordInstall.status, "install");
+    if (closingKeywordInstall.status !== "install") {
+      throw new Error("expected closing keyword install");
+    }
+    assert.equal(closingKeywordInstall.move.action, "install");
+    assert.equal(
+      closingKeywordInstall.move.priorRevision,
+      PUBLISH_GATE_REVISION,
+    );
+    assert.equal(
+      closingKeywordInstall.move.priorGeneration,
+      PUBLISH_GATE_GENERATION,
+    );
+    assert.equal(
+      closingKeywordInstall.move.nextRevision,
+      CLOSING_KEYWORD_REVISION,
+    );
+    assert.equal(
+      closingKeywordInstall.move.nextGeneration,
+      CLOSING_KEYWORD_GENERATION,
+    );
+    assert.equal(
+      closingKeywordInstall.move.nextGeneration,
+      closingKeywordInstall.move.priorGeneration + 1,
+    );
+    assert.equal(
+      canonicalStringify(closingKeywordInstall.move.priorHealthyProof),
+      canonicalStringify(publishGateHealthy),
+    );
+    for (
+      const healthy of [
+        successorHealthy,
+        healthyProof(PUBLISH_GATE_REVISION, 38, 158),
+        null,
+      ]
+    ) {
+      assert.equal(
+        planOwnerDevelopmentInstall(
+          releaseSnapshot({
+            runtime: runtimeRecord({
+              revision: PUBLISH_GATE_REVISION,
+              generation: PUBLISH_GATE_GENERATION,
+              healthyProof: healthy,
+            }),
+          }),
+          NOW,
+        ).status,
+        "waiting",
+      );
+    }
+
+    // The installed closing-keyword generation 40 pointer is stable only with
+    // its own bound healthy proof, and that exact proof authorizes exactly one
+    // move to the fixed owner-approved successor runtime revision.
+    const closingKeywordHealthy = healthyProof(
+      CLOSING_KEYWORD_REVISION,
+      40,
+      163,
+    );
+    const candidateLossInstall = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: CLOSING_KEYWORD_REVISION,
+          generation: CLOSING_KEYWORD_GENERATION,
+          healthyProof: closingKeywordHealthy,
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(candidateLossInstall.status, "install");
+    if (candidateLossInstall.status !== "install") {
+      throw new Error("expected candidate loss install");
+    }
+    assert.equal(candidateLossInstall.move.action, "install");
+    assert.equal(
+      candidateLossInstall.move.priorRevision,
+      CLOSING_KEYWORD_REVISION,
+    );
+    assert.equal(
+      candidateLossInstall.move.priorGeneration,
+      CLOSING_KEYWORD_GENERATION,
+    );
+    assert.equal(
+      candidateLossInstall.move.nextRevision,
+      CANDIDATE_LOSS_REVISION,
+    );
+    assert.equal(
+      candidateLossInstall.move.nextGeneration,
+      CANDIDATE_LOSS_GENERATION,
+    );
+    assert.equal(
+      candidateLossInstall.move.nextGeneration,
+      candidateLossInstall.move.priorGeneration + 1,
+    );
+    assert.equal(
+      canonicalStringify(candidateLossInstall.move.priorHealthyProof),
+      canonicalStringify(closingKeywordHealthy),
+    );
+    for (
+      const healthy of [
+        publishGateHealthy,
+        healthyProof(CLOSING_KEYWORD_REVISION, 39, 164),
+        null,
+      ]
+    ) {
+      assert.equal(
+        planOwnerDevelopmentInstall(
+          releaseSnapshot({
+            runtime: runtimeRecord({
+              revision: CLOSING_KEYWORD_REVISION,
+              generation: CLOSING_KEYWORD_GENERATION,
+              healthyProof: healthy,
+            }),
+          }),
+          NOW,
+        ).status,
+        "waiting",
+      );
+    }
+
+    // The installed candidate-loss generation 41 pointer is stable only with
+    // its own bound healthy proof, and that exact proof authorizes exactly one
+    // move to the fixed owner-approved successor runtime revision.
+    const candidateLossHealthy = healthyProof(CANDIDATE_LOSS_REVISION, 41, 168);
+    const closedPrInstall = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: CANDIDATE_LOSS_REVISION,
+          generation: CANDIDATE_LOSS_GENERATION,
+          healthyProof: candidateLossHealthy,
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(closedPrInstall.status, "install");
+    if (closedPrInstall.status !== "install") {
+      throw new Error("expected closed PR install");
+    }
+    assert.equal(closedPrInstall.move.action, "install");
+    assert.equal(
+      closedPrInstall.move.priorRevision,
+      CANDIDATE_LOSS_REVISION,
+    );
+    assert.equal(
+      closedPrInstall.move.priorGeneration,
+      CANDIDATE_LOSS_GENERATION,
+    );
+    assert.equal(closedPrInstall.move.nextRevision, CLOSED_PR_REVISION);
+    assert.equal(closedPrInstall.move.nextGeneration, CLOSED_PR_GENERATION);
+    assert.equal(
+      closedPrInstall.move.nextGeneration,
+      closedPrInstall.move.priorGeneration + 1,
+    );
+    assert.equal(
+      canonicalStringify(closedPrInstall.move.priorHealthyProof),
+      canonicalStringify(candidateLossHealthy),
+    );
+    for (
+      const healthy of [
+        closingKeywordHealthy,
+        healthyProof(CANDIDATE_LOSS_REVISION, 40, 169),
+        null,
+      ]
+    ) {
+      assert.equal(
+        planOwnerDevelopmentInstall(
+          releaseSnapshot({
+            runtime: runtimeRecord({
+              revision: CANDIDATE_LOSS_REVISION,
+              generation: CANDIDATE_LOSS_GENERATION,
+              healthyProof: healthy,
+            }),
+          }),
+          NOW,
+        ).status,
+        "waiting",
+      );
+    }
+
+    // The installed closed-PR generation 42 pointer is stable only with its
+    // own bound healthy proof, and that exact proof authorizes exactly one
+    // move to the fixed owner-approved successor runtime revision.
+    const closedPrHealthy = healthyProof(CLOSED_PR_REVISION, 42, 173);
+    const closedPrHeadInstall = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: CLOSED_PR_REVISION,
+          generation: CLOSED_PR_GENERATION,
+          healthyProof: closedPrHealthy,
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(closedPrHeadInstall.status, "install");
+    if (closedPrHeadInstall.status !== "install") {
+      throw new Error("expected closed PR head install");
+    }
+    assert.equal(closedPrHeadInstall.move.action, "install");
+    assert.equal(closedPrHeadInstall.move.priorRevision, CLOSED_PR_REVISION);
+    assert.equal(
+      closedPrHeadInstall.move.priorGeneration,
+      CLOSED_PR_GENERATION,
+    );
+    assert.equal(
+      closedPrHeadInstall.move.nextRevision,
+      CLOSED_PR_HEAD_REVISION,
+    );
+    assert.equal(
+      closedPrHeadInstall.move.nextGeneration,
+      CLOSED_PR_HEAD_GENERATION,
+    );
+    assert.equal(
+      closedPrHeadInstall.move.nextGeneration,
+      closedPrHeadInstall.move.priorGeneration + 1,
+    );
+    assert.equal(
+      canonicalStringify(closedPrHeadInstall.move.priorHealthyProof),
+      canonicalStringify(closedPrHealthy),
+    );
+    for (
+      const healthy of [
+        candidateLossHealthy,
+        healthyProof(CLOSED_PR_REVISION, 41, 174),
+        null,
+      ]
+    ) {
+      assert.equal(
+        planOwnerDevelopmentInstall(
+          releaseSnapshot({
+            runtime: runtimeRecord({
+              revision: CLOSED_PR_REVISION,
+              generation: CLOSED_PR_GENERATION,
+              healthyProof: healthy,
+            }),
+          }),
+          NOW,
+        ).status,
+        "waiting",
+      );
+    }
+
+    // The installed closed-PR head generation 43 pointer is stable only with
+    // its own bound healthy proof, and that exact proof authorizes exactly one
+    // move to the fixed owner-approved successor runtime revision.
+    const closedPrHeadHealthy = healthyProof(
+      CLOSED_PR_HEAD_REVISION,
+      43,
+      178,
+    );
+    const assignFirstInstall = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: CLOSED_PR_HEAD_REVISION,
+          generation: CLOSED_PR_HEAD_GENERATION,
+          healthyProof: closedPrHeadHealthy,
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(assignFirstInstall.status, "install");
+    if (assignFirstInstall.status !== "install") {
+      throw new Error("expected assign first install");
+    }
+    assert.equal(assignFirstInstall.move.action, "install");
+    assert.equal(
+      assignFirstInstall.move.priorRevision,
+      CLOSED_PR_HEAD_REVISION,
+    );
+    assert.equal(
+      assignFirstInstall.move.priorGeneration,
+      CLOSED_PR_HEAD_GENERATION,
+    );
+    assert.equal(assignFirstInstall.move.nextRevision, ASSIGN_FIRST_REVISION);
+    assert.equal(
+      assignFirstInstall.move.nextGeneration,
+      ASSIGN_FIRST_GENERATION,
+    );
+    assert.equal(
+      assignFirstInstall.move.nextGeneration,
+      assignFirstInstall.move.priorGeneration + 1,
+    );
+    assert.equal(
+      canonicalStringify(assignFirstInstall.move.priorHealthyProof),
+      canonicalStringify(closedPrHeadHealthy),
+    );
+    for (
+      const healthy of [
+        closedPrHealthy,
+        healthyProof(CLOSED_PR_HEAD_REVISION, 42, 179),
+        null,
+      ]
+    ) {
+      assert.equal(
+        planOwnerDevelopmentInstall(
+          releaseSnapshot({
+            runtime: runtimeRecord({
+              revision: CLOSED_PR_HEAD_REVISION,
+              generation: CLOSED_PR_HEAD_GENERATION,
+              healthyProof: healthy,
+            }),
+          }),
+          NOW,
+        ).status,
+        "waiting",
+      );
+    }
+
+    // The installed assign-first generation 44 pointer is stable only with its
+    // own bound healthy proof, and that exact proof authorizes exactly one
+    // move to the fixed owner-approved successor runtime revision.
+    const assignFirstHealthy = healthyProof(ASSIGN_FIRST_REVISION, 44, 183);
+    const reviewPhaseInstall = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: ASSIGN_FIRST_REVISION,
+          generation: ASSIGN_FIRST_GENERATION,
+          healthyProof: assignFirstHealthy,
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(reviewPhaseInstall.status, "install");
+    if (reviewPhaseInstall.status !== "install") {
+      throw new Error("expected review-phase PR install");
+    }
+    assert.equal(reviewPhaseInstall.move.action, "install");
+    assert.equal(
+      reviewPhaseInstall.move.priorRevision,
+      ASSIGN_FIRST_REVISION,
+    );
+    assert.equal(
+      reviewPhaseInstall.move.priorGeneration,
+      ASSIGN_FIRST_GENERATION,
+    );
+    assert.equal(
+      reviewPhaseInstall.move.nextRevision,
+      REVIEW_PHASE_PR_REVISION,
+    );
+    assert.equal(
+      reviewPhaseInstall.move.nextGeneration,
+      REVIEW_PHASE_PR_GENERATION,
+    );
+    assert.equal(
+      reviewPhaseInstall.move.nextGeneration,
+      reviewPhaseInstall.move.priorGeneration + 1,
+    );
+    assert.equal(
+      canonicalStringify(reviewPhaseInstall.move.priorHealthyProof),
+      canonicalStringify(assignFirstHealthy),
+    );
+    for (
+      const healthy of [
+        closedPrHeadHealthy,
+        healthyProof(ASSIGN_FIRST_REVISION, 43, 184),
+        null,
+      ]
+    ) {
+      assert.equal(
+        planOwnerDevelopmentInstall(
+          releaseSnapshot({
+            runtime: runtimeRecord({
+              revision: ASSIGN_FIRST_REVISION,
+              generation: ASSIGN_FIRST_GENERATION,
+              healthyProof: healthy,
+            }),
+          }),
+          NOW,
+        ).status,
+        "waiting",
+      );
+    }
+
+    // The installed review-phase PR generation 45 pointer is stable only with
+    // its own bound healthy proof, and that stable pointer is terminal.
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: REVIEW_PHASE_PR_REVISION,
+            generation: REVIEW_PHASE_PR_GENERATION,
+            healthyProof: healthyProof(REVIEW_PHASE_PR_REVISION, 45, 188),
+          }),
+        }),
+        NOW,
+      ).status,
+      "no_change",
+    );
+    for (
+      const healthy of [
+        assignFirstHealthy,
+        healthyProof(REVIEW_PHASE_PR_REVISION, 44, 189),
+        null,
+      ]
+    ) {
+      assert.equal(
+        planOwnerDevelopmentInstall(
+          releaseSnapshot({
+            runtime: runtimeRecord({
+              revision: REVIEW_PHASE_PR_REVISION,
+              generation: REVIEW_PHASE_PR_GENERATION,
+              healthyProof: healthy,
+            }),
+          }),
+          NOW,
+        ).status,
+        "waiting",
+      );
+    }
+
+    // The generation 45 candidate really failed (a runner shutdown killed its
+    // execution), so the guard rolled exactly once to the recorded prior at
+    // monotonic generation 46; that rollback-target pointer is now the base of
+    // a separate owner-approved rung.
+    const rollbackTargetHealthy = healthyProof(
+      ASSIGN_FIRST_REVISION,
+      ROLLBACK_TARGET_GENERATION,
+      193,
+    );
+    const retryInstall = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: ASSIGN_FIRST_REVISION,
+          generation: ROLLBACK_TARGET_GENERATION,
+          healthyProof: rollbackTargetHealthy,
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(retryInstall.status, "install");
+    if (retryInstall.status !== "install") {
+      throw new Error("expected review-phase PR retry install");
+    }
+    assert.equal(retryInstall.move.action, "install");
+    assert.equal(retryInstall.move.priorRevision, ASSIGN_FIRST_REVISION);
+    assert.equal(
+      retryInstall.move.priorGeneration,
+      ROLLBACK_TARGET_GENERATION,
+    );
+    assert.equal(
+      retryInstall.move.nextRevision,
+      REVIEW_PHASE_PR_RETRY_REVISION,
+    );
+    assert.equal(
+      retryInstall.move.nextGeneration,
+      REVIEW_PHASE_PR_RETRY_GENERATION,
+    );
+    assert.equal(
+      retryInstall.move.nextGeneration,
+      retryInstall.move.priorGeneration + 1,
+    );
+    assert.equal(
+      canonicalStringify(retryInstall.move.priorHealthyProof),
+      canonicalStringify(rollbackTargetHealthy),
+    );
+
+    // A failed retry candidate rolls exactly once more to the same recorded
+    // prior at generation 48, and a missing proof stays a zero-write wait.
+    const failedRetry = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: REVIEW_PHASE_PR_RETRY_REVISION,
+          generation: REVIEW_PHASE_PR_RETRY_GENERATION,
+          healthyProof: rollbackTargetHealthy,
+          executionProof: failedProof(
+            REVIEW_PHASE_PR_RETRY_REVISION,
+            REVIEW_PHASE_PR_RETRY_GENERATION,
+            194,
+          ),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(failedRetry.status, "rollback");
+    if (failedRetry.status !== "rollback") {
+      throw new Error("expected review-phase PR retry rollback");
+    }
+    assert.equal(failedRetry.move.nextRevision, ASSIGN_FIRST_REVISION);
+    assert.equal(failedRetry.move.nextGeneration, 48);
+    assert.equal(
+      canonicalStringify(failedRetry.move.priorHealthyProof),
+      canonicalStringify(rollbackTargetHealthy),
+    );
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: REVIEW_PHASE_PR_RETRY_REVISION,
+            generation: REVIEW_PHASE_PR_RETRY_GENERATION,
+            executionProof: failedProof(
+              REVIEW_PHASE_PR_RETRY_REVISION,
+              REVIEW_PHASE_PR_RETRY_GENERATION,
+              195,
+            ),
+          }),
+        }),
+        NOW,
+      ).status,
+      "waiting",
+    );
+
+    // The installed retry generation 47 pointer is stable only with its own
+    // bound healthy proof, and that proof authorizes exactly one further
+    // owner-approved move: the livelock-bound revision at generation 48.
+    const retryHealthy = healthyProof(
+      REVIEW_PHASE_PR_RETRY_REVISION,
+      REVIEW_PHASE_PR_RETRY_GENERATION,
+      196,
+    );
+    const livelockInstall = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: REVIEW_PHASE_PR_RETRY_REVISION,
+          generation: REVIEW_PHASE_PR_RETRY_GENERATION,
+          healthyProof: retryHealthy,
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(livelockInstall.status, "install");
+    if (livelockInstall.status !== "install") {
+      throw new Error("expected livelock-bound install");
+    }
+    assert.equal(
+      livelockInstall.move.nextRevision,
+      LIVELOCK_BOUND_REVISION,
+    );
+    assert.equal(
+      livelockInstall.move.nextGeneration,
+      LIVELOCK_BOUND_GENERATION,
+    );
+    assert.equal(
+      livelockInstall.move.nextGeneration,
+      livelockInstall.move.priorGeneration + 1,
+    );
+    assert.equal(
+      canonicalStringify(livelockInstall.move.priorHealthyProof),
+      canonicalStringify(retryHealthy),
+    );
+
+    // The installed generation 48 pointer is terminal only with its own bound
+    // healthy proof; without it the plan is a zero-write wait, and a failed
+    // candidate rolls back exactly once to the recorded retry prior at a
+    // monotonic generation. Its own healthy proof authorizes exactly one
+    // further move: the review-wait-bound revision at generation 49.
+    const livelockHealthy = healthyProof(
+      LIVELOCK_BOUND_REVISION,
+      LIVELOCK_BOUND_GENERATION,
+      197,
+    );
+    const reviewWaitInstall = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: LIVELOCK_BOUND_REVISION,
+          generation: LIVELOCK_BOUND_GENERATION,
+          healthyProof: livelockHealthy,
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(reviewWaitInstall.status, "install");
+    if (reviewWaitInstall.status !== "install") {
+      throw new Error("expected review-wait-bound install");
+    }
+    assert.equal(
+      reviewWaitInstall.move.nextRevision,
+      REVIEW_WAIT_BOUND_REVISION,
+    );
+    assert.equal(
+      reviewWaitInstall.move.nextGeneration,
+      REVIEW_WAIT_BOUND_GENERATION,
+    );
+    assert.equal(
+      reviewWaitInstall.move.nextGeneration,
+      reviewWaitInstall.move.priorGeneration + 1,
+    );
+    assert.equal(
+      canonicalStringify(reviewWaitInstall.move.priorHealthyProof),
+      canonicalStringify(livelockHealthy),
+    );
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: LIVELOCK_BOUND_REVISION,
+            generation: LIVELOCK_BOUND_GENERATION,
+          }),
+        }),
+        NOW,
+      ).status,
+      "waiting",
+    );
+    const reviewWaitHealthy = healthyProof(
+      REVIEW_WAIT_BOUND_REVISION,
+      REVIEW_WAIT_BOUND_GENERATION,
+      199,
+    );
+    const cooldownInstall = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: REVIEW_WAIT_BOUND_REVISION,
+          generation: REVIEW_WAIT_BOUND_GENERATION,
+          healthyProof: reviewWaitHealthy,
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(cooldownInstall.status, "install");
+    if (cooldownInstall.status !== "install") {
+      throw new Error("expected cooldown-bound install");
+    }
+    assert.equal(cooldownInstall.move.nextRevision, COOLDOWN_BOUND_REVISION);
+    assert.equal(
+      cooldownInstall.move.nextGeneration,
+      COOLDOWN_BOUND_GENERATION,
+    );
+    assert.equal(
+      cooldownInstall.move.nextGeneration,
+      cooldownInstall.move.priorGeneration + 1,
+    );
+    assert.equal(
+      canonicalStringify(cooldownInstall.move.priorHealthyProof),
+      canonicalStringify(reviewWaitHealthy),
+    );
+    // The installed generation 50 pointer is stable only with its own bound
+    // healthy proof; without it the plan waits, and a failed candidate rolls
+    // back exactly once to the recorded review-wait-bound prior. Its own
+    // healthy proof authorizes exactly one further, final move: the
+    // child-deadline revision at generation 51.
+    const cooldownHealthy = healthyProof(
+      COOLDOWN_BOUND_REVISION,
+      COOLDOWN_BOUND_GENERATION,
+      201,
+    );
+    const childDeadlineState = releaseSnapshot({
+      runtime: runtimeRecord({
+        revision: COOLDOWN_BOUND_REVISION,
+        generation: COOLDOWN_BOUND_GENERATION,
+        healthyProof: cooldownHealthy,
+        executionProof: cooldownHealthy,
+      }),
+      hostedReleases: [acceptedRelease()],
+      cooldowns: [cooldown(NOW - 1)],
+    });
+    const childDeadlineInstall = planOwnerDevelopmentInstall(
+      childDeadlineState,
+      NOW,
+    );
+    assert.equal(childDeadlineInstall.status, "install");
+    if (childDeadlineInstall.status !== "install") {
+      throw new Error("expected child-deadline install");
+    }
+    assert.equal(childDeadlineInstall.move.action, "install");
+    assert.equal(
+      childDeadlineInstall.move.priorRevision,
+      COOLDOWN_BOUND_REVISION,
+    );
+    assert.equal(
+      childDeadlineInstall.move.priorGeneration,
+      COOLDOWN_BOUND_GENERATION,
+    );
+    assert.equal(
+      childDeadlineInstall.move.nextRevision,
+      CHILD_DEADLINE_REVISION,
+    );
+    assert.equal(
+      childDeadlineInstall.move.nextGeneration,
+      CHILD_DEADLINE_GENERATION,
+    );
+    assert.equal(
+      childDeadlineInstall.move.nextGeneration,
+      childDeadlineInstall.move.priorGeneration + 1,
+    );
+    assert.equal(
+      canonicalStringify(childDeadlineInstall.move.priorHealthyProof),
+      canonicalStringify(cooldownHealthy),
+    );
+    // The planned move builds the exact intended snapshot: only the pointer,
+    // generation and timestamps change and every historical proof is preserved.
+    const childDeadlinePlanned = buildOwnerDevelopmentInstallSnapshot(
+      childDeadlineState,
+      STATE_HEAD,
+      childDeadlineInstall.move,
+      NOW,
+    );
+    assert.equal(
+      childDeadlinePlanned.sequence,
+      childDeadlineState.sequence + 1,
+    );
+    assert.equal(childDeadlinePlanned.stateHead, STATE_HEAD);
+    assert.equal(
+      childDeadlinePlanned.hostedRuntimes[0].activeRevision,
+      CHILD_DEADLINE_REVISION,
+    );
+    assert.equal(
+      childDeadlinePlanned.hostedRuntimes[0].generation,
+      CHILD_DEADLINE_GENERATION,
+    );
+    assert.equal(
+      canonicalStringify(
+        childDeadlinePlanned.hostedRuntimes[0].lastHealthyProof,
+      ),
+      canonicalStringify(cooldownHealthy),
+    );
+    // A healthy proof bound to another revision or generation, and no recorded
+    // proof at all, never authorize the fixed child-deadline pin.
+    for (
+      const healthy of [
+        healthyProof(
+          COOLDOWN_BOUND_REVISION,
+          COOLDOWN_BOUND_GENERATION - 1,
+          208,
+        ),
+        healthyProof(
+          REVIEW_WAIT_BOUND_REVISION,
+          COOLDOWN_BOUND_GENERATION,
+          209,
+        ),
+        null,
+      ]
+    ) {
+      assert.equal(
+        planOwnerDevelopmentInstall(
+          releaseSnapshot({
+            runtime: runtimeRecord({
+              revision: COOLDOWN_BOUND_REVISION,
+              generation: COOLDOWN_BOUND_GENERATION,
+              healthyProof: healthy,
+            }),
+          }),
+          NOW,
+        ).status,
+        "waiting",
+      );
+    }
+    // A running generation 50 execution blocks the child-deadline install until
+    // it settles.
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: COOLDOWN_BOUND_REVISION,
+            generation: COOLDOWN_BOUND_GENERATION,
+            healthyProof: cooldownHealthy,
+            execution: executionIntent(
+              COOLDOWN_BOUND_REVISION,
+              COOLDOWN_BOUND_GENERATION,
+            ),
+          }),
+        }),
+        NOW,
+      ).status,
+      "waiting",
+    );
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: COOLDOWN_BOUND_REVISION,
+            generation: COOLDOWN_BOUND_GENERATION,
+          }),
+        }),
+        NOW,
+      ).status,
+      "waiting",
+    );
+    const failedCooldown = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: COOLDOWN_BOUND_REVISION,
+          generation: COOLDOWN_BOUND_GENERATION,
+          healthyProof: reviewWaitHealthy,
+          executionProof: failedProof(
+            COOLDOWN_BOUND_REVISION,
+            COOLDOWN_BOUND_GENERATION,
+            202,
+          ),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(failedCooldown.status, "rollback");
+    if (failedCooldown.status !== "rollback") {
+      throw new Error("expected cooldown-bound rollback");
+    }
+    assert.equal(failedCooldown.move.nextRevision, REVIEW_WAIT_BOUND_REVISION);
+    assert.equal(
+      failedCooldown.move.nextGeneration,
+      COOLDOWN_BOUND_GENERATION + 1,
+    );
+
+    // A failed child-deadline generation 51 candidate settles exactly once by
+    // rolling back only to the exact previously proven cooldown-bound revision
+    // with a monotonic generation 52, authorized by its retained healthy proof.
+    const failedChildDeadline = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: CHILD_DEADLINE_REVISION,
+          generation: CHILD_DEADLINE_GENERATION,
+          healthyProof: cooldownHealthy,
+          executionProof: failedProof(
+            CHILD_DEADLINE_REVISION,
+            CHILD_DEADLINE_GENERATION,
+            203,
+          ),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(failedChildDeadline.status, "rollback");
+    if (failedChildDeadline.status !== "rollback") {
+      throw new Error("expected child-deadline rollback");
+    }
+    assert.equal(failedChildDeadline.move.action, "rollback");
+    assert.equal(
+      failedChildDeadline.move.priorRevision,
+      CHILD_DEADLINE_REVISION,
+    );
+    assert.equal(
+      failedChildDeadline.move.priorGeneration,
+      CHILD_DEADLINE_GENERATION,
+    );
+    assert.equal(
+      failedChildDeadline.move.nextRevision,
+      COOLDOWN_BOUND_REVISION,
+    );
+    assert.equal(
+      failedChildDeadline.move.nextGeneration,
+      CHILD_DEADLINE_GENERATION + 1,
+    );
+    assert.equal(
+      failedChildDeadline.move.nextGeneration,
+      failedChildDeadline.move.priorGeneration + 1,
+    );
+    assert.equal(
+      canonicalStringify(failedChildDeadline.move.priorHealthyProof),
+      canonicalStringify(cooldownHealthy),
+    );
+    // The installed child-deadline pointer's own bound healthy proof authorizes
+    // exactly one further movement: the runtime-source rung at generation 52.
+    // A missing retained prior and an unbound failure never roll back.
+    const runtimeSourcePlan = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: CHILD_DEADLINE_REVISION,
+          generation: CHILD_DEADLINE_GENERATION,
+          healthyProof: healthyProof(
+            CHILD_DEADLINE_REVISION,
+            CHILD_DEADLINE_GENERATION,
+            204,
+          ),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(runtimeSourcePlan.status, "install");
+    if (runtimeSourcePlan.status !== "install") {
+      throw new Error("expected install");
+    }
+    assert.equal(runtimeSourcePlan.move.nextRevision, RUNTIME52_REVISION);
+    assert.equal(runtimeSourcePlan.move.nextGeneration, RUNTIME52_GENERATION);
+    assert.equal(
+      runtimeSourcePlan.move.nextGeneration,
+      runtimeSourcePlan.move.priorGeneration + 1,
+    );
+    for (
+      const state of [
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: CHILD_DEADLINE_REVISION,
+            generation: CHILD_DEADLINE_GENERATION,
+            executionProof: failedProof(
+              CHILD_DEADLINE_REVISION,
+              CHILD_DEADLINE_GENERATION,
+              206,
+            ),
+          }),
+        }),
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: CHILD_DEADLINE_REVISION,
+            generation: CHILD_DEADLINE_GENERATION,
+            healthyProof: cooldownHealthy,
+            executionProof: failedProof(
+              CHILD_DEADLINE_REVISION,
+              CHILD_DEADLINE_GENERATION - 1,
+              207,
+            ),
+          }),
+        }),
+      ]
+    ) {
+      assert.equal(planOwnerDevelopmentInstall(state, NOW).status, "waiting");
+    }
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: REVIEW_WAIT_BOUND_REVISION,
+            generation: REVIEW_WAIT_BOUND_GENERATION,
+          }),
+        }),
+        NOW,
+      ).status,
+      "waiting",
+    );
+    const failedReviewWait = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: REVIEW_WAIT_BOUND_REVISION,
+          generation: REVIEW_WAIT_BOUND_GENERATION,
+          healthyProof: livelockHealthy,
+          executionProof: failedProof(
+            REVIEW_WAIT_BOUND_REVISION,
+            REVIEW_WAIT_BOUND_GENERATION,
+            200,
+          ),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(failedReviewWait.status, "rollback");
+    if (failedReviewWait.status !== "rollback") {
+      throw new Error("expected review-wait-bound rollback");
+    }
+    assert.equal(
+      failedReviewWait.move.nextRevision,
+      LIVELOCK_BOUND_REVISION,
+    );
+    assert.equal(
+      failedReviewWait.move.nextGeneration,
+      REVIEW_WAIT_BOUND_GENERATION + 1,
+    );
+    const failedLivelock = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: LIVELOCK_BOUND_REVISION,
+          generation: LIVELOCK_BOUND_GENERATION,
+          healthyProof: retryHealthy,
+          executionProof: failedProof(
+            LIVELOCK_BOUND_REVISION,
+            LIVELOCK_BOUND_GENERATION,
+            198,
+          ),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(failedLivelock.status, "rollback");
+    if (failedLivelock.status !== "rollback") {
+      throw new Error("expected livelock-bound rollback");
+    }
+    assert.equal(
+      failedLivelock.move.nextRevision,
+      REVIEW_PHASE_PR_RETRY_REVISION,
+    );
+    assert.equal(
+      failedLivelock.move.nextGeneration,
+      LIVELOCK_BOUND_GENERATION + 1,
+    );
+    assert.equal(
+      canonicalStringify(failedLivelock.move.priorHealthyProof),
+      canonicalStringify(retryHealthy),
+    );
+
+    // A failed review-phase PR generation 45 candidate settles exactly once by
+    // rolling back only to the exact previously proven assign-first revision
+    // with a monotonic generation 46, authorized by its retained healthy
+    // proof.
+    const failedReviewPhase = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: REVIEW_PHASE_PR_REVISION,
+          generation: REVIEW_PHASE_PR_GENERATION,
+          healthyProof: assignFirstHealthy,
+          executionProof: failedProof(REVIEW_PHASE_PR_REVISION, 45, 190),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(failedReviewPhase.status, "rollback");
+    if (failedReviewPhase.status !== "rollback") {
+      throw new Error("expected review-phase PR rollback");
+    }
+    assert.equal(failedReviewPhase.move.action, "rollback");
+    assert.equal(
+      failedReviewPhase.move.priorRevision,
+      REVIEW_PHASE_PR_REVISION,
+    );
+    assert.equal(
+      failedReviewPhase.move.priorGeneration,
+      REVIEW_PHASE_PR_GENERATION,
+    );
+    assert.equal(
+      failedReviewPhase.move.nextRevision,
+      ASSIGN_FIRST_REVISION,
+    );
+    assert.equal(failedReviewPhase.move.nextGeneration, 46);
+    assert.equal(
+      canonicalStringify(failedReviewPhase.move.priorHealthyProof),
+      canonicalStringify(assignFirstHealthy),
+    );
+
+    // A review-phase PR failure that does not bind the exact pointer or a
+    // missing retained prior never rolls back.
+    const reviewPhaseWaits = [
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: REVIEW_PHASE_PR_REVISION,
+          generation: REVIEW_PHASE_PR_GENERATION,
+          healthyProof: assignFirstHealthy,
+          executionProof: failedProof(REVIEW_PHASE_PR_REVISION, 44, 191),
+        }),
+      }),
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: REVIEW_PHASE_PR_REVISION,
+          generation: REVIEW_PHASE_PR_GENERATION,
+          executionProof: failedProof(REVIEW_PHASE_PR_REVISION, 45, 192),
+        }),
+      }),
+    ];
+    for (const state of reviewPhaseWaits) {
+      const plan = planOwnerDevelopmentInstall(state, NOW);
+      assert.notEqual(plan.status, "rollback");
+      assert.equal(plan.status, "waiting");
+    }
+
+    // A failed assign-first generation 44 candidate settles exactly once by
+    // rolling back only to the exact previously proven closed-PR head revision
+    // with a monotonic generation 45, authorized by its retained healthy
+    // proof.
+    const failedAssignFirst = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: ASSIGN_FIRST_REVISION,
+          generation: ASSIGN_FIRST_GENERATION,
+          healthyProof: closedPrHeadHealthy,
+          executionProof: failedProof(ASSIGN_FIRST_REVISION, 44, 185),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(failedAssignFirst.status, "rollback");
+    if (failedAssignFirst.status !== "rollback") {
+      throw new Error("expected assign first rollback");
+    }
+    assert.equal(failedAssignFirst.move.action, "rollback");
+    assert.equal(
+      failedAssignFirst.move.priorRevision,
+      ASSIGN_FIRST_REVISION,
+    );
+    assert.equal(
+      failedAssignFirst.move.priorGeneration,
+      ASSIGN_FIRST_GENERATION,
+    );
+    assert.equal(
+      failedAssignFirst.move.nextRevision,
+      CLOSED_PR_HEAD_REVISION,
+    );
+    assert.equal(failedAssignFirst.move.nextGeneration, 45);
+    assert.equal(
+      canonicalStringify(failedAssignFirst.move.priorHealthyProof),
+      canonicalStringify(closedPrHeadHealthy),
+    );
+
+    // An assign-first failure that does not bind the exact pointer or a
+    // missing retained prior never rolls back.
+    const assignFirstWaits = [
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: ASSIGN_FIRST_REVISION,
+          generation: ASSIGN_FIRST_GENERATION,
+          healthyProof: closedPrHeadHealthy,
+          executionProof: failedProof(ASSIGN_FIRST_REVISION, 43, 186),
+        }),
+      }),
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: ASSIGN_FIRST_REVISION,
+          generation: ASSIGN_FIRST_GENERATION,
+          executionProof: failedProof(ASSIGN_FIRST_REVISION, 44, 187),
+        }),
+      }),
+    ];
+    for (const state of assignFirstWaits) {
+      const plan = planOwnerDevelopmentInstall(state, NOW);
+      assert.notEqual(plan.status, "rollback");
+      assert.equal(plan.status, "waiting");
+    }
+
+    // A failed closed-PR head generation 43 candidate settles exactly once by
+    // rolling back only to the exact previously proven closed-PR revision
+    // with a monotonic generation 44, authorized by its retained healthy
+    // proof.
+    const failedClosedPrHead = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: CLOSED_PR_HEAD_REVISION,
+          generation: CLOSED_PR_HEAD_GENERATION,
+          healthyProof: closedPrHealthy,
+          executionProof: failedProof(CLOSED_PR_HEAD_REVISION, 43, 180),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(failedClosedPrHead.status, "rollback");
+    if (failedClosedPrHead.status !== "rollback") {
+      throw new Error("expected closed PR head rollback");
+    }
+    assert.equal(failedClosedPrHead.move.action, "rollback");
+    assert.equal(
+      failedClosedPrHead.move.priorRevision,
+      CLOSED_PR_HEAD_REVISION,
+    );
+    assert.equal(
+      failedClosedPrHead.move.priorGeneration,
+      CLOSED_PR_HEAD_GENERATION,
+    );
+    assert.equal(failedClosedPrHead.move.nextRevision, CLOSED_PR_REVISION);
+    assert.equal(failedClosedPrHead.move.nextGeneration, 44);
+    assert.equal(
+      canonicalStringify(failedClosedPrHead.move.priorHealthyProof),
+      canonicalStringify(closedPrHealthy),
+    );
+
+    // A closed-PR head failure that does not bind the exact pointer or a
+    // missing retained prior never rolls back.
+    const closedPrHeadWaits = [
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: CLOSED_PR_HEAD_REVISION,
+          generation: CLOSED_PR_HEAD_GENERATION,
+          healthyProof: closedPrHealthy,
+          executionProof: failedProof(CLOSED_PR_HEAD_REVISION, 42, 181),
+        }),
+      }),
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: CLOSED_PR_HEAD_REVISION,
+          generation: CLOSED_PR_HEAD_GENERATION,
+          executionProof: failedProof(CLOSED_PR_HEAD_REVISION, 43, 182),
+        }),
+      }),
+    ];
+    for (const state of closedPrHeadWaits) {
+      const plan = planOwnerDevelopmentInstall(state, NOW);
+      assert.notEqual(plan.status, "rollback");
+      assert.equal(plan.status, "waiting");
+    }
+
+    // A failed closed-PR generation 42 candidate settles exactly once by
+    // rolling back only to the exact previously proven candidate-loss
+    // revision with a monotonic generation 43, authorized by its retained
+    // healthy proof.
+    const failedClosedPr = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: CLOSED_PR_REVISION,
+          generation: CLOSED_PR_GENERATION,
+          healthyProof: candidateLossHealthy,
+          executionProof: failedProof(CLOSED_PR_REVISION, 42, 175),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(failedClosedPr.status, "rollback");
+    if (failedClosedPr.status !== "rollback") {
+      throw new Error("expected closed PR rollback");
+    }
+    assert.equal(failedClosedPr.move.action, "rollback");
+    assert.equal(failedClosedPr.move.priorRevision, CLOSED_PR_REVISION);
+    assert.equal(failedClosedPr.move.priorGeneration, CLOSED_PR_GENERATION);
+    assert.equal(
+      failedClosedPr.move.nextRevision,
+      CANDIDATE_LOSS_REVISION,
+    );
+    assert.equal(failedClosedPr.move.nextGeneration, 43);
+    assert.equal(
+      failedClosedPr.move.nextGeneration,
+      failedClosedPr.move.priorGeneration + 1,
+    );
+    assert.equal(
+      canonicalStringify(failedClosedPr.move.priorHealthyProof),
+      canonicalStringify(candidateLossHealthy),
+    );
+
+    // A closed-PR failure that does not bind the exact pointer or a missing
+    // retained prior never rolls back.
+    const closedPrWaits = [
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: CLOSED_PR_REVISION,
+          generation: CLOSED_PR_GENERATION,
+          healthyProof: candidateLossHealthy,
+          executionProof: failedProof(CLOSED_PR_REVISION, 41, 176),
+        }),
+      }),
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: CLOSED_PR_REVISION,
+          generation: CLOSED_PR_GENERATION,
+          executionProof: failedProof(CLOSED_PR_REVISION, 42, 177),
+        }),
+      }),
+    ];
+    for (const state of closedPrWaits) {
+      const plan = planOwnerDevelopmentInstall(state, NOW);
+      assert.notEqual(plan.status, "rollback");
+      assert.equal(plan.status, "waiting");
+    }
+
+    // A failed candidate-loss generation 41 candidate settles exactly once by
+    // rolling back only to the exact previously proven closing-keyword
+    // revision with a monotonic generation 42, authorized by its retained
+    // healthy proof.
+    const failedCandidateLoss = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: CANDIDATE_LOSS_REVISION,
+          generation: CANDIDATE_LOSS_GENERATION,
+          healthyProof: closingKeywordHealthy,
+          executionProof: failedProof(CANDIDATE_LOSS_REVISION, 41, 170),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(failedCandidateLoss.status, "rollback");
+    if (failedCandidateLoss.status !== "rollback") {
+      throw new Error("expected candidate loss rollback");
+    }
+    assert.equal(failedCandidateLoss.move.action, "rollback");
+    assert.equal(
+      failedCandidateLoss.move.priorRevision,
+      CANDIDATE_LOSS_REVISION,
+    );
+    assert.equal(
+      failedCandidateLoss.move.priorGeneration,
+      CANDIDATE_LOSS_GENERATION,
+    );
+    assert.equal(
+      failedCandidateLoss.move.nextRevision,
+      CLOSING_KEYWORD_REVISION,
+    );
+    assert.equal(failedCandidateLoss.move.nextGeneration, 42);
+    assert.equal(
+      failedCandidateLoss.move.nextGeneration,
+      failedCandidateLoss.move.priorGeneration + 1,
+    );
+    assert.equal(
+      canonicalStringify(failedCandidateLoss.move.priorHealthyProof),
+      canonicalStringify(closingKeywordHealthy),
+    );
+
+    // A candidate-loss failure that does not bind the exact pointer or a
+    // missing retained prior never rolls back.
+    const candidateLossWaits = [
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: CANDIDATE_LOSS_REVISION,
+          generation: CANDIDATE_LOSS_GENERATION,
+          healthyProof: closingKeywordHealthy,
+          executionProof: failedProof(CANDIDATE_LOSS_REVISION, 40, 171),
+        }),
+      }),
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: CANDIDATE_LOSS_REVISION,
+          generation: CANDIDATE_LOSS_GENERATION,
+          executionProof: failedProof(CANDIDATE_LOSS_REVISION, 41, 172),
+        }),
+      }),
+    ];
+    for (const state of candidateLossWaits) {
+      const plan = planOwnerDevelopmentInstall(state, NOW);
+      assert.notEqual(plan.status, "rollback");
+      assert.equal(plan.status, "waiting");
+    }
+
+    // A failed closing-keyword generation 40 candidate settles exactly once by
+    // rolling back only to the exact previously proven publish-gate revision
+    // with a monotonic generation 41, authorized by its retained healthy
+    // proof.
+    const failedClosingKeyword = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: CLOSING_KEYWORD_REVISION,
+          generation: CLOSING_KEYWORD_GENERATION,
+          healthyProof: publishGateHealthy,
+          executionProof: failedProof(CLOSING_KEYWORD_REVISION, 40, 165),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(failedClosingKeyword.status, "rollback");
+    if (failedClosingKeyword.status !== "rollback") {
+      throw new Error("expected closing keyword rollback");
+    }
+    assert.equal(failedClosingKeyword.move.action, "rollback");
+    assert.equal(
+      failedClosingKeyword.move.priorRevision,
+      CLOSING_KEYWORD_REVISION,
+    );
+    assert.equal(
+      failedClosingKeyword.move.priorGeneration,
+      CLOSING_KEYWORD_GENERATION,
+    );
+    assert.equal(
+      failedClosingKeyword.move.nextRevision,
+      PUBLISH_GATE_REVISION,
+    );
+    assert.equal(failedClosingKeyword.move.nextGeneration, 41);
+    assert.equal(
+      failedClosingKeyword.move.nextGeneration,
+      failedClosingKeyword.move.priorGeneration + 1,
+    );
+    assert.equal(
+      canonicalStringify(failedClosingKeyword.move.priorHealthyProof),
+      canonicalStringify(publishGateHealthy),
+    );
+
+    // A closing-keyword failure that does not bind the exact pointer or a
+    // missing retained prior never rolls back.
+    const closingKeywordWaits = [
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: CLOSING_KEYWORD_REVISION,
+          generation: CLOSING_KEYWORD_GENERATION,
+          healthyProof: publishGateHealthy,
+          executionProof: failedProof(CLOSING_KEYWORD_REVISION, 39, 166),
+        }),
+      }),
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: CLOSING_KEYWORD_REVISION,
+          generation: CLOSING_KEYWORD_GENERATION,
+          executionProof: failedProof(CLOSING_KEYWORD_REVISION, 40, 167),
+        }),
+      }),
+    ];
+    for (const state of closingKeywordWaits) {
+      const plan = planOwnerDevelopmentInstall(state, NOW);
+      assert.notEqual(plan.status, "rollback");
+      assert.equal(plan.status, "waiting");
+    }
+
+    // A failed publish-gate generation 39 candidate settles exactly once by
+    // rolling back only to the exact previously proven successor revision
+    // with a monotonic generation 40, authorized by its retained healthy
+    // proof.
+    const failedPublishGate = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: PUBLISH_GATE_REVISION,
+          generation: PUBLISH_GATE_GENERATION,
+          healthyProof: successorHealthy,
+          executionProof: failedProof(PUBLISH_GATE_REVISION, 39, 159),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(failedPublishGate.status, "rollback");
+    if (failedPublishGate.status !== "rollback") {
+      throw new Error("expected publish gate rollback");
+    }
+    assert.equal(failedPublishGate.move.action, "rollback");
+    assert.equal(failedPublishGate.move.priorRevision, PUBLISH_GATE_REVISION);
+    assert.equal(
+      failedPublishGate.move.priorGeneration,
+      PUBLISH_GATE_GENERATION,
+    );
+    assert.equal(failedPublishGate.move.nextRevision, SUCCESSOR_REVISION);
+    assert.equal(failedPublishGate.move.nextGeneration, 40);
+    assert.equal(
+      failedPublishGate.move.nextGeneration,
+      failedPublishGate.move.priorGeneration + 1,
+    );
+    assert.equal(
+      canonicalStringify(failedPublishGate.move.priorHealthyProof),
+      canonicalStringify(successorHealthy),
+    );
+
+    // A publish-gate failure that does not bind the exact pointer and a
+    // missing retained prior never roll back.
+    const publishGateWaits = [
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: PUBLISH_GATE_REVISION,
+          generation: PUBLISH_GATE_GENERATION,
+          healthyProof: successorHealthy,
+          executionProof: failedProof(PUBLISH_GATE_REVISION, 38, 160),
+        }),
+      }),
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: PUBLISH_GATE_REVISION,
+          generation: PUBLISH_GATE_GENERATION,
+          executionProof: failedProof(PUBLISH_GATE_REVISION, 39, 161),
+        }),
+      }),
+    ];
+    for (const state of publishGateWaits) {
+      const plan = planOwnerDevelopmentInstall(state, NOW);
+      assert.notEqual(plan.status, "rollback");
+      assert.equal(plan.status, "waiting");
+    }
+
+    // The post-rollback successor generation 40 pointer is terminal: it is
+    // outside the one-shot chain and never reattempts either movement.
+    for (
+      const healthy of [
+        healthyProof(SUCCESSOR_REVISION, 40, 162),
+        null,
+      ]
+    ) {
+      assert.equal(
+        planOwnerDevelopmentInstall(
+          releaseSnapshot({
+            runtime: runtimeRecord({
+              revision: SUCCESSOR_REVISION,
+              generation: 40,
+              healthyProof: healthy,
+            }),
+          }),
+          NOW,
+        ).status,
+        "no_change",
+      );
+    }
+
+    // A failed generation 38 successor candidate settles exactly once by
+    // rolling back only to the exact previously proven review model revision
+    // with a monotonic generation 39, authorized by its retained healthy
+    // proof.
+    const failedSuccessor = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: SUCCESSOR_REVISION,
+          generation: SUCCESSOR_GENERATION,
+          healthyProof: reviewModelHealthy,
+          executionProof: failedProof(SUCCESSOR_REVISION, 38, 153),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(failedSuccessor.status, "rollback");
+    if (failedSuccessor.status !== "rollback") {
+      throw new Error("expected successor rollback");
+    }
+    assert.equal(failedSuccessor.move.action, "rollback");
+    assert.equal(failedSuccessor.move.priorRevision, SUCCESSOR_REVISION);
+    assert.equal(failedSuccessor.move.priorGeneration, SUCCESSOR_GENERATION);
+    assert.equal(failedSuccessor.move.nextRevision, REVIEW_MODEL);
+    assert.equal(failedSuccessor.move.nextGeneration, 39);
+    assert.equal(
+      failedSuccessor.move.nextGeneration,
+      failedSuccessor.move.priorGeneration + 1,
+    );
+    assert.equal(
+      canonicalStringify(failedSuccessor.move.priorHealthyProof),
+      canonicalStringify(reviewModelHealthy),
+    );
+
+    // A successor failure that does not bind the exact pointer, a
+    // no-execution settlement and a missing retained prior never roll back.
+    const successorWaits = [
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: SUCCESSOR_REVISION,
+          generation: SUCCESSOR_GENERATION,
+          healthyProof: reviewModelHealthy,
+          executionProof: failedProof(SUCCESSOR_REVISION, 37, 154),
+        }),
+      }),
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: SUCCESSOR_REVISION,
+          generation: SUCCESSOR_GENERATION,
+          healthyProof: reviewModelHealthy,
+          executionProof: notStartedProof(
+            SUCCESSOR_REVISION,
+            SUCCESSOR_GENERATION,
+          ),
+        }),
+      }),
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: SUCCESSOR_REVISION,
+          generation: SUCCESSOR_GENERATION,
+          executionProof: failedProof(SUCCESSOR_REVISION, 38, 155),
+        }),
+      }),
+    ];
+    for (const state of successorWaits) {
+      const plan = planOwnerDevelopmentInstall(state, NOW);
+      assert.notEqual(plan.status, "rollback");
+      assert.equal(plan.status, "waiting");
+    }
+
+    // The post-rollback review model generation 39 pointer is terminal: it is
+    // outside the one-shot chain and never reattempts either movement.
+    for (
+      const healthy of [
+        healthyProof(REVIEW_MODEL, 39, 156),
+        null,
+      ]
+    ) {
+      assert.equal(
+        planOwnerDevelopmentInstall(
+          releaseSnapshot({
+            runtime: runtimeRecord({
+              revision: REVIEW_MODEL,
+              generation: 39,
+              healthyProof: healthy,
+            }),
+          }),
+          NOW,
+        ).status,
+        "no_change",
+      );
+    }
+
+    // A failed generation 37 candidate settles exactly once by rolling back
+    // to the exact previously proven generation 36 revision with a monotonic
+    // generation 38, authorized by its recorded healthy proof.
+    const failed = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: REVIEW_MODEL,
+          generation: REVIEW_MODEL_GENERATION,
+          healthyProof: baseFetchHealthy,
+          executionProof: failedProof(
+            REVIEW_MODEL,
+            REVIEW_MODEL_GENERATION,
+            145,
+          ),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(failed.status, "rollback");
+    if (failed.status !== "rollback") throw new Error("expected rollback");
+    assert.equal(failed.move.action, "rollback");
+    assert.equal(failed.move.priorRevision, REVIEW_MODEL);
+    assert.equal(failed.move.priorGeneration, REVIEW_MODEL_GENERATION);
+    assert.equal(failed.move.nextRevision, BASE_FETCH);
+    assert.equal(failed.move.nextGeneration, 38);
+    assert.equal(failed.move.nextGeneration, failed.move.priorGeneration + 1);
+    assert.equal(
+      canonicalStringify(failed.move.priorHealthyProof),
+      canonicalStringify(baseFetchHealthy),
+    );
+
+    // A failure that does not bind the exact pointer, a no-execution
+    // settlement and a missing recorded prior never roll back.
+    const waits = [
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: REVIEW_MODEL,
+          generation: REVIEW_MODEL_GENERATION,
+          healthyProof: baseFetchHealthy,
+          executionProof: failedProof(REVIEW_MODEL, 36, 146),
+        }),
+      }),
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: REVIEW_MODEL,
+          generation: REVIEW_MODEL_GENERATION,
+          healthyProof: baseFetchHealthy,
+          executionProof: notStartedProof(
+            REVIEW_MODEL,
+            REVIEW_MODEL_GENERATION,
+          ),
+        }),
+      }),
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: REVIEW_MODEL,
+          generation: REVIEW_MODEL_GENERATION,
+          executionProof: failedProof(
+            REVIEW_MODEL,
+            REVIEW_MODEL_GENERATION,
+            147,
+          ),
+        }),
+      }),
+    ];
+    for (const state of waits) {
+      const plan = planOwnerDevelopmentInstall(state, NOW);
+      assert.notEqual(plan.status, "rollback");
+      assert.equal(plan.status, "waiting");
+    }
+
+    // The post-rollback base fetch generation 38 pointer is terminal: it is
+    // outside the one-shot chain and never reattempts either movement.
+    for (
+      const healthy of [
+        healthyProof(BASE_FETCH, 38, 148),
+        null,
+      ]
+    ) {
+      assert.equal(
+        planOwnerDevelopmentInstall(
+          releaseSnapshot({
+            runtime: runtimeRecord({
+              revision: BASE_FETCH,
+              generation: 38,
+              healthyProof: healthy,
+            }),
+          }),
+          NOW,
+        ).status,
+        "no_change",
+      );
+    }
   },
 );
 
@@ -1108,6 +4075,1507 @@ Deno.test(
     // A malformed record is refused instead of serialized.
     assert.throws(() =>
       ownerDevelopmentInstallCommitMessage({ ...record, nonce: "not-a-nonce" })
+    );
+  },
+);
+
+Deno.test(
+  "owner install issue79: a healthy generation 17 waits for the separately promoted generation 18",
+  () => {
+    const settlementHealthy = healthyProof(SETTLEMENT, 17, 301);
+    const plan = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: SETTLEMENT,
+          generation: 17,
+          healthyProof: settlementHealthy,
+          executionProof: settlementHealthy,
+        }),
+      }),
+      NOW,
+    );
+    // The 17 -> 18 movement belongs to the separate hosted promotion that
+    // accepted the released revision. Planning the trigger revision from the
+    // settlement pointer would be the two-generation jump the intended
+    // snapshot builder always rejects, so the planner waits instead.
+    assert.equal(plan.status, "waiting");
+  },
+);
+
+Deno.test(
+  "owner install issue79: a failed released generation 18 waits instead of installing the trigger",
+  () => {
+    const releasedHealthy = healthyProof(RELEASED, 18, 302);
+    const failedReleased = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: RELEASED,
+          generation: 18,
+          healthyProof: releasedHealthy,
+          executionProof: failedProof(RELEASED, 18, 303),
+        }),
+      }),
+      NOW,
+    );
+    // The retained generation 18 healthy proof cannot authorize forward
+    // installation while the latest settlement of this exact pointer failed;
+    // with no recorded prior authority the failure waits instead of inventing
+    // a rollback target.
+    assert.equal(failedReleased.status, "waiting");
+
+    // A settled healthy generation 18 execution still authorizes exactly the
+    // one-generation install of the trigger revision.
+    const settledReleased = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: RELEASED,
+          generation: 18,
+          healthyProof: releasedHealthy,
+          executionProof: releasedHealthy,
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(settledReleased.status, "install");
+    if (settledReleased.status !== "install") {
+      throw new Error("expected install");
+    }
+    assert.equal(settledReleased.move.nextRevision, TRIGGER);
+    assert.equal(settledReleased.move.nextGeneration, 19);
+    assert.equal(
+      settledReleased.move.nextGeneration,
+      settledReleased.move.priorGeneration + 1,
+    );
+    assert.equal(
+      canonicalStringify(settledReleased.move.priorHealthyProof),
+      canonicalStringify(releasedHealthy),
+    );
+  },
+);
+
+Deno.test(
+  "owner install issue79: failed generations 25-33 roll back to their recorded healthy predecessor",
+  () => {
+    const rows = [
+      {
+        revision: APP_IDENTITY,
+        generation: 25,
+        priorRevision: DELIVERED_ROUND2,
+        priorGeneration: 24,
+      },
+      {
+        revision: MODEL_ROUTE,
+        generation: 26,
+        priorRevision: APP_IDENTITY,
+        priorGeneration: 25,
+      },
+      {
+        revision: RESERVE_MODEL,
+        generation: 27,
+        priorRevision: MODEL_ROUTE,
+        priorGeneration: 26,
+      },
+      {
+        revision: MULTI_TARGET,
+        generation: 28,
+        priorRevision: RESERVE_MODEL,
+        priorGeneration: 27,
+      },
+      {
+        revision: SCOPE_GATE,
+        generation: 29,
+        priorRevision: MULTI_TARGET,
+        priorGeneration: 28,
+      },
+      {
+        revision: CANDIDATE_AUTH,
+        generation: 30,
+        priorRevision: SCOPE_GATE,
+        priorGeneration: 29,
+      },
+      {
+        revision: PRESERVE_SCOPE,
+        generation: 31,
+        priorRevision: CANDIDATE_AUTH,
+        priorGeneration: 30,
+      },
+      {
+        revision: FOREIGN_AUTH,
+        generation: 32,
+        priorRevision: PRESERVE_SCOPE,
+        priorGeneration: 31,
+      },
+      {
+        revision: REASON_CODE,
+        generation: 33,
+        priorRevision: FOREIGN_AUTH,
+        priorGeneration: 32,
+      },
+    ];
+    for (const [index, row] of rows.entries()) {
+      const runId = 300 + index * 5;
+      const priorHealthy = healthyProof(
+        row.priorRevision,
+        row.priorGeneration,
+        runId,
+      );
+      const state = releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: row.revision,
+          generation: row.generation,
+          healthyProof: priorHealthy,
+          executionProof: failedProof(
+            row.revision,
+            row.generation,
+            runId + 1,
+          ),
+        }),
+      });
+      const before = canonicalStringify(state);
+      const plan = planOwnerDevelopmentInstall(state, NOW);
+      assert.equal(
+        plan.status,
+        "rollback",
+        `generation ${row.generation} must roll back`,
+      );
+      if (plan.status !== "rollback") throw new Error("expected rollback");
+      assert.equal(plan.move.action, "rollback");
+      assert.equal(plan.move.priorRevision, row.revision);
+      assert.equal(plan.move.priorGeneration, row.generation);
+      assert.equal(plan.move.nextRevision, row.priorRevision);
+      assert.equal(plan.move.nextGeneration, row.generation + 1);
+      assert.equal(plan.move.nextGeneration, plan.move.priorGeneration + 1);
+      assert.equal(
+        canonicalStringify(plan.move.priorHealthyProof),
+        canonicalStringify(priorHealthy),
+      );
+
+      // The planned movement applies to an intended snapshot that changes
+      // exactly the pointer, generation and timestamps.
+      const planned = buildOwnerDevelopmentInstallSnapshot(
+        state,
+        STATE_HEAD,
+        plan.move,
+        NOW,
+      );
+      const priorRuntime = state.hostedRuntimes[0];
+      const nextRuntime = planned.hostedRuntimes[0];
+      assert.equal(planned.sequence, state.sequence + 1);
+      assert.equal(planned.stateHead, STATE_HEAD);
+      assert.equal(planned.updatedAt, NOW);
+      assert.equal(
+        canonicalStringify(planned.releases),
+        canonicalStringify(state.releases),
+      );
+      assert.equal(
+        canonicalStringify(planned.hostedReleases),
+        canonicalStringify(state.hostedReleases),
+      );
+      assert.equal(
+        canonicalStringify(planned.githubCooldowns),
+        canonicalStringify(state.githubCooldowns),
+      );
+      assert.equal(planned.hostedRuntimes.length, 1);
+      assert.equal(nextRuntime.id, priorRuntime.id);
+      assert.equal(nextRuntime.activeRevision, row.priorRevision);
+      assert.equal(nextRuntime.generation, row.generation + 1);
+      assert.equal(nextRuntime.createdAt, priorRuntime.createdAt);
+      assert.equal(nextRuntime.nextOrdinaryAt, NOW);
+      assert.equal(nextRuntime.updatedAt, NOW);
+      assert.equal(
+        canonicalStringify(nextRuntime.lastHealthyProof),
+        canonicalStringify(priorRuntime.lastHealthyProof),
+      );
+      assert.equal(
+        canonicalStringify(nextRuntime.lastExecutionProof),
+        canonicalStringify(priorRuntime.lastExecutionProof),
+      );
+      // Neither boundary mutates its input snapshot.
+      assert.equal(canonicalStringify(state), before);
+
+      // A missing prior proof, or one bound to the wrong generation, never
+      // authorizes the rollback.
+      const missing = releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: row.revision,
+          generation: row.generation,
+          executionProof: failedProof(
+            row.revision,
+            row.generation,
+            runId + 2,
+          ),
+        }),
+      });
+      assert.equal(
+        planOwnerDevelopmentInstall(missing, NOW).status,
+        "waiting",
+        `generation ${row.generation} missing prior proof`,
+      );
+      const wrong = releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: row.revision,
+          generation: row.generation,
+          healthyProof: healthyProof(
+            row.priorRevision,
+            row.generation,
+            runId + 3,
+          ),
+          executionProof: failedProof(
+            row.revision,
+            row.generation,
+            runId + 4,
+          ),
+        }),
+      });
+      assert.equal(
+        planOwnerDevelopmentInstall(wrong, NOW).status,
+        "waiting",
+        `generation ${row.generation} wrong prior proof`,
+      );
+    }
+  },
+);
+
+Deno.test(
+  "owner install issue79: the trusted consumer pipeline applies the failed generation 25 rollback to its recorded prior",
+  async () => {
+    const priorHealthy = healthyProof(DELIVERED_ROUND2, 24, 401);
+    const state = releaseSnapshot({
+      runtime: runtimeRecord({
+        revision: APP_IDENTITY,
+        generation: 25,
+        healthyProof: priorHealthy,
+        executionProof: failedProof(APP_IDENTITY, 25, 402),
+      }),
+      hostedReleases: [acceptedRelease()],
+      cooldowns: [cooldown(NOW - 1)],
+    });
+    const before = canonicalStringify(state);
+    // The trusted one-shot consumer runs exactly this public sequence before
+    // it writes: plan, build the intended snapshot, serialize the two changed
+    // blobs and compose the bounded commit record. No port is faked and no
+    // live call is made.
+    const plan = planOwnerDevelopmentInstall(state, NOW);
+    assert.equal(plan.status, "rollback");
+    if (plan.status !== "rollback") throw new Error("expected rollback");
+    assert.equal(plan.move.priorRevision, APP_IDENTITY);
+    assert.equal(plan.move.priorGeneration, 25);
+    assert.equal(plan.move.nextRevision, DELIVERED_ROUND2);
+    assert.equal(plan.move.nextGeneration, 26);
+    const planned = buildOwnerDevelopmentInstallSnapshot(
+      state,
+      STATE_HEAD,
+      plan.move,
+      NOW,
+    );
+    const files = await ownerDevelopmentInstallFiles(planned, STATE_HEAD);
+    const message = ownerDevelopmentInstallCommitMessage({
+      version: "v1",
+      kind: "owner_development_install",
+      authority: "owner",
+      action: plan.move.action,
+      authorizedAt: NOW,
+      priorRevision: plan.move.priorRevision,
+      priorGeneration: plan.move.priorGeneration,
+      nextRevision: plan.move.nextRevision,
+      nextGeneration: plan.move.nextGeneration,
+      stateHead: STATE_HEAD,
+      priorHealthyProof: plan.move.priorHealthyProof,
+      nonce: "b".repeat(64),
+    });
+
+    // The applied snapshot moves only the pointer, generation and timestamps
+    // and preserves every unrelated release and history record.
+    assert.equal(planned.sequence, state.sequence + 1);
+    assert.equal(planned.stateHead, STATE_HEAD);
+    assert.equal(planned.updatedAt, NOW);
+    assert.equal(
+      canonicalStringify(planned.releases),
+      canonicalStringify(state.releases),
+    );
+    assert.equal(
+      canonicalStringify(planned.hostedReleases),
+      canonicalStringify(state.hostedReleases),
+    );
+    assert.equal(
+      canonicalStringify(planned.githubCooldowns),
+      canonicalStringify(state.githubCooldowns),
+    );
+    const priorRuntime = state.hostedRuntimes[0];
+    const nextRuntime = planned.hostedRuntimes[0];
+    assert.equal(nextRuntime.activeRevision, DELIVERED_ROUND2);
+    assert.equal(nextRuntime.generation, 26);
+    assert.equal(
+      canonicalStringify(nextRuntime.lastHealthyProof),
+      canonicalStringify(priorHealthy),
+    );
+    assert.equal(
+      canonicalStringify(nextRuntime.lastExecutionProof),
+      canonicalStringify(priorRuntime.lastExecutionProof),
+    );
+    assert.equal(canonicalStringify(state), before);
+
+    // The serialized blobs and the commit record carry that exact rollback.
+    const manifest = JSON.parse(files.manifest.text);
+    assert.equal(manifest.sequence, state.sequence + 1);
+    assert.equal(manifest.stateHead, STATE_HEAD);
+    const record = JSON.parse(files.record.text);
+    assert.equal(record.activeRevision, DELIVERED_ROUND2);
+    assert.equal(record.generation, 26);
+    const lines = message.trim().split("\n");
+    const committed = JSON.parse(lines[lines.length - 1]);
+    assert.equal(committed.action, "rollback");
+    assert.equal(committed.priorRevision, APP_IDENTITY);
+    assert.equal(committed.priorGeneration, 25);
+    assert.equal(committed.nextRevision, DELIVERED_ROUND2);
+    assert.equal(committed.nextGeneration, 26);
+    assert.equal(
+      canonicalStringify(committed.priorHealthyProof),
+      canonicalStringify(priorHealthy),
+    );
+  },
+);
+
+Deno.test(
+  "owner install runtime52: a healthy generation 51 plans the exact one-generation install of the 80cc rung",
+  () => {
+    const childDeadlineHealthy = healthyProof(
+      CHILD_DEADLINE_REVISION,
+      CHILD_DEADLINE_GENERATION,
+      501,
+    );
+    const state = releaseSnapshot({
+      runtime: runtimeRecord({
+        revision: CHILD_DEADLINE_REVISION,
+        generation: CHILD_DEADLINE_GENERATION,
+        healthyProof: childDeadlineHealthy,
+        executionProof: childDeadlineHealthy,
+      }),
+      hostedReleases: [acceptedRelease()],
+      cooldowns: [cooldown(NOW - 1)],
+    });
+    const before = canonicalStringify(state);
+    const plan = planOwnerDevelopmentInstall(state, NOW);
+    assert.equal(plan.status, "install");
+    if (plan.status !== "install") throw new Error("expected install");
+    assert.equal(plan.move.action, "install");
+    assert.equal(plan.move.priorRevision, CHILD_DEADLINE_REVISION);
+    assert.equal(plan.move.priorGeneration, CHILD_DEADLINE_GENERATION);
+    assert.equal(plan.move.nextRevision, RUNTIME52_REVISION);
+    assert.equal(plan.move.nextGeneration, RUNTIME52_GENERATION);
+    assert.equal(plan.move.nextGeneration, plan.move.priorGeneration + 1);
+    assert.equal(
+      canonicalStringify(plan.move.priorHealthyProof),
+      canonicalStringify(childDeadlineHealthy),
+    );
+    // The planned install applies as exactly one generation movement and
+    // leaves every release, cooldown and history record unchanged.
+    const planned = buildOwnerDevelopmentInstallSnapshot(
+      state,
+      STATE_HEAD,
+      plan.move,
+      NOW,
+    );
+    const priorRuntime = state.hostedRuntimes[0];
+    const nextRuntime = planned.hostedRuntimes[0];
+    assert.equal(planned.sequence, state.sequence + 1);
+    assert.equal(planned.stateHead, STATE_HEAD);
+    assert.equal(planned.updatedAt, NOW);
+    assert.equal(
+      canonicalStringify(planned.releases),
+      canonicalStringify(state.releases),
+    );
+    assert.equal(
+      canonicalStringify(planned.hostedReleases),
+      canonicalStringify(state.hostedReleases),
+    );
+    assert.equal(
+      canonicalStringify(planned.githubCooldowns),
+      canonicalStringify(state.githubCooldowns),
+    );
+    assert.equal(nextRuntime.id, priorRuntime.id);
+    assert.equal(nextRuntime.activeRevision, RUNTIME52_REVISION);
+    assert.equal(nextRuntime.generation, RUNTIME52_GENERATION);
+    assert.equal(
+      canonicalStringify(nextRuntime.lastHealthyProof),
+      canonicalStringify(priorRuntime.lastHealthyProof),
+    );
+    assert.equal(
+      canonicalStringify(nextRuntime.lastExecutionProof),
+      canonicalStringify(priorRuntime.lastExecutionProof),
+    );
+    assert.equal(canonicalStringify(state), before);
+
+    // No proof, or a proof bound to another revision or generation, never
+    // authorizes the new rung.
+    for (
+      const healthy of [
+        healthyProof(CHILD_DEADLINE_REVISION, 50, 502),
+        healthyProof(UNRELATED, 51, 503),
+        null,
+      ]
+    ) {
+      assert.equal(
+        planOwnerDevelopmentInstall(
+          releaseSnapshot({
+            runtime: runtimeRecord({
+              revision: CHILD_DEADLINE_REVISION,
+              generation: CHILD_DEADLINE_GENERATION,
+              healthyProof: healthy,
+            }),
+          }),
+          NOW,
+        ).status,
+        "waiting",
+      );
+    }
+  },
+);
+
+Deno.test(
+  "owner install runtime52: an exact failed generation 52 rolls back to the recorded 1f90 generation 51 predecessor",
+  () => {
+    const childDeadlineHealthy = healthyProof(
+      CHILD_DEADLINE_REVISION,
+      CHILD_DEADLINE_GENERATION,
+      511,
+    );
+    const state = releaseSnapshot({
+      runtime: runtimeRecord({
+        revision: RUNTIME52_REVISION,
+        generation: RUNTIME52_GENERATION,
+        healthyProof: childDeadlineHealthy,
+        executionProof: failedProof(
+          RUNTIME52_REVISION,
+          RUNTIME52_GENERATION,
+          512,
+        ),
+      }),
+      hostedReleases: [acceptedRelease()],
+      cooldowns: [cooldown(NOW - 1)],
+    });
+    const before = canonicalStringify(state);
+    const plan = planOwnerDevelopmentInstall(state, NOW);
+    assert.equal(plan.status, "rollback");
+    if (plan.status !== "rollback") throw new Error("expected rollback");
+    assert.equal(plan.move.action, "rollback");
+    assert.equal(plan.move.priorRevision, RUNTIME52_REVISION);
+    assert.equal(plan.move.priorGeneration, RUNTIME52_GENERATION);
+    assert.equal(plan.move.nextRevision, CHILD_DEADLINE_REVISION);
+    assert.equal(plan.move.nextGeneration, RUNTIME52_GENERATION + 1);
+    assert.equal(plan.move.nextGeneration, plan.move.priorGeneration + 1);
+    assert.equal(
+      canonicalStringify(plan.move.priorHealthyProof),
+      canonicalStringify(childDeadlineHealthy),
+    );
+    // The rollback applies as exactly one generation movement to the recorded
+    // healthy predecessor and leaves every unrelated record unchanged.
+    const planned = buildOwnerDevelopmentInstallSnapshot(
+      state,
+      STATE_HEAD,
+      plan.move,
+      NOW,
+    );
+    const priorRuntime = state.hostedRuntimes[0];
+    const nextRuntime = planned.hostedRuntimes[0];
+    assert.equal(planned.sequence, state.sequence + 1);
+    assert.equal(planned.stateHead, STATE_HEAD);
+    assert.equal(planned.updatedAt, NOW);
+    assert.equal(
+      canonicalStringify(planned.releases),
+      canonicalStringify(state.releases),
+    );
+    assert.equal(
+      canonicalStringify(planned.hostedReleases),
+      canonicalStringify(state.hostedReleases),
+    );
+    assert.equal(
+      canonicalStringify(planned.githubCooldowns),
+      canonicalStringify(state.githubCooldowns),
+    );
+    assert.equal(nextRuntime.id, priorRuntime.id);
+    assert.equal(nextRuntime.activeRevision, CHILD_DEADLINE_REVISION);
+    assert.equal(
+      nextRuntime.generation,
+      RUNTIME52_GENERATION + 1,
+    );
+    assert.equal(
+      canonicalStringify(nextRuntime.lastHealthyProof),
+      canonicalStringify(priorRuntime.lastHealthyProof),
+    );
+    assert.equal(
+      canonicalStringify(nextRuntime.lastExecutionProof),
+      canonicalStringify(priorRuntime.lastExecutionProof),
+    );
+    assert.equal(canonicalStringify(state), before);
+
+    // A missing predecessor proof, a proof of the failed pointer itself and a
+    // wrong-generation predecessor proof never authorize the rollback.
+    const refusals = [
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: RUNTIME52_REVISION,
+          generation: RUNTIME52_GENERATION,
+          executionProof: failedProof(
+            RUNTIME52_REVISION,
+            RUNTIME52_GENERATION,
+            513,
+          ),
+        }),
+      }),
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: RUNTIME52_REVISION,
+          generation: RUNTIME52_GENERATION,
+          healthyProof: healthyProof(
+            RUNTIME52_REVISION,
+            RUNTIME52_GENERATION,
+            514,
+          ),
+          executionProof: failedProof(
+            RUNTIME52_REVISION,
+            RUNTIME52_GENERATION,
+            515,
+          ),
+        }),
+      }),
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: RUNTIME52_REVISION,
+          generation: RUNTIME52_GENERATION,
+          healthyProof: healthyProof(
+            CHILD_DEADLINE_REVISION,
+            RUNTIME52_GENERATION,
+            516,
+          ),
+          executionProof: failedProof(
+            RUNTIME52_REVISION,
+            RUNTIME52_GENERATION,
+            517,
+          ),
+        }),
+      }),
+    ];
+    for (const refusal of refusals) {
+      assert.equal(
+        planOwnerDevelopmentInstall(refusal, NOW).status,
+        "waiting",
+      );
+    }
+  },
+);
+
+Deno.test(
+  "owner install owner-repair53: an idle unproven generation 52 installs the pinned 573d repair at generation 53",
+  () => {
+    const retained51 = healthyProof(
+      CHILD_DEADLINE_REVISION,
+      CHILD_DEADLINE_GENERATION,
+      601,
+    );
+    // The pointer is exactly the idle unproven generation 52 revision: no
+    // settlement and no healthy proof of its own, only the genuine retained
+    // generation 51 proof.
+    const state = releaseSnapshot({
+      runtime: runtimeRecord({
+        revision: RUNTIME52_REVISION,
+        generation: RUNTIME52_GENERATION,
+        healthyProof: retained51,
+      }),
+    });
+    const before = canonicalStringify(state);
+    const plan = planOwnerDevelopmentInstall(state, NOW);
+    assert.equal(plan.status, "install");
+    if (plan.status !== "install") throw new Error("expected install");
+    assert.equal(plan.move.action, "install");
+    assert.equal(plan.move.priorRevision, RUNTIME52_REVISION);
+    assert.equal(plan.move.priorGeneration, RUNTIME52_GENERATION);
+    assert.equal(plan.move.nextRevision, OWNER_REPAIR53_REVISION);
+    assert.equal(plan.move.nextGeneration, OWNER_REPAIR53_GENERATION);
+    assert.equal(plan.move.nextGeneration, plan.move.priorGeneration + 1);
+    assert.equal(
+      canonicalStringify(plan.move.priorHealthyProof),
+      canonicalStringify(retained51),
+    );
+    // The repair install applies to the intended snapshot and preserves the
+    // retained prior proof and every unrelated release/history record.
+    const planned = buildOwnerDevelopmentInstallSnapshot(
+      state,
+      STATE_HEAD,
+      plan.move,
+      NOW,
+    );
+    const priorRuntime = state.hostedRuntimes[0];
+    const nextRuntime = planned.hostedRuntimes[0];
+    assert.equal(planned.sequence, state.sequence + 1);
+    assert.equal(planned.stateHead, STATE_HEAD);
+    assert.equal(planned.updatedAt, NOW);
+    assert.equal(
+      canonicalStringify(planned.releases),
+      canonicalStringify(state.releases),
+    );
+    assert.equal(
+      canonicalStringify(planned.hostedReleases),
+      canonicalStringify(state.hostedReleases),
+    );
+    assert.equal(
+      canonicalStringify(planned.githubCooldowns),
+      canonicalStringify(state.githubCooldowns),
+    );
+    assert.equal(nextRuntime.id, priorRuntime.id);
+    assert.equal(nextRuntime.activeRevision, OWNER_REPAIR53_REVISION);
+    assert.equal(nextRuntime.generation, OWNER_REPAIR53_GENERATION);
+    assert.equal(nextRuntime.createdAt, priorRuntime.createdAt);
+    assert.equal(
+      canonicalStringify(nextRuntime.lastHealthyProof),
+      canonicalStringify(retained51),
+    );
+    assert.equal(
+      canonicalStringify(nextRuntime.lastExecutionProof),
+      canonicalStringify(priorRuntime.lastExecutionProof),
+    );
+    assert.equal(canonicalStringify(state), before);
+
+    // A missing or mismatched retained proof never authorizes the repair
+    // install.
+    const refusals = [
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: RUNTIME52_REVISION,
+          generation: RUNTIME52_GENERATION,
+        }),
+      }),
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: RUNTIME52_REVISION,
+          generation: RUNTIME52_GENERATION,
+          healthyProof: healthyProof(
+            UNRELATED,
+            CHILD_DEADLINE_GENERATION,
+            602,
+          ),
+        }),
+      }),
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: RUNTIME52_REVISION,
+          generation: RUNTIME52_GENERATION,
+          healthyProof: healthyProof(
+            CHILD_DEADLINE_REVISION,
+            RUNTIME52_GENERATION,
+            603,
+          ),
+        }),
+      }),
+    ];
+    for (const refusal of refusals) {
+      assert.equal(
+        planOwnerDevelopmentInstall(refusal, NOW).status,
+        "waiting",
+      );
+    }
+
+    // A retained earlier settlement remains history, while any inconsistent
+    // own-generation settlement cannot be ignored to take the repair path.
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: RUNTIME52_REVISION,
+            generation: RUNTIME52_GENERATION,
+            healthyProof: retained51,
+            executionProof: retained51,
+          }),
+        }),
+        NOW,
+      ).status,
+      "install",
+    );
+    for (
+      const settlement of [
+        healthyProof(RUNTIME52_REVISION, RUNTIME52_GENERATION, 605),
+        notStartedProof(RUNTIME52_REVISION, RUNTIME52_GENERATION),
+        failedProof(UNRELATED, RUNTIME52_GENERATION, 606),
+        failedProof(RUNTIME52_REVISION, CHILD_DEADLINE_GENERATION, 607),
+      ]
+    ) {
+      assert.equal(
+        planOwnerDevelopmentInstall(
+          releaseSnapshot({
+            runtime: runtimeRecord({
+              revision: RUNTIME52_REVISION,
+              generation: RUNTIME52_GENERATION,
+              healthyProof: retained51,
+              executionProof: settlement,
+            }),
+          }),
+          NOW,
+        ).status,
+        "waiting",
+      );
+    }
+    for (
+      const proof of [
+        { ...retained51, repository: "ubiquity/ai.ubq.fi" },
+        { ...retained51, ref: "refs/heads/development" },
+      ]
+    ) {
+      const tampered = structuredClone(state);
+      tampered.hostedRuntimes[0].lastHealthyProof = proof;
+      assert.equal(
+        planOwnerDevelopmentInstall(tampered, NOW).status,
+        "waiting",
+      );
+    }
+
+    // The proven generation 52 keeps its existing terminal outcome instead of
+    // taking the unproven repair path.
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: RUNTIME52_REVISION,
+            generation: RUNTIME52_GENERATION,
+            healthyProof: healthyProof(
+              RUNTIME52_REVISION,
+              RUNTIME52_GENERATION,
+              604,
+            ),
+            executionProof: healthyProof(
+              RUNTIME52_REVISION,
+              RUNTIME52_GENERATION,
+              604,
+            ),
+          }),
+        }),
+        NOW,
+      ).status,
+      "no_change",
+    );
+
+    // A running execution, a requested release, a live pointer intent and an
+    // active cooldown each keep the repair install a zero-write wait.
+    const intentRelease = parseHostedReleaseRecordV1({
+      ...acceptedRelease(),
+      phase: "promoting",
+      pointerIntent: {
+        action: "promote",
+        expectedRevision: ORIGINAL,
+        nextRevision: AGGREGATE,
+        expectedGeneration: OWNER_DEVELOPMENT_INSTALL_ORIGINAL_GENERATION,
+        createdAt: T0,
+      },
+    });
+    const gated = [
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: RUNTIME52_REVISION,
+          generation: RUNTIME52_GENERATION,
+          healthyProof: retained51,
+          execution: executionIntent(RUNTIME52_REVISION, RUNTIME52_GENERATION),
+        }),
+      }),
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: RUNTIME52_REVISION,
+          generation: RUNTIME52_GENERATION,
+          healthyProof: retained51,
+        }),
+        hostedReleases: [requestedRelease()],
+      }),
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: RUNTIME52_REVISION,
+          generation: RUNTIME52_GENERATION,
+          healthyProof: retained51,
+        }),
+        hostedReleases: [intentRelease],
+      }),
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: RUNTIME52_REVISION,
+          generation: RUNTIME52_GENERATION,
+          healthyProof: retained51,
+        }),
+        cooldowns: [cooldown(NOW + 1)],
+      }),
+    ];
+    for (const gatedState of gated) {
+      assert.equal(
+        planOwnerDevelopmentInstall(gatedState, NOW).status,
+        "waiting",
+      );
+    }
+  },
+);
+
+Deno.test(
+  "owner install owner-repair53: a failed corrected generation 53 rolls back to the recorded 1f90 generation 51 predecessor at generation 54",
+  () => {
+    const retained51 = healthyProof(
+      CHILD_DEADLINE_REVISION,
+      CHILD_DEADLINE_GENERATION,
+      611,
+    );
+    const state = releaseSnapshot({
+      runtime: runtimeRecord({
+        revision: OWNER_REPAIR53_REVISION,
+        generation: OWNER_REPAIR53_GENERATION,
+        healthyProof: retained51,
+        executionProof: failedProof(
+          OWNER_REPAIR53_REVISION,
+          OWNER_REPAIR53_GENERATION,
+          612,
+        ),
+      }),
+    });
+    const before = canonicalStringify(state);
+    const plan = planOwnerDevelopmentInstall(state, NOW);
+    assert.equal(plan.status, "rollback");
+    if (plan.status !== "rollback") throw new Error("expected rollback");
+    assert.equal(plan.move.action, "rollback");
+    assert.equal(plan.move.priorRevision, OWNER_REPAIR53_REVISION);
+    assert.equal(plan.move.priorGeneration, OWNER_REPAIR53_GENERATION);
+    assert.equal(plan.move.nextRevision, CHILD_DEADLINE_REVISION);
+    assert.equal(plan.move.nextGeneration, OWNER_REPAIR53_GENERATION + 1);
+    assert.equal(plan.move.nextGeneration, plan.move.priorGeneration + 1);
+    assert.equal(
+      canonicalStringify(plan.move.priorHealthyProof),
+      canonicalStringify(retained51),
+    );
+    // The single rollback applies to the intended snapshot and preserves the
+    // recorded prior proof and every unrelated release/history record.
+    const planned = buildOwnerDevelopmentInstallSnapshot(
+      state,
+      STATE_HEAD,
+      plan.move,
+      NOW,
+    );
+    const priorRuntime = state.hostedRuntimes[0];
+    const nextRuntime = planned.hostedRuntimes[0];
+    assert.equal(planned.sequence, state.sequence + 1);
+    assert.equal(planned.stateHead, STATE_HEAD);
+    assert.equal(planned.updatedAt, NOW);
+    assert.equal(
+      canonicalStringify(planned.releases),
+      canonicalStringify(state.releases),
+    );
+    assert.equal(
+      canonicalStringify(planned.hostedReleases),
+      canonicalStringify(state.hostedReleases),
+    );
+    assert.equal(
+      canonicalStringify(planned.githubCooldowns),
+      canonicalStringify(state.githubCooldowns),
+    );
+    assert.equal(nextRuntime.id, priorRuntime.id);
+    assert.equal(nextRuntime.activeRevision, CHILD_DEADLINE_REVISION);
+    assert.equal(nextRuntime.generation, OWNER_REPAIR53_GENERATION + 1);
+    assert.equal(nextRuntime.createdAt, priorRuntime.createdAt);
+    assert.equal(
+      canonicalStringify(nextRuntime.lastHealthyProof),
+      canonicalStringify(retained51),
+    );
+    assert.equal(
+      canonicalStringify(nextRuntime.lastExecutionProof),
+      canonicalStringify(priorRuntime.lastExecutionProof),
+    );
+    assert.equal(canonicalStringify(state), before);
+
+    // Installing the corrected pointer retains the earlier proof; it must wait
+    // for its own genuine generation 53 healthy settlement before completion.
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: OWNER_REPAIR53_REVISION,
+            generation: OWNER_REPAIR53_GENERATION,
+            healthyProof: retained51,
+          }),
+        }),
+        NOW,
+      ).status,
+      "waiting",
+    );
+
+    // A missing, own-generation or wrong-generation predecessor proof never
+    // authorizes the rollback.
+    const refusals = [
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: OWNER_REPAIR53_REVISION,
+          generation: OWNER_REPAIR53_GENERATION,
+          executionProof: failedProof(
+            OWNER_REPAIR53_REVISION,
+            OWNER_REPAIR53_GENERATION,
+            613,
+          ),
+        }),
+      }),
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: OWNER_REPAIR53_REVISION,
+          generation: OWNER_REPAIR53_GENERATION,
+          healthyProof: healthyProof(
+            OWNER_REPAIR53_REVISION,
+            OWNER_REPAIR53_GENERATION,
+            614,
+          ),
+          executionProof: failedProof(
+            OWNER_REPAIR53_REVISION,
+            OWNER_REPAIR53_GENERATION,
+            615,
+          ),
+        }),
+      }),
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: OWNER_REPAIR53_REVISION,
+          generation: OWNER_REPAIR53_GENERATION,
+          healthyProof: healthyProof(
+            CHILD_DEADLINE_REVISION,
+            OWNER_REPAIR53_GENERATION,
+            616,
+          ),
+          executionProof: failedProof(
+            OWNER_REPAIR53_REVISION,
+            OWNER_REPAIR53_GENERATION,
+            617,
+          ),
+        }),
+      }),
+    ];
+    for (const refusal of refusals) {
+      assert.equal(
+        planOwnerDevelopmentInstall(refusal, NOW).status,
+        "waiting",
+      );
+    }
+
+    // Both rollback targets (1f90 generation 53 and 1f90 generation 54)
+    // stay terminal with no automatic retry.
+    for (
+      const terminalState of [
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: CHILD_DEADLINE_REVISION,
+            generation: OWNER_REPAIR53_GENERATION,
+            healthyProof: retained51,
+          }),
+        }),
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: CHILD_DEADLINE_REVISION,
+            generation: OWNER_REPAIR53_GENERATION + 1,
+            healthyProof: retained51,
+          }),
+        }),
+      ]
+    ) {
+      assert.equal(
+        planOwnerDevelopmentInstall(terminalState, NOW).status,
+        "no_change",
+      );
+    }
+  },
+);
+
+Deno.test(
+  "owner install runtime54: the public planner installs exact a6c4 generation 54 only from proven idle 573d generation 53",
+  () => {
+    const proven53 = healthyProof(OWNER_REPAIR53_REVISION, 53, 701);
+    const runtime = runtimeRecord({
+      revision: OWNER_REPAIR53_REVISION,
+      generation: OWNER_REPAIR53_GENERATION,
+      healthyProof: proven53,
+      executionProof: proven53,
+    });
+    const state = releaseSnapshot({
+      runtime,
+      hostedReleases: [acceptedRelease()],
+      cooldowns: [cooldown(NOW - 1)],
+    });
+    const before = canonicalStringify(state);
+    const plan = planOwnerDevelopmentInstall(state, NOW);
+    assert.equal(plan.status, "install");
+    if (plan.status !== "install") throw new Error("expected install");
+    assert.deepEqual(plan.move, {
+      action: "install",
+      priorRevision: OWNER_REPAIR53_REVISION,
+      priorGeneration: OWNER_REPAIR53_GENERATION,
+      nextRevision: RUNTIME54_REVISION,
+      nextGeneration: RUNTIME54_GENERATION,
+      priorHealthyProof: proven53,
+    });
+    const planned = buildOwnerDevelopmentInstallSnapshot(
+      state,
+      STATE_HEAD,
+      plan.move,
+      NOW,
+    );
+    assert.deepEqual(planned, {
+      ...state,
+      stateHead: STATE_HEAD,
+      sequence: state.sequence + 1,
+      updatedAt: NOW,
+      hostedRuntimes: [{
+        ...runtime,
+        activeRevision: RUNTIME54_REVISION,
+        generation: RUNTIME54_GENERATION,
+        updatedAt: NOW,
+        nextOrdinaryAt: NOW,
+      }],
+    });
+    assert.equal(canonicalStringify(state), before);
+
+    for (
+      const proof of [
+        null,
+        healthyProof(OWNER_REPAIR53_REVISION, 52, 702),
+        healthyProof(UNRELATED, 53, 703),
+        healthyProof(CHILD_DEADLINE_REVISION, 51, 704),
+      ]
+    ) {
+      assert.equal(
+        planOwnerDevelopmentInstall(
+          releaseSnapshot({ runtime: { ...runtime, lastHealthyProof: proof } }),
+          NOW,
+        ).status,
+        "waiting",
+      );
+    }
+    for (
+      const proof of [
+        { ...proven53, repository: "ubiquity/ai.ubq.fi" },
+        { ...proven53, ref: "refs/heads/development" },
+      ]
+    ) {
+      const tampered = structuredClone(state);
+      tampered.hostedRuntimes[0].lastHealthyProof = proof;
+      assert.equal(
+        planOwnerDevelopmentInstall(tampered, NOW).status,
+        "waiting",
+      );
+    }
+
+    const intentRelease = parseHostedReleaseRecordV1({
+      ...acceptedRelease(),
+      phase: "promoting",
+      pointerIntent: {
+        action: "promote",
+        expectedRevision: ORIGINAL,
+        nextRevision: AGGREGATE,
+        expectedGeneration: OWNER_DEVELOPMENT_INSTALL_ORIGINAL_GENERATION,
+        createdAt: T0,
+      },
+    });
+    for (
+      const gated of [
+        releaseSnapshot({
+          runtime: {
+            ...runtime,
+            execution: executionIntent(OWNER_REPAIR53_REVISION, 53),
+          },
+        }),
+        releaseSnapshot({ runtime, hostedReleases: [requestedRelease()] }),
+        releaseSnapshot({ runtime, hostedReleases: [intentRelease] }),
+        releaseSnapshot({ runtime, cooldowns: [cooldown(NOW + 1)] }),
+        releaseSnapshot({ runtime, cooldowns: [cooldown(null)] }),
+      ]
+    ) {
+      const unchanged = canonicalStringify(gated);
+      assert.equal(planOwnerDevelopmentInstall(gated, NOW).status, "waiting");
+      assert.equal(canonicalStringify(gated), unchanged);
+    }
+    // A movement computed from another pointer or proof cannot be applied.
+    for (
+      const stale of [
+        { ...plan.move, priorRevision: UNRELATED },
+        { ...plan.move, priorGeneration: 52 },
+        {
+          ...plan.move,
+          priorHealthyProof: healthyProof(OWNER_REPAIR53_REVISION, 53, 705),
+        },
+      ]
+    ) {
+      assert.throws(() =>
+        buildOwnerDevelopmentInstallSnapshot(state, STATE_HEAD, stale, NOW)
+      );
+    }
+  },
+);
+
+Deno.test(
+  "owner install runtime54: an exact failed a6c4 generation 54 applies one rollback to proven 573d generation 55 and never retries",
+  () => {
+    const proven53 = healthyProof(OWNER_REPAIR53_REVISION, 53, 711);
+    const failed54 = failedProof(RUNTIME54_REVISION, RUNTIME54_GENERATION, 712);
+    const runtime = runtimeRecord({
+      revision: RUNTIME54_REVISION,
+      generation: RUNTIME54_GENERATION,
+      healthyProof: proven53,
+      executionProof: failed54,
+    });
+    const state = releaseSnapshot({
+      runtime,
+      hostedReleases: [acceptedRelease()],
+      cooldowns: [cooldown(NOW - 1)],
+    });
+    const before = canonicalStringify(state);
+    const plan = planOwnerDevelopmentInstall(state, NOW);
+    assert.equal(plan.status, "rollback");
+    if (plan.status !== "rollback") throw new Error("expected rollback");
+    assert.deepEqual(plan.move, {
+      action: "rollback",
+      priorRevision: RUNTIME54_REVISION,
+      priorGeneration: RUNTIME54_GENERATION,
+      nextRevision: OWNER_REPAIR53_REVISION,
+      nextGeneration: 55,
+      priorHealthyProof: proven53,
+    });
+    const planned = buildOwnerDevelopmentInstallSnapshot(
+      state,
+      STATE_HEAD,
+      plan.move,
+      NOW,
+    );
+    assert.deepEqual(planned, {
+      ...state,
+      stateHead: STATE_HEAD,
+      sequence: state.sequence + 1,
+      updatedAt: NOW,
+      hostedRuntimes: [{
+        ...runtime,
+        activeRevision: OWNER_REPAIR53_REVISION,
+        generation: 55,
+        updatedAt: NOW,
+        nextOrdinaryAt: NOW,
+      }],
+    });
+    assert.equal(canonicalStringify(state), before);
+    assert.equal(planOwnerDevelopmentInstall(planned, NOW).status, "no_change");
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: OWNER_REPAIR53_REVISION,
+            generation: 55,
+            healthyProof: healthyProof(OWNER_REPAIR53_REVISION, 55, 713),
+          }),
+        }),
+        NOW,
+      ).status,
+      "no_change",
+    );
+    assert.throws(() =>
+      buildOwnerDevelopmentInstallSnapshot(planned, STATE_HEAD, plan.move, NOW)
+    );
+
+    for (
+      const proof of [
+        null,
+        healthyProof(UNRELATED, 53, 714),
+        healthyProof(OWNER_REPAIR53_REVISION, 52, 715),
+        healthyProof(RUNTIME54_REVISION, RUNTIME54_GENERATION, 716),
+      ]
+    ) {
+      assert.equal(
+        planOwnerDevelopmentInstall(
+          releaseSnapshot({ runtime: { ...runtime, lastHealthyProof: proof } }),
+          NOW,
+        ).status,
+        "waiting",
+      );
+    }
+    for (
+      const settlement of [
+        null,
+        notStartedProof(RUNTIME54_REVISION, RUNTIME54_GENERATION),
+        failedProof(UNRELATED, RUNTIME54_GENERATION, 717),
+        failedProof(RUNTIME54_REVISION, 53, 718),
+      ]
+    ) {
+      assert.equal(
+        planOwnerDevelopmentInstall(
+          releaseSnapshot({
+            runtime: { ...runtime, lastExecutionProof: settlement },
+          }),
+          NOW,
+        ).status,
+        "waiting",
+      );
+    }
+    const healthy54 = healthyProof(
+      RUNTIME54_REVISION,
+      RUNTIME54_GENERATION,
+      719,
+    );
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: {
+            ...runtime,
+            lastHealthyProof: healthy54,
+            lastExecutionProof: healthy54,
+          },
+        }),
+        NOW,
+      ).status,
+      "install",
+    );
+  },
+);
+
+Deno.test(
+  "owner install runtime55: proven idle a6c4 generation 54 installs exact 275f generation 55 while failed a6c4 retains its distinct rollback",
+  () => {
+    const proven54 = healthyProof(
+      RUNTIME54_REVISION,
+      RUNTIME54_GENERATION,
+      801,
+    );
+    const runtime = runtimeRecord({
+      revision: RUNTIME54_REVISION,
+      generation: RUNTIME54_GENERATION,
+      healthyProof: proven54,
+      executionProof: proven54,
+    });
+    const state = releaseSnapshot({
+      runtime,
+      hostedReleases: [acceptedRelease()],
+      cooldowns: [cooldown(NOW - 1)],
+    });
+    const before = canonicalStringify(state);
+    const plan = planOwnerDevelopmentInstall(state, NOW);
+    assert.equal(plan.status, "install");
+    if (plan.status !== "install") throw new Error("expected install");
+    assert.deepEqual(plan.move, {
+      action: "install",
+      priorRevision: RUNTIME54_REVISION,
+      priorGeneration: RUNTIME54_GENERATION,
+      nextRevision: RUNTIME55_REVISION,
+      nextGeneration: RUNTIME55_GENERATION,
+      priorHealthyProof: proven54,
+    });
+    const planned = buildOwnerDevelopmentInstallSnapshot(
+      state,
+      STATE_HEAD,
+      plan.move,
+      NOW,
+    );
+    assert.deepEqual(planned, {
+      ...state,
+      stateHead: STATE_HEAD,
+      sequence: state.sequence + 1,
+      updatedAt: NOW,
+      hostedRuntimes: [{
+        ...runtime,
+        activeRevision: RUNTIME55_REVISION,
+        generation: RUNTIME55_GENERATION,
+        updatedAt: NOW,
+        nextOrdinaryAt: NOW,
+      }],
+    });
+    assert.equal(canonicalStringify(state), before);
+    assert.throws(() =>
+      buildOwnerDevelopmentInstallSnapshot(planned, STATE_HEAD, plan.move, NOW)
+    );
+    for (
+      const proof of [
+        null,
+        healthyProof(RUNTIME54_REVISION, 53, 802),
+        healthyProof(UNRELATED, 54, 803),
+        healthyProof(OWNER_REPAIR53_REVISION, 53, 804),
+      ]
+    ) {
+      assert.equal(
+        planOwnerDevelopmentInstall(
+          releaseSnapshot({ runtime: { ...runtime, lastHealthyProof: proof } }),
+          NOW,
+        ).status,
+        "waiting",
+      );
+    }
+    const intentRelease = parseHostedReleaseRecordV1({
+      ...acceptedRelease(),
+      phase: "promoting",
+      pointerIntent: {
+        action: "promote",
+        expectedRevision: ORIGINAL,
+        nextRevision: AGGREGATE,
+        expectedGeneration: OWNER_DEVELOPMENT_INSTALL_ORIGINAL_GENERATION,
+        createdAt: T0,
+      },
+    });
+    for (
+      const gated of [
+        releaseSnapshot({
+          runtime: {
+            ...runtime,
+            execution: executionIntent(RUNTIME54_REVISION, 54),
+          },
+        }),
+        releaseSnapshot({ runtime, hostedReleases: [requestedRelease()] }),
+        releaseSnapshot({ runtime, hostedReleases: [intentRelease] }),
+        releaseSnapshot({ runtime, cooldowns: [cooldown(NOW + 1)] }),
+        releaseSnapshot({ runtime, cooldowns: [cooldown(null)] }),
+      ]
+    ) {
+      assert.equal(planOwnerDevelopmentInstall(gated, NOW).status, "waiting");
+    }
+    const failed54 = failedProof(RUNTIME54_REVISION, 54, 805);
+    // Latest exact failure has precedence over the pointer's earlier health.
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: { ...runtime, lastExecutionProof: failed54 },
+        }),
+        NOW,
+      ).status,
+      "waiting",
+    );
+    const proven53 = healthyProof(OWNER_REPAIR53_REVISION, 53, 806);
+    const failedState = releaseSnapshot({
+      runtime: {
+        ...runtime,
+        lastHealthyProof: proven53,
+        lastExecutionProof: failed54,
+      },
+    });
+    const rollback = planOwnerDevelopmentInstall(failedState, NOW);
+    assert.equal(rollback.status, "rollback");
+    if (rollback.status !== "rollback") throw new Error("expected rollback");
+    assert.equal(rollback.move.nextRevision, OWNER_REPAIR53_REVISION);
+    assert.equal(rollback.move.nextGeneration, 55);
+    const restored = buildOwnerDevelopmentInstallSnapshot(
+      failedState,
+      STATE_HEAD,
+      rollback.move,
+      NOW,
+    );
+    assert.equal(
+      planOwnerDevelopmentInstall(restored, NOW).status,
+      "no_change",
+    );
+  },
+);
+
+Deno.test(
+  "owner install runtime55: exact failed 275f generation 55 restores proven a6c4 once at terminal generation 56",
+  () => {
+    const proven54 = healthyProof(
+      RUNTIME54_REVISION,
+      RUNTIME54_GENERATION,
+      811,
+    );
+    const failed55 = failedProof(RUNTIME55_REVISION, RUNTIME55_GENERATION, 812);
+    const runtime = runtimeRecord({
+      revision: RUNTIME55_REVISION,
+      generation: RUNTIME55_GENERATION,
+      healthyProof: proven54,
+      executionProof: failed55,
+    });
+    const state = releaseSnapshot({
+      runtime,
+      hostedReleases: [acceptedRelease()],
+      cooldowns: [cooldown(NOW - 1)],
+    });
+    const before = canonicalStringify(state);
+    const plan = planOwnerDevelopmentInstall(state, NOW);
+    assert.equal(plan.status, "rollback");
+    if (plan.status !== "rollback") throw new Error("expected rollback");
+    assert.deepEqual(plan.move, {
+      action: "rollback",
+      priorRevision: RUNTIME55_REVISION,
+      priorGeneration: RUNTIME55_GENERATION,
+      nextRevision: RUNTIME54_REVISION,
+      nextGeneration: 56,
+      priorHealthyProof: proven54,
+    });
+    const planned = buildOwnerDevelopmentInstallSnapshot(
+      state,
+      STATE_HEAD,
+      plan.move,
+      NOW,
+    );
+    assert.deepEqual(planned, {
+      ...state,
+      stateHead: STATE_HEAD,
+      sequence: state.sequence + 1,
+      updatedAt: NOW,
+      hostedRuntimes: [{
+        ...runtime,
+        activeRevision: RUNTIME54_REVISION,
+        generation: 56,
+        updatedAt: NOW,
+        nextOrdinaryAt: NOW,
+      }],
+    });
+    assert.equal(canonicalStringify(state), before);
+    assert.equal(planOwnerDevelopmentInstall(planned, NOW).status, "no_change");
+    assert.throws(() =>
+      buildOwnerDevelopmentInstallSnapshot(planned, STATE_HEAD, plan.move, NOW)
+    );
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: RUNTIME54_REVISION,
+            generation: 56,
+            healthyProof: healthyProof(RUNTIME54_REVISION, 56, 813),
+          }),
+        }),
+        NOW,
+      ).status,
+      "no_change",
+    );
+    for (
+      const proof of [
+        null,
+        healthyProof(UNRELATED, 54, 814),
+        healthyProof(RUNTIME54_REVISION, 53, 815),
+        healthyProof(RUNTIME55_REVISION, 55, 816),
+      ]
+    ) {
+      assert.equal(
+        planOwnerDevelopmentInstall(
+          releaseSnapshot({ runtime: { ...runtime, lastHealthyProof: proof } }),
+          NOW,
+        ).status,
+        "waiting",
+      );
+    }
+    for (
+      const settlement of [
+        null,
+        notStartedProof(RUNTIME55_REVISION, 55),
+        failedProof(UNRELATED, 55, 817),
+        failedProof(RUNTIME55_REVISION, 54, 818),
+      ]
+    ) {
+      assert.equal(
+        planOwnerDevelopmentInstall(
+          releaseSnapshot({
+            runtime: { ...runtime, lastExecutionProof: settlement },
+          }),
+          NOW,
+        ).status,
+        "waiting",
+      );
+    }
+    const proven55 = healthyProof(RUNTIME55_REVISION, 55, 819);
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: {
+            ...runtime,
+            lastHealthyProof: proven55,
+            lastExecutionProof: proven55,
+          },
+        }),
+        NOW,
+      ).status,
+      "no_change",
     );
   },
 );

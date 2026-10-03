@@ -89,6 +89,7 @@ export const HOSTED_RUNTIME_CHILD_ENV_KEYS = [
   "SENTINEL_MODEL_FALLBACK",
   "SENTINEL_REVIEW_MODEL_ID",
   "SENTINEL_DEEPSEEK_API_KEY",
+  "SENTINEL_APP_INSTALLATION_ID",
   // Explicit development switch for the durable GitHub cooldown gates; it
   // crosses only when the launcher was given a non-empty value.
   "SENTINEL_COOLDOWN_MODE",
@@ -138,7 +139,12 @@ const HOSTED_TERMINAL_LOOKING = /"kind"\s*:\s*"hosted_runtime_terminal"/;
 const MAX_DIAGNOSTIC_LINE_CHARS = 2_048;
 const MAX_HOSTED_DIAGNOSTICS = 64;
 
-export type HostedRuntimeJobV1 = "prepare" | "repair" | "finalize";
+export type HostedRuntimeJobV1 =
+  | "prepare"
+  | "repair"
+  | "finalize"
+  | "matrix_plan"
+  | "matrix_cell";
 
 /** Core run identity plus the exact protected job this process runs in. */
 export interface HostedRuntimeIdentityV1 {
@@ -238,6 +244,15 @@ export interface HostedRuntimeLauncherInputV1 {
   denoExecutable: string;
   /** The one process border: bounded Git identity reads and the child run. */
   process: ReplayRuntimeV1;
+  /**
+   * Optional advisory sink for reconstructed child diagnostics. Each summary
+   * is delivered as soon as its complete stdout line is retained, before the
+   * child exits; it never attests settlement, health, terminal or authority,
+   * and a throwing sink is swallowed. Absent means no streaming at all.
+   */
+  onDiagnostic?: (diagnostic: HostedModelDiagnosticV1) => void;
+  /** Native workflow JSON only: planDigest and optional cellId, never credentials. */
+  stdin?: string;
 }
 
 export type HostedRuntimeLauncherStatusV1 =
@@ -270,6 +285,8 @@ export interface HostedRuntimeLauncherResultV1 {
    * default; they never attest health, terminal, settlement or any authority.
    */
   diagnostics: HostedModelDiagnosticV1[];
+  /** Authenticated native matrix log carrier; never aggregate terminal proof. */
+  matrixCarrier?: Record<string, unknown>;
 }
 
 /** Fixed private launcher scratch inside the ignored launcher checkout. */
@@ -297,7 +314,10 @@ export async function runHostedRuntimeLauncher(
 async function launchHostedRuntime(
   input: HostedRuntimeLauncherInputV1,
 ): Promise<HostedRuntimeLauncherResultV1> {
-  const identity = parseHostedEnvironment(input.env, "repair");
+  const identity = parseHostedEnvironment(
+    input.env,
+    runtimeJob(input.env.GITHUB_JOB),
+  );
   const dirs = await resolveRuntimeDirectories(
     input.launcherDir,
     input.runtimeDir,
@@ -333,6 +353,10 @@ async function launchHostedRuntime(
     throw new Error(HOSTED_RUNTIME_STATIC_EXECUTION);
   }
 
+  if (identity.job !== "repair" && execution.purpose !== "ordinary") {
+    throw new Error(HOSTED_RUNTIME_STATIC_EXECUTION);
+  }
+  const stdin = nativeMatrixStdin(input.stdin, identity.job);
   const startedAt = input.clock.now();
   if (!isNonNegativeSafeInteger(startedAt)) {
     throw new Error(HOSTED_RUNTIME_STATIC_ENV);
@@ -342,20 +366,39 @@ async function launchHostedRuntime(
     tmp: childTmp,
     denoDir: childDenoDir,
   });
+  // Streaming is attached only here, after the exact execution identity has
+  // been verified, and only to the actual child command: the bounded Git
+  // identity reads above never see a sink.
+  const diagnosticStream = input.onDiagnostic === undefined
+    ? undefined
+    : createHostedDiagnosticStream(execution, input.onDiagnostic);
 
   const run = await input.process.run({
     executable: input.denoExecutable,
-    args: ["run", "-A", HOSTED_RUNTIME_CHILD_ENTRYPOINT],
+    args: [
+      "run",
+      "-A",
+      identity.job === "repair"
+        ? HOSTED_RUNTIME_CHILD_ENTRYPOINT
+        : "src/host/matrix-actions.ts",
+    ],
+    ...(stdin === undefined ? {} : { stdin }),
     cwd: dirs.runtime,
     env: childEnv,
     maxDurationMs: HOSTED_RUNTIME_DEADLINE_MS,
     maxOutputBytes: HOSTED_RUNTIME_MAX_OUTPUT_BYTES,
+    ...(diagnosticStream === undefined
+      ? {}
+      : { onStdoutChunk: diagnosticStream }),
   });
   const finishedAt = input.clock.now();
   // A backward or invalid clock is a refusal: no terminal instant is ever
   // fabricated to hide it.
   if (!isNonNegativeSafeInteger(finishedAt) || finishedAt < startedAt) {
     return unavailableResult();
+  }
+  if (identity.job === "matrix_plan" || identity.job === "matrix_cell") {
+    return resolveMatrixLauncherResult(run, execution, identity.job, stdin);
   }
   const resolved = resolveLauncherResult({
     run,
@@ -517,6 +560,83 @@ type ChildStatusScanV1 =
   | { kind: "none" }
   | { kind: "one"; value: unknown }
   | { kind: "uncertain" };
+
+/**
+ * Incremental advisory stream over the RETAINED child stdout chunks. Complete
+ * lines are strictly re-parsed through the shared allow-list and stamped with
+ * the already-verified execution intent, exactly like the final capture scan;
+ * a partial line is bounded by the same line limit, an oversized line is
+ * discarded through its newline (a parseable-looking suffix is never
+ * interpreted), and UTF-8 sequences split across chunks are decoded with the
+ * decoder's own carry-over. Malformed, forged, private, incomplete and stderr
+ * bytes never produce a summary. Nothing here is evidence: a streamed advisory
+ * can precede a later truncation that leaves the final list empty, and it
+ * never affects settlement, health, the trusted terminal or the exit status.
+ * A throwing sink is swallowed so an advisory can never disturb the run.
+ */
+function createHostedDiagnosticStream(
+  execution: HostedExecutionIntentV1,
+  sink: (diagnostic: HostedModelDiagnosticV1) => void,
+): (chunk: Uint8Array) => void {
+  const decoder = new TextDecoder();
+  let partial = "";
+  let discarding = false;
+  let accepted = 0;
+  return (chunk) => {
+    if (accepted >= MAX_HOSTED_DIAGNOSTICS) return;
+    const text = decoder.decode(chunk, { stream: true });
+    let index = 0;
+    while (index < text.length) {
+      if (discarding) {
+        // Only the newline that ends the oversized line resumes parsing; the
+        // discarded bytes are never inspected, not even their suffix.
+        const newline = text.indexOf("\n", index);
+        if (newline < 0) return;
+        discarding = false;
+        index = newline + 1;
+        continue;
+      }
+      const newline = text.indexOf("\n", index);
+      if (newline < 0) {
+        const rest = text.slice(index);
+        if (partial.length + rest.length > MAX_DIAGNOSTIC_LINE_CHARS) {
+          partial = "";
+          discarding = true;
+        } else {
+          partial += rest;
+        }
+        return;
+      }
+      const line = `${partial}${text.slice(index, newline)}`.trim();
+      partial = "";
+      index = newline + 1;
+      if (line.length === 0 || line.length > MAX_DIAGNOSTIC_LINE_CHARS) {
+        continue;
+      }
+      let value: unknown;
+      try {
+        value = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      const diagnostic = parseLocalModelDiagnosticV1(value);
+      if (diagnostic === null) continue;
+      accepted += 1;
+      try {
+        sink({
+          version: "v1",
+          kind: "hosted_model_diagnostic",
+          advisory: true,
+          execution,
+          diagnostic,
+        });
+      } catch {
+        // Advisory only: a throwing sink can never disturb the child run.
+      }
+      if (accepted >= MAX_HOSTED_DIAGNOSTICS) return;
+    }
+  };
+}
 
 /**
  * A child status record is one whole JSON line carrying a `status` property.
@@ -702,7 +822,7 @@ function buildChildEnvironment(
     const value = env[key];
     if (isNonEmptyText(value)) routeEnv[key] = value;
   }
-  return {
+  const child: Record<string, string> = {
     HOME: dirs.home,
     PATH: path,
     GITHUB_TOKEN: githubToken,
@@ -724,6 +844,32 @@ function buildChildEnvironment(
     TMP: dirs.tmp,
     DENO_DIR: dirs.denoDir,
   };
+  if (isNonEmptyText(appToken)) {
+    child.SENTINEL_SUPERVISOR_TOKEN = appToken;
+  }
+  // Optional model-route inputs, forwarded only when non-empty so an unset
+  // route keeps the primary gateway behaviour exactly as before. The child's
+  // own trusted resolver decides the route; the launcher never selects one and
+  // the DeepSeek key is only ever a forwarded value, never logged.
+  for (
+    const key of [
+      "SENTINEL_MODEL_BASE_URL",
+      "SENTINEL_MODEL_ID",
+      "SENTINEL_MODEL_FALLBACK",
+      "SENTINEL_DEEPSEEK_API_KEY",
+      "SENTINEL_APP_INSTALLATION_ID",
+      "SENTINEL_COOLDOWN_MODE",
+    ] as const
+  ) {
+    const value = env[key];
+    if (isNonEmptyText(value)) child[key] = value;
+  }
+  if (identity.job === "matrix_plan") {
+    const output = env.GITHUB_OUTPUT;
+    if (!isNonEmptyText(output)) throw new Error(HOSTED_RUNTIME_STATIC_ENV);
+    child.GITHUB_OUTPUT = output;
+  }
+  return child;
 }
 
 /** Canonical real directories: the runtime is the launcher's fixed sibling. */
@@ -809,6 +955,167 @@ async function runBoundedGit(
   }
 }
 
+/** Native role selects a fixed entrypoint; no override may impersonate repair. */
+function runtimeJob(
+  value: string | undefined,
+): "repair" | "matrix_plan" | "matrix_cell" {
+  if (
+    value === "repair" || value === "matrix_plan" || value === "matrix_cell"
+  ) return value;
+  failIdentity();
+}
+
+function nativeMatrixStdin(
+  value: string | undefined,
+  job: HostedRuntimeJobV1,
+): string | undefined {
+  if (job === "matrix_plan") {
+    if (value !== undefined) failIdentity();
+    return undefined;
+  }
+  if (value === undefined || value.trim() === "") {
+    if (job === "matrix_cell") failIdentity();
+    return undefined;
+  }
+  if (new TextEncoder().encode(value).byteLength > 512) failIdentity();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    failIdentity();
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    failIdentity();
+  }
+  const obj = parsed as Record<string, unknown>;
+  const keys = job === "matrix_cell"
+    ? ["planDigest", "cellId"]
+    : ["planDigest"];
+  if (
+    !hasExactKeys(obj, keys) || !isDigest(obj.planDigest) ||
+    (job === "matrix_cell" && !isDigest(obj.cellId))
+  ) failIdentity();
+  return JSON.stringify(obj);
+}
+
+async function readNativeMatrixStdin(): Promise<string | undefined> {
+  const parts: Uint8Array[] = [];
+  let total = 0;
+  for await (const part of Deno.stdin.readable) {
+    total += part.byteLength;
+    if (total > 512) failIdentity();
+    parts.push(part);
+  }
+  if (total === 0) return undefined;
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const part of parts) {
+    bytes.set(part, offset);
+    offset += part.byteLength;
+  }
+  return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+}
+
+function isDigest(value: unknown): value is string {
+  return typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
+}
+
+function resolveMatrixLauncherResult(
+  run: ReplayCommandResultV1,
+  execution: HostedExecutionIntentV1,
+  job: "matrix_plan" | "matrix_cell",
+  stdin: string | undefined,
+): HostedRuntimeLauncherResultV1 {
+  if (
+    run.outcome !== "exited" || !run.settled || run.truncated ||
+    run.exitCode === null
+  ) return unavailableResult();
+  const kind = job === "matrix_plan"
+    ? "sentinel_matrix_plan"
+    : "sentinel_matrix_cell";
+  const found: Record<string, unknown>[] = [];
+  for (const line of new TextDecoder().decode(run.stdout).split("\n")) {
+    if (line.length > 4096) continue;
+    let value: unknown;
+    try {
+      value = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      continue;
+    }
+    const obj = value as Record<string, unknown>;
+    if (obj.kind !== kind) continue;
+    const keys = job === "matrix_plan"
+      ? [
+        "kind",
+        "waveId",
+        "run",
+        "runtimeSha",
+        "generation",
+        "planDigest",
+        "prepared",
+      ]
+      : [
+        "kind",
+        "run",
+        "runtimeSha",
+        "generation",
+        "cellId",
+        "reservationId",
+        "resultDigest",
+        "bundleDigest",
+        "status",
+      ];
+    if (
+      !hasExactKeys(obj, keys) || obj.runtimeSha !== execution.revision ||
+      obj.generation !== execution.generation
+    ) return unavailableResult();
+    const native = obj.run;
+    if (
+      typeof native !== "object" || native === null || Array.isArray(native)
+    ) return unavailableResult();
+    const identity = native as Record<string, unknown>;
+    if (
+      !hasExactKeys(identity, ["runId", "runAttempt", "launcherSha"]) ||
+      identity.runId !== execution.runId ||
+      identity.runAttempt !== execution.runAttempt ||
+      identity.launcherSha !== execution.launcherSha
+    ) return unavailableResult();
+    if (job === "matrix_plan") {
+      if (
+        obj.waveId !== execution.id || !isDigest(obj.planDigest) ||
+        typeof obj.prepared !== "number" ||
+        !Number.isSafeInteger(obj.prepared) ||
+        obj.prepared < 0 || obj.prepared > 256
+      ) return unavailableResult();
+    } else {
+      const selection = JSON.parse(stdin ?? "{}") as Record<string, unknown>;
+      if (
+        obj.cellId !== selection.cellId || !isDigest(obj.cellId) ||
+        typeof obj.reservationId !== "string" ||
+        obj.reservationId.length === 0 ||
+        obj.reservationId.length > 256 ||
+        Array.from(obj.reservationId).some((char) => char.charCodeAt(0) < 32) ||
+        !isDigest(obj.resultDigest) ||
+        (obj.bundleDigest !== null && !isDigest(obj.bundleDigest)) ||
+        !["completed", "failed", "not_started"].includes(String(obj.status))
+      ) return unavailableResult();
+    }
+    found.push(obj);
+  }
+  if (found.length !== 1) return unavailableResult();
+  return {
+    status: run.exitCode === 0 ? "healthy" : "failed",
+    terminal: null,
+    detail: run.exitCode === 0
+      ? HOSTED_RUNTIME_HEALTHY_DETAIL
+      : HOSTED_RUNTIME_FAILED_DETAIL,
+    diagnostics: [],
+    matrixCarrier: found[0],
+  };
+}
 function executionIdOf(identity: HostedRuntimeIdentityV1): string {
   return `${identity.runId}:${identity.runAttempt}:repair`;
 }
@@ -863,9 +1170,9 @@ export async function runHostedRuntimeMain(): Promise<
   HostedRuntimeLauncherResultV1
 > {
   try {
-    // Only the named keys are read: the eight identity fields plus the five
-    // process inputs. No unrestricted env access is required.
-    const env = {
+    // Only the named keys are read: the eight identity fields plus the four
+    // existing process inputs. No unrestricted env access is required.
+    const env: Record<string, string | undefined> = {
       ...readHostedIdentityEnv(),
       HOME: Deno.env.get("HOME"),
       PATH: Deno.env.get("PATH"),
@@ -876,11 +1183,21 @@ export async function runHostedRuntimeMain(): Promise<
       SENTINEL_MODEL_FALLBACK: Deno.env.get("SENTINEL_MODEL_FALLBACK"),
       SENTINEL_REVIEW_MODEL_ID: Deno.env.get("SENTINEL_REVIEW_MODEL_ID"),
       SENTINEL_DEEPSEEK_API_KEY: Deno.env.get("SENTINEL_DEEPSEEK_API_KEY"),
+      SENTINEL_APP_INSTALLATION_ID: Deno.env.get(
+        "SENTINEL_APP_INSTALLATION_ID",
+      ),
       UOS_AI_TOKEN: Deno.env.get("UOS_AI_TOKEN"),
     };
     // Native identity is the first check: a malformed job identity fails
     // before any credential, checkout or state setup.
-    parseHostedEnvironment(env, "repair");
+    const job = runtimeJob(env.GITHUB_JOB);
+    parseHostedEnvironment(env, job);
+    if (job === "matrix_plan") {
+      env.GITHUB_OUTPUT = Deno.env.get("GITHUB_OUTPUT");
+    }
+    const stdin = job === "matrix_plan"
+      ? undefined
+      : await readNativeMatrixStdin();
     const launcherDir = Deno.cwd();
     const runtimeDir = joinPath(launcherDir, "..", "runtime");
     const token = env.GITHUB_TOKEN;
@@ -902,6 +1219,8 @@ export async function runHostedRuntimeMain(): Promise<
       runtimeDir,
       denoExecutable: Deno.execPath(),
       process: new DenoReplayRuntime(Deno.execPath()),
+      onDiagnostic: logHostedDiagnostic,
+      ...(stdin === undefined ? {} : { stdin }),
     });
     return result;
   } catch {
@@ -909,13 +1228,24 @@ export async function runHostedRuntimeMain(): Promise<
   }
 }
 
+/**
+ * Production advisory sink: one sanitized summary per streamed line, printed
+ * as soon as its complete stdout line is retained instead of waiting for the
+ * whole child run. It is explicitly advisory and never evidence of child
+ * settlement, health or delivery.
+ */
+function logHostedDiagnostic(diagnostic: HostedModelDiagnosticV1): void {
+  console.log(JSON.stringify(diagnostic));
+}
+
 if (import.meta.main) {
   const result = await runHostedRuntimeMain();
-  // Each reconstructed advisory is printed first; it is not evidence. Then
-  // only the trusted parsed terminal is ever printed. A failed or unavailable
-  // run prints no terminal record and exits nonzero.
-  for (const diagnostic of result.diagnostics) {
-    console.log(JSON.stringify(diagnostic));
+  // Each reconstructed advisory already reached the sanitized sink as its
+  // complete line was retained, so it is never printed a second time here.
+  // Only the trusted parsed terminal is printed; a failed or unavailable run
+  // prints no terminal record and exits nonzero.
+  if (result.matrixCarrier !== undefined) {
+    console.log(JSON.stringify(result.matrixCarrier));
   }
   if (result.terminal !== null) console.log(JSON.stringify(result.terminal));
   if (result.status !== "healthy") {

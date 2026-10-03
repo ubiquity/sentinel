@@ -57,6 +57,8 @@ export interface ReplayCommandInputV1 {
   executable: string;
   /** Exact argv elements; no shell is ever involved. */
   args: string[];
+  /** Optional bounded trusted input; absent preserves ignored stdin. */
+  stdin?: string;
   cwd: string;
   /** Complete child environment (the runtime clears everything else). */
   env: Readonly<Record<string, string>>;
@@ -64,6 +66,14 @@ export interface ReplayCommandInputV1 {
   maxDurationMs: number;
   /** Combined retained byte bound (stdout + stderr); beyond this bytes are discarded. */
   maxOutputBytes: number;
+  /**
+   * Optional advisory observer invoked synchronously with each RETAINED stdout
+   * chunk as it is captured (a read-only view of exactly the retained prefix;
+   * bytes beyond the combined bound and every stderr byte are never
+   * delivered). An observer exception is swallowed: it can never disturb
+   * capture, draining, the deadline or settlement.
+   */
+  onStdoutChunk?: (chunk: Uint8Array) => void;
 }
 
 export type ReplayCommandOutcomeV1 = "exited" | "spawn_failed" | "timed_out";
@@ -200,7 +210,7 @@ export class DenoReplayRuntime implements ReplayRuntimeV1 {
         // so signaling -pid reaches exactly this run's descendants and
         // nothing else. Never signal a non-recorded pid.
         detached: true,
-        stdio: ["ignore", "pipe", "pipe"],
+        stdio: [input.stdin === undefined ? "ignore" : "pipe", "pipe", "pipe"],
         env: { ...input.env, NODE_V8_COVERAGE: "" },
       });
     } catch (error) {
@@ -252,6 +262,12 @@ export class DenoReplayRuntime implements ReplayRuntimeV1 {
       };
     }
 
+    if (input.stdin !== undefined && child.stdin !== null) {
+      // The bounded caller input is closed once; early child exit may refuse it.
+      child.stdin.on("error", () => {});
+      child.stdin.end(input.stdin);
+    }
+
     let closeCode: number | null = null;
     let closeSignal: string | null = null;
     let spawnError: unknown = null;
@@ -264,7 +280,10 @@ export class DenoReplayRuntime implements ReplayRuntimeV1 {
       }
     });
 
-    const collector = new BoundedCollector(input.maxOutputBytes);
+    const collector = new BoundedCollector(
+      input.maxOutputBytes,
+      input.onStdoutChunk,
+    );
     const streamsDone = Promise.allSettled([
       collector.collect(child.stdout, "stdout"),
       collector.collect(child.stderr, "stderr"),
@@ -546,7 +565,8 @@ function delay(ms: number): Promise<void> {
  * covers the combined retained output (stdout + stderr), matching the
  * registry contract; the retained prefix is what digests cover and any
  * overage sets `truncated`. Both streams are drained concurrently to EOF so
- * a full pipe can never deadlock the run.
+ * a full pipe can never deadlock the run. An optional advisory observer sees
+ * exactly the retained stdout chunks, and never stderr.
  */
 class BoundedCollector {
   truncated = false;
@@ -556,7 +576,10 @@ class BoundedCollector {
   private stdoutTotal = 0;
   private stderrTotal = 0;
 
-  constructor(budget: number) {
+  constructor(
+    budget: number,
+    private readonly onStdoutChunk?: (chunk: Uint8Array) => void,
+  ) {
     this.remaining = budget;
   }
 
@@ -574,13 +597,15 @@ class BoundedCollector {
   ): Promise<void> {
     if (stream === null) return;
     const chunks = slot === "stdout" ? this.stdoutChunks : this.stderrChunks;
+    const observer = slot === "stdout" ? this.onStdoutChunk : undefined;
     for await (const value of stream) {
       if (this.remaining === 0) {
         this.truncated = true;
         continue;
       }
       const take = Math.min(value.byteLength, this.remaining);
-      chunks.push(value.subarray(0, take));
+      const retained = value.subarray(0, take);
+      chunks.push(retained);
       if (slot === "stdout") {
         this.stdoutTotal += take;
       } else {
@@ -588,6 +613,16 @@ class BoundedCollector {
       }
       this.remaining -= take;
       if (take < value.byteLength) this.truncated = true;
+      // Advisory observer: only retained stdout bytes, never stderr. A thrown
+      // observer must not disturb capture, draining, the deadline or
+      // settlement, so it is swallowed here.
+      if (observer !== undefined && take > 0) {
+        try {
+          observer(retained);
+        } catch {
+          // Advisory only: the run continues exactly as if it were absent.
+        }
+      }
     }
   }
 }

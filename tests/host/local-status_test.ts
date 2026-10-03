@@ -1445,6 +1445,57 @@ Deno.test("embedded renderer: uncapped producer report renders the actual rollin
   }
 });
 
+Deno.test("embedded renderer: approved reserve model survives the runtime launcher boundary", async () => {
+  const root = await makeRoot("sentinel-local-render-reserve-");
+  try {
+    // The real producer is called with the actual owner-approved runtime
+    // route; its produced bytes are fed to the renderer unchanged.
+    const produced = await produceSnapshot(
+      repairSnapshot(
+        [work("w-1", "work", 1)],
+        [
+          ...chargedReservations("reserve-hour", 120, FINISHED - 1000),
+          ...chargedReservations("reserve-week", 60, FINISHED - 2 * HOUR),
+        ],
+      ),
+      root,
+      { modelId: "gpt-reserve" },
+    );
+    // The producer reports the actual configured model, not a display label.
+    assert.equal(produced.status.model, "gpt-reserve");
+    assert.equal(produced.status.reasoning, "max");
+    assert.deepEqual(produced.status.limits, {
+      perHour: null,
+      perSevenDays: null,
+    });
+    const R = reservationAggregates(produced.status);
+    assert.equal(R.chargedHour, 120);
+    assert.equal(R.chargedSevenDays, 180);
+
+    // The unchanged produced bytes must render truthfully: the approved model
+    // and its actual uncapped usage, with no substitute label.
+    const rendered = await expectRecorded(
+      produced.fileText,
+      "GREEN",
+      "Implementation model: gpt-reserve with max reasoning",
+    );
+    assert.ok(
+      rendered.summary.includes(
+        `Rolling usage: ${R.chargedHour} charged in the last hour; ${R.chargedSevenDays} charged in the last seven days (historical usage, no admission caps)`,
+      ),
+      rendered.summary,
+    );
+    assert.ok(
+      rendered.summary.includes(
+        "Next eligible local start (UTC): none recorded (admission is uncapped)",
+      ),
+      rendered.summary,
+    );
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
 Deno.test("embedded renderer: large lifetime history renders unchanged", async () => {
   const root = await makeRoot("sentinel-local-render-large-");
   try {

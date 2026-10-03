@@ -55,6 +55,10 @@ import {
 import type { HostedExecutionIntentV1 } from "../contracts/hosted-supervisor.ts";
 import type { MatrixRunIdentityV1 } from "../contracts/matrix.ts";
 import type { MatrixArtifactTransportV1 } from "./matrix-artifact-port.ts";
+import {
+  readMatrixNativeCarrier,
+  runActionsMatrixAggregateCycles,
+} from "./matrix-actions.ts";
 import { parseReleaseStateSnapshotV1 } from "../contracts/state-snapshots.ts";
 import { fetchHttpTransport, type HttpTransportV1 } from "../github/http.ts";
 import { runRepairEntrypoint } from "../main.ts";
@@ -1141,8 +1145,6 @@ async function readControllerSha(
 }
 
 if (import.meta.main) {
-  const { readMatrixNativeCarrier, runActionsMatrixAggregateCycles } =
-    await import("./matrix-actions.ts");
   const carrier = await readMatrixNativeCarrier(false, true);
   await runActionsRepairHost({
     runTargetCycles: (input) =>

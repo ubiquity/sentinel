@@ -47,6 +47,7 @@ jobs:
           const ERROR_OUTCOMES = ["state_error", "source_error"];
           const KNOWN_PURPOSES = ["implementation", "continuation", "retry", "review_request"];
           const KNOWN_RESERVATION_OUTCOMES = ["reserved", "submitted", "ambiguous", "confirmed_not_submitted"];
+          const KNOWN_MODELS = ["gpt-reserve", "gpt-5.6-luna"];
           const REPORT_VERSION = "v2";
           const MAX_RECORD_ID_CHARS = 256;
           const MAX_LOGIN_CHARS = 128;
@@ -171,7 +172,7 @@ jobs:
             if (status.kind !== "sentinel_local_status") reject("kind is not sentinel_local_status");
             if (status.version !== "v1") reject("version is not v1");
             if (status.reportVersion !== REPORT_VERSION) reject("reportVersion is not v2");
-            if (status.model !== "gpt-reserve" || status.reasoning !== "max") {
+            if ((status.model !== "gpt-5.6-luna" && status.model !== "gpt-reserve") || status.reasoning !== "max") {
               reject("model policy is not gpt-reserve with max reasoning");
             }
             if (
@@ -420,7 +421,7 @@ jobs:
             details.push("- Dispatch age: " + elapsed(ageMs) + " (stale beyond 2 hours)");
             details.push("- Controller SHA: " + status.controllerSha);
             details.push("- Target base SHA: " + (isSha(status.targetBaseSha) ? status.targetBaseSha : "none recorded"));
-            details.push("- Implementation model: gpt-reserve with max reasoning (matches the required runtime policy)");
+            details.push("- Implementation model: " + status.model + " with max reasoning (matches the required runtime policy)");
             details.push("- Admission limits: uncapped (no rolling hourly or weekly model-start cap)");
             details.push("- Outcome: " + outcomeStatus + (outcomeStatus === "step_limit" ? " after " + status.outcome.steps + " steps" : ""));
             details.push("- Work items: " + W.total + (W.omitted > 0 ? " (" + work.length + " in bounded detail, " + W.omitted + " omitted)" : ""));
