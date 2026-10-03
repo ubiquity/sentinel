@@ -369,3 +369,18 @@ Deno.test("token provider: a hung injected signer cannot block past its bound", 
   assert.equal(transport.requests.length, 0, "no request after signer hang");
   assert.ok(Date.now() - started < 2_000, "signer hang settled");
 });
+
+Deno.test("fromFetch: byte responses preserve non UTF-8 archive bytes", async () => {
+  const bytes = new Uint8Array([0x50, 0x4b, 0xff, 0x00, 0x80]);
+  const transport = fromFetch(() => Promise.resolve(new Response(bytes)));
+  const response = await transport({
+    method: "GET",
+    url: "https://api.github.com/archive",
+    headers: new Map(),
+    body: null,
+    ...{ responseType: "bytes" as const },
+  });
+  assert.deepEqual("bodyBytes" in response, true);
+  if ("bodyBytes" in response) assert.deepEqual(response.bodyBytes, bytes);
+  assert.deepEqual(response.bodyText, "");
+});
