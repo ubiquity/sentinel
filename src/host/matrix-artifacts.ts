@@ -21,6 +21,11 @@ import {
 import type { Clock, StateReadView } from "../contracts/ports.ts";
 import type { RepositoryIdentityV1 } from "../contracts/shared.ts";
 import {
+  candidateBranch,
+  candidatePreservationRef,
+  implementationIntentKey,
+} from "../repair/keys.ts";
+import {
   createDeadline,
   type HttpResponseV1,
   type HttpTransportV1,
@@ -161,6 +166,22 @@ export function createActionsMatrixArtifactTransport(options: {
           const reservation = reservations[0],
             task = work[0],
             intent = task.intent;
+          const implementing = intent?.kind === "implementation" &&
+            intent.expectedHead === null && intent.resultId === null;
+          const preserving = intent?.kind === "candidate_preservation" &&
+            reservation.outcome === "submitted" &&
+            reservation.settledAt !== null && task.target.head !== null &&
+            task.target.head !== task.target.base &&
+            intent.expectedHead === task.target.head &&
+            intent.resultId === null && intent.pr === null &&
+            task.target.candidateState?.preserved === null &&
+            intent.startedAt >= reservation.createdAt &&
+            intent.startedAt <= options.clock.now() + TOLERANCE &&
+            intent.branch === await candidatePreservationRef(
+                task.repository,
+                task.id,
+                request.intentKey,
+              );
           if (
             reservation.taskId !== request.taskId ||
             !sameRepo(reservation.repository, request.repository) ||
@@ -170,11 +191,12 @@ export function createActionsMatrixArtifactTransport(options: {
             reservation.outcome === "confirmed_not_submitted" ||
             task.nextStep !== "work" ||
             task.target.base !== request.expectedBase ||
-            intent?.kind !== "implementation" ||
-            intent.key !== request.intentKey ||
+            (!implementing && !preserving) ||
+            intent?.key !== request.intentKey ||
+            request.intentKey !==
+              implementationIntentKey(request.reservationId) ||
             intent.requestId !== request.reservationId ||
-            intent.observedBase !== request.expectedBase ||
-            intent.expectedHead !== null || intent.resultId !== null
+            intent.observedBase !== request.expectedBase
           ) refuse();
           requested.set(request.reservationId, request);
         }
@@ -626,6 +648,31 @@ export function createActionsMatrixArtifactTransport(options: {
               result.status !== cellMarker.status ||
               result.completedAt > options.clock.now() + TOLERANCE
             ) refuse();
+            const task = snapshot.work.find((row) =>
+              row.id === cell.taskId &&
+              sameRepo(row.repository, cell.repository)
+            )!;
+            if (task.intent?.kind === "candidate_preservation") {
+              const reservation = snapshot.reservations.find((row) =>
+                row.id === cell.reservationId
+              )!;
+              const checkpoint = task.target.checkpoint;
+              if (
+                result.status !== "completed" ||
+                result.receipt?.outcome !== "completed" ||
+                result.bundle === null ||
+                result.bundle.head !== task.target.head ||
+                result.receipt.candidate?.head !== task.target.head ||
+                result.bundle.checkpointSha !== (checkpoint?.sha ?? null) ||
+                result.receipt.candidate?.checkpointSha !==
+                  (checkpoint?.sha ?? null) ||
+                (checkpoint !== null &&
+                  checkpoint.branch !== candidateBranch(task.id)) ||
+                task.intent.startedAt + TOLERANCE < result.completedAt ||
+                reservation.settledAt === null ||
+                reservation.settledAt + TOLERANCE < result.completedAt
+              ) refuse();
+            }
             if (result.bundle) {
               const bundle = files.get(`${cell.cellId}.bundle`);
               if (
