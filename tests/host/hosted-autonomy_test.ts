@@ -1980,3 +1980,150 @@ Deno.test(
     assert.equal(reviewNext.counters.retries, 0);
   },
 );
+
+Deno.test(
+  "hosted autonomy: the green gate reads the complete check-run listing",
+  async () => {
+    const check = (
+      name: string,
+      conclusion: string | null,
+      status = "completed",
+    ) => ({ name, head_sha: HEAD, status, conclusion });
+    const greenPage = (count: number, offset: number) =>
+      Array.from({ length: count }, (_, index) =>
+        check(
+          index === 0 && offset === 0 ? "test-local" : `c-${offset + index}`,
+          "success",
+        ));
+    const original = globalThis.fetch;
+    try {
+      const serve = (
+        pages: readonly {
+          total_count: number;
+          check_runs: unknown[];
+        }[],
+      ) => {
+        const requests: string[] = [];
+        globalThis.fetch = ((input: string | URL | Request) => {
+          const url = String(input);
+          requests.push(url);
+          const page = Number(new URL(url).searchParams.get("page") ?? "1");
+          const payload = pages[page - 1];
+          return Promise.resolve(
+            payload === undefined
+              ? new Response("{}", { status: 404 })
+              : new Response(JSON.stringify(payload), { status: 200 }),
+          );
+        }) as typeof fetch;
+        return requests;
+      };
+
+      const github = createHostedAutonomyGitHub("fixture-token");
+
+      // A green first page is not the whole listing: a failing run beyond
+      // page one must block the merge authorization.
+      const failingRequests = serve([
+        { total_count: 101, check_runs: greenPage(100, 0) },
+        { total_count: 101, check_runs: [check("late-failure", "failure")] },
+      ]);
+      assert.equal(await github.hasSuccessfulCheck(HEAD), false);
+      assert.ok(failingRequests.some((url) => url.includes("page=2")));
+
+      // The same listing with every page green is authorized only after the
+      // complete listing was read.
+      serve([
+        { total_count: 101, check_runs: greenPage(100, 0) },
+        { total_count: 101, check_runs: greenPage(1, 100) },
+      ]);
+      assert.equal(await github.hasSuccessfulCheck(HEAD), true);
+
+      // An unreadable later page is an incomplete listing: fail closed.
+      serve([
+        { total_count: 101, check_runs: greenPage(100, 0) },
+      ]);
+      assert.equal(await github.hasSuccessfulCheck(HEAD), false);
+    } finally {
+      globalThis.fetch = original;
+    }
+  },
+);
+
+Deno.test(
+  "hosted autonomy: a failing later check page blocks the delivery merge",
+  async () => {
+    const check = (
+      name: string,
+      conclusion: string | null,
+      status = "completed",
+    ) => ({ name, head_sha: HEAD, status, conclusion });
+    const greenPage = (count: number, offset: number) =>
+      Array.from({ length: count }, (_, index) =>
+        check(
+          index === 0 && offset === 0 ? "test-local" : `c-${offset + index}`,
+          "success",
+        ));
+    const { rig } = await makeRig("autonomy-check-pages", {
+      pull: pullFacts({ state: "open", merged: false, mergeCommitSha: null }),
+    });
+    const original = globalThis.fetch;
+    const requests: string[] = [];
+    globalThis.fetch = ((
+      input: string | URL | Request,
+      init?: RequestInit,
+    ) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      requests.push(`${method} ${url}`);
+      if (method === "PUT" && url.endsWith("/pulls/51/merge")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ merged: true, sha: MERGE }), {
+            status: 200,
+          }),
+        );
+      }
+      const payload = url.includes("/check-runs")
+        ? Number(new URL(url).searchParams.get("page") ?? "1") === 1
+          ? { total_count: 101, check_runs: greenPage(100, 0) }
+          : {
+            total_count: 101,
+            check_runs: [check("late-failure", "failure")],
+          }
+        : url.includes("/actions/runs")
+        ? { workflow_runs: [] }
+        : url.includes("/git/ref/")
+        ? { object: { sha: BASE } }
+        : {
+          state: "open",
+          merged: false,
+          merge_commit_sha: null,
+          head: { sha: HEAD },
+          base: { ref: "development" },
+          user: { login: "github-actions[bot]" },
+          number: 51,
+        };
+      return Promise.resolve(
+        new Response(JSON.stringify(payload), { status: 200 }),
+      );
+    }) as typeof fetch;
+    try {
+      const result = await run(
+        rig,
+        createHostedAutonomyGitHub("fixture-token"),
+      );
+      assert.ok(
+        !result.actions.some((action) => action.startsWith("merge:")),
+      );
+      assert.ok(
+        result.actions.some((action) => action.endsWith("checks_pending")),
+      );
+      assert.ok(
+        requests.some((url) =>
+          url.includes("/check-runs") && url.includes("page=2")
+        ),
+      );
+    } finally {
+      globalThis.fetch = original;
+      await Deno.remove(rig.tmp, { recursive: true });
+    }
+  },
+);
