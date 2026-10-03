@@ -120,21 +120,21 @@ All records have `version: "v1"` and a `kind`; fields below are complete.
 Per-repository configuration; the only credential surface is a restricted
 reference — no secret literal is allowed in any field.
 
-| Field                   | Type                                             | Semantics                                                                                                                                                                                                                                                                                                                                  |
-| ----------------------- | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `repository`            | `{ owner, name, installationId }`                | GitHub identity + App installation reference                                                                                                                                                                                                                                                                                               |
-| `baseBranch`            | string                                           | primary source branch                                                                                                                                                                                                                                                                                                                      |
-| `adapter`               | `{ kind: "gateway", baseUrl }`                   | exact adapter kind — only `"gateway"` in v1                                                                                                                                                                                                                                                                                                |
-| `commands.replay/.test` | `CommandId`                                      | trusted command IDs only; the config never carries shell argv (model-supplied commands are outside the contract). Registry lookup is **own-property only**: a configured id like `constructor` against an empty registry is rejected instead of resolving to an inherited `Object.prototype` member                                        |
-| `commandRegistry`       | `CommandRegistryV1`                              | required concrete registry (file/injected config — never env/flag); references the same IDs and is checked to contain them                                                                                                                                                                                                                 |
-| `protectedPaths`        | string[]                                         | path prefixes that must never be modified                                                                                                                                                                                                                                                                                                  |
-| `build.projectId`       | string \| null                                   | Deno Deploy project id; null = not deployed                                                                                                                                                                                                                                                                                                |
-| `build.acceptance`      | object \| null                                   | `healthPath`, `metricsPath`, `managedBodyMarker`, `managedHeaders` (non-secret identity markers), `domain`                                                                                                                                                                                                                                 |
-| `secretRef`             | string \| null                                   | restricted storage reference to host-injected credentials; must be a ref, never a literal URL/query/userinfo                                                                                                                                                                                                                               |
-| `liveStartLimits`       | `{ perHour, perSevenDays }` \| null              | rolling model-start caps; **null = inference not enabled**; `perSevenDays` is an explicit nullable cap: `null` means **no weekly admission cap** (never a wildcard, `Infinity`, huge number or zero), a missing/undefined/malformed weekly value is invalid, and `perHour <= perSevenDays` is enforced only when the weekly cap is numeric |
-| `sessionBound`          | `{ maxDurationMs, maxOutputChars }` \| null      | declared supported session bounds                                                                                                                                                                                                                                                                                                          |
-| `retention`             | `{ evidenceMaxAgeMs, evidenceMaxBytes }` \| null | owner-approved evidence retention bound                                                                                                                                                                                                                                                                                                    |
-| `stabilityPolicy`       | object \| null                                   | declared metrics/denominators, `windowMs`/`sampleIntervalMs`, `minSamples`, `minRequests`, baseline window/samples, owner thresholds; empty threshold list rejected; `sampleIntervalMs <= windowMs` enforced                                                                                                                               |
+| Field                   | Type                                             | Semantics                                                                                                                                                                                                                                                                                                                                                                               |
+| ----------------------- | ------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `repository`            | `{ owner, name, installationId }`                | GitHub identity + App installation reference                                                                                                                                                                                                                                                                                                                                            |
+| `baseBranch`            | string                                           | primary source branch                                                                                                                                                                                                                                                                                                                                                                   |
+| `adapter`               | `{ kind: "gateway", baseUrl }`                   | exact adapter kind — only `"gateway"` in v1                                                                                                                                                                                                                                                                                                                                             |
+| `commands.replay/.test` | `CommandId`                                      | trusted command IDs only; the config never carries shell argv (model-supplied commands are outside the contract). Registry lookup is **own-property only**: a configured id like `constructor` against an empty registry is rejected instead of resolving to an inherited `Object.prototype` member                                                                                     |
+| `commandRegistry`       | `CommandRegistryV1`                              | required concrete registry (file/injected config — never env/flag); references the same IDs and is checked to contain them                                                                                                                                                                                                                                                              |
+| `protectedPaths`        | string[]                                         | path prefixes that must never be modified                                                                                                                                                                                                                                                                                                                                               |
+| `build.projectId`       | string \| null                                   | Deno Deploy project id; null = not deployed                                                                                                                                                                                                                                                                                                                                             |
+| `build.acceptance`      | object \| null                                   | `healthPath`, `metricsPath`, `managedBodyMarker`, `managedHeaders` (non-secret identity markers), `domain`                                                                                                                                                                                                                                                                              |
+| `secretRef`             | string \| null                                   | restricted storage reference to host-injected credentials; must be a ref, never a literal URL/query/userinfo                                                                                                                                                                                                                                                                            |
+| `liveStartLimits`       | `{ perHour, perSevenDays }` \| null              | rolling model-start caps; **a null record = inference not enabled** (never "unlimited"); inside a present record each cap is an explicit nullable cap: `null` means **no admission cap for that window** (never a wildcard, `Infinity`, huge number or zero), a missing/undefined/malformed value is invalid, and `perHour <= perSevenDays` is enforced only when both caps are numeric |
+| `sessionBound`          | `{ maxDurationMs, maxOutputChars }` \| null      | declared supported session bounds                                                                                                                                                                                                                                                                                                                                                       |
+| `retention`             | `{ evidenceMaxAgeMs, evidenceMaxBytes }` \| null | owner-approved evidence retention bound                                                                                                                                                                                                                                                                                                                                                 |
+| `stabilityPolicy`       | object \| null                                   | declared metrics/denominators, `windowMs`/`sampleIntervalMs`, `minSamples`, `minRequests`, baseline window/samples, owner thresholds; empty threshold list rejected; `sampleIntervalMs <= windowMs` enforced                                                                                                                                                                            |
 
 `CommandRegistryV1 { version, commands }` binds each `CommandId` to
 `CommandSpecV1 { executable, args, maxDurationMs, maxOutputBytes }`:
@@ -638,26 +638,29 @@ Rules:
 
 - **One global budget.** All repositories charge the same rolling caps.
   Admission policy is the complete supplied config set: the requested repository
-  must be in the set, every config must carry non-null `liveStartLimits` and
-  `sessionBound`, the hour cap must be a positive safe integer and identical
-  across the whole set, and `perSevenDays` must agree exactly — a numeric cap
-  keeps the positive/invariant checks, explicit `null` means no weekly cap, and
-  a null/numeric mix across repositories is a conflict, never an inferred
-  fallback. Missing, null or mismatched policies return `disabled`; no
-  default/fallback caps, no per-repo independent budget. Workflow single-writer
-  serialization and one deployed config are caller responsibilities — the
-  controller invents no distributed policy negotiation.
+  must be in the set, every config must carry a non-null `liveStartLimits`
+  record and `sessionBound`, each cap must be either a positive safe integer or
+  explicit `null` (no cap for that window), and both fields must agree exactly
+  across the whole set — a numeric cap keeps the positive/invariant checks
+  (`perHour <= perSevenDays` only when both are numeric), explicit `null` means
+  no cap for that window, and a null/numeric mix across repositories is a
+  conflict, never an inferred fallback. A null `liveStartLimits` record still
+  means inference is not enabled. Missing, non-positive or mismatched policies
+  return `disabled`; no default/fallback caps, no per-repo independent budget.
+  Workflow single-writer serialization and one deployed config are caller
+  responsibilities — the controller invents no distributed policy negotiation.
 - **Charging.** Millisecond rolling intervals `(now - duration, now]`; every
   `reserved`/`submitted`/`ambiguous` reservation charges at its `createdAt`;
   only `confirmed_not_submitted` with a validated restricted `proofRef` is
   refunded. Windows never reset on midnight or process restart. The earliest
   `retryAt` under every enforced cap sorts charged timestamps (each enforced
   window's cap-th most recent charge must fall out), so several excess entries
-  are handled exactly, not by assuming one; an explicit null weekly cap enforces
-  the rolling hour only. Timestamp/window and snapshot-sequence arithmetic stays
-  inside the safe-integer range: any overflow or invalid arithmetic input is a
-  typed failure (`unavailable`) and nothing is written, never an unsafe
-  `retryAt` or `NaN`.
+  are handled exactly, not by assuming one; each cap explicitly `null` enforces
+  nothing for that window while every admitted start still records its durable
+  reservation. Timestamp/window and snapshot-sequence arithmetic stays inside
+  the safe-integer range: any overflow or invalid arithmetic input is a typed
+  failure (`unavailable`) and nothing is written, never an unsafe `retryAt` or
+  `NaN`.
 - **Identity deduplication.** Exact logical identity
   (repository/taskId/head/attempt/purpose) is compared **before** any duplicate
   classification: the same derived id plus the same logical identity returns
@@ -703,10 +706,10 @@ the same global repair snapshot.
 
 `earliestRetryAt(reservations, now, limits)` and `isCharged(reservation)` are
 the pure rolling-window helpers. `earliestRetryAt` validates every input with
-the frozen reservation parser, plus a nonnegative safe-integer `now`, a positive
-safe-integer hour cap, a weekly cap that is either a positive safe-integer with
-`perHour <= perSevenDays` or explicit `null` (no weekly cap; a missing or
-malformed weekly value is invalid, never permissive); invalid input or timestamp
+the frozen reservation parser, plus a nonnegative safe-integer `now`, and for
+each cap either a positive safe-integer (with `perHour <= perSevenDays` when
+both are numeric) or explicit `null` (no cap for that window; a missing or
+malformed value is invalid, never permissive); invalid input or timestamp
 overflow throws one fixed sanitized `RangeError` that never echoes a value. The
 controller catches it at its boundary, returns `unavailable` and writes nothing
 — an unsafe `retryAt` or `NaN` is never produced. Windows are

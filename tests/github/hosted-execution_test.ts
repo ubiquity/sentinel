@@ -996,3 +996,111 @@ Deno.test("hosted execution: future, inverted or early-terminal metadata is refu
     false,
   );
 });
+
+Deno.test("hosted execution: paginated native jobs reject incomplete conflicting or foreign pages", async (t) => {
+  for (
+    const defect of [
+      "duplicate_id",
+      "duplicate_repair",
+      "wrong_attempt",
+      "wrong_head",
+      "changing_total",
+      "missing_next",
+      "short_page",
+      "cycle",
+      "foreign_origin",
+      "foreign_attempt",
+      "userinfo",
+      "repeated_query",
+      "extra_next",
+      "multiple_next",
+      "missing_page",
+      "native_ceiling",
+      "page_cooldown",
+    ]
+  ) {
+    await t.step(defect, async () => {
+      const rig = makeRig();
+      const cells = Array.from(
+        { length: 100 },
+        (_, index) =>
+          jobBody({ id: 10000 + index, name: "matrix_cell (" + index + ")" }),
+      );
+      const repair = jobBody();
+      if (defect === "duplicate_id") repair.id = cells[0].id;
+      if (defect === "duplicate_repair") cells[0] = jobBody({ id: JOB_ID + 1 });
+      if (defect === "wrong_attempt") cells[0].run_attempt = RUN_ATTEMPT + 1;
+      if (defect === "wrong_head") cells[0].head_sha = "f".repeat(40);
+      scriptAttemptAndJobs(rig, attemptBody(), {});
+      rig.http.on("GET", JOBS_PATH, (request) => {
+        const page = Number(
+          new URL(request.url).searchParams.get("page") ?? "1",
+        );
+        if (defect === "page_cooldown" && page === 1) rig.gate.deny = true;
+        if (defect === "missing_page" && page === 2) return response(404, {});
+        let next = page === 1
+          ? API_BASE + JOBS_PATH + "?per_page=100&page=2"
+          : null;
+        if (defect === "missing_next") next = null;
+        if (defect === "cycle") {
+          next = API_BASE + JOBS_PATH + "?per_page=100&page=1";
+        }
+        if (defect === "foreign_origin") {
+          next = "https://evil.example" + JOBS_PATH + "?per_page=100&page=2";
+        }
+        if (defect === "foreign_attempt") {
+          next = API_BASE +
+            JOBS_PATH.replace(
+              "/attempts/" + RUN_ATTEMPT,
+              "/attempts/" + (RUN_ATTEMPT + 1),
+            ) + "?per_page=100&page=2";
+        }
+        if (defect === "userinfo") {
+          next = "https://user@api.github.com" + JOBS_PATH +
+            "?per_page=100&page=2";
+        }
+        if (defect === "repeated_query") {
+          next = API_BASE + JOBS_PATH + "?per_page=100&page=2&page=2";
+        }
+        if (defect === "extra_next" && page === 2) {
+          next = API_BASE + JOBS_PATH + "?per_page=100&page=3";
+        }
+        const total = defect === "native_ceiling"
+          ? 262
+          : defect === "changing_total" && page === 2
+          ? 102
+          : 101;
+        const jobs = page === 1
+          ? defect === "short_page" ? cells.slice(0, 99) : cells
+          : [repair];
+        return response(
+          200,
+          jobsBody(jobs, total),
+          next === null ? {} : {
+            link: "<" + next + '>; rel="next"' +
+              (defect === "multiple_next"
+                ? ", <" + next + '>; rel="next"'
+                : ""),
+          },
+        );
+      });
+      scriptLog(rig, logText([terminalRecord()]));
+      const result = await rig.client.readHostedExecution(intent());
+      assert.equal(result.ok, false, defect);
+      assert.equal(
+        rig.http.callsTo(JOB_LOG_PATH).length,
+        0,
+        "invalid listing cannot authenticate a terminal",
+      );
+      assert.ok(
+        rig.http.calls.every((call) => new URL(call.url).origin === API_BASE),
+        "no credential may follow a foreign page",
+      );
+      assert.ok(rig.gate.admissions.every((scope) => scope === 0));
+      if (defect === "page_cooldown") {
+        assert.equal(rig.http.callsTo(JOBS_PATH).length, 1);
+        if (!result.ok) assert.equal(result.error.kind, "rate_limited");
+      }
+    });
+  }
+});

@@ -1,7 +1,8 @@
 /**
- * m04-repair selection tests: the frozen plan priority order, WIP cap,
- * dependency and wait/terminal/blocked skipping, plus stable repo/source
- * tie-breaks. Pure functions only; no ports, no Git, no model calls.
+ * m04-repair selection tests: the frozen plan priority order, unfinished-PR
+ * accounting, dependency and wait/terminal/blocked skipping, plus stable
+ * repo/source tie-breaks. Pure functions only; no ports, no Git, no model
+ * calls.
  */
 import assert from "node:assert/strict";
 
@@ -12,7 +13,6 @@ import {
   countUnfinishedPullRequests,
   hasPublishedIdentity,
   isEligible,
-  MAX_UNFINISHED_PRS,
   rankEligibleWork,
   rankReviewDrain,
   RETIRED_MERGED_MESSAGE,
@@ -265,13 +265,13 @@ Deno.test("selection: waiting, blocked, terminal and dependency records are skip
   assert.equal(ranked.skipped[dependent.id], "dependency");
 });
 
-Deno.test("selection: WIP cap skips fresh publications at three unfinished PRs", () => {
+Deno.test("selection: fresh publications are admitted despite three unfinished PRs", () => {
   const fresh = work("issue-1", {
     source: { kind: "issue", id: "1", revision: SHA2 },
     classification: { severity: "P2", priority: 9 },
   });
   const prs = Array.from(
-    { length: MAX_UNFINISHED_PRS },
+    { length: 3 },
     (_, index) =>
       work(`issue-${index + 10}`, {
         source: { kind: "issue", id: `${index + 10}`, revision: SHA2 },
@@ -291,8 +291,9 @@ Deno.test("selection: WIP cap skips fresh publications at three unfinished PRs",
     repairConfigs(),
     NOW,
   );
-  assert.deepEqual(ranked.ordered, []);
-  assert.equal(ranked.skipped[fresh.id], "wip");
+  assert.deepEqual(ranked.ordered, [fresh.id]);
+  assert.equal(ranked.skipped[fresh.id], undefined);
+  for (const pr of prs) assert.equal(ranked.skipped[pr.id], "waiting");
 });
 
 Deno.test("selection: an existing-PR correction is never WIP-skipped", () => {
@@ -309,7 +310,7 @@ Deno.test("selection: an existing-PR correction is never WIP-skipped", () => {
     },
   });
   const prs = Array.from(
-    { length: MAX_UNFINISHED_PRS },
+    { length: 3 },
     (_, index) =>
       work(`issue-${index + 10}`, {
         source: { kind: "issue", id: `${index + 10}`, revision: SHA2 },
@@ -332,14 +333,14 @@ Deno.test("selection: an existing-PR correction is never WIP-skipped", () => {
   assert.deepEqual(
     ranked.ordered,
     [correction.id],
-    "the correction of an already-owned PR remains eligible at the cap",
+    "the correction of an already-owned PR remains eligible",
   );
   assert.equal(ranked.skipped[correction.id], undefined);
 });
 
 // ---------------------------------------------------------------------------
 // M15 V1 candidate state: candidate presence alone never excludes a record.
-// WIP, dependency, terminal/blocked and wait rules still apply to candidates.
+// Dependency, terminal/blocked and wait rules still apply to candidates.
 // ---------------------------------------------------------------------------
 
 const CANDIDATE_REF = `refs/heads/sentinel-candidates/${"ab".repeat(32)}`;
@@ -422,9 +423,9 @@ Deno.test("selection: candidate state alone never excludes an eligible record", 
   }
 });
 
-Deno.test("selection: candidate records still obey WIP, dependency, wait and terminal rules", () => {
+Deno.test("selection: candidate records still obey dependency, wait and terminal rules", () => {
   const candidatePrs = Array.from(
-    { length: MAX_UNFINISHED_PRS },
+    { length: 3 },
     (_, index) =>
       candidateWork(`candidate-pr-${index}`, {
         source: { kind: "issue", id: `p${index}`, revision: SHA2 },
@@ -466,14 +467,18 @@ Deno.test("selection: candidate records still obey WIP, dependency, wait and ter
     blocked,
   ]);
   const ranked = rankEligibleWork(snap, repairConfigs(), NOW);
-  assert.deepEqual(ranked.ordered, []);
+  assert.deepEqual(
+    ranked.ordered,
+    [fresh.id],
+    "an unfinished candidate PR never gates an unrelated fresh record",
+  );
   for (const record of candidatePrs) {
     assert.equal(ranked.skipped[record.id], "waiting", record.id);
   }
   assert.equal(
     ranked.skipped[fresh.id],
-    "wip",
-    "three unfinished candidate PRs still occupy the cap",
+    undefined,
+    "three unfinished candidate PRs do not occupy any admission cap",
   );
   assert.equal(
     ranked.skipped[dependent.id],
@@ -945,9 +950,9 @@ Deno.test(
 );
 
 Deno.test(
-  "selection: the WIP cap skips only NEW publications, never an existing published intent",
+  "selection: unfinished publications never gate a new publication",
   () => {
-    // Three unfinished pull requests saturate the cap.
+    // Three unfinished pull requests previously saturated the removed cap.
     const saturated = [
       prRecord("issue-1", 1, 7),
       prRecord("issue-2", 2, 8),
@@ -955,7 +960,7 @@ Deno.test(
     ];
     // A record whose durable intent already names a published PR is recovering
     // an EXISTING publication (retiring a closed one, observing its review) and
-    // must stay selectable even though the cap is full.
+    // stays selectable.
     const carrier = work("issue-4", {
       source: { kind: "issue", id: "4", revision: SHA2 },
       related: { incidentId: null, issueNumber: 4 },
@@ -974,7 +979,8 @@ Deno.test(
         resultId: null,
       },
     });
-    // A record with no published identity at all is still a NEW publication.
+    // A record with no published identity at all is a NEW publication and is
+    // admitted on the same terms.
     const fresh = freshIssue("issue-5", 5);
 
     const ranked = rankEligibleWork(
@@ -982,13 +988,17 @@ Deno.test(
       repairConfigs(),
       NOW,
     );
-    assert.deepEqual(ranked.ordered, [carrier.id]);
-    assert.equal(ranked.skipped[carrier.id], undefined, "never wip-skipped");
-    assert.equal(ranked.skipped[fresh.id], "wip");
+    assert.deepEqual(
+      ranked.ordered,
+      [carrier.id, fresh.id],
+      "priority then oldest-first ordering survives cap removal",
+    );
+    assert.equal(ranked.skipped[carrier.id], undefined, "never skipped");
+    assert.equal(ranked.skipped[fresh.id], undefined, "no admission cap");
     assert.equal(
       countUnfinishedPullRequests(snapshot([...saturated, carrier]).work),
       3,
-      "the cap itself still counts only records holding a target PR",
+      "accounting still counts only records holding a target PR",
     );
   },
 );

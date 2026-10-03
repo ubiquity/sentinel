@@ -140,7 +140,10 @@ const ACTIONS_RELEASE_LOG_HOST =
 
 /** Hosted supervisor execution reader: one bounded whole-operation window. */
 const HOSTED_EXECUTION_READ_DEADLINE_MS = 120_000;
-const HOSTED_EXECUTION_MAX_JOBS = 100;
+// Native protected workflow: at most 256 matrix cells plus five fixed jobs.
+const HOSTED_EXECUTION_MAX_JOBS = 256 + 5;
+const HOSTED_EXECUTION_JOBS_PAGE_SIZE = 100;
+const HOSTED_EXECUTION_MAX_JOB_STEPS = 100;
 const HOSTED_EXECUTION_BRANCH = "sentinel-supervisor";
 const HOSTED_EXECUTION_UNAVAILABLE = "hosted execution evidence is unavailable";
 const HOSTED_EXECUTION_SCOPE =
@@ -1090,7 +1093,7 @@ export class GitHubApiClient {
 
   /**
    * Exact authenticated settlement of one saved hosted execution intent:
-   * attempt + complete one-page jobs listing + (for a completed runtime step)
+   * attempt + complete paginated jobs listing + (for a completed runtime step)
    * the trusted signed job log carrying exactly one runtime terminal. A missing
    * or not-yet-complete repair job is `null` (pending); an exact completed
    * skip/cancellation/timeout/absence is an explicit not_started settlement.
@@ -1263,40 +1266,78 @@ export class GitHubApiClient {
     }, parseHostedNotStartedProofV1);
   }
 
-  /** One complete bounded jobs page; duplicates/identity mismatches fail. */
+  /** Complete native attempt listing; every page shares the same deadline. */
   private async readHostedAttemptJobs(
     intent: HostedExecutionIntentV1,
     deadline: DeadlineV1,
   ): Promise<
     PortResultV1<{ raw: unknown; repair: HostedRepairJobV1 | null }>
   > {
-    if (deadline.fired()) return this.hostedExecutionTimeout();
-    const repo = repoPath(this.repository);
-    const response = await this.request(
-      "GET",
-      `/repos/${repo}/actions/runs/${intent.runId}/attempts/${intent.runAttempt}/jobs`,
-      { per_page: String(HOSTED_EXECUTION_MAX_JOBS) },
-      deadline,
+    const path = `/repos/${
+      repoPath(this.repository)
+    }/actions/runs/${intent.runId}/attempts/${intent.runAttempt}/jobs`;
+    const pages: unknown[] = [];
+    const jobs: unknown[] = [];
+    let total: number | null = null;
+    const maxPages = Math.ceil(
+      HOSTED_EXECUTION_MAX_JOBS / HOSTED_EXECUTION_JOBS_PAGE_SIZE,
     );
-    if (!response.ok) return response;
-    if (response.value.status !== 200) {
-      return portError(...this.mapError(response.value));
+    for (let page = 1; page <= maxPages; page++) {
+      if (deadline.fired()) return this.hostedExecutionTimeout();
+      const response = await this.request(
+        "GET",
+        path,
+        {
+          per_page: String(HOSTED_EXECUTION_JOBS_PAGE_SIZE),
+          page: String(page),
+        },
+        deadline,
+      );
+      if (!response.ok) return response;
+      if (response.value.status !== 200) {
+        return portError(...this.mapError(response.value));
+      }
+      const parsed = parseWire(response.value, parseHostedJobsPage);
+      if (!parsed.ok) return parsed;
+      if (total === null) total = parsed.value.total;
+      if (
+        total !== parsed.value.total ||
+        parsed.value.jobs.length !== Math.min(
+            HOSTED_EXECUTION_JOBS_PAGE_SIZE,
+            total - jobs.length,
+          )
+      ) {
+        return portError("unavailable", HOSTED_EXECUTION_METADATA);
+      }
+      pages.push(JSON.parse(response.value.bodyText));
+      jobs.push(...parsed.value.jobs);
+      const link = response.value.headers.get("link") ?? "";
+      if ([...link.matchAll(/;\s*rel="next"/g)].length > 1) {
+        return portError("unavailable", HOSTED_EXECUTION_METADATA);
+      }
+      const next = nextLinkUrl(response.value.headers);
+      if (jobs.length === total) {
+        if (next !== null) {
+          return portError("unavailable", HOSTED_EXECUTION_METADATA);
+        }
+        const complete = parseWith(
+          { total_count: total, jobs },
+          (value) => parseHostedJobs(value, intent),
+        );
+        if (!complete.ok) return complete;
+        return portOk({
+          raw: pages.length === 1 ? pages[0] : pages,
+          repair: complete.value.repair,
+        });
+      }
+      if (
+        next === null ||
+        !validHostedJobsNext(this.apiBaseUrl, path, next, page + 1)
+      ) {
+        return portError("unavailable", HOSTED_EXECUTION_METADATA);
+      }
     }
-    if (nextLinkUrl(response.value.headers) !== null) {
-      return portError("unavailable", HOSTED_EXECUTION_METADATA);
-    }
-    let raw: unknown;
-    try {
-      raw = JSON.parse(response.value.bodyText);
-    } catch {
-      return portError("invalid", "GitHub API response is malformed");
-    }
-    const parsed = parseWith(
-      raw,
-      (value) => parseHostedJobs(value, intent),
-    );
-    if (!parsed.ok) return parsed;
-    return portOk({ raw, repair: parsed.value.repair });
+    return portError("unavailable", HOSTED_EXECUTION_METADATA);
   }
 
   /** Trusted signed job log, bounded and read without any credential. */
@@ -2527,7 +2568,50 @@ function parseHostedAttempt(
   return { status, completedAt };
 }
 
-/** Exactly one bounded complete page with at most one total repair job. */
+/** Each authenticated page is bounded by the native API page size. */
+function parseHostedJobsPage(
+  value: unknown,
+): { total: number; jobs: unknown[] } {
+  const obj = expectRecord(value, "$");
+  const total = expectCount(obj.total_count, "$.total_count");
+  if (total > HOSTED_EXECUTION_MAX_JOBS) {
+    fail(
+      "$.total_count",
+      "bound_exceeded",
+      "native job count exceeds workflow",
+    );
+  }
+  const jobs = expectArray(
+    obj.jobs,
+    "$.jobs",
+    HOSTED_EXECUTION_JOBS_PAGE_SIZE,
+    (item) => item,
+  );
+  return { total, jobs };
+}
+
+/** A next page must stay on this exact authenticated attempt and advance once. */
+function validHostedJobsNext(
+  apiBaseUrl: string,
+  path: string,
+  next: string,
+  page: number,
+): boolean {
+  try {
+    const url = new URL(next);
+    return url.origin === new URL(apiBaseUrl).origin &&
+      url.username === "" && url.password === "" && url.hash === "" &&
+      url.pathname === path &&
+      [...url.searchParams.keys()].length === 2 &&
+      url.searchParams.get("per_page") ===
+        String(HOSTED_EXECUTION_JOBS_PAGE_SIZE) &&
+      url.searchParams.get("page") === String(page);
+  } catch {
+    return false;
+  }
+}
+
+/** Exactly one complete native listing with at most one total repair job. */
 function parseHostedJobs(
   value: unknown,
   intent: HostedExecutionIntentV1,
@@ -2544,9 +2628,26 @@ function parseHostedJobs(
     fail("$.total_count", "bound_exceeded", "job list is not a complete page");
   }
   const matches: Array<{ job: Record<string, unknown>; path: string }> = [];
+  const ids = new Set<number>();
   for (const [index, item] of jobs.entries()) {
     const path = `$.jobs[${index}]`;
     const job = expectRecord(item, path);
+    const id = expectPositiveInt(job.id, `${path}.id`);
+    if (
+      ids.has(id) ||
+      expectPositiveInt(job.run_id, `${path}.run_id`) !== intent.runId ||
+      expectPositiveInt(job.run_attempt, `${path}.run_attempt`) !==
+        intent.runAttempt ||
+      expectNonEmptyString(job.head_sha, `${path}.head_sha`, 40) !==
+        intent.launcherSha
+    ) {
+      fail(
+        path,
+        "invalid_value",
+        "native job identity is duplicate or foreign",
+      );
+    }
+    ids.add(id);
     if (
       expectNonEmptyString(job.name, `${path}.name`, MaxText.label) !== "repair"
     ) {
@@ -2608,7 +2709,7 @@ function parseHostedJobs(
   const steps = expectArray(
     job.steps,
     `${path}.steps`,
-    HOSTED_EXECUTION_MAX_JOBS,
+    HOSTED_EXECUTION_MAX_JOB_STEPS,
     (item) => item,
   );
   const stepMatches: Array<{ step: Record<string, unknown>; path: string }> =
