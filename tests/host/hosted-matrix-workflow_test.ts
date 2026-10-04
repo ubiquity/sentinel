@@ -27,7 +27,11 @@ Deno.test("protected matrix workflow preserves verification, fanout, credentials
   assert.match(cell, /needs.matrix_plan.outputs.hasCells == 'true'/);
   assert.match(cell, /fail-fast: false/);
   assert.ok(!cell.includes("max-parallel"));
-  assert.match(repair, /needs: \[prepare, matrix_plan, matrix_cell\]/);
+  assert.match(repair, /needs: \[prepare, matrix_plan\]/);
+  assert.ok(
+    !repair.includes("matrix_cell"),
+    "the consumer must start with the cells, before every sibling settles",
+  );
   assert.match(repair, /needs.prepare.outputs.modelStartsEnabled != 'true'/);
   assert.match(
     finalize,

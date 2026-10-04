@@ -458,7 +458,11 @@ jobs:
           retention-days: 7
 
   repair:
-    needs: [prepare, matrix_plan, matrix_cell]
+    # Starts with the cells: the progressive consumer polls authenticated
+    # completed cell artifacts, ingests each exactly once, and leaves slower or
+    # missing producers charged and unresolved. finalize still waits for every
+    # cell and this consumer, so no producer is settled before its own job ends.
+    needs: [prepare, matrix_plan]
     if: ${{ !cancelled() && needs.prepare.result == 'success' && github.ref == 'refs/heads/sentinel-supervisor' && needs.prepare.outputs.run == 'true' && (needs.prepare.outputs.modelStartsEnabled != 'true' || needs.matrix_plan.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 120

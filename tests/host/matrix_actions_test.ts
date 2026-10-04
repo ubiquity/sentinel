@@ -30,6 +30,7 @@ import {
   createRepairStateStore,
 } from "../../src/state/mod.ts";
 import {
+  type MatrixAggregateOptionsV1,
   runActionsMatrixAggregateCycles,
   runActionsMatrixHost,
 } from "../../src/host/matrix-actions.ts";
@@ -1494,6 +1495,7 @@ for (
 async function freshMatrixArtifacts(
   noStart17 = false,
   nativeScopedOnly = false,
+  progressive: "none" | "settle" | "missing" | "single" = "none",
 ) {
   const r = await rig();
   try {
@@ -1638,6 +1640,10 @@ async function freshMatrixArtifacts(
     assert.equal(peak, noStart17 ? 0 : 2);
     const before = await r.store.readRepair();
     assert.ok(before.ok && before.value.status === "found");
+    // Bind the narrowed found snapshot once: TypeScript does not retain the
+    // assertion narrowing inside the poll callback below.
+    const beforeWork: ReturnType<typeof workRecord>[] = before.value
+      .snapshot.work;
     assert.equal(
       before.value.snapshot.reservations.filter((row) =>
         row.purpose === "implementation"
@@ -1769,7 +1775,10 @@ async function freshMatrixArtifacts(
           }) + "\n",
       );
     }
-    const artifactHttp = function (available: boolean) {
+    const artifactHttp = function (
+      available: () => boolean,
+      allow: (row: Record<string, unknown>) => boolean = () => true,
+    ) {
       return createActionsMatrixArtifactHttpTransport((url, init) => {
         artifactCalls.push(url);
         const parsed = new URL(url);
@@ -1826,8 +1835,8 @@ async function freshMatrixArtifacts(
               ),
             );
           }
-          const rows = available && !parsed.pathname.includes("/runs/72/")
-            ? artifactRows
+          const rows = available() && !parsed.pathname.includes("/runs/72/")
+            ? artifactRows.filter(allow)
             : [];
           return reply({ total_count: rows.length, artifacts: rows });
         }
@@ -1863,8 +1872,10 @@ async function freshMatrixArtifacts(
     }
     const aggregate = async function (
       name: string,
-      available: boolean,
+      available: boolean | (() => boolean),
       carrier?: { planDigest: string },
+      options: MatrixAggregateOptionsV1 = { maxWaitMs: 0 },
+      allow: (row: Record<string, unknown>) => boolean = () => true,
     ) {
       const deps = await r.job(name, "repair");
       if (name === "later-run") {
@@ -1894,11 +1905,15 @@ async function freshMatrixArtifacts(
         };
       }
       const oldCwd = Deno.cwd();
+      let result: { status: string } | null = null;
       Deno.chdir(deps.workDir);
       try {
-        await runActionsRepairHost({
+        result = await runActionsRepairHost({
           ...deps,
-          artifactHttp: artifactHttp(available),
+          artifactHttp: artifactHttp(
+            typeof available === "function" ? available : () => available,
+            allow,
+          ),
           model: {
             modelId: "gpt-reserve",
             runModel: () => {
@@ -1910,12 +1925,248 @@ async function freshMatrixArtifacts(
               { ...input, modelStartsEnabled: false },
               undefined,
               carrier,
+              options,
             ),
         });
       } finally {
         Deno.chdir(oldCwd);
       }
+      return result;
     };
+    if (progressive !== "none") {
+      const fast = results[0]!;
+      const slow = results[1]!;
+      const fastName = "sentinel-matrix-cell-71-1-" + fast.cellId;
+      const slowName = "sentinel-matrix-cell-71-1-" + slow.cellId;
+      const observed: { fast: boolean; slow: boolean }[] = [];
+      const waits: number[] = [];
+      let listings = 0;
+      // Availability advances on each authenticated artifact listing: the fast
+      // sibling appears only after the first empty scan, the slow sibling only
+      // after the consumer has already consumed the fast one. The single-scan
+      // mode exposes the fast cell immediately and never the slow one.
+      const available = () => {
+        listings += 1;
+        return true;
+      };
+      const allow = (row: Record<string, unknown>) => {
+        const name = String(row["name"]);
+        if (name === fastName) {
+          return progressive === "single" ||
+            (progressive === "settle" && listings >= 2);
+        }
+        if (name === slowName) return progressive === "settle" && listings >= 4;
+        return true;
+      };
+      const options: MatrixAggregateOptionsV1 = progressive === "single"
+        ? {
+          maxWaitMs: 0,
+          pollWait: (ms) => {
+            waits.push(ms);
+            r.clock.advance(ms);
+            return Promise.resolve();
+          },
+        }
+        : {
+          maxWaitMs: 180_000,
+          pollWait: async (ms) => {
+            waits.push(ms);
+            r.clock.advance(ms);
+            const mid = await r.store.readRepair();
+            assert.ok(mid.ok && mid.value.status === "found");
+            if (!mid.ok || mid.value.status !== "found") {
+              throw new Error("repair state unreadable");
+            }
+            const state = mid.value.snapshot;
+            const intentOf = (taskId: string) =>
+              state.work.find((row) => row.id === taskId)?.intent?.kind ?? null;
+            const reservationOf = (taskId: string) =>
+              state.reservations.find((row) => row.taskId === taskId);
+            // Ingestion itself preserves the charge/attempt/retry/review
+            // accounting and adds no stalled execution: this snapshot is read
+            // before the ordinary lifecycle runs.
+            for (const record of state.work) {
+              const prior = beforeWork.find((row) => row.id === record.id);
+              assert.ok(prior);
+              assert.equal(record.counters.attempts, prior.counters.attempts);
+              assert.equal(record.counters.retries, prior.counters.retries);
+              assert.equal(
+                record.counters.reviewRounds,
+                prior.counters.reviewRounds,
+              );
+              assert.equal(record.counters.stalled ?? 0, 0);
+            }
+            observed.push({
+              fast: intentOf(fast.taskId) === "candidate_preservation",
+              slow: intentOf(slow.taskId) === "candidate_preservation",
+            });
+            if (progressive === "missing") {
+              // A live producer whose artifact has not arrived keeps its exact
+              // implementation intent, charged reservation and no blocker.
+              assert.equal(intentOf(fast.taskId), "implementation");
+              assert.equal(intentOf(slow.taskId), "implementation");
+              assert.equal(reservationOf(fast.taskId)?.outcome, "reserved");
+              assert.equal(reservationOf(slow.taskId)?.outcome, "reserved");
+              for (const record of state.work) {
+                assert.equal(record.nextStep, "work");
+                assert.equal(record.blocker, null);
+                assert.equal(record.wait, null);
+              }
+            }
+          },
+        };
+      const result = await aggregate(
+        "progressive",
+        available,
+        { planDigest: planner.planDigest },
+        options,
+        allow,
+      );
+      assert.equal(result?.status, "ran");
+      if (progressive === "single") {
+        // The documented maxWaitMs 0 contract is exactly one authenticated
+        // recovery, even though that recovery consumed the fast cell.
+        assert.deepEqual(waits, [], "maxWaitMs 0 never waits");
+        assert.equal(
+          listings,
+          1,
+          "maxWaitMs 0 performs exactly one authenticated recovery",
+        );
+      } else {
+        assert.deepEqual(waits, [60_000, 60_000]);
+      }
+      const final = await r.store.readRepair();
+      assert.ok(final.ok && final.value.status === "found");
+      if (!final.ok || final.value.status !== "found") {
+        throw new Error("repair state unreadable");
+      }
+      // Bind the narrowed found snapshot once: the stalled lookup below runs
+      // inside a closure where the assertion narrowing is not retained.
+      const finalWork: ReturnType<typeof workRecord>[] = final.value
+        .snapshot.work;
+      assert.equal(modelCalls, 2, "consumption never starts a model");
+      assert.deepEqual(
+        final.value.snapshot.reservations.map((row) => [
+          row.id,
+          row.attempt,
+          row.purpose,
+        ]),
+        before.value.snapshot.reservations.map((row) => [
+          row.id,
+          row.attempt,
+          row.purpose,
+        ]),
+        "no refund, duplicate reservation or extra admission",
+      );
+      // Ingestion never changes the charge/attempt/retry/review accounting.
+      assert.deepEqual(
+        final.value.snapshot.work.map((row) => ({
+          attempts: row.counters.attempts,
+          retries: row.counters.retries,
+          reviewRounds: row.counters.reviewRounds,
+        })),
+        before.value.snapshot.work.map((row) => ({
+          attempts: row.counters.attempts,
+          retries: row.counters.retries,
+          reviewRounds: row.counters.reviewRounds,
+        })),
+        "ingestion preserves attempt/retry/review accounting",
+      );
+      // The ordinary lifecycle that follows is deterministic
+      // unavailable-publication bookkeeping: each ingested candidate whose
+      // preservation read is unavailable re-arms its wait and is counted as
+      // exactly one stalled execution, while a still-unconsumed live producer
+      // is deferred without any persistence at all.
+      const stalledOf = (taskId: string) =>
+        finalWork.find((row) => row.id === taskId)?.counters.stalled ?? 0;
+      if (progressive === "settle") {
+        assert.equal(
+          stalledOf(fast.taskId),
+          1,
+          "each ingested candidate re-armed one unavailable wait",
+        );
+        assert.equal(stalledOf(slow.taskId), 1);
+      } else if (progressive === "single") {
+        assert.equal(
+          stalledOf(fast.taskId),
+          1,
+          "the ingested candidate was stalled exactly once",
+        );
+        assert.equal(
+          stalledOf(slow.taskId),
+          0,
+          "the unconsumed live producer was never persisted",
+        );
+      } else {
+        assert.equal(stalledOf(fast.taskId), 0);
+        assert.equal(stalledOf(slow.taskId), 0);
+      }
+      if (progressive === "settle") {
+        // The first scan was empty and never completion; the fast cell was then
+        // consumed while its slower sibling was still a live charged producer.
+        assert.deepEqual(observed, [
+          { fast: false, slow: false },
+          { fast: true, slow: false },
+        ]);
+        for (const cell of [fast, slow]) {
+          const record: ReturnType<typeof workRecord> | undefined = final.value
+            .snapshot.work.find((row) => row.id === cell.taskId);
+          assert.ok(record);
+          assert.equal(record.intent?.kind, "candidate_preservation");
+          assert.equal(record.blocker, null);
+          assert.equal(record.nextStep, "work");
+          assert.equal(
+            record.target.head,
+            cell.receipt?.candidate?.head ?? null,
+            "the exact authenticated candidate head is preserved",
+          );
+        }
+        assert.ok(
+          final.value.snapshot.reservations.every((row) =>
+            row.outcome === "submitted" && row.settledAt !== null
+          ),
+          "each cell is settled exactly once by real ingestion",
+        );
+      } else if (progressive === "single") {
+        // One recovery consumed the fast cell; the slower live producer keeps
+        // its exact charge and intent because the window had already closed.
+        const fastRecord: ReturnType<typeof workRecord> | undefined = final
+          .value.snapshot.work.find((row) => row.id === fast.taskId);
+        assert.ok(fastRecord);
+        assert.equal(fastRecord.intent?.kind, "candidate_preservation");
+        assert.equal(
+          fastRecord.target.head,
+          fast.receipt?.candidate?.head ?? null,
+          "the exact authenticated candidate head is preserved",
+        );
+        const slowRecord: ReturnType<typeof workRecord> | undefined = final
+          .value.snapshot.work.find((row) => row.id === slow.taskId);
+        assert.ok(slowRecord);
+        assert.equal(slowRecord.intent?.kind, "implementation");
+        assert.equal(slowRecord.nextStep, "work");
+        assert.equal(slowRecord.blocker, null);
+        assert.equal(
+          final.value.snapshot.reservations.find((row) =>
+            row.taskId === slow.taskId
+          )?.outcome,
+          "reserved",
+          "the slower live producer stays charged and unresolved",
+        );
+      } else {
+        assert.ok(observed.every((entry) => !entry.fast && !entry.slow));
+        assert.deepEqual(
+          final.value.snapshot.reservations,
+          before.value.snapshot.reservations,
+          "a live producer without an artifact stays charged and unresolved",
+        );
+        for (const record of final.value.snapshot.work) {
+          assert.equal(record.intent?.kind, "implementation");
+          assert.equal(record.nextStep, "work");
+          assert.equal(record.blocker, null);
+        }
+      }
+      return;
+    }
     const digestControl = await r.store.readRepair();
     assert.ok(digestControl.ok && digestControl.value.status === "found");
     if (nativeScopedOnly) {
@@ -2086,7 +2337,7 @@ async function freshMatrixArtifacts(
           portError("not_found", "exact Git candidate object is absent"),
         );
     }
-    await aggregate("missing-artifact", false);
+    await aggregate("missing-artifact", false, undefined, { maxWaitMs: 0 });
     const missing = await r.store.readRepair();
     assert.ok(missing.ok && missing.value.status === "found");
     assert.deepEqual(
@@ -2109,7 +2360,7 @@ async function freshMatrixArtifacts(
     [...r.github.values()].forEach((port, index) => {
       port.preserveCandidate = originalPreservers[index]!;
     });
-    await aggregate("later-run", true);
+    await aggregate("later-run", true, undefined, { maxWaitMs: 0 });
     assert.equal(
       modelCalls,
       2,
@@ -2151,6 +2402,12 @@ Deno.test("matrix actions: native carrier scopes real in-progress artifact recov
   freshMatrixArtifacts(false, true));
 Deno.test("matrix actions: advancing planner clock recovers seventeen no-start cells", () =>
   freshMatrixArtifacts(true));
+Deno.test("matrix actions: progressive consumer ingests a fast cell while a slower sibling is still active", () =>
+  freshMatrixArtifacts(false, false, "settle"));
+Deno.test("matrix actions: a live producer without an artifact stays charged, never failed or unhealthy", () =>
+  freshMatrixArtifacts(false, false, "missing"));
+Deno.test("matrix actions: the maxWaitMs-zero single scan consumer performs exactly one authenticated recovery", () =>
+  freshMatrixArtifacts(false, false, "single"));
 for (
   const scenario of [
     {
