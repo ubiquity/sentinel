@@ -90,7 +90,25 @@ import {
   type ReviewTaskStatementV1,
 } from "../src/contracts/review-receipt.ts";
 import { reviewAuthorizesMerge } from "../src/repair/review-gate.ts";
+import { RETIRED_MERGED_MESSAGE } from "../src/repair/selection.ts";
 import type { GitSha } from "../src/contracts/brands.ts";
+import { RollingStartBudget } from "../src/budget/mod.ts";
+import { GitHubApiClient } from "../src/github/client.ts";
+import { portOk } from "../src/contracts/ports.ts";
+import {
+  fetchHttpTransport,
+  type HttpTransportV1,
+} from "../src/github/http.ts";
+import { HostedRepairCooldownGate } from "../src/host/hosted-cooldown.ts";
+import { parseCooldownModeV1 } from "../src/contracts/cooldown-mode.ts";
+import {
+  createActionsMatrixArtifactHttpTransport,
+  createActionsMatrixArtifactTransport,
+} from "../src/host/matrix-artifacts.ts";
+import {
+  type HistoricalMatrixQuarantineDepsV1,
+  runHistoricalMatrixQuarantine,
+} from "../src/host/matrix-actions.ts";
 import type { RepositoryIdentityV1 } from "../src/contracts/shared.ts";
 import {
   extractSelfFailureSignature,
@@ -105,6 +123,7 @@ import {
 import { canonicalStringify } from "../src/contracts/canonical.ts";
 import {
   candidateBranch,
+  candidatePreservationRef,
   releaseRequestId,
   reviewOperationKey,
 } from "../src/repair/keys.ts";
@@ -350,6 +369,7 @@ export type HostedAutonomyReasonV1 =
   | "write_unavailable"
   | "readback_unverified"
   | "identity_rejected"
+  | "historical_quarantine_incomplete"
   | "unexpected_failure";
 
 export interface HostedAutonomyResultV1 {
@@ -371,6 +391,8 @@ export interface HostedAutonomyPullV1 {
   headSha: string | null;
   baseRef: string | null;
   author: string | null;
+  /** Required only when recovering a historical cleared publication. */
+  mergedBy?: string | null;
   parents: readonly string[];
   revisionOnBaseBranch: boolean;
 }
@@ -488,6 +510,52 @@ export interface HostedAutonomyDepsV1 {
    */
   githubFor(repository: RepositoryIdentityV1): HostedAutonomyGitHubV1 | null;
   clock: { now(): number };
+  /** Present on protected maintenance; rejection-only, before retry/delivery. */
+  historicalMatrix?: HistoricalMatrixQuarantineDepsV1;
+}
+
+/** Existing native token and read-only artifact route; no release writer or model. */
+export function createHostedHistoricalMatrixQuarantine(input: {
+  state: StateReadView & RepairStateWriter;
+  clock: { now(): number };
+  token: string;
+  artifactRoot: string;
+  http?: HttpTransportV1;
+  artifactHttp?: HttpTransportV1;
+  cooldownMode?: string;
+}): HistoricalMatrixQuarantineDepsV1 {
+  const client = new GitHubApiClient({
+    repository: { owner: "ubiquity", name: "sentinel", installationId: 0 },
+    apiBaseUrl: "https://api.github.com",
+    http: input.http ?? fetchHttpTransport(),
+    clock: input.clock,
+    auth: {
+      authorizationHeader: () =>
+        Promise.resolve(portOk(`Bearer ${input.token}`)),
+    },
+    cooldownGate: new HostedRepairCooldownGate({
+      state: input.state,
+      clock: input.clock,
+      mode: parseCooldownModeV1(input.cooldownMode),
+    }),
+  });
+  return {
+    state: input.state,
+    clock: input.clock,
+    budget: new RollingStartBudget({
+      state: input.state,
+      clock: input.clock,
+      configs: [],
+    }),
+    readExecution: (execution) => client.readHostedExecution(execution),
+    transport: createActionsMatrixArtifactTransport({
+      state: input.state,
+      clock: input.clock,
+      token: input.token,
+      artifactRoot: input.artifactRoot,
+      http: input.artifactHttp ?? createActionsMatrixArtifactHttpTransport(),
+    }),
+  };
 }
 
 function skipped(
@@ -1040,6 +1108,49 @@ async function readTrustedTask(
   }
 }
 
+/** Recover only the PR erased by the merged/base-refresh disposition. */
+async function historicalMergedPublication(
+  snapshot: RepairStateSnapshotV1,
+  record: HostedAutonomyRecordV1,
+): Promise<HostedAutonomyRecordV1 | null> {
+  const head = record.target.head;
+  const base = record.target.base;
+  const preserved = record.target.candidateState?.preserved;
+  if (
+    isHostedSelf(record.repository) || record.nextStep !== "blocked" ||
+    record.blocker?.kind !== "other" ||
+    record.blocker.message !== RETIRED_MERGED_MESSAGE ||
+    record.target.pr !== null || record.source.kind !== "issue" ||
+    record.related.issueNumber === null ||
+    record.source.id !== String(record.related.issueNumber) ||
+    head === null || base === null || preserved == null ||
+    record.target.branch !== candidateBranch(record.id) ||
+    preserved.head !== head || preserved.base !== base ||
+    record.target.candidateState?.publishedHead !== head ||
+    !intentClosable(record, snapshot.reservations)
+  ) return null;
+  if (
+    preserved.ref !== await candidatePreservationRef(
+      record.repository,
+      record.id,
+      preserved.operationKey,
+    )
+  ) return null;
+  const numbers = new Set(
+    snapshot.reviews.filter((review) =>
+      sameRepository(review.repository, record.repository) &&
+      review.pullRequest.head === head && review.pullRequest.base === base &&
+      review.taskAcceptance?.issueNumber === record.related.issueNumber &&
+      record.evidence.some((evidence) =>
+        evidence.kind === "review_receipt" &&
+        evidence.ref === `artifact:review-receipt/${review.id}`
+      )
+    ).map((review) => review.pullRequest.number),
+  );
+  if (numbers.size !== 1) return null;
+  return { ...record, target: { ...record.target, pr: [...numbers][0] } };
+}
+
 /** Verified merge facts: the exact revision a foreign record delivered. */
 interface HostedMergedDeliveryV1 {
   readonly revision: string;
@@ -1467,6 +1578,15 @@ export async function runHostedAutonomy(
   deps: HostedAutonomyDepsV1,
 ): Promise<HostedAutonomyResultV1> {
   const actions: string[] = [];
+  if (deps.historicalMatrix) {
+    let count: number;
+    try {
+      count = await runHistoricalMatrixQuarantine(deps.historicalMatrix);
+    } catch {
+      throw new HistoricalQuarantineIncomplete();
+    }
+    if (count > 0) actions.push(`historical-matrix:quarantined:${count}`);
+  }
   const revisions: string[] = [];
   const initial = await readRepairSafely(deps.state);
   if (initial === null || !initial.ok || initial.value.status !== "found") {
@@ -2073,7 +2193,11 @@ export async function runHostedAutonomy(
   // The exact facts are re-read here for every foreign record with an
   // authorizing receipt; the ones the delivery pass verified in this same run
   // are already present and are not read twice.
-  for (const record of snapshot.work) {
+  const recovered = new Map<string, HostedAutonomyRecordV1>();
+  for (const original of snapshot.work) {
+    const record = await historicalMergedPublication(snapshot, original) ??
+      original;
+    if (record !== original) recovered.set(record.id, record);
     if (record.nextStep === "done") continue;
     if (isHostedSelf(record.repository)) continue;
     const issueNumber = record.related.issueNumber;
@@ -2102,6 +2226,13 @@ export async function runHostedAutonomy(
     }
     const pull = await readPull(scope, pullRequest);
     if (pull === null) continue;
+    if (
+      recovered.has(record.id) && (
+        pull.number !== pullRequest ||
+        pull.author !== HOSTED_AUTONOMY_TRUSTED_APP_AUTHOR ||
+        pull.mergedBy !== HOSTED_AUTONOMY_TRUSTED_APP_AUTHOR
+      )
+    ) continue;
     const evidence = verifiedMergedDelivery(record, pull, scope.baseBranch);
     if (evidence === null) continue;
     foreignMerged.set(key, evidence);
@@ -2110,11 +2241,15 @@ export async function runHostedAutonomy(
   // evidence is present, immediately before the closure plan that may close
   // its issue: issue text that drifted after the delivery read is a different
   // task and never authorizes this closure.
+  const closureSnapshot = {
+    ...snapshot,
+    work: snapshot.work.map((record) => recovered.get(record.id) ?? record),
+  };
   const closureTasks = new Map<
     string,
     ReviewTaskStatementV1 | null | "unavailable"
   >();
-  for (const record of snapshot.work) {
+  for (const record of closureSnapshot.work) {
     if (record.nextStep === "done") continue;
     const issueNumber = record.related.issueNumber;
     const pullRequest = record.target.pr;
@@ -2138,14 +2273,14 @@ export async function runHostedAutonomy(
     );
   }
   const closures = planHostedClosures(
-    snapshot,
+    closureSnapshot,
     released,
     foreignMerged,
     closureTasks,
   ).slice(0, 5);
   if (closures.length > 0) {
     for (const plan of closures) {
-      const record = snapshot.work.find((item) =>
+      const record = closureSnapshot.work.find((item) =>
         item.id === plan.id && sameRepository(item.repository, plan.repository)
       );
       if (record === undefined) continue;
@@ -2166,6 +2301,18 @@ export async function runHostedAutonomy(
         continue;
       }
       if (!isHostedSelf(record.repository)) {
+        if (recovered.has(record.id)) {
+          const pull = await readPull(scope, record.target.pr!);
+          if (
+            pull === null || pull.number !== record.target.pr ||
+            pull.author !== HOSTED_AUTONOMY_TRUSTED_APP_AUTHOR ||
+            pull.mergedBy !== HOSTED_AUTONOMY_TRUSTED_APP_AUTHOR ||
+            verifiedMergedDelivery(record, pull, scope.baseBranch) === null
+          ) {
+            actions.push(`close:${plan.id}:issue=${plan.issueNumber}:refused`);
+            continue;
+          }
+        }
         let checksGreen = false;
         try {
           checksGreen = scope.surface !== null && record.target.head !== null &&
@@ -2208,7 +2355,14 @@ export async function runHostedAutonomy(
       let next: RepairStateSnapshotV1;
       try {
         next = applyHostedClosures(
-          snapshot,
+          {
+            ...snapshot,
+            work: snapshot.work.map((record) =>
+              applied.some((plan) => plan.id === record.id)
+                ? recovered.get(record.id) ?? record
+                : record
+            ),
+          },
           observedHead as GitSha,
           applied,
           now,
@@ -2295,6 +2449,12 @@ export async function runHostedAutonomy(
   return skipped(reason, observedHead, actions);
 }
 
+class HistoricalQuarantineIncomplete extends Error {
+  constructor() {
+    super("historical matrix quarantine incomplete");
+  }
+}
+
 /**
  * Parse one raw `GET /pulls/{number}` response into the remote merge facts the
  * helper needs. GitHub assigns `merge_commit_sha` only once a pull is merged,
@@ -2311,6 +2471,7 @@ export function parseHostedAutonomyPull(
   const head = obj["head"] as Record<string, unknown> | undefined;
   const base = obj["base"] as Record<string, unknown> | undefined;
   const user = obj["user"] as Record<string, unknown> | undefined;
+  const merger = obj["merged_by"] as Record<string, unknown> | undefined;
   const merged = obj["merged"] === true;
   const mergeCommitSha = obj["merge_commit_sha"];
   const headSha = head?.["sha"];
@@ -2325,6 +2486,9 @@ export function parseHostedAutonomyPull(
     headSha,
     baseRef,
     author: typeof user?.["login"] === "string" ? String(user["login"]) : null,
+    ...(obj["merged_by"] === undefined ? {} : {
+      mergedBy: typeof merger?.["login"] === "string" ? merger["login"] : null,
+    }),
     parents: [],
     revisionOnBaseBranch: false,
   };
@@ -2820,17 +2984,23 @@ export function revisionIntegratedIntoBase(
 const GIT_SHA_PATTERN = /^[0-9a-f]{40}$/;
 
 /** Hosted entry point: identity first, then the two bounded passes. */
-export async function runHostedAutonomyMain(): Promise<number> {
+export async function runHostedAutonomyMain(input?: {
+  /** Trusted in-process test transport; native checkout identity remains mandatory. */
+  env: Readonly<Record<string, string | undefined>>;
+  deps: HostedAutonomyDepsV1;
+}): Promise<number> {
+  const env = (key: string) =>
+    input === undefined ? readEnv(key) : input.env[key] ?? null;
   const facts = await readCheckoutFacts();
   const validated = validateIssue48QuotaHostedIdentity({
-    repository: readEnv("GITHUB_REPOSITORY"),
-    ref: readEnv("GITHUB_REF"),
-    job: readEnv("GITHUB_JOB"),
-    runId: readEnv("GITHUB_RUN_ID"),
-    runAttempt: readEnv("GITHUB_RUN_ATTEMPT"),
-    workflowRef: readEnv("GITHUB_WORKFLOW_REF"),
-    sha: readEnv("GITHUB_SHA"),
-    workflowSha: readEnv("GITHUB_WORKFLOW_SHA"),
+    repository: env("GITHUB_REPOSITORY"),
+    ref: env("GITHUB_REF"),
+    job: env("GITHUB_JOB"),
+    runId: env("GITHUB_RUN_ID"),
+    runAttempt: env("GITHUB_RUN_ATTEMPT"),
+    workflowRef: env("GITHUB_WORKFLOW_REF"),
+    sha: env("GITHUB_SHA"),
+    workflowSha: env("GITHUB_WORKFLOW_SHA"),
     checkoutHead: facts.head,
     checkoutClean: facts.clean,
   });
@@ -2839,8 +3009,8 @@ export async function runHostedAutonomyMain(): Promise<number> {
   // token authenticates every repository-visible code-change op (merge, issue
   // closure, CI approval) so it is attributed to ubiquity-sentinel[bot], while
   // the native Actions token keeps owning the state refs it has always owned.
-  const stateToken = readEnv("GITHUB_TOKEN");
-  const apiToken = readEnv("SENTINEL_SUPERVISOR_TOKEN") ?? stateToken;
+  const stateToken = env("GITHUB_TOKEN");
+  const apiToken = env("SENTINEL_SUPERVISOR_TOKEN") ?? stateToken;
   if (
     stateToken === null || stateToken.length === 0 ||
     apiToken === null || apiToken.length === 0
@@ -2849,45 +3019,69 @@ export async function runHostedAutonomyMain(): Promise<number> {
   }
   let result: HostedAutonomyResultV1;
   try {
-    const scratch = `${Deno.cwd()}/.hosted-autonomy`;
-    Deno.mkdirSync(scratch, { recursive: true, mode: 0o700 });
-    const runner = new DenoGitRunner(
-      `${scratch}/git-home`,
-      githubGitAuthEnv(stateToken),
+    if (input) {
+      result = await runHostedAutonomy(input.deps);
+    } else {
+      const scratch = `${Deno.cwd()}/.hosted-autonomy`;
+      Deno.mkdirSync(scratch, { recursive: true, mode: 0o700 });
+      const runner = new DenoGitRunner(
+        `${scratch}/git-home`,
+        githubGitAuthEnv(stateToken),
+      );
+      const state = createRepairStateStore({
+        scratchDir: `${scratch}/state`,
+        remoteUrl: ISSUE48_QUOTA_REMOTE_URL,
+        runner,
+      });
+      // One surface per exact repository identity: the durable snapshot may
+      // carry work for several repositories, and each record is delivered under
+      // its OWN repository, never under the self repository.
+      const surfaces = new Map<string, HostedAutonomyGitHubV1>();
+      const githubFor = (
+        repository: RepositoryIdentityV1,
+      ): HostedAutonomyGitHubV1 => {
+        const key = hostedRepositoryKey(repository);
+        const cached = surfaces.get(key);
+        if (cached !== undefined) return cached;
+        const created = createHostedAutonomyGitHub(apiToken, repository);
+        surfaces.set(key, created);
+        return created;
+      };
+      const artifactRoot = await Deno.makeTempDir({
+        prefix: "sentinel-maintenance-matrix-",
+      });
+      try {
+        result = await runHostedAutonomy({
+          state,
+          githubFor,
+          clock: { now: () => Date.now() },
+          historicalMatrix: createHostedHistoricalMatrixQuarantine({
+            state,
+            clock: { now: () => Date.now() },
+            token: stateToken,
+            artifactRoot,
+            cooldownMode: env("SENTINEL_COOLDOWN_MODE") ?? undefined,
+          }),
+        });
+      } finally {
+        await Deno.remove(artifactRoot, { recursive: true });
+      }
+    }
+  } catch (error) {
+    result = failed(
+      error instanceof HistoricalQuarantineIncomplete
+        ? "historical_quarantine_incomplete"
+        : "unexpected_failure",
+      null,
     );
-    const state = createRepairStateStore({
-      scratchDir: `${scratch}/state`,
-      remoteUrl: ISSUE48_QUOTA_REMOTE_URL,
-      runner,
-    });
-    // One surface per exact repository identity: the durable snapshot may
-    // carry work for several repositories, and each record is delivered under
-    // its OWN repository, never under the self repository.
-    const surfaces = new Map<string, HostedAutonomyGitHubV1>();
-    const githubFor = (
-      repository: RepositoryIdentityV1,
-    ): HostedAutonomyGitHubV1 => {
-      const key = hostedRepositoryKey(repository);
-      const cached = surfaces.get(key);
-      if (cached !== undefined) return cached;
-      const created = createHostedAutonomyGitHub(apiToken, repository);
-      surfaces.set(key, created);
-      return created;
-    };
-    result = await runHostedAutonomy({
-      state,
-      githubFor,
-      clock: { now: () => Date.now() },
-    });
-  } catch {
-    result = failed("unexpected_failure", null);
   }
   return report(result);
 }
 
 /** The two reasons that mean the helper itself could not run safely. */
 export function isHardAutonomyFailure(reason: HostedAutonomyReasonV1): boolean {
-  return reason === "identity_rejected" || reason === "unexpected_failure";
+  return reason === "identity_rejected" || reason === "unexpected_failure" ||
+    reason === "historical_quarantine_incomplete";
 }
 
 function report(result: HostedAutonomyResultV1): number {

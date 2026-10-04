@@ -913,6 +913,47 @@ function ordinaryDue(
     healthy.execution.generation === runtime.generation;
 }
 
+/** One exact recovery after historical quarantine and native run71 settlement. */
+function samePointerRecovery(
+  runtime: HostedRuntimeRecordV1,
+): "ordinary" | "verify" | "refused" {
+  const revision = "c79b2b87a6a2dd0adc201895af10806ef7a9c600";
+  const latest = runtime.lastExecutionProof;
+  if (runtime.activeRevision !== revision || runtime.generation !== 59) {
+    return latest?.execution.id === "37148984941:1:repair"
+      ? "refused"
+      : "ordinary";
+  }
+  const healthy = runtime.lastHealthyProof;
+  if (latest?.outcome === "healthy") {
+    return healthy !== null && latest.execution.revision === revision &&
+        latest.execution.generation === 59 && sameCanonical(latest, healthy)
+      ? "ordinary"
+      : "refused";
+  }
+  if (
+    healthy === null || healthy.execution.revision !== revision ||
+    healthy.execution.generation !== 59 ||
+    healthy.execution.id !== "37134515396:1:repair" ||
+    healthy.execution.launcherSha !==
+      "bf1d0300f9634feb6541f2d7e96cbfe4bba7dfe0" ||
+    healthy.logDigest !==
+      "c031f4a39f3eac1ff64c8f6bce28eb733ff4dfe1ea5d813dcfb31d08ffce1cf3" ||
+    latest?.outcome !== "not_started" ||
+    latest.execution.id !== "37148984941:1:repair" ||
+    latest.execution.runId !== 37148984941 ||
+    latest.execution.runAttempt !== 1 ||
+    latest.execution.launcherSha !==
+      "6468457a7b293ec489b6e00fa9fef062f7914abe" ||
+    latest.execution.revision !== revision ||
+    latest.execution.generation !== 59 ||
+    latest.execution.purpose !== "ordinary" ||
+    latest.execution.releaseId !== null ||
+    latest.observedAt < healthy.observedAt
+  ) return "refused";
+  return "verify";
+}
+
 /**
  * Promotion-source preflight before a healthy prior settlement may persist the
  * promote intent: the reread repair request must canonical-equal the frozen
@@ -1068,6 +1109,22 @@ export async function runHostedSupervisorPrepare(
       continue;
     }
 
+    const samePointer = samePointerRecovery(runtime);
+    if (samePointer === "refused") {
+      return pending("exact same-pointer recovery proof is unavailable");
+    }
+    if (
+      samePointer === "verify" && (
+        releases.some((release) =>
+          !isTerminalPhase(release.phase) || release.pointerIntent !== null
+        ) ||
+        cursor.snapshot?.githubCooldowns.some((cooldown) =>
+          cooldown.retryNotBefore === null ||
+          input.clock.now() < cooldown.retryNotBefore
+        )
+      )
+    ) return pending("exact same-pointer recovery admission is blocked");
+
     const recovery = planPointerRecovery(runtime, releases, input.clock.now());
     if (recovery !== null) {
       // A persisted promote intent is durable, not self-authorizing: before
@@ -1185,10 +1242,10 @@ export async function runHostedSupervisorPrepare(
         cursor,
         runtime,
         releases,
-        "ordinary",
+        samePointer === "verify" ? "bootstrap" : "ordinary",
         runtime.activeRevision,
         null,
-        input.clock.now(),
+        samePointer === "verify" ? undefined : input.clock.now(),
       );
     }
 

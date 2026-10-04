@@ -3526,6 +3526,68 @@ Deno.test("delivery matches an existing release request by source PR/head and re
   }
 });
 
+Deno.test("base refresh preserves merged own PR identity for guarded maintenance", async () => {
+  const record = deliveryRecord(SHA3);
+  const rig = await makeRig("merged-refresh-identity", {
+    summaries: false,
+    github: {
+      baseSha: SHA2,
+      candidateLifecycle: {
+        refs: { "refs/heads/sentinel/repair/issue-1": SHA3 },
+        pullRequests: [{
+          ...exactOpenPr(7, SHA3, record.target.branch!),
+          state: "merged",
+          mergeSha: SHA4,
+        }],
+        prepareBaseRefresh: () => {
+          throw new Error("an observed merge must never be refreshed");
+        },
+      },
+    },
+  });
+  try {
+    const receipt = completedReceipt(7, SHA3, SHA1);
+    const charge = reservation("retained-merge-charge", {
+      taskId: record.id,
+      purpose: "review_request",
+    });
+    const seed = seededSnapshot([record], {
+      reviews: [receipt],
+      reservations: [charge],
+    });
+    const written = await rig.store.writeRepair(seed, null);
+    assert.ok(written.ok && written.value.status === "applied");
+    const result = await rig.entry();
+    assert.equal(result.status, "idle", JSON.stringify(result));
+    const state = await rig.snapshot();
+    assert.equal(state.work[0].nextStep, "blocked");
+    assert.equal(
+      state.work[0].blocker?.message,
+      "pull request was merged outside the trusted review path",
+    );
+    assert.deepEqual(
+      state.work[0].target,
+      record.target,
+      "observing a merge preserves its PR identity without accepting it",
+    );
+    assert.equal(state.work[0].intent, null);
+    assert.deepEqual(state.work[0].counters, record.counters);
+    assert.deepEqual(state.work[0].source, record.source);
+    assert.deepEqual(state.work[0].evidence, record.evidence);
+    assert.deepEqual(state.reviews, [receipt]);
+    assert.deepEqual(state.reservations, [charge]);
+    assert.deepEqual(state.releaseRequests, []);
+    assert.equal(rig.model.requests.length, 0);
+    assert.equal(rig.github.calls.filter((call) => call === "merge").length, 0);
+    assert.equal(
+      rig.github.calls.filter((call) => call === "closeIssue:1").length,
+      0,
+    );
+  } finally {
+    await rig.ctx.cleanup();
+  }
+});
+
 Deno.test("trusted merge survives a transient post-merge task read", async () => {
   const rig = await makeRig("merge-task-read", {
     summaries: false,

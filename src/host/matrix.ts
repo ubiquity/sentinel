@@ -221,7 +221,14 @@ export async function planMatrixWave(
     const now = deps.clock.now();
     if (now >= bounds.modelCutoff || now >= bounds.runDeadline) break;
     const ranked = rankEligibleWork(context.snapshot, deps.configs, now);
-    const nextId = ranked.ordered.find((id) => !attemptedIds.has(id));
+    const nextId = ranked.ordered.find((id) => {
+      if (attemptedIds.has(id)) return false;
+      const record = context.snapshot.work.find((work) => work.id === id);
+      if (record === undefined) return false;
+      const config = configForRepository(deps, record.repository);
+      return config !== null &&
+        isMatrixImplementationReadyV1(record, context.snapshot, config);
+    });
     if (nextId === undefined) break;
     attemptedIds.add(nextId);
     const record = context.snapshot.work.find((work) => work.id === nextId);
@@ -310,7 +317,7 @@ export async function planMatrixWave(
   }
 
   return {
-    plan: manifest(cells),
+    plan: { ...manifest(cells), plannedAt: deps.clock.now() },
     attempted,
     prepared: cells.length,
     notReady,

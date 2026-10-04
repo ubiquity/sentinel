@@ -6,6 +6,29 @@ import type {
   MatrixRunIdentityV1,
 } from "../contracts/matrix.ts";
 import type { RepositoryIdentityV1 } from "../contracts/shared.ts";
+import type {
+  HostedExecutionIntentV1,
+  HostedRunProofV1,
+} from "../contracts/hosted-supervisor.ts";
+import type { WorkRecordV1 } from "../contracts/work-record.ts";
+import type { BudgetReservationV1 } from "../contracts/budget-reservation.ts";
+import type { ModelRunRequestV1 } from "../contracts/ports.ts";
+
+/** Rejection-only evidence; these bytes never authorize historical ingestion. */
+export interface MatrixRejectedWaveV1 {
+  reason: "reservation_after_manifest";
+  proof: HostedRunProofV1;
+  planDigest: string;
+  plannerJobId: number;
+  affected: readonly {
+    request: ModelRunRequestV1;
+    requestDigest: string;
+    work: WorkRecordV1;
+    workDigest: string;
+    reservation: BudgetReservationV1;
+    reservationDigest: string;
+  }[];
+}
 
 export interface MatrixArtifactRequestV1 {
   taskId: WorkItemId;
@@ -27,6 +50,14 @@ export interface MatrixAuthenticatedWaveV1 {
   };
 }
 export interface MatrixArtifactTransportV1 {
+  /** Exact current attempt and exhaustive native jobs must all be completed. */
+  confirmCompletedExecution?(
+    execution: HostedExecutionIntentV1,
+  ): Promise<boolean>;
+  /** Selects only the exact freshly saved, natively settled execution. */
+  rejectHistorical?(input: {
+    proof: HostedRunProofV1;
+  }): Promise<readonly MatrixRejectedWaveV1[]>;
   recover(input: {
     requests: readonly MatrixArtifactRequestV1[];
     runtimeSha: GitSha;
