@@ -426,6 +426,116 @@ export class GitStateStore implements StateStore {
     );
   }
 
+  readRepairAt(input: { commit: GitSha; expectedHead: GitSha }): Promise<
+    PortResultV1<StateReadResultV1<RepairStateSnapshotV1>>
+  > {
+    return this.withOpDir(async (op) => {
+      if (
+        !/^[0-9a-f]{40}$/.test(input.commit) ||
+        !/^[0-9a-f]{40}$/.test(input.expectedHead)
+      ) {
+        return portError("invalid", "historical repair identity is malformed");
+      }
+      const loaded = await this.loadRemote(op, REPAIR_REF, "repair");
+      if (!loaded.ok) return loaded;
+      if (
+        loaded.value.status !== "found" ||
+        loaded.value.head !== input.expectedHead
+      ) {
+        return portError(
+          "conflict",
+          "historical repair head changed or is absent",
+        );
+      }
+      const ancestor = await this.git(op, [
+        "merge-base",
+        "--is-ancestor",
+        input.commit,
+        input.expectedHead,
+      ]);
+      if (!ancestor.ok) {
+        return portError(
+          "invalid",
+          "historical repair commit is missing or not an ancestor",
+        );
+      }
+      const snapshot = await this.readCommitTree(op, input.commit, "repair");
+      if (!snapshot.ok) return snapshot;
+      const lookup = await this.git(op, ["ls-remote", "origin", REPAIR_REF]);
+      if (!lookup.ok) {
+        return this.gitFailure("unavailable", "ls-remote", lookup);
+      }
+      const fresh = this.parseLsRemote(lookup.stdout, REPAIR_REF);
+      if (fresh.status !== "found" || fresh.head !== input.expectedHead) {
+        return portError(
+          "conflict",
+          "historical repair head changed during read",
+        );
+      }
+      return portOk({
+        status: "found" as const,
+        snapshot: snapshot.value as RepairStateSnapshotV1,
+        head: input.commit,
+        ref: REPAIR_REF,
+      });
+    });
+  }
+
+  readReleaseAt(input: { commit: GitSha; expectedHead: GitSha }): Promise<
+    PortResultV1<StateReadResultV1<ReleaseStateSnapshotV1>>
+  > {
+    return this.withOpDir(async (op) => {
+      if (
+        !/^[0-9a-f]{40}$/.test(input.commit) ||
+        !/^[0-9a-f]{40}$/.test(input.expectedHead)
+      ) {
+        return portError("invalid", "historical release identity is malformed");
+      }
+      const loaded = await this.loadRemote(op, RELEASE_REF, "release");
+      if (!loaded.ok) return loaded;
+      if (
+        loaded.value.status !== "found" ||
+        loaded.value.head !== input.expectedHead
+      ) {
+        return portError(
+          "conflict",
+          "historical release head changed or is absent",
+        );
+      }
+      const ancestor = await this.git(op, [
+        "merge-base",
+        "--is-ancestor",
+        input.commit,
+        input.expectedHead,
+      ]);
+      if (!ancestor.ok) {
+        return portError(
+          "invalid",
+          "historical release commit is missing or not an ancestor",
+        );
+      }
+      const snapshot = await this.readCommitTree(op, input.commit, "release");
+      if (!snapshot.ok) return snapshot;
+      const lookup = await this.git(op, ["ls-remote", "origin", RELEASE_REF]);
+      if (!lookup.ok) {
+        return this.gitFailure("unavailable", "ls-remote", lookup);
+      }
+      const fresh = this.parseLsRemote(lookup.stdout, RELEASE_REF);
+      if (fresh.status !== "found" || fresh.head !== input.expectedHead) {
+        return portError(
+          "conflict",
+          "historical release head changed during read",
+        );
+      }
+      return portOk({
+        status: "found" as const,
+        snapshot: snapshot.value as ReleaseStateSnapshotV1,
+        head: input.commit,
+        ref: RELEASE_REF,
+      });
+    });
+  }
+
   // -------------------------------------------------------------------------
   // Writes: role-gated, strict expected-head CAS, non-force pushes only.
   // -------------------------------------------------------------------------

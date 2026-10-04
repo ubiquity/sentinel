@@ -52,7 +52,12 @@ import {
   readHostedIdentityEnv,
   readHostedRuntimeExecution,
 } from "./hosted-runtime.ts";
-import type { HostedExecutionIntentV1 } from "../contracts/hosted-supervisor.ts";
+import type {
+  HostedExecutionIntentV1,
+  HostedExecutionSettlementV1,
+} from "../contracts/hosted-supervisor.ts";
+import type { PortResultV1 } from "../contracts/ports.ts";
+import { GitHubApiClient } from "../github/client.ts";
 import type { MatrixRunIdentityV1 } from "../contracts/matrix.ts";
 import type { MatrixArtifactTransportV1 } from "./matrix-artifact-port.ts";
 import {
@@ -241,7 +246,12 @@ export interface ActionsTargetCyclesInputV1 {
     artifactRoot: string;
     sourcePathFor: (config: RepositoryConfigV1) => string;
     expectedProvider: string;
-    createArtifactTransport: () => Promise<MatrixArtifactTransportV1>;
+    createArtifactTransport: (
+      producerState?: StateReadView,
+    ) => Promise<MatrixArtifactTransportV1>;
+    readExecution?: (
+      execution: HostedExecutionIntentV1,
+    ) => Promise<PortResultV1<HostedExecutionSettlementV1 | null>>;
   };
   /**
    * Prepare one target's own private state before its port is composed: its
@@ -971,13 +981,25 @@ export async function runActionsRepairHost(
         artifactRoot: joinPath(sourceDir, "..", ".sentinel-matrix"),
         sourcePathFor: mirrorPathFor,
         expectedProvider: modelRoute.provider,
-        createArtifactTransport: async () => {
+        readExecution: (execution) =>
+          new GitHubApiClient({
+            repository: selfRepository,
+            apiBaseUrl: "https://api.github.com",
+            http,
+            clock,
+            auth: {
+              authorizationHeader: () =>
+                Promise.resolve(portOk(`Bearer ${githubToken}`)),
+            },
+            cooldownGate: gate,
+          }).readHostedExecution(execution),
+        createArtifactTransport: async (producerState) => {
           const {
             createActionsMatrixArtifactTransport,
             createActionsMatrixArtifactHttpTransport,
           } = await import("./matrix-artifacts.ts");
           return createActionsMatrixArtifactTransport({
-            state: {
+            state: producerState ?? {
               readRepair: () => state.readRepair(),
               readRelease: () => state.readRelease(),
             },
