@@ -159,8 +159,11 @@ async function nextSampleDelay(
   if (record?.monitoring.startedAt === null || record === undefined) {
     return null;
   }
+  // The next candidate slot is sampled only after the following adjacent
+  // slot has also passed the source lag, allowing boundary-spanning cohorts
+  // to be correlated before the slot becomes durable acceptance evidence.
   const nextDueAt = record.monitoring.startedAt +
-    (record.monitoring.samples + 1) * RELEASE_SAMPLE_INTERVAL_MS + logsLagMs;
+    (record.monitoring.samples + 2) * RELEASE_SAMPLE_INTERVAL_MS + logsLagMs;
   // A zero/negative delay means the state became due while it was being read;
   // yield one millisecond before retrying so the entrypoint cannot busy-loop.
   return Math.max(1, nextDueAt - now);

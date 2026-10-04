@@ -1170,6 +1170,156 @@ Deno.test("port: log sampling produces exact-window Cohort counts with complete 
   assert.deepEqual(sample.value.coverage, { status: "complete" });
 });
 
+Deno.test(
+  "port: correlates a request cohort across adjacent telemetry windows",
+  async () => {
+    const transport = new ScriptedTransport();
+    transport.any(
+      "GET",
+      new RegExp("^/v2/apps/[^/]+/logs$"),
+      (url) => {
+        const start = Date.parse(url.searchParams.get("start") ?? "0");
+        const messages = start === T0
+          ? [
+            acceptedEvent({
+              requestId: "boundary-request",
+              identity: DEP_1,
+              timestamp: T0 + 29_999,
+            }),
+          ]
+          : start === T0 + 30_000
+          ? [
+            terminalEvent({
+              requestId: "boundary-request",
+              identity: DEP_1,
+              timestamp: T0 + 30_001,
+            }),
+          ]
+          : [];
+        return {
+          kind: "response",
+          status: 200,
+          body: JSON.stringify({
+            logs: messages.map((message, index) => ({
+              timestamp: new Date(start + index).toISOString(),
+              level: "info",
+              message,
+              revision_id: DEP_1.revisionId,
+            })),
+            next_cursor: null,
+          }),
+        };
+      },
+    );
+    const clock = new TestClock(T0 + 35_001);
+    const port = client(transport, clock);
+
+    const early = await port.sampleMetrics({
+      baseUrl: MANAGED_URL,
+      metricsPath: "/health",
+      identity: DEP_1,
+      windowStart: T0,
+      windowEnd: T0 + 30_000,
+      domain: "ai.ubq.fi",
+    });
+    assert.ok(early.ok);
+    if (!early.ok) return;
+    assert.equal(early.value.requestCount, 1);
+    assert.equal(early.value.coverage.status, "incomplete");
+
+    clock.at(T0 + 65_001);
+
+    const first = await port.sampleMetrics({
+      baseUrl: MANAGED_URL,
+      metricsPath: "/health",
+      identity: DEP_1,
+      windowStart: T0,
+      windowEnd: T0 + 30_000,
+      domain: "ai.ubq.fi",
+    });
+    const second = await port.sampleMetrics({
+      baseUrl: MANAGED_URL,
+      metricsPath: "/health",
+      identity: DEP_1,
+      windowStart: T0 + 30_000,
+      windowEnd: T0 + 60_000,
+      domain: "ai.ubq.fi",
+    });
+
+    assert.ok(first.ok);
+    assert.ok(second.ok);
+    if (!first.ok || !second.ok) return;
+    assert.equal(first.value.requestCount, 1);
+    assert.deepEqual(first.value.coverage, { status: "complete" });
+    assert.equal(second.value.requestCount, 0);
+    assert.deepEqual(second.value.coverage, { status: "complete" });
+  },
+);
+
+Deno.test(
+  "port: adjacent terminals outside the bounded cohort do not poison coverage",
+  async () => {
+    const slotLength = 30_000;
+    const transport = new ScriptedTransport();
+    transport.any(
+      "GET",
+      new RegExp("^/v2/apps/[^/]+/logs$"),
+      (url) => {
+        const start = Date.parse(url.searchParams.get("start") ?? "0");
+        const slot = (start - T0) / slotLength;
+        const messages: string[] = [];
+        if (slot >= 0 && slot <= 4 && Number.isInteger(slot)) {
+          if (slot > 0) {
+            messages.push(
+              terminalEvent({
+                requestId: `boundary-${slot - 1}`,
+                identity: DEP_1,
+                timestamp: T0 + slot * slotLength + 1,
+              }),
+            );
+          }
+          if (slot < 4) {
+            messages.push(
+              acceptedEvent({
+                requestId: `boundary-${slot}`,
+                identity: DEP_1,
+                timestamp: T0 + (slot + 1) * slotLength - 1,
+              }),
+            );
+          }
+        }
+        return {
+          kind: "response",
+          status: 200,
+          body: JSON.stringify({
+            logs: messages.map((message, index) => ({
+              timestamp: new Date(start + index).toISOString(),
+              level: "info",
+              message,
+              revision_id: DEP_1.revisionId,
+            })),
+            next_cursor: null,
+          }),
+        };
+      },
+    );
+    const port = client(transport, new TestClock(T0 + 125_001));
+    const sample = await port.sampleMetrics({
+      baseUrl: MANAGED_URL,
+      metricsPath: "/health",
+      identity: DEP_1,
+      windowStart: T0 + 2 * slotLength,
+      windowEnd: T0 + 3 * slotLength,
+      domain: "ai.ubq.fi",
+    });
+
+    assert.ok(sample.ok);
+    if (!sample.ok) return;
+    assert.equal(sample.value.requestCount, 1);
+    assert.deepEqual(sample.value.coverage, { status: "complete" });
+  },
+);
+
 Deno.test("port: log sampling before the trusted lag is missing, never zero", async () => {
   const transport = new ScriptedTransport();
   logRoute(transport, { accept: 100 });
