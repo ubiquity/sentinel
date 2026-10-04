@@ -2,6 +2,10 @@
 
 Read before changing Sentinel runtime or delivery. These are scoped user exceptions; they do not broadly override higher authority.
 
+## PR111 owner-approved operator delivery - 2026-10-04
+
+The owner explicitly authorized the existing `0x4007` operator route to merge PR111 with `--merge --match-head-commit f68a4240bb3dc0435ceb92d4caa886f4d1b05cfe` after fresh current-head CI, genuine App semantic-review receipt, source-issue binding and base checks. The absence of the owner-removed pull-request rule blocks the legacy runtime merge port; it does not prohibit this separately approved operator action. The executed merge is `2bca04186b3e462c63ba3d9ce996f4a5d3fd03b6`, with the reviewed head and `ac98dc80` base as its exact parents and an identical reviewed/tested tree. This task-scoped approval permits no fake native approval status, trusted-state/receipt edit, admin bypass, branch deletion, or inferred permission for another operation. The release controller retains promotion authority; healthy runtime `ac98dc80`/generation61 and progressing producer work are preserved. The operator merge is recorded as such, not as autonomous runtime-port execution.
+
 ## Task-scoped local execution override - 2026-10-03
 
 For the current Sentinel concurrency task, the owner explicitly selected `gpt-6.1-sol` with `ultra` reasoning and Fast mode (`service_tier=fast`, mapped to request tier `priority`) for remaining local execution and new delegation. This supersedes the local DeepSeek default only for this task. Relay the instruction through supported parent controls, preserve current workers and artifacts, and change settings only at supported safe boundaries. A message or resume alone is not evidence that an existing request changed model or tier; distinguish requested settings from actual readback. Do not directly start turns on native multi-agent children or restart shared services.
