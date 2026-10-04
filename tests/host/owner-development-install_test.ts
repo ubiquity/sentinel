@@ -7,7 +7,7 @@
  */
 import assert from "node:assert/strict";
 
-import type { GitSha } from "../../src/contracts/brands.ts";
+import type { GitSha, WorkItemId } from "../../src/contracts/brands.ts";
 import { canonicalStringify } from "../../src/contracts/canonical.ts";
 import { parseGitHubCooldownV1 } from "../../src/contracts/github-cooldown.ts";
 import type { GitHubCooldownV1 } from "../../src/contracts/github-cooldown.ts";
@@ -32,11 +32,23 @@ import {
   parseRepairStateSnapshotV1,
 } from "../../src/contracts/state-snapshots.ts";
 import { portOk } from "../../src/contracts/ports.ts";
-import { implementationIntentKey } from "../../src/repair/keys.ts";
+import {
+  candidateBranch,
+  candidatePreservationRef,
+  implementationIntentKey,
+} from "../../src/repair/keys.ts";
 import { runHistoricalMatrixQuarantine } from "../../src/host/matrix-actions.ts";
-import { runHostedSupervisorPrepare } from "../../src/host/actions-supervisor.ts";
+import {
+  runHostedSupervisorFinalize,
+  runHostedSupervisorPrepare,
+} from "../../src/host/actions-supervisor.ts";
 import { reservation, workRecord } from "../state/helpers.ts";
 import type { ReleaseStateSnapshotV1 } from "../../src/contracts/state-snapshots.ts";
+import type { RepairStateSnapshotV1 } from "../../src/contracts/state-snapshots.ts";
+import {
+  CLOSED_C_WAVE,
+  type ClosedCWaveBindingV1,
+} from "../../src/host/modern-matrix-recovery.ts";
 import {
   buildOwnerDevelopmentInstallSnapshot,
   OWNER_DEVELOPMENT_INSTALL_ADVANCE_REVISION,
@@ -241,11 +253,389 @@ const CONCURRENCY_PLANNER_REVISION =
   "ddc98af7062b63e2b6b0f1e6b877e32f4675d442" as GitSha;
 const ROLLBACK_TARGET_GENERATION = 46;
 
+async function matrixRecoveryState() {
+  const work = CLOSED_C_WAVE.cells.map((cell) =>
+    workRecord(cell.taskId, {
+      createdAt: T0,
+      updatedAt: T0 + 1000,
+      repository: cell.repository,
+      source: {
+        kind: "issue",
+        id: cell.taskId.split("-").at(-1),
+        revision: cell.base,
+      },
+      related: {
+        incidentId: null,
+        issueNumber: Number(cell.taskId.split("-").at(-1)),
+      },
+      failingRevision: null,
+      controller: { sha: CLOSED_C_WAVE.runtimeSha },
+      counters: { attempts: 1, retries: 0, reviewRounds: 0 },
+      target: {
+        base: cell.base,
+        branch: candidateBranch(cell.taskId as WorkItemId),
+        head: null,
+        checkpoint: null,
+        pr: null,
+      },
+      intent: {
+        kind: "implementation",
+        key: implementationIntentKey(cell.reservationId),
+        startedAt: T0,
+        branch: candidateBranch(cell.taskId as WorkItemId),
+        expectedHead: null,
+        observedBase: cell.base,
+        pr: null,
+        requestId: cell.reservationId,
+        resultId: null,
+      },
+    })
+  );
+  const charges = CLOSED_C_WAVE.cells.map((cell) =>
+    reservation(cell.reservationId, {
+      createdAt: T0,
+      repository: cell.repository,
+      taskId: cell.taskId,
+      attempt: 1,
+      head: cell.base,
+    })
+  );
+  for (let index = 0; index < 13; index++) {
+    const requestId = "c".repeat(63) + index.toString(16);
+    const id = "older-unrelated-" + index;
+    const branch = "sentinel/" + id;
+    const repository = {
+      owner: "ubiquity",
+      name: "sentinel",
+      installationId: 0,
+    };
+    work.push(workRecord(id, {
+      repository,
+      createdAt: T0 - 2000,
+      updatedAt: T0 - 1000,
+      source: { kind: "issue", id: String(1000 + index), revision: UNRELATED },
+      related: { incidentId: null, issueNumber: 1000 + index },
+      target: {
+        base: UNRELATED,
+        branch,
+        head: null,
+        checkpoint: null,
+        pr: null,
+      },
+      counters: { attempts: 1, retries: 0, reviewRounds: 0 },
+      intent: {
+        kind: "implementation",
+        key: implementationIntentKey(requestId),
+        startedAt: T0 - 1000,
+        branch,
+        expectedHead: null,
+        observedBase: UNRELATED,
+        pr: null,
+        requestId,
+        resultId: null,
+      },
+    }));
+    charges.push(
+      reservation(requestId, {
+        repository,
+        taskId: id,
+        head: UNRELATED,
+        createdAt: T0 - 1000,
+      }),
+    );
+  }
+  const original = parseRepairStateSnapshotV1({
+    version: "v1",
+    kind: "repair_state_snapshot",
+    sequence: 1,
+    stateHead: null,
+    updatedAt: T0 + 3000,
+    incidents: [],
+    evidence: [],
+    work,
+    reservations: charges,
+    reviews: [],
+    replays: [],
+    releaseRequests: [],
+    githubCooldowns: [],
+  });
+  const ingestedWork = await Promise.all(work.map(async (row, index) => {
+    if (index >= CLOSED_C_WAVE.cells.length) return row;
+    if (index >= 18) {
+      return {
+        ...row,
+        nextStep: "blocked",
+        blocker: {
+          kind: "other",
+          since: NOW,
+          message: "matrix result unavailable",
+        },
+        updatedAt: NOW,
+      };
+    }
+    const head = "b".repeat(40) as GitSha;
+    const protectedCandidate = row.id === "issue-ubiquity-ai.ubq.fi-751";
+    return {
+      ...row,
+      target: {
+        ...row.target,
+        head,
+        checkpoint: null,
+        candidateState: { preserved: null, publishedHead: null },
+      },
+      intent: protectedCandidate ? null : {
+        ...row.intent!,
+        kind: "candidate_preservation",
+        branch: await candidatePreservationRef(
+          row.repository,
+          row.id,
+          row.intent!.key,
+        ),
+        expectedHead: head,
+      },
+      nextStep: protectedCandidate ? "blocked" : "work",
+      blocker: protectedCandidate
+        ? {
+          kind: "other",
+          since: NOW,
+          message: "candidate touches a protected path",
+        }
+        : null,
+      updatedAt: NOW,
+    };
+  }));
+  const ingested = parseRepairStateSnapshotV1({
+    ...original,
+    sequence: 2,
+    updatedAt: NOW,
+    work: ingestedWork,
+    reservations: charges.map((row, index) =>
+      index >= CLOSED_C_WAVE.cells.length ? row : ({
+        ...row,
+        outcome: index < 18 ? "submitted" : "ambiguous",
+        settledAt: NOW,
+      })
+    ),
+  });
+  return { original, ingested };
+}
+
+Deno.test("owner install matrix recovery: exact metadata and charges install, bootstrap, rollback and never reinstall", async () => {
+  const candidate = "a".repeat(40) as GitSha;
+  const own = parseHostedRunProofV1({
+    ...hostedProof({
+      runId: 37170000000,
+      purpose: "bootstrap",
+      releaseId: null,
+      revision: CLOSED_C_WAVE.runtimeSha,
+      generation: 60,
+      outcome: "healthy",
+    }),
+    execution: {
+      ...hostedProof({
+        runId: 37170000000,
+        purpose: "bootstrap",
+        releaseId: null,
+        revision: CLOSED_C_WAVE.runtimeSha,
+        generation: 60,
+        outcome: "healthy",
+      }).execution,
+      createdAt: T0 - 5000,
+    },
+    startedAt: T0 - 4000,
+    finishedAt: T0 - 3000,
+    observedAt: T0 - 2000,
+    terminalAt: T0 - 3500,
+  });
+  const failure = parseHostedRunProofV1({
+    ...hostedProof({
+      runId: CLOSED_C_WAVE.run.runId,
+      purpose: "ordinary",
+      releaseId: null,
+      revision: CLOSED_C_WAVE.runtimeSha,
+      generation: 60,
+      outcome: "failed",
+    }),
+    execution: {
+      ...hostedProof({
+        runId: CLOSED_C_WAVE.run.runId,
+        purpose: "ordinary",
+        releaseId: null,
+        revision: CLOSED_C_WAVE.runtimeSha,
+        generation: 60,
+        outcome: "failed",
+      }).execution,
+      launcherSha: CLOSED_C_WAVE.run.launcherSha,
+    },
+  });
+  const state = releaseSnapshot({
+    runtime: runtimeRecord({
+      revision: CLOSED_C_WAVE.runtimeSha,
+      generation: 60,
+      healthyProof: own,
+      executionProof: failure,
+    }),
+  });
+  const cells = await matrixRecoveryState();
+  for (const failedBootstrap of [false, true]) {
+    const fixture = await concurrencyInstallerFixture(
+      state,
+      undefined,
+      candidate,
+      { ...cells, binding: CLOSED_C_WAVE },
+    );
+    try {
+      const repair = await fixture.readRepair();
+      assert.equal(await fixture.run(), 0);
+      assert.equal(fixture.reports.at(-1)?.status, "installed");
+      assert.equal(fixture.reports.at(-1)?.candidateGeneration, 61);
+      assert.equal(fixture.patches(), 1);
+      assert.deepEqual(await fixture.readRepair(), repair);
+      assert.equal(await fixture.run(), 0);
+      assert.equal(fixture.reports.at(-1)?.status, "waiting");
+      const run = { runId: 37190000000, runAttempt: 1, launcherSha: LAUNCHER };
+      const prepared = await runHostedSupervisorPrepare({
+        state: fixture.releaseStore,
+        clock: { now: () => NOW + 100 },
+        run,
+        evidence: {
+          readExecution: () => Promise.resolve(portOk(null)),
+          verifyRevision: () => Promise.resolve(portOk(true)),
+          verifyRequest: () => Promise.resolve(portOk(false)),
+        },
+      });
+      assert.equal(prepared.status, "run");
+      if (prepared.status !== "run") throw new Error("missing bootstrap");
+      assert.equal(prepared.execution.purpose, "bootstrap");
+      assert.equal(prepared.execution.revision, candidate);
+      assert.equal(prepared.execution.generation, 61);
+      const proof = parseHostedRunProofV1({
+        ...failure,
+        execution: prepared.execution,
+        startedAt: NOW + 200,
+        finishedAt: NOW + 300,
+        observedAt: NOW + 400,
+        outcome: failedBootstrap ? "failed" : "healthy",
+        startupReady: !failedBootstrap,
+        baseSha: failedBootstrap ? null : candidate,
+        terminalAt: failedBootstrap ? null : NOW + 250,
+      });
+      const finalized = await runHostedSupervisorFinalize({
+        state: fixture.releaseStore,
+        clock: { now: () => NOW + 400 },
+        run,
+        evidence: {
+          readExecution: () => Promise.resolve(portOk(proof)),
+          verifyRevision: () => Promise.resolve(portOk(true)),
+          verifyRequest: () => Promise.resolve(portOk(false)),
+        },
+      });
+      assert.equal(finalized.status, "idle");
+      fixture.setNow(NOW + 500);
+      assert.equal(await fixture.run(), 0);
+      assert.equal(
+        fixture.reports.at(-1)?.status,
+        failedBootstrap ? "rolled_back" : "no_change",
+      );
+      assert.equal(fixture.patches(), failedBootstrap ? 2 : 1);
+      const after = await fixture.read();
+      assert.ok(after.ok && after.value.status === "found");
+      assert.equal(
+        after.value.snapshot.hostedRuntimes[0].generation,
+        failedBootstrap ? 62 : 61,
+      );
+      assert.deepEqual(await fixture.readRepair(), repair);
+      if (failedBootstrap) {
+        assert.deepEqual(
+          after.value.snapshot.hostedRuntimes[0].lastHealthyProof,
+          own,
+        );
+        assert.equal(await fixture.run(), 0);
+        assert.equal(fixture.reports.at(-1)?.status, "waiting");
+        assert.equal(fixture.patches(), 2);
+        const restoredRun = { ...run, runId: run.runId + 1 };
+        const restored = await runHostedSupervisorPrepare({
+          state: fixture.releaseStore,
+          clock: { now: () => NOW + 600 },
+          run: restoredRun,
+          evidence: {
+            readExecution: () => Promise.resolve(portOk(null)),
+            verifyRevision: () => Promise.resolve(portOk(true)),
+            verifyRequest: () => Promise.resolve(portOk(false)),
+          },
+        });
+        assert.equal(restored.status, "run");
+        if (restored.status !== "run") {
+          throw new Error("missing restored verification");
+        }
+        assert.equal(restored.execution.purpose, "bootstrap");
+        assert.equal(restored.execution.generation, 62);
+        assert.equal(restored.execution.revision, CLOSED_C_WAVE.runtimeSha);
+        const restoredFailure = parseHostedRunProofV1({
+          ...failure,
+          execution: restored.execution,
+          startedAt: NOW + 700,
+          finishedAt: NOW + 800,
+          observedAt: NOW + 900,
+        });
+        const settledRollback = await runHostedSupervisorFinalize({
+          state: fixture.releaseStore,
+          clock: { now: () => NOW + 900 },
+          run: restoredRun,
+          evidence: {
+            readExecution: () => Promise.resolve(portOk(restoredFailure)),
+            verifyRevision: () => Promise.resolve(portOk(true)),
+            verifyRequest: () => Promise.resolve(portOk(false)),
+          },
+        });
+        assert.equal(settledRollback.status, "idle");
+        fixture.setNow(NOW + 1000);
+        assert.equal(await fixture.run(), 0);
+        assert.equal(fixture.reports.at(-1)?.status, "waiting");
+        assert.equal(
+          fixture.patches(),
+          2,
+          "failed restored verification cannot reinstall or advance to generation 63",
+        );
+        assert.deepEqual(await fixture.readRepair(), repair);
+      }
+      assert.ok(
+        fixture.requests.filter((row) => row.method === "GET").every((row) =>
+          !row.path.includes("/logs") && !row.path.includes("/zip")
+        ),
+      );
+    } finally {
+      await fixture.close();
+    }
+  }
+  for (const refusal of ["ci", "parent", "readback", "native"] as const) {
+    const fixture = await concurrencyInstallerFixture(
+      state,
+      refusal === "native" ? undefined : refusal,
+      candidate,
+      { ...cells, binding: CLOSED_C_WAVE, nativeRefusal: refusal === "native" },
+    );
+    try {
+      assert.equal(await fixture.run(), 0);
+      assert.notEqual(fixture.reports.at(-1)?.status, "installed");
+      assert.equal(fixture.patches(), refusal === "readback" ? 1 : 0);
+    } finally {
+      await fixture.close();
+    }
+  }
+});
+
 /** Real production entrypoint, fake GitHub transport, real private Git objects. */
 async function concurrencyInstallerFixture(
   snapshot: ReleaseStateSnapshotV1,
   refusal?: "ancestry" | "ci" | "parent" | "readback" | "artifact",
   candidateRevision: GitSha = CONCURRENCY_REVISION,
+  matrixRecovery?: {
+    binding: ClosedCWaveBindingV1;
+    original: RepairStateSnapshotV1;
+    ingested: RepairStateSnapshotV1;
+    nativeRefusal?: boolean;
+  },
 ) {
   const directory = await Deno.makeTempDir({
     prefix: "sentinel-owner57-",
@@ -256,6 +646,7 @@ async function concurrencyInstallerFixture(
   const originalFetch = globalThis.fetch;
   const originalLog = console.log;
   const originalNow = Date.now;
+  let fixtureNow = NOW;
   const originalCwd = Deno.cwd();
   const originalEnvironmentGet = Deno.env.get;
   const environment: Record<string, string> = {
@@ -377,6 +768,48 @@ async function concurrencyInstallerFixture(
       "refs/heads/sentinel-state/repair",
       initialHead,
     ]);
+    let recoveryBinding: ClosedCWaveBindingV1 | undefined;
+    let expectedRepairHead = initialHead;
+    if (matrixRecovery !== undefined) {
+      await git([
+        ...gitArgs,
+        "update-ref",
+        "-d",
+        "refs/heads/sentinel-state/repair",
+        initialHead,
+      ]);
+      const repairStore = createRepairStateStore({
+        remoteUrl: remote,
+        scratchDir: `${directory}/matrix-repair`,
+        runner: new DenoGitRunner(`${directory}/matrix-home`),
+      });
+      const original = await repairStore.writeRepair(
+        matrixRecovery.original,
+        null,
+      );
+      assert.ok(
+        original.ok && original.value.status === "applied",
+        JSON.stringify(original),
+      );
+      const ingested = await repairStore.writeRepair(
+        parseRepairStateSnapshotV1({
+          ...matrixRecovery.ingested,
+          stateHead: original.value.head,
+          sequence: 2,
+        }),
+        original.value.head,
+      );
+      assert.ok(
+        ingested.ok && ingested.value.status === "applied",
+        JSON.stringify(ingested),
+      );
+      expectedRepairHead = ingested.value.head;
+      recoveryBinding = {
+        ...matrixRecovery.binding,
+        repairCommit: original.value.head,
+        releaseCommit: initialHead,
+      };
+    }
     if (refusal === "artifact") {
       const blob = await git(
         [...gitArgs, "hash-object", "-w", "--stdin"],
@@ -473,6 +906,60 @@ async function concurrencyInstallerFixture(
       const method = init?.method ?? "GET";
       const body = init?.body ? JSON.parse(String(init.body)) : {};
       requests.push({ method, path: url.pathname, body });
+      if (
+        matrixRecovery !== undefined && url.pathname.includes("/actions/runs/")
+      ) {
+        const latest = await store.readRelease();
+        assert.ok(latest.ok && latest.value.status === "found");
+        const producer = snapshot.hostedRuntimes[0].lastExecutionProof!;
+        const currentProof = latest.value.snapshot.hostedRuntimes[0]
+          .lastExecutionProof!;
+        const proof =
+          url.pathname.includes(String(currentProof.execution.runId))
+            ? currentProof
+            : producer;
+        if (url.pathname.endsWith("/jobs")) {
+          return response({
+            total_count: 1,
+            jobs: [{
+              id: proof.jobId,
+              status: matrixRecovery.nativeRefusal
+                ? "in_progress"
+                : "completed",
+            }],
+          });
+        }
+        if (url.pathname.endsWith("/artifacts")) {
+          const binding = recoveryBinding!;
+          return response({
+            total_count: binding.cells.length + 1,
+            artifacts: [
+              {
+                id: 1,
+                name:
+                  `sentinel-matrix-plan-${binding.run.runId}-${binding.run.runAttempt}`,
+                expired: false,
+                digest: `sha256:${binding.planZipDigest ?? DIGEST}`,
+              },
+              ...binding.cells.map((cell, index) => ({
+                id: index + 2,
+                name:
+                  `sentinel-matrix-cell-${binding.run.runId}-${binding.run.runAttempt}-${cell.cellId}`,
+                expired: false,
+                digest: `sha256:${DIGEST}`,
+              })),
+            ],
+          });
+        }
+        return response({
+          id: proof.execution.runId,
+          run_attempt: proof.execution.runAttempt,
+          head_sha: proof.execution.launcherSha,
+          workflow_id: proof.workflowId,
+          head_branch: "sentinel-supervisor",
+          status: "completed",
+        });
+      }
       if (url.pathname.includes("/compare/")) {
         assert.ok(
           url.pathname.endsWith(`${candidateRevision}...development`),
@@ -587,13 +1074,18 @@ async function concurrencyInstallerFixture(
         assert.ok(createdCommit !== null);
         assert.deepEqual(body, { sha: createdCommit, force: false });
         patches++;
-        await git([...gitArgs, "update-ref", ref, body.sha, beforeHead]);
+        const expected = await git([
+          ...gitArgs,
+          "rev-parse",
+          `${createdCommit}^`,
+        ]);
+        await git([...gitArgs, "update-ref", ref, body.sha, expected]);
         return response({ object: { sha: body.sha } });
       }
       throw new Error(`unexpected offline request: ${method} ${url.pathname}`);
     };
     console.log = (value: unknown) => reports.push(JSON.parse(String(value)));
-    Date.now = () => NOW;
+    Date.now = () => fixtureNow;
     Deno.env.get = (name) => {
       if (Object.hasOwn(environment, name)) return environment[name];
       assert.ok(name === "PATH" || name === "NODE_V8_COVERAGE");
@@ -605,10 +1097,21 @@ async function concurrencyInstallerFixture(
       beforeHead,
       requests,
       reports,
-      run: runOwnerDevelopmentInstallMain,
+      run: () =>
+        runOwnerDevelopmentInstallMain(
+          recoveryBinding === undefined ? undefined : {
+            matrixRecoveryRevision: candidateRevision,
+            matrixRecoveryBinding: recoveryBinding,
+          },
+        ),
       patches: () => patches,
       head: () => git([...gitArgs, "rev-parse", ref]),
       read: () => store.readRelease(),
+      readRepair: () => store.readRepair(),
+      releaseStore: store,
+      setNow: (value: number) => {
+        fixtureNow = value;
+      },
       message: () => git([...gitArgs, "log", "-1", "--format=%B", ref]),
       close: async () => {
         assert.equal(
@@ -617,7 +1120,7 @@ async function concurrencyInstallerFixture(
             "rev-parse",
             "refs/heads/sentinel-state/repair",
           ]),
-          initialHead,
+          expectedRepairHead,
         );
         Deno.Command = originalCommand;
         globalThis.fetch = originalFetch;

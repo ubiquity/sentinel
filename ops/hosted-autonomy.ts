@@ -77,6 +77,26 @@
  */
 import type { PortResultV1 } from "../src/contracts/ports.ts";
 import type {
+  GitHubPort,
+  IncidentAdapter,
+  ReplayPort,
+} from "../src/contracts/ports.ts";
+import {
+  CLOSED_C_WAVE,
+  closedCWaveNeedsRecovery,
+  type ClosedCWaveRecoveryDepsV1,
+  ingestClosedCWave,
+} from "../src/host/modern-matrix-recovery.ts";
+import { createGitBundleImporter } from "../src/host/matrix-git.ts";
+import {
+  createDefaultBranchResolver,
+  loadTargetConfigsV1,
+} from "../src/host/targets.ts";
+import {
+  parseAppInstallationId,
+  scopeTargetConfigV1,
+} from "../src/host/actions.ts";
+import type {
   ReleaseStateSnapshotV1,
   RepairStateSnapshotV1,
 } from "../src/contracts/state-snapshots.ts";
@@ -127,7 +147,12 @@ import {
   releaseRequestId,
   reviewOperationKey,
 } from "../src/repair/keys.ts";
-import { githubGitAuthEnv } from "../src/host/local.ts";
+import {
+  createLocalRepositoryConfig,
+  githubGitAuthEnv,
+  prepareSourceRepository,
+  refreshDevelopment,
+} from "../src/host/local.ts";
 import { createRepairStateStore, DenoGitRunner } from "../src/state/mod.ts";
 import type {
   RepairStateWriter,
@@ -512,6 +537,139 @@ export interface HostedAutonomyDepsV1 {
   clock: { now(): number };
   /** Present on protected maintenance; rejection-only, before retry/delivery. */
   historicalMatrix?: HistoricalMatrixQuarantineDepsV1;
+  closedMatrix?: () => Promise<ClosedCWaveRecoveryDepsV1>;
+}
+
+/** The maintenance slice has no implementation, review or publication capability. */
+export async function createHostedClosedMatrixRecovery(input: {
+  state: StateReadView & RepairStateWriter;
+  clock: { now(): number };
+  token: string;
+  apiToken: string;
+  sourceDir: string;
+  scratch: string;
+  artifactRoot: string;
+  appInstallationId?: string;
+  cooldownMode?: string;
+  http?: HttpTransportV1;
+  artifactHttp?: HttpTransportV1;
+}): Promise<ClosedCWaveRecoveryDepsV1> {
+  const http = input.http ?? fetchHttpTransport();
+  const template = createLocalRepositoryConfig();
+  const targets = await loadTargetConfigsV1({
+    template,
+    root: input.sourceDir,
+    resolveDefaultBranch: createDefaultBranchResolver({
+      http,
+      token: input.apiToken,
+    }),
+  });
+  const configs = targets.configs.map((config) =>
+    scopeTargetConfigV1(
+      config,
+      template.repository,
+      parseAppInstallationId(input.appInstallationId),
+    )
+  );
+  const gate = new HostedRepairCooldownGate({
+    state: input.state,
+    clock: input.clock,
+    mode: parseCooldownModeV1(input.cooldownMode),
+  });
+  const client = new GitHubApiClient({
+    repository: template.repository,
+    apiBaseUrl: "https://api.github.com",
+    http,
+    clock: input.clock,
+    auth: {
+      authorizationHeader: () =>
+        Promise.resolve(portOk(`Bearer ${input.token}`)),
+    },
+    cooldownGate: gate,
+  });
+  const budget = new RollingStartBudget({
+    state: input.state,
+    clock: input.clock,
+    configs,
+  });
+  function refused<T>(): T {
+    return new Proxy({}, {
+      get: () => () =>
+        Promise.reject(new Error("C maintenance capability refused")),
+    }) as T;
+  }
+  const mirror = (config: typeof configs[number]) =>
+    input.scratch + "/sources/" + config.repository.owner + "-" +
+    config.repository.name;
+  await Deno.mkdir(input.scratch + "/sources", {
+    recursive: true,
+    mode: 0o700,
+  });
+  return {
+    state: input.state,
+    clock: input.clock,
+    configs,
+    cycleFor: () => ({
+      state: input.state,
+      clock: input.clock,
+      configs,
+      controllerSha: CLOSED_C_WAVE.runtimeSha,
+      github: refused<GitHubPort>(),
+      githubCooldown: gate,
+      incidents: refused<IncidentAdapter>(),
+      replay: refused<ReplayPort>(),
+      model: {
+        modelId: "gpt-reserve",
+        runModel: () => {
+          throw new Error("C maintenance model refused");
+        },
+      },
+      budget,
+      externalImplementations: true,
+    }),
+    prepareTarget: async (config) => {
+      const host = {
+        stateRoot: input.scratch,
+        sourceDir: input.sourceDir,
+        controllerSha: CLOSED_C_WAVE.runtimeSha,
+        githubToken: input.apiToken,
+        modelToken: "",
+        codexExecutable: "",
+        denoExecutable: Deno.execPath(),
+        trustedPath: "/usr/bin:/bin",
+      };
+      const remoteUrl =
+        `https://github.com/${config.repository.owner}/${config.repository.name}.git`;
+      await prepareSourceRepository(
+        mirror(config),
+        host,
+        input.scratch,
+        config.repository.name === template.repository.name &&
+          config.repository.owner === template.repository.owner
+          ? undefined
+          : remoteUrl,
+      );
+      await refreshDevelopment(
+        mirror(config),
+        host,
+        input.scratch,
+        gate,
+        config.repository.installationId,
+        { remoteUrl, baseBranch: config.baseBranch },
+      );
+    },
+    importerFor: (config, bundlesDir) =>
+      createGitBundleImporter({ repositoryDir: mirror(config), bundlesDir }),
+    transportFor: (state) =>
+      createActionsMatrixArtifactTransport({
+        state,
+        clock: input.clock,
+        token: input.token,
+        artifactRoot: input.artifactRoot,
+        http: input.artifactHttp ?? createActionsMatrixArtifactHttpTransport(),
+      }),
+    readExecution: (execution) => client.readHostedExecution(execution),
+  };
 }
 
 /** Exact authenticated legacy wave identities; no runtime-selected history. */
@@ -1697,6 +1855,37 @@ export async function runHostedAutonomy(
   deps: HostedAutonomyDepsV1,
 ): Promise<HostedAutonomyResultV1> {
   const actions: string[] = [];
+  if (deps.closedMatrix) {
+    const read = await deps.state.readRepair();
+    if (!read.ok) {
+      throw new Error("C maintenance repair state unavailable");
+    }
+    const closed = read.value.status === "found"
+      ? await deps.closedMatrix()
+      : undefined;
+    if (
+      read.value.status === "found" && closed !== undefined &&
+      closedCWaveNeedsRecovery(read.value.snapshot, closed.binding)
+    ) {
+      const recovered = await ingestClosedCWave(closed);
+      console.log(
+        JSON.stringify({ kind: "sentinel_closed_c_recovery", ...recovered }),
+      );
+      return {
+        kind: "hosted_autonomy",
+        status: recovered.repairHead === read.value.head
+          ? "skipped"
+          : "applied",
+        reason: recovered.repairHead === read.value.head
+          ? "no_change"
+          : "applied",
+        beforeHead: read.value.head,
+        appliedHead: recovered.repairHead,
+        actions: ["closed-c-matrix:ingested:" + recovered.dispositions.length],
+        revisions: [],
+      };
+    }
+  }
   if (deps.historicalMatrix) {
     let count: number;
     try {
@@ -3174,6 +3363,19 @@ export async function runHostedAutonomyMain(input?: {
           state,
           githubFor,
           clock: { now: () => Date.now() },
+          closedMatrix: () =>
+            createHostedClosedMatrixRecovery({
+              state,
+              clock: { now: () => Date.now() },
+              token: stateToken,
+              apiToken,
+              sourceDir: Deno.cwd(),
+              scratch,
+              artifactRoot,
+              appInstallationId: env("SENTINEL_APP_INSTALLATION_ID") ??
+                undefined,
+              cooldownMode: env("SENTINEL_COOLDOWN_MODE") ?? undefined,
+            }),
           historicalMatrix: createHostedHistoricalMatrixQuarantine({
             state,
             clock: { now: () => Date.now() },

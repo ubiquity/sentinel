@@ -34,6 +34,13 @@ import {
   runActionsMatrixHost,
 } from "../../src/host/matrix-actions.ts";
 import { runActionsRepairHost } from "../../src/host/actions.ts";
+import type { ActionsTargetCyclesInputV1 } from "../../src/host/actions.ts";
+import {
+  closedCWaveHandledReservations,
+  ingestClosedCWave,
+} from "../../src/host/modern-matrix-recovery.ts";
+import { createGitBundleImporter } from "../../src/host/matrix-git.ts";
+import { runHostedAutonomy } from "../../ops/hosted-autonomy.ts";
 import { implementationIntentKey } from "../../src/repair/keys.ts";
 import {
   OPERATION_MARGIN_MS,
@@ -392,6 +399,7 @@ async function rig(
     foreignSha,
     clock,
     store,
+    release,
     github,
     jobs,
     job,
@@ -399,6 +407,308 @@ async function rig(
     cleanup: () => Deno.remove(root, { recursive: true }),
   };
 }
+Deno.test("closed C recovery: real mixed ingestion preserves charges and rehydrates fresh mirrors", async () => {
+  const r = await rig();
+  try {
+    for (
+      const [slug, count] of [["ubiquity/sentinel", 1], [
+        "ubiquity/ai.ubq.fi",
+        3,
+      ]] as const
+    ) {
+      const rows = Array.from(
+        { length: count },
+        (_, index) => issue(index + 1),
+      );
+      const port = r.github.get(slug)!;
+      port.listOpenIssues = () => Promise.resolve(portOk(rows));
+      port.readIssue = (number) =>
+        Promise.resolve(portOk(rows[number - 1] ?? null));
+    }
+    const refusing: ImplementationPort = {
+      modelId: "gpt-reserve",
+      runModel: () => {
+        throw Error("recovery cannot start a model");
+      },
+    };
+    const planner = await runActionsMatrixHost({
+      ...await r.job("closed-plan", "matrix_plan"),
+      model: refusing,
+    });
+    assert.ok("plan" in planner);
+    assert.equal(planner.plan.cells.length, 4);
+    const producerRepair = await r.store.readRepair();
+    assert.ok(producerRepair.ok && producerRepair.value.status === "found");
+    const results: MatrixCellResultV1[] = [];
+    const archive = r.root + "/closed-archive";
+    await Deno.mkdir(archive);
+    for (const cell of planner.plan.cells) {
+      const deps = await r.job("closed-cell-" + cell.cellId, "matrix_cell");
+      const artifactRoot = deps.workDir + "/../.sentinel-matrix";
+      await Deno.mkdir(artifactRoot);
+      await Deno.writeTextFile(
+        artifactRoot + "/plan.json",
+        JSON.stringify(planner.plan),
+      );
+      const number = cell.request.issue!.number;
+      const model: ImplementationPort = {
+        modelId: "gpt-reserve",
+        runModel: async (request) => {
+          if (
+            request.repository.name === "ai.ubq.fi" && number >= 2
+          ) return portError("unavailable", "fake unavailable model");
+          const source = deps.workDir + "/.sentinel-actions-state/" +
+            (request.repository.name === "sentinel"
+              ? "source"
+              : "sources/ubiquity-ai.ubq.fi");
+          const path = request.repository.name === "sentinel"
+            ? "repair.txt"
+            : "deno.json";
+          await Deno.writeTextFile(source + "/" + path, "candidate\n");
+          await checked(source, ["add", path], r.env);
+          await checked(source, ["commit", "-q", "-m", "candidate"], r.env);
+          const head = await checked(
+            source,
+            ["rev-parse", "HEAD"],
+            r.env,
+          ) as GitSha;
+          return portOk({
+            invocationId: cell.cellId,
+            outcome: "completed",
+            actual: {
+              evidenceKind: "request-runtime",
+              provider: PROVIDER,
+              threadId: "thread-" + cell.cellId,
+              turnId: "turn-" + cell.cellId,
+              terminalOrigin: "runtime",
+              observedTerminalStatus: "completed",
+              observedModel: request.model,
+              observedReasoning: "max",
+              durationMs: 1,
+              outputChars: 1,
+            },
+            candidate: {
+              head,
+              checkpointSha: request.repository.name === "sentinel"
+                ? head
+                : null,
+              changedPaths: [path],
+            },
+            error: null,
+          });
+        },
+      };
+      const result = await runActionsMatrixHost({
+        ...deps,
+        model,
+        carrier: { planDigest: planner.planDigest, cellId: cell.cellId },
+      });
+      assert.ok("cellId" in result);
+      results.push(result);
+      if (result.bundle) {
+        await Deno.copyFile(
+          artifactRoot + "/" + result.bundle.file,
+          archive + "/" + result.bundle.file,
+        );
+      }
+      await Deno.remove(deps.workDir + "/..", { recursive: true });
+    }
+    let assembly: ActionsTargetCyclesInputV1 | undefined;
+    const capture = await r.job("closed-capture", "repair");
+    await runActionsRepairHost({
+      ...capture,
+      model: refusing,
+      runTargetCycles: (input) => {
+        assembly = input;
+        return Promise.resolve({
+          outcome: { status: "idle", detail: "captured leaf dependencies" },
+          addressed: [],
+          skipped: [],
+          failed: [],
+        });
+      },
+    });
+    assert.ok(assembly);
+    const release = await r.release.readRelease();
+    assert.ok(release.ok && release.value.status === "found");
+    const runtime = release.value.snapshot.hostedRuntimes[0]!;
+    assert.ok(runtime.execution && runtime.lastHealthyProof);
+    const failedProof = {
+      ...runtime.lastHealthyProof,
+      execution: runtime.execution,
+      startedAt: runtime.execution.createdAt,
+      finishedAt: r.clock.now(),
+      observedAt: r.clock.now(),
+      outcome: "failed" as const,
+      terminalAt: null,
+      logDigest: "c".repeat(64),
+    };
+    const saved = await r.release.writeRelease(
+      parseReleaseStateSnapshotV1({
+        ...release.value.snapshot,
+        stateHead: release.value.head,
+        sequence: release.value.snapshot.sequence + 1,
+        updatedAt: r.clock.now(),
+        hostedRuntimes: [{
+          ...runtime,
+          execution: null,
+          lastExecutionProof: failedProof,
+          updatedAt: r.clock.now(),
+        }],
+      }),
+      release.value.head,
+    );
+    assert.ok(
+      saved.ok && saved.value.status === "applied",
+      JSON.stringify(saved),
+    );
+    const binding = {
+      runtimeSha: r.sha,
+      generation: 1,
+      run: planner.plan.run,
+      repairCommit: producerRepair.value.head,
+      releaseCommit: saved.value.head,
+      planDigest: planner.planDigest,
+      expectedProvider: PROVIDER,
+      cells: planner.plan.cells.map((cell) => ({
+        reservationId: cell.reservationId,
+        taskId: cell.taskId,
+        repository: cell.repository,
+        base: cell.expectedBase,
+      })),
+    };
+    const input = assembly;
+    const deps = {
+      state: r.store,
+      clock: r.clock,
+      configs: input.configs,
+      cycleFor: (config: typeof input.configs[number]) => ({
+        ...input,
+        github: input.composeGithub(config),
+        model: refusing,
+        externalImplementations: true,
+      }),
+      prepareTarget: (config: typeof input.configs[number]) =>
+        input.prepareTarget!(config),
+      importerFor: (config: typeof input.configs[number], bundlesDir: string) =>
+        createGitBundleImporter({
+          repositoryDir: input.host!.sourcePathFor(config),
+          bundlesDir,
+        }),
+      transportFor: () => ({
+        confirmCompletedExecution: () => Promise.resolve(true),
+        recover: () =>
+          Promise.resolve([{
+            plan: planner.plan,
+            planDigest: planner.planDigest,
+            results,
+            bundlesDir: archive,
+            provenance: {
+              run: planner.plan.run,
+              plannerJobId: 101,
+              cellJobIds: [102, 103, 104, 105],
+            },
+          }]),
+      }),
+      readExecution: () => Promise.resolve(portOk(failedProof)),
+      binding,
+    };
+    const maintenance = await runHostedAutonomy({
+      state: r.store,
+      clock: r.clock,
+      githubFor: () => {
+        throw new Error(
+          "maintenance must not follow ingestion with ordinary actions",
+        );
+      },
+      historicalMatrix: {
+        state: r.store,
+        clock: r.clock,
+        budget: input.budget,
+        readExecution: () => {
+          throw new Error(
+            "legacy rejection must follow successful C ingestion on a later pass",
+          );
+        },
+        transport: deps.transportFor(),
+      },
+      closedMatrix: () => Promise.resolve(deps),
+    });
+    assert.equal(maintenance.status, "applied");
+    const first = await ingestClosedCWave(deps);
+    assert.equal(
+      first.dispositions.filter((row) => row.outcome === "submitted").length,
+      2,
+    );
+    assert.equal(
+      first.dispositions.filter((row) => row.outcome === "ambiguous").length,
+      2,
+    );
+    assert.equal(
+      first.dispositions.filter((row) =>
+        row.intentKind === "candidate_preservation"
+      ).length,
+      1,
+    );
+    const protectedRow = first.dispositions.find((row) =>
+      row.taskId.includes("ai.ubq.fi-1")
+    )!;
+    assert.equal(protectedRow.nextStep, "blocked");
+    assert.equal(protectedRow.intentKind, null);
+    assert.ok(protectedRow.head);
+    assert.equal(protectedRow.checkpoint, null);
+    const settled = await r.store.readRepair();
+    assert.ok(settled.ok && settled.value.status === "found");
+    assert.equal(
+      closedCWaveHandledReservations(settled.value.snapshot, binding).size,
+      4,
+    );
+    for (const config of input.configs) {
+      const source = input.host!.sourcePathFor(config);
+      await Deno.remove(source, { recursive: true });
+      await checked(r.root, [
+        "clone",
+        "-q",
+        config.repository.name === "sentinel"
+          ? r.root + "/seed"
+          : r.root + "/foreign",
+        source,
+      ], r.env);
+    }
+    const replay = await ingestClosedCWave(deps);
+    assert.equal(
+      replay.repairHead,
+      first.repairHead,
+      "rehydration must not resettle or mutate state",
+    );
+    for (const result of results.filter((row) => row.bundle !== null)) {
+      const config = input.configs.find((row) =>
+        row.repository.name === result.repository.name
+      )!;
+      assert.ok(
+        (await gitRun(input.host!.sourcePathFor(config), [
+          "cat-file",
+          "-e",
+          result.bundle!.head + "^{commit}",
+        ], r.env)).ok,
+      );
+    }
+    await assert.rejects(
+      () =>
+        ingestClosedCWave({
+          ...deps,
+          readExecution: () =>
+            Promise.resolve(
+              portOk({ ...failedProof, logDigest: "d".repeat(64) }),
+            ),
+        }),
+      /native failure proof changed/,
+    );
+  } finally {
+    await r.cleanup();
+  }
+});
+
 for (const mode of [false, true, "expensive_reads", "fresh_drift"] as const) {
   const unassigned = mode === true;
   const expensiveReads = mode === "expensive_reads";

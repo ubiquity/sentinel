@@ -921,6 +921,11 @@ export type StateWriteResultV1 =
 
 export interface StateReadView {
   readRepair(): Promise<PortResultV1<StateReadResultV1<RepairStateSnapshotV1>>>;
+  /** Read one strict ancestor of the freshly verified fixed repair ref. */
+  readRepairAt?(input: {
+    commit: GitSha;
+    expectedHead: GitSha;
+  }): Promise<PortResultV1<StateReadResultV1<RepairStateSnapshotV1>>>;
   readRelease(): Promise<
     PortResultV1<StateReadResultV1<ReleaseStateSnapshotV1>>
   >;

@@ -290,6 +290,70 @@ Deno.test("state history: remote movement during historical read refuses without
   }
 });
 
+Deno.test("state history: repair ancestor authenticates fixed scope and refuses drift", async () => {
+  const ctx = await makeCtx("repair-history");
+  try {
+    const writer = storeAt(ctx, "repair-history-writer", "repair");
+    const first = appliedHead(await writer.writeRepair(repairSnapshot(), null));
+    const current = appliedHead(
+      await writer.writeRepair(
+        repairSnapshot({ stateHead: first, sequence: 2, updatedAt: T0 + 2000 }),
+        first,
+      ),
+    );
+    const reader = storeAt(ctx, "repair-history-reader", "repair");
+    const read = await reader.readRepairAt({
+      commit: first,
+      expectedHead: current,
+    });
+    assert(read.ok && read.value.status === "found");
+    assert.equal(read.value.head, first);
+    assert.equal(read.value.ref, REPAIR_STATE_REF);
+    assert.deepEqual(read.value.snapshot, repairSnapshot());
+    const foreign = appliedHead(
+      await storeAt(ctx, "repair-history-foreign", "release").writeRelease(
+        releaseSnapshot(),
+        null,
+      ),
+    );
+    for (
+      const input of [{ commit: first, expectedHead: first }, {
+        commit: SHA3,
+        expectedHead: current,
+      }, { commit: foreign, expectedHead: current }]
+    ) assert.equal((await reader.readRepairAt(input)).ok, false);
+    const base = new DenoGitRunner(`${ctx.tmp}/git-home`);
+    let moved = false;
+    const moving = storeAt(ctx, "repair-history-moving", "repair", {
+      runGit: async (args, options) => {
+        const result = await base.runGit(args, options);
+        if (args[0] === "merge-base" && !moved) {
+          moved = true;
+          appliedHead(
+            await writer.writeRepair(
+              repairSnapshot({
+                stateHead: current,
+                sequence: 3,
+                updatedAt: T0 + 3000,
+              }),
+              current,
+            ),
+          );
+        }
+        return result;
+      },
+    });
+    const refused = await moving.readRepairAt({
+      commit: first,
+      expectedHead: current,
+    });
+    assert(!refused.ok && refused.error.kind === "conflict");
+    assert(moved);
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
 Deno.test("state: branch creation, sequential writes, read and restart", async () => {
   const ctx = await makeCtx("lifecycle");
   try {

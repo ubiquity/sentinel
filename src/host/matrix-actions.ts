@@ -55,6 +55,11 @@ import { markBlocked } from "../repair/transitions.ts";
 import { implementationIntentKey } from "../repair/keys.ts";
 import type { BudgetReservationV1 } from "../contracts/budget-reservation.ts";
 import type { GitSha } from "../contracts/brands.ts";
+import {
+  closedCWaveHandledReservations,
+  closedCWaveNeedsRecovery,
+  ingestClosedCWave,
+} from "./modern-matrix-recovery.ts";
 
 export const HISTORICAL_MATRIX_QUARANTINE =
   "authenticated historical matrix manifest rejected: reservation_after_manifest; model outcome uncertain";
@@ -893,17 +898,46 @@ export async function runActionsMatrixAggregateCycles(
   carrier?: MatrixNativeCarrierV1,
 ): Promise<ActionsTargetCyclesResultV1> {
   const host = hostOf(input);
-  const read = await input.state.readRepair();
+  let read = await input.state.readRepair();
   if (!read.ok || read.value.status !== "found") {
     throw new Error("matrix aggregate cannot read authoritative state");
   }
+  if (closedCWaveNeedsRecovery(read.value.snapshot)) {
+    if (!host.readExecution) {
+      throw new Error("C recovery native proof reader unavailable");
+    }
+    const recovered = await ingestClosedCWave({
+      state: input.state,
+      clock: input.clock,
+      configs: input.configs,
+      cycleFor: (config) => targetDeps(input, config),
+      prepareTarget: async (config) => {
+        await input.prepareTarget?.(config);
+      },
+      importerFor: (config, bundlesDir) =>
+        createGitBundleImporter({
+          repositoryDir: host.sourcePathFor(config),
+          bundlesDir,
+        }),
+      transportFor: (state) => host.createArtifactTransport(state),
+      readExecution: host.readExecution,
+    }, false);
+    console.log(
+      JSON.stringify({ kind: "sentinel_closed_c_recovery", ...recovered }),
+    );
+    read = await input.state.readRepair();
+    if (!read.ok || read.value.status !== "found") {
+      throw new Error("C recovery readback unavailable");
+    }
+  }
+  const handled = closedCWaveHandledReservations(read.value.snapshot);
   const requests = read.value.snapshot.work.flatMap((record) => {
     const intent = record.intent;
     if (
       record.nextStep !== "work" ||
       (intent?.kind !== "implementation" &&
         intent?.kind !== "candidate_preservation") ||
-      intent.requestId === null
+      intent.requestId === null || handled.has(intent.requestId)
     ) {
       return [];
     }
