@@ -6,6 +6,7 @@ import { canonicalStringify } from "../../src/contracts/canonical.ts";
 import {
   HOSTED_SUPERVISOR_WORKFLOW_ID,
   HOSTED_SUPERVISOR_WORKFLOW_PATH,
+  parseHostedExecutionSettlementV1,
 } from "../../src/contracts/hosted-supervisor.ts";
 import {
   matrixCellIdV1,
@@ -460,6 +461,8 @@ async function fixture(paginated = false) {
     cellMarker,
     archives,
     calls,
+    http,
+    state,
     transport,
     input,
     setArchive,
@@ -501,6 +504,105 @@ Deno.test("matrix artifacts: authenticated paginated old wave recovers exact bun
     );
   } finally {
     await Deno.remove(rig.tmp, { recursive: true });
+  }
+});
+
+Deno.test("matrix completion: exact settled latest authenticates and custody failures refuse", async () => {
+  for (
+    const fault of [
+      "none",
+      "pending",
+      "missing",
+      "foreign-owner",
+      "generation",
+      "revision",
+      "truncated",
+      "unavailable",
+      "drift",
+    ]
+  ) {
+    const f = await fixture();
+    const previousCwd = Deno.cwd();
+    Deno.chdir(`${f.tmp}/checkout`);
+    try {
+      const runtime = f.release.hostedRuntimes[0];
+      const execution = { ...runtime.execution!, id: WAVE, ...RUN };
+      runtime.execution = null;
+      runtime.lastExecutionProof = parseHostedExecutionSettlementV1({
+        execution,
+        workflowId: HOSTED_SUPERVISOR_WORKFLOW_ID,
+        workflowPath: HOSTED_SUPERVISOR_WORKFLOW_PATH,
+        repository: "ubiquity/sentinel",
+        ref: "refs/heads/sentinel-supervisor",
+        jobId: null,
+        finishedAt: T0,
+        observedAt: T0 + 10_000,
+        outcome: "not_started",
+        evidenceDigest: "a".repeat(64),
+      });
+      f.attempt.status = "completed";
+      if (fault === "missing") runtime.lastExecutionProof = null;
+      if (fault === "foreign-owner") {
+        runtime.execution = {
+          ...execution,
+          id: "99:1:repair",
+          runId: 99,
+          runAttempt: 1,
+        };
+      }
+      if (fault === "generation") runtime.generation++;
+      if (fault === "revision") runtime.activeRevision = SHA3;
+      if (fault === "pending") f.attempt.status = "in_progress";
+      const transport = createActionsMatrixArtifactTransport({
+        state: f.state,
+        token: "fake-local-token",
+        clock: { now: () => T0 + 10_000 },
+        artifactRoot: `${f.tmp}/completion`,
+        http: (request) => {
+          if (fault === "unavailable") {
+            return Promise.resolve({
+              status: 503,
+              headers: new Headers(),
+              bodyText: "",
+            });
+          }
+          if (
+            fault === "truncated" &&
+            new URL(request.url).pathname.endsWith("/jobs")
+          ) {
+            return Promise.resolve({
+              status: 200,
+              headers: new Headers(),
+              bodyText: JSON.stringify({
+                total_count: f.jobs.length + 1,
+                jobs: f.jobs,
+              }),
+            });
+          }
+          if (
+            fault === "drift" && new URL(request.url).pathname.endsWith("/jobs")
+          ) {
+            runtime.execution = {
+              ...execution,
+              id: "99:1:repair",
+              runId: 99,
+              runAttempt: 1,
+            };
+          }
+          return f.http(request);
+        },
+      });
+      if (fault === "none") {
+        assert.equal(
+          await transport.confirmCompletedExecution!(execution),
+          true,
+        );
+      } else {await assert.rejects(() =>
+          transport.confirmCompletedExecution!(execution), fault);}
+    } finally {
+      Deno.chdir(previousCwd);
+      await Deno.remove(f.tmp, { recursive: true });
+    }
   }
 });
 

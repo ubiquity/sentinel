@@ -185,14 +185,27 @@ export function createActionsMatrixArtifactTransport(options: {
           release.value.status !== "found"
         ) refuse();
         const snapshot = repair.value.snapshot;
+        const completionCustody = input.completedExecution
+          ? canonicalStringify({
+            head: release.value.head,
+            runtime: release.value.snapshot.hostedRuntimes.find((row) =>
+              row.id === HOSTED_RUNTIME_ID
+            ),
+          })
+          : null;
         if (input.completedExecution) {
-          const current = release.value.snapshot.hostedRuntimes.find((row) =>
+          const runtime = release.value.snapshot.hostedRuntimes.find((row) =>
             row.id === HOSTED_RUNTIME_ID
-          )?.execution;
+          );
+          const current = runtime?.execution ??
+            runtime?.lastExecutionProof?.execution;
           if (
             !current ||
             canonicalStringify(current) !==
-              canonicalStringify(input.completedExecution)
+              canonicalStringify(input.completedExecution) ||
+            (!runtime?.execution &&
+              (runtime?.activeRevision !== current.revision ||
+                runtime.generation !== current.generation))
           ) refuse();
         }
         if (input.rejectionProof) {
@@ -415,6 +428,16 @@ export function createActionsMatrixArtifactTransport(options: {
               (job.started_at !== null && finished < instant(job.started_at))
             ) refuse();
           }
+          const fresh = await options.state.readRelease();
+          if (
+            !fresh.ok || fresh.value.status !== "found" ||
+            canonicalStringify({
+                head: fresh.value.head,
+                runtime: fresh.value.snapshot.hostedRuntimes.find((row) =>
+                  row.id === HOSTED_RUNTIME_ID
+                ),
+              }) !== completionCustody
+          ) refuse();
           return { recovered: [], rejected: [], completed: true };
         }
         const download = async (

@@ -94,7 +94,7 @@ import { RETIRED_MERGED_MESSAGE } from "../src/repair/selection.ts";
 import type { GitSha } from "../src/contracts/brands.ts";
 import { RollingStartBudget } from "../src/budget/mod.ts";
 import { GitHubApiClient } from "../src/github/client.ts";
-import { portOk } from "../src/contracts/ports.ts";
+import { portError, portOk } from "../src/contracts/ports.ts";
 import {
   fetchHttpTransport,
   type HttpTransportV1,
@@ -523,7 +523,18 @@ export function createHostedHistoricalMatrixQuarantine(input: {
   http?: HttpTransportV1;
   artifactHttp?: HttpTransportV1;
   cooldownMode?: string;
+  historicalReleaseWitness?: {
+    commit: GitSha;
+    executionId: string;
+    logDigest: string;
+  };
 }): HistoricalMatrixQuarantineDepsV1 {
+  const witness = input.historicalReleaseWitness ?? {
+    commit: "d3e5fe3afcdb22e91e5adbc8c9c842a2fb3b632b" as GitSha,
+    executionId: "37136320870:1:repair",
+    logDigest:
+      "42a15377b48d6c450a48ec576601b2c309952bba6d14b4fb5e66bdcfaf16a382",
+  };
   const client = new GitHubApiClient({
     repository: { owner: "ubiquity", name: "sentinel", installationId: 0 },
     apiBaseUrl: "https://api.github.com",
@@ -548,6 +559,34 @@ export function createHostedHistoricalMatrixQuarantine(input: {
       configs: [],
     }),
     readExecution: (execution) => client.readHostedExecution(execution),
+    historicalReleaseWitness: {
+      ...witness,
+      reject: (proof, expectedHead) => {
+        const historicalState: StateReadView = {
+          readRepair: () => input.state.readRepair(),
+          readRelease: () =>
+            input.state.readReleaseAt
+              ? input.state.readReleaseAt({
+                commit: witness.commit,
+                expectedHead,
+              })
+              : Promise.resolve(
+                portError(
+                  "unavailable",
+                  "historical release reader unavailable",
+                ),
+              ),
+        };
+        return createActionsMatrixArtifactTransport({
+          state: historicalState,
+          clock: input.clock,
+          token: input.token,
+          artifactRoot: input.artifactRoot,
+          http: input.artifactHttp ??
+            createActionsMatrixArtifactHttpTransport(),
+        }).rejectHistorical!({ proof });
+      },
+    },
     transport: createActionsMatrixArtifactTransport({
       state: input.state,
       clock: input.clock,

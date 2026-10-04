@@ -54,6 +54,7 @@ import {
 import { markBlocked } from "../repair/transitions.ts";
 import { implementationIntentKey } from "../repair/keys.ts";
 import type { BudgetReservationV1 } from "../contracts/budget-reservation.ts";
+import type { GitSha } from "../contracts/brands.ts";
 
 export const HISTORICAL_MATRIX_QUARANTINE =
   "authenticated historical matrix manifest rejected: reservation_after_manifest; model outcome uncertain";
@@ -63,9 +64,24 @@ export interface HistoricalMatrixQuarantineDepsV1 {
   clock: Clock;
   budget: Pick<BudgetControllerV1, "settleModelStart">;
   transport: MatrixArtifactTransportV1;
+  /** One owner-selected release witness; never a history scan or fallback. */
+  historicalReleaseWitness?: {
+    commit: GitSha;
+    executionId: string;
+    logDigest: string;
+    reject(
+      proof: HostedRunProofV1,
+      expectedHead: GitSha,
+    ): Promise<readonly MatrixRejectedWaveV1[]>;
+  };
   readExecution(
     execution: HostedExecutionIntentV1,
   ): Promise<PortResultV1<HostedExecutionSettlementV1 | null>>;
+}
+interface HistoricalProofCustodyV1 {
+  commit: GitSha;
+  expectedHead: GitSha;
+  proofDigest: string;
 }
 function reservationIdentity(row: BudgetReservationV1) {
   return canonicalStringify({
@@ -76,11 +92,12 @@ function reservationIdentity(row: BudgetReservationV1) {
   });
 }
 async function proofInCustody(
-  state: StateReadView,
+  deps: HistoricalMatrixQuarantineDepsV1,
   proof: HostedRunProofV1,
   current?: HostedExecutionIntentV1 | null,
+  historical?: HistoricalProofCustodyV1,
 ) {
-  const read = await state.readRelease();
+  const read = await deps.state.readRelease();
   if (!read.ok || read.value.status !== "found") return false;
   const runtime = read.value.snapshot.hostedRuntimes.find((row) =>
     row.id === HOSTED_RUNTIME_ID
@@ -91,6 +108,30 @@ async function proofInCustody(
     canonicalStringify(runtime?.execution ?? null) !==
       canonicalStringify(current)
   ) return false;
+  if (historical) {
+    if (
+      read.value.head !== historical.expectedHead ||
+      !deps.state.readReleaseAt
+    ) return false;
+    const saved = await deps.state.readReleaseAt(historical);
+    if (
+      !saved.ok || saved.value.status !== "found" ||
+      saved.value.head !== historical.commit
+    ) return false;
+    const prior = saved.value.snapshot.hostedRuntimes.find((row) =>
+      row.id === HOSTED_RUNTIME_ID
+    )?.lastExecutionProof;
+    if (
+      !prior || prior.outcome === "not_started" ||
+      await matrixDigestV1({ ...prior, observedAt: 0 }) !==
+        historical.proofDigest ||
+      canonicalStringify({ ...prior, observedAt: proof.observedAt }) !==
+        canonicalStringify(proof)
+    ) return false;
+    // The exact completed native proof was authenticated once for this operation.
+    // Its immutable bytes remain bound by the full historical digest and frozen head.
+    return true;
+  }
   if (
     runtime?.execution && canonicalStringify(runtime.execution) === identity
   ) return true;
@@ -105,6 +146,7 @@ async function quarantineRow(
   wave: MatrixRejectedWaveV1,
   captured: MatrixRejectedWaveV1["affected"][number],
   currentExecution: HostedExecutionIntentV1 | null,
+  historical?: HistoricalProofCustodyV1,
 ) {
   if (
     wave.reason !== "reservation_after_manifest" ||
@@ -127,7 +169,7 @@ async function quarantineRow(
     await matrixDigestV1(captured.request) !== captured.requestDigest ||
     await matrixDigestV1(captured.work) !== captured.workDigest ||
     await matrixDigestV1(captured.reservation) !== captured.reservationDigest ||
-    !await proofInCustody(deps.state, wave.proof, currentExecution)
+    !await proofInCustody(deps, wave.proof, currentExecution, historical)
   ) throw new Error("historical matrix custody unavailable");
   const read = await deps.state.readRepair();
   if (!read.ok || read.value.status !== "found") {
@@ -151,6 +193,9 @@ async function quarantineRow(
   ) {
     throw new Error("historical matrix captured identity changed");
   }
+  if (!await proofInCustody(deps, wave.proof, currentExecution, historical)) {
+    throw new Error("historical matrix pre-settlement custody unavailable");
+  }
   const settled = await deps.budget.settleModelStart({
     id: reservation.id,
     outcome: "ambiguous",
@@ -169,7 +214,7 @@ async function quarantineRow(
   const fresh = await deps.state.readRepair();
   if (
     !fresh.ok || fresh.value.status !== "found" ||
-    !await proofInCustody(deps.state, wave.proof, currentExecution)
+    !await proofInCustody(deps, wave.proof, currentExecution, historical)
   ) {
     throw new Error("historical matrix post-settlement custody unavailable");
   }
@@ -197,6 +242,9 @@ async function quarantineRow(
     HISTORICAL_MATRIX_QUARANTINE,
     now,
   );
+  if (!await proofInCustody(deps, wave.proof, currentExecution, historical)) {
+    throw new Error("historical matrix pre-block custody unavailable");
+  }
   const write = await deps.state.writeRepair({
     ...fresh.value.snapshot,
     stateHead: fresh.value.head,
@@ -212,6 +260,7 @@ async function quarantineRow(
   const verified = await deps.state.readRepair();
   if (
     !verified.ok || verified.value.status !== "found" ||
+    !await proofInCustody(deps, wave.proof, currentExecution, historical) ||
     canonicalStringify(
         verified.value.snapshot.work.find((row) =>
           row.id === work.id &&
@@ -286,13 +335,46 @@ export async function runHistoricalMatrixQuarantine(
     throw new Error("historical matrix current custody changed");
   }
   const savedProof = freshRuntime?.lastExecutionProof;
-  const execution = savedProof?.execution.purpose === "ordinary" &&
-      savedProof.outcome !== "not_started"
-    ? savedProof.execution
-    : current?.purpose === "ordinary" &&
-        currentNative?.outcome !== "not_started"
-    ? current
-    : null;
+  let historical: HistoricalProofCustodyV1 | undefined;
+  let witnessedProof: HostedRunProofV1 | undefined;
+  if (deps.historicalReleaseWitness) {
+    const witness = deps.historicalReleaseWitness;
+    const saved = await deps.state.readReleaseAt?.({
+      commit: witness.commit,
+      expectedHead: freshRelease.value.head,
+    });
+    if (
+      !saved?.ok || saved.value.status !== "found" ||
+      saved.value.head !== witness.commit
+    ) {
+      throw new Error("historical matrix release witness unavailable");
+    }
+    const prior = saved.value.snapshot.hostedRuntimes.find((row) =>
+      row.id === HOSTED_RUNTIME_ID
+    )?.lastExecutionProof;
+    if (
+      !prior || prior.outcome === "not_started" ||
+      prior.execution.purpose !== "ordinary" ||
+      prior.execution.id !== witness.executionId ||
+      prior.logDigest !== witness.logDigest
+    ) {
+      throw new Error("historical matrix release witness binding changed");
+    }
+    witnessedProof = parseHostedRunProofV1(prior);
+    historical = {
+      commit: witness.commit,
+      expectedHead: freshRelease.value.head,
+      proofDigest: await matrixDigestV1({ ...witnessedProof, observedAt: 0 }),
+    };
+  }
+  const execution = witnessedProof?.execution ??
+    (savedProof?.execution.purpose === "ordinary" &&
+        savedProof.outcome !== "not_started"
+      ? savedProof.execution
+      : current?.purpose === "ordinary" &&
+          currentNative?.outcome !== "not_started"
+      ? current
+      : null);
   if (!execution) {
     throw new Error("historical matrix saved execution unavailable");
   }
@@ -309,22 +391,33 @@ export async function runHistoricalMatrixQuarantine(
   const proof = parseHostedRunProofV1(native.value);
   if (
     canonicalStringify(proof.execution) !== canonicalStringify(execution) ||
-    !await proofInCustody(deps.state, proof, current) ||
+    !await proofInCustody(deps, proof, current, historical) ||
     !deps.transport.rejectHistorical
   ) {
     throw new Error("historical matrix native custody unavailable");
   }
-  const waves = await deps.transport.rejectHistorical({ proof });
+  const waves = historical
+    ? await deps.historicalReleaseWitness!.reject(
+      proof,
+      historical.expectedHead,
+    )
+    : await deps.transport.rejectHistorical({ proof });
   if (waves.length === 0) {
     const fresh = await deps.state.readRepair();
     if (
       !fresh.ok || fresh.value.status !== "found" ||
-      !await proofInCustody(deps.state, proof, current) ||
+      !await proofInCustody(deps, proof, current, historical) ||
       canonicalStringify(fresh.value.snapshot.work) !==
         canonicalStringify(repair.value.snapshot.work) ||
       canonicalStringify(fresh.value.snapshot.reservations) !==
         canonicalStringify(repair.value.snapshot.reservations)
     ) throw new Error("historical matrix applicability changed");
+    if (historical) {
+      return runHistoricalMatrixQuarantine({
+        ...deps,
+        historicalReleaseWitness: undefined,
+      });
+    }
   }
   let count = 0;
   for (const wave of waves) {
@@ -336,11 +429,11 @@ export async function runHistoricalMatrixQuarantine(
       throw new Error("historical matrix rejection identity unavailable");
     }
     for (const captured of wave.affected) {
-      await quarantineRow(deps, wave, captured, current);
+      await quarantineRow(deps, wave, captured, current, historical);
       count++;
     }
   }
-  if (!await proofInCustody(deps.state, proof, current)) {
+  if (!await proofInCustody(deps, proof, current, historical)) {
     throw new Error("historical matrix final custody changed");
   }
   return count;
