@@ -1027,6 +1027,13 @@ Deno.test(
           }
           const statusArgs = ["status", "--porcelain=v1", "-z"];
           const beforeStatus = await run(statusArgs);
+          const resolved = await new LocalCheckoutResolver(root, base)
+            .resolve();
+          assert.equal(
+            resolved === null,
+            pending !== "clean",
+            "a dirty descendant checkout cannot resolve as a candidate",
+          );
           const session = new FakeCodexSession();
           const port = new CodexImplementationPort({
             openSession: () => Promise.resolve(session),
