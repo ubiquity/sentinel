@@ -359,6 +359,13 @@ async function fixture(paginated = false) {
     updated_at: ISO,
   };
   const calls: { url: string; auth: boolean }[] = [];
+  const pagination = {
+    numeric: false,
+    next: null as string | null,
+    repository: { id: 123, full_name: "ubiquity/sentinel" },
+    truncate: false,
+    duplicate: false,
+  };
   const http = createActionsMatrixArtifactHttpTransport((url, init) => {
     const parsed = new URL(url);
     calls.push({ url, auth: Boolean(init?.headers?.authorization) });
@@ -380,6 +387,9 @@ async function fixture(paginated = false) {
     }
     assert.equal(init?.headers?.authorization, "Bearer fake-local-token");
     assert.equal(init?.redirect, "manual");
+    if (parsed.pathname === "/repos/ubiquity/sentinel") {
+      return reply(pagination.repository);
+    }
     if (parsed.pathname.endsWith("/attempts/2")) return reply(attempt);
     if (
       parsed.pathname.endsWith("/artifacts") ||
@@ -388,14 +398,29 @@ async function fixture(paginated = false) {
       const key = parsed.pathname.endsWith("/jobs") ? "jobs" : "artifacts";
       const rows = key === "jobs" ? jobs : artifacts;
       const page = Number(parsed.searchParams.get("page"));
+      const nextPath = pagination.numeric
+        ? parsed.pathname.replace(
+          "/repos/ubiquity/sentinel",
+          "/repositories/123",
+        )
+        : parsed.pathname;
       const next = rows.length > page * 100
-        ? `<${parsed.origin}${parsed.pathname}?per_page=100&page=${
-          page + 1
+        ? `<${
+          pagination.next ??
+            `${parsed.origin}${nextPath}?per_page=100&page=${page + 1}`
         }>; rel="next"`
         : "";
+      const entries: Record<string, unknown>[] = rows.slice(
+        (page - 1) * 100,
+        page * 100,
+      );
+      if (page === 2 && pagination.truncate) entries.pop();
+      if (page === 2 && pagination.duplicate) {
+        entries[entries.length - 1] = { ...rows[0] };
+      }
       return reply({
         total_count: rows.length,
-        [key]: rows.slice((page - 1) * 100, page * 100),
+        [key]: entries,
       }, next ? { link: next } : {});
     }
     const archive = parsed.pathname.match(/\/artifacts\/(\d+)\/zip$/),
@@ -461,6 +486,7 @@ async function fixture(paginated = false) {
     cellMarker,
     archives,
     calls,
+    pagination,
     http,
     state,
     transport,
@@ -470,6 +496,164 @@ async function fixture(paginated = false) {
     cellName,
   };
 }
+
+Deno.test("matrix artifacts: numeric repository pagination recovers native 100 plus 8 pages", async () => {
+  const rig = await fixture(true);
+  try {
+    rig.pagination.numeric = true;
+    rig.artifacts.push(
+      ...Array.from(
+        { length: 6 },
+        (_, i) => ({ id: i + 3000, name: `extra-${i}` }),
+      ),
+    );
+    const { currentRun: _oldRun, ...input } = rig.input;
+    const waves = await rig.transport.recover(input);
+    assert.equal(rig.artifacts.length, 108);
+    assert.equal(waves.length, 1);
+    assert.equal(waves[0].results.length, 1);
+    assert.deepEqual(
+      await Deno.readFile(`${waves[0].bundlesDir}/${rig.result.bundle!.file}`),
+      rig.bundle,
+    );
+    assert.equal(
+      rig.calls.filter((call) =>
+        new URL(call.url).pathname === "/repos/ubiquity/sentinel"
+      ).length,
+      1,
+    );
+  } finally {
+    await Deno.remove(rig.tmp, { recursive: true });
+  }
+});
+
+Deno.test("matrix artifacts: numeric repository pagination also binds current-run artifacts and job pages", async () => {
+  const rig = await fixture(true);
+  try {
+    rig.pagination.numeric = true;
+    rig.artifacts.push(
+      ...Array.from(
+        { length: 6 },
+        (_, i) => ({ id: i + 3000, name: `extra-${i}` }),
+      ),
+    );
+    rig.jobs.push(
+      ...Array.from(
+        { length: 6 },
+        (_, i) => ({ ...rig.jobs[0], id: i + 4000, name: `extra-job-${i}` }),
+      ),
+    );
+    const waves = await rig.transport.recover(rig.input);
+    assert.equal(waves.length, 1);
+    assert.equal(waves[0].results.length, 1);
+    assert.ok(
+      rig.calls.some((call) =>
+        call.url.includes("/runs/71/artifacts?per_page=100&page=2")
+      ),
+    );
+    assert.ok(
+      rig.calls.some((call) =>
+        call.url.includes("/attempts/2/jobs?per_page=100&page=2")
+      ),
+    );
+    assert.equal(
+      rig.calls.filter((call) =>
+        new URL(call.url).pathname === "/repos/ubiquity/sentinel"
+      ).length,
+      1,
+    );
+  } finally {
+    await Deno.remove(rig.tmp, { recursive: true });
+  }
+});
+
+Deno.test("matrix artifacts: numeric repository pagination refuses foreign identity and malformed boundaries", async (t) => {
+  const valid =
+    "https://api.github.com/repositories/123/actions/artifacts?per_page=100&page=2";
+  const cases: [string, (rig: Awaited<ReturnType<typeof fixture>>) => void][] =
+    [
+      ["other repository ID", (rig) => {
+        rig.pagination.next = valid.replace("/123/", "/456/");
+      }],
+      ["wrong authenticated repository name", (rig) => {
+        rig.pagination.repository.full_name = "ubiquity/other";
+      }],
+      ["wrong authenticated repository ID", (rig) => {
+        rig.pagination.repository.id = 456;
+      }],
+      ["invalid authenticated repository ID", (rig) => {
+        rig.pagination.repository.id = 0;
+      }],
+      ["foreign host", (rig) => {
+        rig.pagination.next = valid.replace(
+          "api.github.com",
+          "foreign.invalid",
+        );
+      }],
+      ["HTTP scheme", (rig) => {
+        rig.pagination.next = valid.replace("https:", "http:");
+      }],
+      ["wrong actions suffix", (rig) => {
+        rig.pagination.next = valid.replace("/artifacts?", "/jobs?");
+      }],
+      ["wrong page size", (rig) => {
+        rig.pagination.next = valid.replace("per_page=100", "per_page=99");
+      }],
+      ["skipped page", (rig) => {
+        rig.pagination.next = valid.replace("page=2", "page=3");
+      }],
+      ["page loop", (rig) => {
+        rig.pagination.next = valid.replace("page=2", "page=1");
+      }],
+      ["extra query", (rig) => {
+        rig.pagination.next = valid + "&other=1";
+      }],
+      ["duplicate query", (rig) => {
+        rig.pagination.next = valid + "&page=2";
+      }],
+      ["fragment", (rig) => {
+        rig.pagination.next = valid + "#other";
+      }],
+      ["duplicate next relation", (rig) => {
+        rig.pagination.next = valid + '>; rel="next", <' + valid;
+      }],
+      ["truncated second page", (rig) => {
+        rig.pagination.truncate = true;
+      }],
+      ["duplicate item ID", (rig) => {
+        rig.pagination.duplicate = true;
+      }],
+    ];
+  for (const [name, change] of cases) {
+    await t.step(name, async () => {
+      const rig = await fixture(true);
+      try {
+        rig.pagination.numeric = true;
+        rig.artifacts.push(
+          ...Array.from(
+            { length: 6 },
+            (_, i) => ({ id: i + 3000, name: `extra-${i}` }),
+          ),
+        );
+        change(rig);
+        const before = canonicalStringify([rig.repair, rig.release]);
+        const { currentRun: _oldRun, ...input } = rig.input;
+        await assert.rejects(
+          () => rig.transport.recover(input),
+          /provenance unavailable or conflicting/,
+        );
+        assert.equal(canonicalStringify([rig.repair, rig.release]), before);
+        assert.ok(
+          rig.calls.every((call) =>
+            new URL(call.url).hostname === "api.github.com"
+          ),
+        );
+      } finally {
+        await Deno.remove(rig.tmp, { recursive: true });
+      }
+    });
+  }
+});
 
 Deno.test("matrix artifacts: authenticated paginated old wave recovers exact bundle after local cells disappeared", async () => {
   const rig = await fixture(true);

@@ -142,6 +142,7 @@ export function createActionsMatrixArtifactTransport(options: {
   clock: Clock;
   artifactRoot: string;
 }): MatrixArtifactTransportV1 {
+  let repositoryId: number | null = null;
   type RecoveryInput = Parameters<MatrixArtifactTransportV1["recover"]>[0] & {
     rejectionProof?: HostedRunProofV1;
     completedExecution?: HostedExecutionIntentV1;
@@ -372,10 +373,33 @@ export function createActionsMatrixArtifactTransport(options: {
             items.push(...body[key].map(record));
             if (items.length > total) refuse();
             const link = response.headers.get("link");
-            const next = link?.match(/<([^>]+)>;\s*rel="next"/);
+            const nextLinks = [
+              ...(link?.matchAll(/<([^>]+)>;\s*rel="next"/g) ?? []),
+            ];
+            if (nextLinks.length > 1) refuse();
+            const next = nextLinks[0];
             if (
               next && next[1] !== `${API}${path}?per_page=100&page=${page + 1}`
-            ) refuse();
+            ) {
+              if (!next[1].startsWith("https://api.github.com/repositories/")) {
+                refuse();
+              }
+              if (repositoryId === null) {
+                const repository = await json(
+                  `https://api.github.com/repos/${REPOSITORY}`,
+                );
+                if (repository.full_name !== REPOSITORY) refuse();
+                repositoryId = positive(repository.id);
+              }
+              if (
+                next[1] !==
+                  `https://api.github.com/repositories/${repositoryId}/actions${path}?per_page=100&page=${
+                    page + 1
+                  }`
+              ) {
+                refuse();
+              }
+            }
             if (!next && items.length === total) {
               const ids = items.map((row) => positive(row.id));
               if (new Set(ids).size !== ids.length) refuse();
