@@ -1075,7 +1075,11 @@ Deno.test("issue48 recovery: supervisor workflow dependency and locking contract
   assert.ok(maintenance.includes("ops/hosted-autonomy.ts"));
   assert.ok(maintenance.includes("--no-lock"));
   assert.ok(maintenance.includes("--allow-run=git"));
-  assert.ok(maintenance.includes("--allow-net=api.github.com"));
+  assert.ok(
+    maintenance.includes(
+      '--allow-net="api.github.com,*.blob.core.windows.net"',
+    ),
+  );
   assert.ok(maintenance.includes("GITHUB_TOKEN: ${{ github.token }}"));
   // The pass authenticates its code-change writes as the `ubiquity-sentinel`
   // App: it mounts the protected environment, resolves the committed targets
@@ -1154,13 +1158,13 @@ Deno.test("issue48 recovery: supervisor workflow dependency and locking contract
     "the maintenance job mounts the protected environment",
   );
 
-  // A maintenance failure must never skip a valid ordinary run: prepare still
-  // runs (always()) and repair requires prepare success explicitly.
+  // Prepare requires successful maintenance so unresolved historical custody
+  // cannot be overwritten; repair still requires prepare success explicitly.
   const prepare = text.slice(prepareAt, repairAt);
   assert.ok(prepare.includes("needs: maintenance"));
   assert.ok(
     prepare.includes(
-      "if: always() && github.ref == 'refs/heads/sentinel-supervisor'",
+      "if: always() && needs.maintenance.result == 'success' && github.ref == 'refs/heads/sentinel-supervisor'",
     ),
   );
   const repair = text.slice(repairAt, finalizeAt);

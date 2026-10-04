@@ -593,7 +593,11 @@ Deno.test(
         2,
         "only ready records are granted",
       );
-      assert.equal(report.notReady, 1);
+      assert.equal(
+        report.notReady,
+        0,
+        "nonready records are filtered before consideration",
+      );
       const [first, second] = report.plan.cells;
 
       const badRun = await runMatrixCell(
@@ -828,7 +832,11 @@ Deno.test(
         1,
         "only the ready issue is planned",
       );
-      assert.equal(report.notReady, 3);
+      assert.equal(
+        report.notReady,
+        0,
+        "nonready records are filtered before consideration",
+      );
       assert.equal(report.deferred, 0);
       assert.equal(report.plan.cells[0].taskId, "issue-501");
 

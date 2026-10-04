@@ -226,7 +226,7 @@ const CONCURRENCY_REVISION =
 const CONCURRENCY_RETRY_REVISION =
   "c79b2b87a6a2dd0adc201895af10806ef7a9c600" as GitSha;
 const CONCURRENCY_PLANNER_REVISION =
-  "ee9aa0c010148af8d08bca637523ebfbc1988e21" as GitSha;
+  "ddc98af7062b63e2b6b0f1e6b877e32f4675d442" as GitSha;
 const ROLLBACK_TARGET_GENERATION = 46;
 
 /** Real production entrypoint, fake GitHub transport, real private Git objects. */
