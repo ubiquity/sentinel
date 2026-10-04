@@ -1053,7 +1053,7 @@ Deno.test("issue48 recovery: supervisor workflow dependency and locking contract
     maintenance.includes("if: github.ref == 'refs/heads/sentinel-supervisor'"),
   );
   assert.ok(maintenance.includes("runs-on: ubuntu-latest"));
-  assert.ok(maintenance.includes("timeout-minutes: 30"));
+  assert.ok(maintenance.includes("timeout-minutes: 5"));
   assert.ok(maintenance.includes("group: sentinel-repair"));
   assert.ok(maintenance.includes("cancel-in-progress: false"));
   assert.ok(
