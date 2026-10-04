@@ -462,14 +462,43 @@ export function closedCWaveHandledReservations(
         charge.settledAt === null || charge.proofRef !== null
       ) return false;
       if (charge.outcome === "ambiguous") {
-        return work.nextStep === "blocked" &&
-          work.intent?.kind === "implementation" &&
-          work.intent.requestId === charge.id;
+        return work.intent?.requestId !== charge.id ||
+          work.intent.kind !== "implementation" || work.nextStep === "blocked";
       }
       return charge.outcome === "submitted" &&
         (work.intent?.requestId !== charge.id ||
-          work.intent.kind === "candidate_preservation") &&
-        work.target.head !== null;
+          work.intent.kind !== "implementation") &&
+        (work.intent?.requestId !== charge.id ||
+          work.intent.kind !== "candidate_preservation" ||
+          work.target.head !== null);
+    }).map((cell) => cell.reservationId),
+  );
+}
+function neededReservations(
+  snapshot: RepairStateSnapshotV1,
+  binding: ClosedCWaveBindingV1 = CLOSED_C_WAVE,
+): ReadonlySet<string> {
+  if (
+    !binding.cells.some((cell) =>
+      snapshot.reservations.some((row) => row.id === cell.reservationId)
+    )
+  ) return new Set();
+  const handled = closedCWaveHandledReservations(snapshot, binding);
+  return new Set(
+    binding.cells.filter((cell) => {
+      const charge = snapshot.reservations.find((row) =>
+        row.id === cell.reservationId
+      );
+      if (!charge) return true;
+      if (!handled.has(charge.id)) return true;
+      const work = snapshot.work.find((row) =>
+        row.id === cell.taskId && sameRepo(row.repository, cell.repository)
+      );
+      // Submitted/BLOCKED is a positive protected disposition. Its original
+      // head/checkpoint remain available to explicit recovery, but only an
+      // actionable preservation intent keeps archives an automatic prerequisite.
+      return work?.intent?.kind === "candidate_preservation" &&
+        work.intent.requestId === charge.id;
     }).map((cell) => cell.reservationId),
   );
 }
@@ -477,27 +506,7 @@ export function closedCWaveNeedsRecovery(
   snapshot: RepairStateSnapshotV1,
   binding: ClosedCWaveBindingV1 = CLOSED_C_WAVE,
 ): boolean {
-  if (
-    !binding.cells.some((cell) =>
-      snapshot.reservations.some((row) => row.id === cell.reservationId)
-    )
-  ) return false;
-  const handled = closedCWaveHandledReservations(snapshot, binding);
-  return binding.cells.some((cell) => {
-    const charge = snapshot.reservations.find((row) =>
-      row.id === cell.reservationId
-    );
-    if (!charge) return true;
-    if (!handled.has(charge.id)) return true;
-    const work = snapshot.work.find((row) =>
-      row.id === cell.taskId && sameRepo(row.repository, cell.repository)
-    );
-    // Submitted/BLOCKED is a positive protected disposition. Its original
-    // head/checkpoint remain available to explicit recovery, but only an
-    // actionable preservation intent keeps archives an automatic prerequisite.
-    return work?.intent?.kind === "candidate_preservation" &&
-      work.intent.requestId === charge.id;
-  });
+  return neededReservations(snapshot, binding).size > 0;
 }
 /** Read-only installer gate reuses the consumer's positive handled predicate. */
 export function closedCWaveChargeReadbackVerified(
@@ -534,6 +543,10 @@ export async function recoverClosedCWave(
 > {
   const binding = deps.binding ?? CLOSED_C_WAVE;
   const live = await readLive(deps);
+  const needed = neededReservations(live.repair.snapshot, binding);
+  if (needed.size === 0) {
+    throw new Error("C recovery has no actionable original operations");
+  }
   if (
     binding.cells.some((cell) =>
       !live.repair.snapshot.reservations.some((row) =>
@@ -596,7 +609,9 @@ export async function recoverClosedCWave(
     canonicalStringify({ ...held, observedAt: proof.observedAt }) !==
       canonicalStringify(proof)
   ) throw new Error("C recovery native failure proof changed");
-  const requests = binding.cells.map((cell) => {
+  const requests = binding.cells.filter((cell) =>
+    needed.has(cell.reservationId)
+  ).map((cell) => {
     const work = producerSnapshot.work.find((row) =>
       row.id === cell.taskId && sameRepo(row.repository, cell.repository)
     );
@@ -632,7 +647,8 @@ export async function recoverClosedCWave(
     await matrixDigestV1(wave.plan) !== binding.planDigest ||
     canonicalStringify(wave.plan.run) !== canonicalStringify(binding.run) ||
     wave.plan.cells.length !== binding.cells.length ||
-    wave.results.length !== binding.cells.length ||
+    wave.results.length !== needed.size ||
+    wave.results.some((row) => !needed.has(row.reservationId)) ||
     wave.plan.cells.some((cell) =>
       cell.runtimeSha !== binding.runtimeSha ||
       cell.generation !== binding.generation ||
@@ -661,6 +677,16 @@ export async function ingestClosedCWave(
 ) {
   const binding = deps.binding ?? CLOSED_C_WAVE;
   const live = await readLive(deps);
+  const needed = neededReservations(live.repair.snapshot, binding);
+  if (needed.size === 0) {
+    return {
+      producer: binding.run,
+      repairHead: live.repair.head,
+      releaseHead: live.release.head,
+      dispositions: [],
+      reports: [],
+    };
+  }
   if (
     maintenance &&
     live.release.snapshot.hostedRuntimes.some((row) => row.execution !== null)
@@ -700,6 +726,7 @@ export async function ingestClosedCWave(
     const snapshot = read.value.snapshot;
     const handled = closedCWaveHandledReservations(snapshot, binding);
     const cells = recovered.wave.plan.cells.filter((cell) =>
+      needed.has(cell.reservationId) &&
       sameRepo(cell.repository, config.repository) &&
       (!handled.has(cell.reservationId) ||
         snapshot.work.some((row) =>
@@ -708,30 +735,9 @@ export async function ingestClosedCWave(
           row.intent.requestId === cell.reservationId
         ))
     );
-    const checkpoints = recovered.wave.plan.cells.filter((cell) =>
-      sameRepo(cell.repository, config.repository) &&
-      handled.has(cell.reservationId) && snapshot.work.some((row) =>
-        row.id === cell.taskId && row.nextStep === "blocked" &&
-        row.target.candidateState?.preserved === null &&
-        row.target.head !== null
-      )
-    );
-    if (cells.length === 0 && checkpoints.length === 0) continue;
+    if (cells.length === 0) continue;
     await deps.prepareTarget(config);
     const importer = deps.importerFor(config, recovered.wave.bundlesDir);
-    for (const cell of checkpoints) {
-      const work = snapshot.work.find((row) => row.id === cell.taskId)!;
-      const result = recovered.wave.results.find((row) =>
-        row.cellId === cell.cellId
-      );
-      if (
-        !result?.bundle || !result.receipt?.candidate ||
-        result.bundle.head !== work.target.head ||
-        result.bundle.checkpointSha !== (work.target.checkpoint?.sha ?? null) ||
-        !await importer.import({ base: cell.expectedBase, ...result.bundle })
-      ) throw new Error("C recovery saved checkpoint unavailable");
-    }
-    if (cells.length === 0) continue;
     const cycle = deps.cycleFor(config);
     const report = await ingestMatrixResults(
       {
@@ -764,7 +770,9 @@ export async function ingestClosedCWave(
   if (after.release.head !== recovered.releaseHead) {
     throw new Error("C recovery release changed during ingestion");
   }
-  const dispositions = binding.cells.map((cell) => {
+  const dispositions = binding.cells.filter((cell) =>
+    needed.has(cell.reservationId)
+  ).map((cell) => {
     const prior = before.reservations.find((row) =>
       row.id === cell.reservationId
     );
@@ -803,7 +811,7 @@ export async function ingestClosedCWave(
       checkpoint: work.target.checkpoint,
     };
   });
-  const known = new Set(binding.cells.map((cell) => cell.reservationId));
+  const known = needed;
   if (
     canonicalStringify(
         before.reservations.filter((row) => !known.has(row.id)),
@@ -814,14 +822,16 @@ export async function ingestClosedCWave(
     canonicalStringify(
         before.work.filter((row) =>
           !binding.cells.some((cell) =>
-            cell.taskId === row.id && sameRepo(cell.repository, row.repository)
+            needed.has(cell.reservationId) && cell.taskId === row.id &&
+            sameRepo(cell.repository, row.repository)
           )
         ),
       ) !==
       canonicalStringify(
         after.repair.snapshot.work.filter((row) =>
           !binding.cells.some((cell) =>
-            cell.taskId === row.id && sameRepo(cell.repository, row.repository)
+            needed.has(cell.reservationId) && cell.taskId === row.id &&
+            sameRepo(cell.repository, row.repository)
           )
         ),
       )
