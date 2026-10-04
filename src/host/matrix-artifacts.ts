@@ -406,9 +406,10 @@ export function createActionsMatrixArtifactTransport(options: {
           ) refuse();
           positive(repo.id);
           positive(headRepo.id);
+          const start = instant(attempt.run_started_at);
           const end = instant(attempt.updated_at);
           if (
-            end < instant(attempt.run_started_at) ||
+            end < start ||
             end < execution.createdAt ||
             end > options.clock.now() + TOLERANCE
           ) refuse();
@@ -425,10 +426,20 @@ export function createActionsMatrixArtifactTransport(options: {
               typeof job.conclusion !== "string" || job.conclusion.length === 0
             ) refuse();
             const finished = instant(job.completed_at);
+            const started = job.started_at === null
+              ? null
+              : instant(job.started_at);
+            // Skipped GitHub placeholders without runners have metadata times,
+            // rather than an execution interval; both must remain in the attempt.
+            const skippedWithoutRunner = job.conclusion === "skipped" &&
+              job.runner_id === null && job.runner_name === null;
             if (
               finished > end + TOLERANCE ||
               finished > options.clock.now() + TOLERANCE ||
-              (job.started_at !== null && finished < instant(job.started_at))
+              (skippedWithoutRunner
+                ? started === null || started < start || started > end ||
+                  finished < start || finished > end
+                : started !== null && finished < started)
             ) refuse();
           }
           const fresh = await options.state.readRelease();

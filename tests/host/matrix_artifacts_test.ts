@@ -507,6 +507,100 @@ Deno.test("matrix artifacts: authenticated paginated old wave recovers exact bun
   }
 });
 
+Deno.test("matrix skipped completion: no-runner wire timestamps and adverse guards", async () => {
+  for (
+    const fault of [
+      "none",
+      "executed",
+      "runner",
+      "active",
+      "incomplete",
+      "foreign",
+      "duplicate",
+      "truncated",
+      "before-attempt",
+      "after-attempt",
+      "future",
+      "invalid-start",
+    ]
+  ) {
+    const f = await fixture();
+    const previousCwd = Deno.cwd();
+    Deno.chdir(`${f.tmp}/checkout`);
+    try {
+      const execution = {
+        ...f.release.hostedRuntimes[0].execution!,
+        id: WAVE,
+        ...RUN,
+        purpose: "bootstrap" as const,
+      };
+      f.release.hostedRuntimes[0].execution = execution;
+      f.attempt.status = "completed";
+      f.attempt.updated_at = new Date(T0 + 2_000).toISOString();
+      const skipped = {
+        ...f.jobs[0],
+        id: 111354489906,
+        name: "matrix_cell (${{ matrix.cellId }})",
+        conclusion: "skipped",
+        runner_id: null as number | null,
+        runner_name: null as string | null,
+        started_at: new Date(T0 + 1_000).toISOString(),
+        completed_at: ISO,
+        steps: [],
+      };
+      if (fault === "executed") skipped.conclusion = "success";
+      if (fault === "runner") {
+        skipped.runner_id = 7;
+        skipped.runner_name = "assigned-runner";
+      }
+      if (fault === "active") skipped.status = "in_progress";
+      if (fault === "incomplete") skipped.completed_at = "";
+      if (fault === "foreign") skipped.run_id = 99;
+      if (fault === "before-attempt") {
+        skipped.completed_at = new Date(T0 - 1).toISOString();
+      }
+      if (fault === "after-attempt") {
+        skipped.started_at = new Date(T0 + 3_000).toISOString();
+      }
+      if (fault === "future") {
+        skipped.started_at = new Date(T0 + 120_000).toISOString();
+        skipped.completed_at = skipped.started_at;
+      }
+      if (fault === "invalid-start") skipped.started_at = "not-a-timestamp";
+      f.jobs.push(skipped);
+      if (fault === "duplicate") f.jobs.push(skipped);
+      const transport = createActionsMatrixArtifactTransport({
+        state: f.state,
+        token: "fake-local-token",
+        clock: { now: () => T0 + 10_000 },
+        artifactRoot: `${f.tmp}/skipped`,
+        http: (request) =>
+          fault === "truncated" &&
+            new URL(request.url).pathname.endsWith("/jobs")
+            ? Promise.resolve({
+              status: 200,
+              headers: new Headers(),
+              bodyText: JSON.stringify({
+                total_count: f.jobs.length + 1,
+                jobs: f.jobs,
+              }),
+            })
+            : f.http(request),
+      });
+      if (fault === "none") {
+        assert.equal(
+          await transport.confirmCompletedExecution!(execution),
+          true,
+        );
+      } else {await assert.rejects(() =>
+          transport.confirmCompletedExecution!(execution), fault);}
+    } finally {
+      Deno.chdir(previousCwd);
+      await Deno.remove(f.tmp, { recursive: true });
+    }
+  }
+});
+
 Deno.test("matrix verification completion: exact held verification survives pointer advance", async () => {
   for (
     const purpose of ["bootstrap", "prior", "candidate", "rollback"] as const
