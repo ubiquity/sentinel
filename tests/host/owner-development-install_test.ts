@@ -424,11 +424,11 @@ async function matrixRecoveryState() {
 for (const useSourcePin of [false, true]) {
   Deno.test(
     useSourcePin
-      ? "owner install matrix recovery: default source pin installs reviewed R3, bootstrap, rollback and never reinstall"
+      ? "owner install matrix recovery: default source pin installs reviewed runtime, bootstrap, rollback and never reinstall"
       : "owner install matrix recovery: exact metadata and charges install, bootstrap, rollback and never reinstall",
     async () => {
       const candidate = useSourcePin
-        ? "37a66d790eff29e9d946fe0df127bda42f986ada" as GitSha
+        ? "ac98dc80ff9c3eca5f36aca91493168e9ff74596" as GitSha
         : "a".repeat(40) as GitSha;
       if (useSourcePin) {
         assert.equal(

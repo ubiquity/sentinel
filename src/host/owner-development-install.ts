@@ -544,7 +544,7 @@ export const OWNER_DEVELOPMENT_INSTALL_CONCURRENCY_PLANNER_REVISION =
 export const OWNER_DEVELOPMENT_INSTALL_CONCURRENCY_PLANNER_GENERATION = 60;
 /** Root stages this exact reviewed and published revision; null grants no rung. */
 export const OWNER_DEVELOPMENT_INSTALL_MATRIX_RECOVERY_REVISION: GitSha | null =
-  "37a66d790eff29e9d946fe0df127bda42f986ada" as GitSha;
+  "ac98dc80ff9c3eca5f36aca91493168e9ff74596" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_MATRIX_RECOVERY_GENERATION = 61;
 export interface OwnerMatrixRecoveryEvidenceV1 {
   candidate: GitSha;
