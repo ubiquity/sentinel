@@ -285,8 +285,49 @@ export interface HostedRuntimeLauncherResultV1 {
    * default; they never attest health, terminal, settlement or any authority.
    */
   diagnostics: HostedModelDiagnosticV1[];
+  /**
+   * Advisory-only, sanitized summary of a settled nonzero child exit that
+   * produced no status record. It carries a closed category and a few
+   * sanitized stack-frame locations, never raw stderr, and it can never
+   * change the terminal, health, settlement or exit status.
+   */
+  earlyFailure?: HostedRuntimeEarlyFailureV1;
   /** Authenticated native matrix log carrier; never aggregate terminal proof. */
   matrixCarrier?: Record<string, unknown>;
+}
+
+/** Closed, non-sensitive category of one settled early child abort. */
+export type HostedRuntimeEarlyFailureCategoryV1 =
+  | "module_not_found"
+  | "permission_denied"
+  | "address_in_use"
+  | "unauthorized"
+  | "forbidden"
+  | "tls"
+  | "dns"
+  | "timeout"
+  | "no_space"
+  | "syntax"
+  | "uncaught"
+  | "signalled"
+  | "unknown";
+
+/**
+ * One sanitized advisory summary of a settled nonzero child exit that produced
+ * no status record (the genuine early-abort path). The category comes from a
+ * closed allow-list and the frames are reduced to `<basename>:<line>:<column>`
+ * locations: arbitrary stderr text, arguments, URLs, host paths and credential
+ * values are never copied. It is advisory only and is never terminal, health,
+ * settlement or authority proof.
+ */
+export interface HostedRuntimeEarlyFailureV1 {
+  version: "v1";
+  kind: "hosted_runtime_early_failure";
+  advisory: true;
+  exitCode: number;
+  category: HostedRuntimeEarlyFailureCategoryV1;
+  /** Bounded basename-only stack locations; empty when none are recognizable. */
+  frames: string[];
 }
 
 /** Fixed private launcher scratch inside the ignored launcher checkout. */
@@ -521,8 +562,155 @@ function attachDiagnostics(
   execution: HostedExecutionIntentV1,
 ): HostedRuntimeLauncherResultV1 {
   const diagnostics = scanChildDiagnostics(run, execution);
-  if (diagnostics.length === 0) return result;
-  return { ...result, diagnostics };
+  const earlyFailure = earlyChildFailureDiagnostic(result, run);
+  if (earlyFailure === null) {
+    return diagnostics.length === 0 ? result : { ...result, diagnostics };
+  }
+  return { ...result, diagnostics, earlyFailure };
+}
+
+/** Bound on the retained stderr prefix inspected for one early-failure summary. */
+const MAX_EARLY_FAILURE_STDERR_BYTES = 16 * 1024;
+/** Bound on the sanitized frame locations carried by one summary. */
+const MAX_EARLY_FAILURE_FRAMES = 4;
+/** Bound on one sanitized `basename:line:column` location. */
+const MAX_EARLY_FAILURE_FRAME_CHARS = 80;
+
+/**
+ * A trailing `basename:line:column` (optionally inside a closing parenthesis)
+ * is the only stderr fragment this summary ever reads, and the basename must
+ * additionally be one of the closed code-owned labels below. A URL, an absolute
+ * host path, a bearer value, a credential-shaped token or any other arbitrary
+ * text can therefore never be emitted as a frame label.
+ */
+const EARLY_FAILURE_FRAME_PATTERN =
+  /([A-Za-z0-9._-]+):(\d{1,7}):(\d{1,7})\)?[ \t]*$/;
+
+/** Closed set of code-owned Sentinel basenames a frame label may name. */
+const EARLY_FAILURE_FRAME_LABELS: ReadonlySet<string> = new Set([
+  "actions.ts",
+  "hosted-runtime.ts",
+  "local.ts",
+  "targets.ts",
+  "matrix-actions.ts",
+  "matrix-artifacts.ts",
+  "client.ts",
+  "impl.ts",
+  "model-port.ts",
+  "loop.ts",
+  "mod.ts",
+  "codex-reviewer.ts",
+  "runtime.ts",
+]);
+
+/** Closed-category classification over patterns only; no stderr text is kept. */
+function classifyEarlyChildFailure(
+  stderr: string,
+): HostedRuntimeEarlyFailureCategoryV1 {
+  const value = stderr.toLowerCase();
+  if (
+    value.includes("cannot find module") ||
+    value.includes("module not found")
+  ) {
+    return "module_not_found";
+  }
+  if (
+    value.includes("permission denied") ||
+    value.includes("operation not permitted")
+  ) {
+    return "permission_denied";
+  }
+  if (
+    value.includes("address already in use") || value.includes("eaddrinuse")
+  ) {
+    return "address_in_use";
+  }
+  if (value.includes("unauthorized") || value.includes("401")) {
+    return "unauthorized";
+  }
+  if (value.includes("forbidden") || value.includes("403")) return "forbidden";
+  if (
+    value.includes("certificate") || value.includes("tls") ||
+    value.includes("ssl")
+  ) {
+    return "tls";
+  }
+  if (
+    value.includes("getaddrinfo") ||
+    value.includes("name or service not known") || value.includes("dns")
+  ) {
+    return "dns";
+  }
+  if (value.includes("timed out") || value.includes("timeout")) {
+    return "timeout";
+  }
+  if (value.includes("no space left")) return "no_space";
+  if (value.includes("syntaxerror")) return "syntax";
+  if (value.includes("uncaught") || value.includes("unhandled")) {
+    return "uncaught";
+  }
+  if (
+    value.includes("sigkill") || value.includes("sigterm") ||
+    value.includes("killed")
+  ) {
+    return "signalled";
+  }
+  return "unknown";
+}
+
+/** Bounded, deduplicated locations from actual `at ` frames of known files. */
+function earlyChildFailureFrames(stderr: string): string[] {
+  const frames: string[] = [];
+  const seen = new Set<string>();
+  for (const rawLine of stderr.split("\n")) {
+    if (frames.length >= MAX_EARLY_FAILURE_FRAMES) break;
+    const line = rawLine.trim();
+    if (!line.startsWith("at ")) continue;
+    const match = EARLY_FAILURE_FRAME_PATTERN.exec(line);
+    if (match === null) continue;
+    // Only code-owned basenames are ever emitted; an unknown or
+    // credential-shaped label yields no frame at all (category only).
+    if (!EARLY_FAILURE_FRAME_LABELS.has(match[1])) continue;
+    const frame = `${match[1]}:${match[2]}:${match[3]}`;
+    if (frame.length > MAX_EARLY_FAILURE_FRAME_CHARS) continue;
+    if (seen.has(frame)) continue;
+    seen.add(frame);
+    frames.push(frame);
+  }
+  return frames;
+}
+
+/**
+ * Sanitized advisory summary for exactly the genuine early-abort path: a
+ * settled, untruncated nonzero child exit whose stdout carried no status record
+ * and whose resolved terminal is the honest failure. Any other disposition —
+ * success, unavailability, truncated, unsettled, timeout, or a preserved child
+ * record — yields null, so the summary can never mint success or replace
+ * observed child metadata.
+ */
+function earlyChildFailureDiagnostic(
+  result: HostedRuntimeLauncherResultV1,
+  run: ReplayCommandResultV1,
+): HostedRuntimeEarlyFailureV1 | null {
+  if (result.status !== "failed" || result.terminal === null) return null;
+  if (run.truncated || !run.settled || run.outcome !== "exited") return null;
+  if (run.exitCode === null || run.exitCode === 0) return null;
+  const scan = scanChildStatusRecords(new TextDecoder().decode(run.stdout));
+  if (scan.kind !== "none") return null;
+  const stderr = new TextDecoder().decode(
+    run.stderr.slice(0, MAX_EARLY_FAILURE_STDERR_BYTES),
+  );
+  // Nothing was retained on the error stream: there is no abort site to
+  // summarize, so the existing empty-stderr result stays exactly as it was.
+  if (stderr.trim().length === 0) return null;
+  return {
+    version: "v1",
+    kind: "hosted_runtime_early_failure",
+    advisory: true,
+    exitCode: run.exitCode,
+    category: classifyEarlyChildFailure(stderr),
+    frames: earlyChildFailureFrames(stderr),
+  };
 }
 
 function scanChildDiagnostics(
@@ -1246,6 +1434,12 @@ if (import.meta.main) {
   // prints no terminal record and exits nonzero.
   if (result.matrixCarrier !== undefined) {
     console.log(JSON.stringify(result.matrixCarrier));
+  }
+  // Advisory only: a sanitized early-abort summary is printed before the
+  // generic failure detail so one authorized verification can identify the
+  // abort site without copying raw stderr or any credential value.
+  if (result.earlyFailure !== undefined) {
+    console.log(JSON.stringify(result.earlyFailure));
   }
   if (result.terminal !== null) console.log(JSON.stringify(result.terminal));
   if (result.status !== "healthy") {

@@ -1345,6 +1345,126 @@ Deno.test("hosted runtime: advisory summaries are wrapper-stamped, bounded and n
   }
 });
 
+Deno.test("hosted runtime: early child failure diagnostic is sanitized, bounded and advisory", async () => {
+  const rig = await makeRig();
+  try {
+    await seedRelease(rig);
+    const fakeSecret = "sentinel-fake-secret-7c1d9f42ab";
+    const hostile = [
+      "error: Uncaught (in promise) Error: fixture abort",
+      "    at main (file:///home/runner/work/sentinel/src/host/hosted-runtime.ts:42:7)",
+      "    at async file:///home/runner/work/sentinel/src/repair/loop.ts:9:3",
+      // Credential-shaped and unknown labels inside real `at ` frame shapes
+      // must never be emitted as frame labels.
+      `    at ${fakeSecret}:11:12`,
+      `    at ${fakeSecret}.ts:13:14`,
+      `    at file:///private/${fakeSecret}.ts:15:16`,
+      `    at https://example.invalid/private?token=${fakeSecret}:17:18`,
+      `Authorization: Bearer ${fakeSecret}`,
+      `https://operator-marker-zz:${fakeSecret}@example.invalid/private?token=${fakeSecret}`,
+      `SENTINEL_SUPERVISOR_TOKEN=${fakeSecret}`,
+    ].join("\n") + "\n";
+    const stderr = new TextEncoder().encode(hostile);
+    const forbidden = [
+      fakeSecret,
+      `${fakeSecret}.ts`,
+      "private?token",
+      "Bearer",
+      "Authorization",
+      "example.invalid",
+      "/home/runner",
+      "operator-marker-zz",
+      "SENTINEL_SUPERVISOR_TOKEN",
+    ];
+
+    // The genuine early-abort path: a settled nonzero exit with no status
+    // record keeps its existing failed terminal and gains only the sanitized
+    // advisory summary.
+    rig.process.child = exited("", 7, { stderr });
+    let result = await launch(rig);
+    assert.equal(result.status, "failed");
+    assert.equal(result.terminal?.outcome, "failed");
+    assert.equal(result.terminal?.startupReady, false);
+    assert.equal(result.terminal?.baseSha, null);
+    assert.equal(result.terminal?.settled, true);
+    assert.equal(result.diagnostics.length, 0);
+    const early = result.earlyFailure;
+    assert.ok(early);
+    assert.equal(early.kind, "hosted_runtime_early_failure");
+    assert.equal(early.advisory, true);
+    assert.equal(early.exitCode, 7);
+    assert.equal(early.category, "uncaught");
+    assert.deepEqual(early.frames, [
+      "hosted-runtime.ts:42:7",
+      "loop.ts:9:3",
+    ]);
+    const serialized = JSON.stringify(result);
+    for (const marker of forbidden) {
+      assert.equal(serialized.includes(marker), false, marker);
+    }
+    assert.ok(serialized.length < 4096, "the advisory stays bounded");
+
+    // Arbitrary stderr text without a recognizable frame is never copied: only
+    // the closed category survives.
+    rig.process.child = exited("", 1, {
+      stderr: new TextEncoder().encode(
+        `error: Cannot find module 'x'\nSENTINEL_SUPERVISOR_TOKEN=${fakeSecret}\n`,
+      ),
+    });
+    result = await launch(rig);
+    assert.equal(result.status, "failed");
+    assert.equal(result.earlyFailure?.category, "module_not_found");
+    assert.deepEqual(result.earlyFailure?.frames, []);
+    assert.equal(JSON.stringify(result).includes(fakeSecret), false);
+
+    // A zero exit with no status record is unattestable: neither success nor
+    // an early-abort advisory may be minted.
+    rig.process.child = exited("", 0, { stderr });
+    result = await launch(rig);
+    assert.equal(result.status, "unavailable");
+    assert.equal(result.terminal, null);
+    assert.equal(result.earlyFailure, undefined);
+
+    // An unsettled nonzero exit is uncertain: no terminal, no advisory.
+    rig.process.child = exited("", 7, { stderr, settled: false });
+    result = await launch(rig);
+    assert.equal(result.status, "unavailable");
+    assert.equal(result.terminal, null);
+    assert.equal(result.earlyFailure, undefined);
+
+    // A truncated capture is uncertain: no advisory either.
+    rig.process.child = exited("", 7, { stderr, truncated: true });
+    result = await launch(rig);
+    assert.equal(result.status, "unavailable");
+    assert.equal(result.earlyFailure, undefined);
+
+    // A genuine child record beside a nonzero exit keeps its observed metadata:
+    // the early-abort advisory never replaces a preserved child result.
+    rig.process.child = exited(
+      `${
+        childLine(rig.execution, {
+          outcome: { status: "source_error", detail: "source unavailable" },
+        })
+      }\n`,
+      3,
+      { stderr },
+    );
+    result = await launch(rig);
+    assert.equal(result.status, "failed");
+    assert.equal(result.terminal?.startupReady, true);
+    assert.equal(result.terminal?.baseSha, OBSERVED_BASE);
+    assert.equal(result.earlyFailure, undefined);
+
+    // A healthy run never carries the advisory.
+    rig.process.child = exited(`${childLine(rig.execution)}\n`, 0, { stderr });
+    result = await launch(rig);
+    assert.equal(result.status, "healthy");
+    assert.equal(result.earlyFailure, undefined);
+  } finally {
+    await rig.cleanup();
+  }
+});
+
 Deno.test("hosted runtime: malformed, oversized, unknown-field or forged advisory inputs are ignored", async () => {
   const rig = await makeRig();
   try {
