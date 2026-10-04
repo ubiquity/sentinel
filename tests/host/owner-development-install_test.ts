@@ -27,7 +27,15 @@ import type {
   HostedRuntimeRecordV1,
 } from "../../src/contracts/hosted-supervisor.ts";
 import { parseReleaseRequestV1 } from "../../src/contracts/release.ts";
-import { parseReleaseStateSnapshotV1 } from "../../src/contracts/state-snapshots.ts";
+import {
+  parseReleaseStateSnapshotV1,
+  parseRepairStateSnapshotV1,
+} from "../../src/contracts/state-snapshots.ts";
+import { portOk } from "../../src/contracts/ports.ts";
+import { implementationIntentKey } from "../../src/repair/keys.ts";
+import { runHistoricalMatrixQuarantine } from "../../src/host/matrix-actions.ts";
+import { runHostedSupervisorPrepare } from "../../src/host/actions-supervisor.ts";
+import { reservation, workRecord } from "../state/helpers.ts";
 import type { ReleaseStateSnapshotV1 } from "../../src/contracts/state-snapshots.ts";
 import {
   buildOwnerDevelopmentInstallSnapshot,
@@ -69,7 +77,11 @@ import {
   planOwnerDevelopmentInstall,
   runOwnerDevelopmentInstallMain,
 } from "../../src/host/owner-development-install.ts";
-import { createReleaseStateStore, DenoGitRunner } from "../../src/state/mod.ts";
+import {
+  createReleaseStateStore,
+  createRepairStateStore,
+  DenoGitRunner,
+} from "../../src/state/mod.ts";
 
 const T0 = 1_700_000_000_000;
 const NOW = T0 + 10_000;
@@ -6578,6 +6590,245 @@ Deno.test(
           assert.equal(fixture.requests.length, 0);
         }
       } finally {
+        await fixture.close();
+      }
+    }
+  },
+);
+
+Deno.test(
+  "owner install runtime60: verified maintenance preserves unrelated admission through installation and rollback",
+  async () => {
+    for (const failedCandidate of [false, true]) {
+      const prior = hostedProof({
+        runId: 1200,
+        purpose: "bootstrap",
+        releaseId: null,
+        revision: CONCURRENCY_RETRY_REVISION,
+        generation: 59,
+        outcome: "healthy",
+      });
+      const latest = failedCandidate
+        ? hostedProof({
+          runId: 1201,
+          purpose: "bootstrap",
+          releaseId: null,
+          revision: CONCURRENCY_PLANNER_REVISION,
+          generation: 60,
+          outcome: "failed",
+        })
+        : prior;
+      const fixture = await concurrencyInstallerFixture(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: failedCandidate
+              ? CONCURRENCY_PLANNER_REVISION
+              : CONCURRENCY_RETRY_REVISION,
+            generation: failedCandidate ? 60 : 59,
+            healthyProof: prior,
+            executionProof: latest,
+          }),
+          hostedReleases: [acceptedRelease()],
+        }),
+        undefined,
+        CONCURRENCY_PLANNER_REVISION,
+      );
+      const remote = `${Deno.cwd()}/remote.git`;
+      const repairRef = "refs/heads/sentinel-state/repair";
+      const command = async (args: string[]) => {
+        const result = await new Deno.Command("git", {
+          args: ["--git-dir", remote, ...args],
+          stdout: "piped",
+          stderr: "piped",
+        }).output();
+        assert.equal(result.code, 0, new TextDecoder().decode(result.stderr));
+      };
+      try {
+        await command(["update-ref", "-d", repairRef, fixture.initialHead]);
+        const repair = createRepairStateStore({
+          remoteUrl: remote,
+          scratchDir: `${Deno.cwd()}/unrelated-repair`,
+        });
+        const release = createReleaseStateStore({
+          remoteUrl: remote,
+          scratchDir: `${Deno.cwd()}/prepare-release`,
+        });
+        const requestId = "e".repeat(64);
+        const work = workRecord("unrelated-existing-admission", {
+          createdAt: T0 - 2000,
+          updatedAt: T0 - 1000,
+          target: {
+            base: UNRELATED,
+            branch: "sentinel/unrelated-existing-admission",
+            checkpoint: null,
+            head: null,
+            pr: null,
+          },
+          intent: {
+            kind: "implementation",
+            key: implementationIntentKey(requestId),
+            startedAt: T0 - 1000,
+            branch: "sentinel/unrelated-existing-admission",
+            expectedHead: null,
+            observedBase: UNRELATED,
+            pr: null,
+            requestId,
+            resultId: null,
+          },
+          counters: { attempts: 1, retries: 0, reviewRounds: 0 },
+        });
+        const charge = reservation(requestId, {
+          taskId: work.id,
+          head: UNRELATED,
+          createdAt: T0 - 1000,
+        });
+        const seeded = await repair.writeRepair(
+          parseRepairStateSnapshotV1({
+            version: "v1",
+            kind: "repair_state_snapshot",
+            stateHead: null,
+            sequence: 1,
+            updatedAt: T0,
+            incidents: [],
+            evidence: [],
+            work: [work],
+            reservations: [charge],
+            reviews: [],
+            replays: [],
+            releaseRequests: [],
+            githubCooldowns: [],
+          }),
+          null,
+        );
+        assert(
+          seeded.ok && seeded.value.status === "applied",
+          JSON.stringify(seeded),
+        );
+        const originalRepair = await repair.readRepair();
+        let nativeReads = 0;
+        let completionReads = 0;
+        const maintenance = async () => {
+          const before = await fixture.read();
+          assert(before.ok && before.value.status === "found");
+          const saved =
+            before.value.snapshot.hostedRuntimes[0].lastExecutionProof;
+          assert(saved && saved.outcome !== "not_started");
+          const result = await runHistoricalMatrixQuarantine({
+            state: {
+              readRepair: () => repair.readRepair(),
+              readRelease: () => fixture.read(),
+              writeRepair: () => {
+                throw new Error("verification must not write repair state");
+              },
+            },
+            clock: { now: () => NOW },
+            budget: {
+              settleModelStart: () => {
+                throw new Error(
+                  "verification must not settle unrelated admission",
+                );
+              },
+            },
+            historicalReleaseWitnesses: [{
+              commit: STATE_HEAD,
+              executionId: "1199:1:repair",
+              logDigest: DIGEST,
+              reservationIds: Array.from(
+                { length: 55 },
+                (_, i) => i.toString(16).padStart(64, "0"),
+              ),
+              reject: () => {
+                throw new Error(
+                  "unrelated admission is outside closed legacy55",
+                );
+              },
+            }],
+            transport: {
+              confirmCompletedExecution: (execution) => {
+                assert.deepEqual(execution, saved.execution);
+                completionReads++;
+                return Promise.resolve(true);
+              },
+              rejectHistorical: () => {
+                throw new Error(
+                  "verification proof cannot authorize ordinary quarantine",
+                );
+              },
+              recover: () => {
+                throw new Error("verification cannot ingest artifacts");
+              },
+            },
+            readExecution: (execution) => {
+              assert.deepEqual(execution, saved.execution);
+              nativeReads++;
+              return Promise.resolve(portOk({ ...saved, observedAt: NOW }));
+            },
+          });
+          assert.equal(result, 0);
+          assert.deepEqual(
+            await fixture.read(),
+            before,
+            "maintenance preserves pointer and both proof slots",
+          );
+          assert.deepEqual(
+            await repair.readRepair(),
+            originalRepair,
+            "unrelated task, intent and charge remain exact",
+          );
+        };
+        await maintenance();
+        assert.equal(await fixture.run(), 0);
+        assert.equal(
+          fixture.reports.at(-1)?.status,
+          failedCandidate ? "rolled_back" : "installed",
+        );
+        assert.equal(
+          fixture.reports.at(-1)?.candidateGeneration,
+          failedCandidate ? 61 : 60,
+        );
+        assert.equal(
+          fixture.reports.at(-1)?.candidateRevision,
+          failedCandidate
+            ? CONCURRENCY_RETRY_REVISION
+            : CONCURRENCY_PLANNER_REVISION,
+        );
+        assert.equal(fixture.patches(), 1);
+        await maintenance();
+        assert.equal(nativeReads, 2);
+        assert.equal(completionReads, 2);
+        const prepared = await runHostedSupervisorPrepare({
+          state: release,
+          clock: { now: () => NOW + 100 },
+          run: {
+            runId: failedCandidate ? 1203 : 1202,
+            runAttempt: 1,
+            launcherSha: LAUNCHER,
+          },
+          evidence: {
+            readExecution: () => Promise.resolve(portOk(null)),
+            verifyRevision: () => Promise.resolve(portOk(true)),
+            verifyRequest: () => Promise.resolve(portOk(false)),
+          },
+        });
+        assert.equal(prepared.status, "run");
+        if (prepared.status !== "run") {
+          throw new Error("exact installed pointer must admit verification");
+        }
+        assert.equal(prepared.execution.generation, failedCandidate ? 61 : 60);
+        assert.equal(
+          prepared.execution.revision,
+          failedCandidate
+            ? CONCURRENCY_RETRY_REVISION
+            : CONCURRENCY_PLANNER_REVISION,
+        );
+        assert.equal(
+          prepared.execution.purpose,
+          "bootstrap",
+          "verification cannot enable ordinary model starts",
+        );
+        assert.deepEqual(await repair.readRepair(), originalRepair);
+      } finally {
+        await command(["update-ref", repairRef, fixture.initialHead]);
         await fixture.close();
       }
     }
