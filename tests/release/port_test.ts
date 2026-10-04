@@ -1240,6 +1240,70 @@ Deno.test(
   },
 );
 
+Deno.test(
+  "port: adjacent terminals outside the bounded cohort do not poison coverage",
+  async () => {
+    const slotLength = 30_000;
+    const transport = new ScriptedTransport();
+    transport.any(
+      "GET",
+      new RegExp("^/v2/apps/[^/]+/logs$"),
+      (url) => {
+        const start = Date.parse(url.searchParams.get("start") ?? "0");
+        const slot = (start - T0) / slotLength;
+        const messages: string[] = [];
+        if (slot >= 0 && slot <= 4 && Number.isInteger(slot)) {
+          if (slot > 0) {
+            messages.push(
+              terminalEvent({
+                requestId: `boundary-${slot - 1}`,
+                identity: DEP_1,
+                timestamp: T0 + slot * slotLength + 1,
+              }),
+            );
+          }
+          if (slot < 4) {
+            messages.push(
+              acceptedEvent({
+                requestId: `boundary-${slot}`,
+                identity: DEP_1,
+                timestamp: T0 + (slot + 1) * slotLength - 1,
+              }),
+            );
+          }
+        }
+        return {
+          kind: "response",
+          status: 200,
+          body: JSON.stringify({
+            logs: messages.map((message, index) => ({
+              timestamp: new Date(start + index).toISOString(),
+              level: "info",
+              message,
+              revision_id: DEP_1.revisionId,
+            })),
+            next_cursor: null,
+          }),
+        };
+      },
+    );
+    const port = client(transport, new TestClock(T0 + 95_001));
+    const sample = await port.sampleMetrics({
+      baseUrl: MANAGED_URL,
+      metricsPath: "/health",
+      identity: DEP_1,
+      windowStart: T0 + 2 * slotLength,
+      windowEnd: T0 + 3 * slotLength,
+      domain: "ai.ubq.fi",
+    });
+
+    assert.ok(sample.ok);
+    if (!sample.ok) return;
+    assert.equal(sample.value.requestCount, 1);
+    assert.deepEqual(sample.value.coverage, { status: "complete" });
+  },
+);
+
 Deno.test("port: log sampling before the trusted lag is missing, never zero", async () => {
   const transport = new ScriptedTransport();
   logRoute(transport, { accept: 100 });

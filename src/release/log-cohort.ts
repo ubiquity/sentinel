@@ -166,9 +166,9 @@ export interface CohortCountsV1 {
   /** Entries consumed that could not be classified as evidence. */
   unreadableCount: number;
   /**
-   * Distinct terminal request ids without an accepted event in this scan.
-   * These outcomes may belong to a different sampling window, so the caller
-   * must treat the sample as incomplete instead of dropping the outcome.
+   * Distinct terminal request ids from the sample window without an accepted
+   * event in the bounded scan. Adjacent terminals are join-only evidence for
+   * the sample's accepted cohort and do not expand this denominator.
    */
   unresolvedOutcomeCount: number;
 }
@@ -183,9 +183,11 @@ export interface CohortCountsV1 {
  * in the sample window may contribute a failure classification. A bounded
  * adjacent-window join may provide the accepted or terminal counterpart for
  * that cohort, but adjacent accepted events never enter the denominator. A
- * terminal without a matching accepted event remains an explicit evidence gap
- * rather than silently disappearing across sampling windows or producing
- * inconsistent metrics such as `requestCount: 0, fiveXxCount: 1`.
+ * terminal from the sample window without a matching accepted event remains
+ * an explicit evidence gap rather than silently disappearing across sampling
+ * windows or producing inconsistent metrics such as
+ * `requestCount: 0, fiveXxCount: 1`. Terminals from adjacent windows are
+ * join-only evidence and do not create gaps for requests outside the sample.
  *
  * Classification follows the owner-configured rules only:
  * - five_xx:     terminal HTTP status >= 500
@@ -202,6 +204,9 @@ export class CohortAccumulatorV1 {
   private readonly timeoutIds = new Set<string>();
   private readonly streamIds = new Set<string>();
   private readonly upstreamIds = new Set<string>();
+  /** Terminal ids whose events came from the sample's exact window. */
+  private readonly sampleTerminalIds = new Set<string>();
+  /** All terminal ids, including adjacent windows, used to close the cohort. */
   private readonly terminalIds = new Set<string>();
   private unreadableCount = 0;
 
@@ -224,6 +229,9 @@ export class CohortAccumulatorV1 {
     }
     const terminal = parse.event;
     this.terminalIds.add(terminal.requestId);
+    if (scope === "sample") {
+      this.sampleTerminalIds.add(terminal.requestId);
+    }
     if (terminal.status >= 500) this.fiveXxIds.add(terminal.requestId);
     if (
       terminal.failureKind !== null &&
@@ -260,7 +268,8 @@ export class CohortAccumulatorV1 {
       unresolvedOutcomeCount:
         [...this.sampleAcceptedIds].filter((id) => !this.terminalIds.has(id))
           .length +
-        [...this.terminalIds].filter((id) => !this.acceptedIds.has(id)).length,
+        [...this.sampleTerminalIds].filter((id) => !this.acceptedIds.has(id))
+          .length,
     };
   }
 }
