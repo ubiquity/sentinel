@@ -4,6 +4,17 @@
  * repair job holds), so its state changes are visible to that run's own
  * execution:
  *
+ *  A CANDIDATE-REF REVALIDATION runs before any blocked work is selected for a
+ *  retry grant. The runtime's ONE terminal diagnosis that the managed candidate
+ *  branch ref matched neither the saved candidate head nor the recorded
+ *  published head is re-read from the record's OWN repository surface; only a
+ *  record whose saved descriptor, published head and canonical preservation ref
+ *  all bind to that same repository, task and producing operation, and whose
+ *  live branch ref reports exactly the original saved head, returns to `work`
+ *  with only that blocker cleared. The pass returns immediately after that
+ *  write, so a delivery or review decision is never made in the same run from a
+ *  state the runtime has not yet reconciled; every other identity is untouched.
+ *
  *  1. RETRY PASS — a work record blocked by one of the runtime's TRANSIENT
  *     failures (a model session that produced no trusted receipt or candidate,
  *     an exhausted attempt budget, exhausted review rounds, a review that
@@ -429,7 +440,12 @@ export interface HostedAutonomyGitHubV1 {
    * `development` constant.
    */
   readDefaultBranch(): Promise<string | null>;
-  /** Current tip of one base branch, or null when it cannot be read. */
+  /**
+   * Current tip of one repository branch — the repository's configured base
+   * branch or a managed candidate branch — or null when it cannot be read. The
+   * response must name exactly `refs/heads/<branch>`: a ref that names any
+   * other branch is not evidence for the requested branch and reads as null.
+   */
   readBaseTip(branch: string): Promise<string | null>;
   /**
    * Self gate: true when the exact head carries a completed successful
@@ -1304,6 +1320,112 @@ export function applyHostedRetries(
 }
 
 /**
+ * The runtime's exact diagnosis that the managed candidate branch ref matched
+ * neither the saved candidate head nor the head that record had published. It
+ * is the ONLY blocker this maintenance pass revalidates, and it is cleared only
+ * against the record's own repository, task and producing operation.
+ */
+const CANDIDATE_REF_IDENTITY_MISMATCH =
+  "candidate branch ref identity mismatch";
+
+/** The exact identity one record must prove before its blocker is cleared. */
+interface CandidateRefRevalidationV1 {
+  readonly id: string;
+  readonly repository: RepositoryIdentityV1;
+  readonly branch: string;
+  readonly head: GitSha;
+}
+
+/**
+ * The exact blocked shape this maintenance pass may revalidate: the runtime's
+ * recorded candidate-ref identity mismatch, on a record whose saved candidate
+ * descriptor, published head and canonical preservation ref all bind to the
+ * record's OWN repository, task and producing operation, and whose branch is
+ * the deterministic managed candidate branch of that same task. Anything else
+ * — a different blocker, a foreign or mismatched branch, a missing or
+ * incoherent descriptor, an incompatible wait — is refused here and left
+ * untouched, with no remote read at all. The caller still has to observe the
+ * branch's exact live head before anything is written.
+ */
+async function candidateRefRevalidation(
+  record: HostedAutonomyRecordV1,
+): Promise<CandidateRefRevalidationV1 | null> {
+  if (record.nextStep !== "blocked" || record.wait !== null) return null;
+  const blocker = record.blocker;
+  if (
+    blocker === null || blocker.kind !== "other" ||
+    blocker.message !== CANDIDATE_REF_IDENTITY_MISMATCH
+  ) {
+    return null;
+  }
+  const head = record.target.head;
+  const branch = record.target.branch;
+  const candidateState = record.target.candidateState;
+  if (head === null || branch === null || candidateState === undefined) {
+    return null;
+  }
+  // The managed branch is derived from the task identity: a record pointing at
+  // any other branch is not this record's candidate and is never revalidated.
+  if (branch !== candidateBranch(record.id)) return null;
+  const preserved = candidateState.preserved;
+  if (preserved === null) return null;
+  // The saved descriptor, the published head and the target must agree on the
+  // exact same candidate identity before the live ref is even consulted.
+  if (preserved.head !== head || preserved.base !== record.target.base) {
+    return null;
+  }
+  if (candidateState.publishedHead !== head) return null;
+  if (
+    preserved.ref !== await candidatePreservationRef(
+      record.repository,
+      record.id,
+      preserved.operationKey,
+    )
+  ) {
+    return null;
+  }
+  return { id: record.id, repository: record.repository, branch, head };
+}
+
+/**
+ * The exact repository/task identity one candidate-ref revalidation binds. The
+ * repository part is the record's own identity, never another repository's.
+ */
+function candidateRefKey(record: {
+  readonly id: string;
+  readonly repository: RepositoryIdentityV1;
+}): string {
+  return `${hostedRepositoryKey(record.repository)}\u0000${record.id}`;
+}
+
+/**
+ * The pure transition: exactly these records return to `work` with ONLY the
+ * diagnosed blocker cleared. The intent (null or non-null), wait, target,
+ * counters, evidence and every other durable field are preserved byte for
+ * byte; only the records' `updatedAt` and the snapshot's head and sequence
+ * move, exactly as every other maintenance write does.
+ */
+function applyCandidateRefRevalidations(
+  snapshot: RepairStateSnapshotV1,
+  head: GitSha,
+  records: readonly CandidateRefRevalidationV1[],
+  now: number,
+): RepairStateSnapshotV1 {
+  const selected = new Set(records.map(candidateRefKey));
+  return parseRepairStateSnapshotV1({
+    ...snapshot,
+    stateHead: head,
+    sequence: snapshot.sequence + 1,
+    updatedAt: now,
+    work: snapshot.work.map((record) =>
+      selected.has(candidateRefKey(record))
+        ? { ...record, nextStep: "work", blocker: null, updatedAt: now }
+        : record
+    ),
+  });
+}
+
+/**
  * Every completed receipt this record's delivery identity binds: same
  * repository, pull request, reviewed head and observed base, a result and
  * completion instant, and a reviewer-bound identity with zero uncounted
@@ -1992,6 +2114,88 @@ export async function runHostedAutonomy(
       return null;
     }
   };
+
+  // ---- candidate-ref revalidation pass ------------------------------------
+  // The runtime parks a record when its managed candidate branch ref matched
+  // neither the saved candidate head nor the head that record had published.
+  // That ONE diagnosis is revalidated here, before any blocked work is
+  // selected for a retry grant: every saved identity must bind exactly to this
+  // record's own repository, task and producing operation, and the branch's
+  // live ref must report exactly the original saved head. A record that proves
+  // it returns to `work` with only that blocker cleared, through the same
+  // expected-head CAS and readback as every other maintenance write, and the
+  // pass then returns immediately so no delivery or review decision is made in
+  // the same run from a state the runtime has not yet reconciled. An
+  // unavailable surface or ref, a mismatched identity and every other blocker
+  // leave the snapshot exactly as it was.
+  const revalidated: CandidateRefRevalidationV1[] = [];
+  for (const record of snapshot.work) {
+    const candidate = await candidateRefRevalidation(record);
+    if (candidate === null) continue;
+    const surface = (await scopeFor(record.repository)).surface;
+    if (surface === null) continue;
+    let observed: string | null;
+    try {
+      observed = await surface.readBaseTip(candidate.branch);
+    } catch {
+      observed = null;
+    }
+    if (observed !== candidate.head) continue;
+    revalidated.push(candidate);
+  }
+  if (revalidated.length > 0) {
+    const now = deps.clock.now();
+    if (!Number.isSafeInteger(now) || now < snapshot.updatedAt) {
+      return skipped("clock_invalid", observedHead, actions);
+    }
+    let next: RepairStateSnapshotV1;
+    try {
+      next = applyCandidateRefRevalidations(
+        snapshot,
+        observedHead as GitSha,
+        revalidated,
+        now,
+      );
+    } catch {
+      return skipped("snapshot_invalid", observedHead, actions);
+    }
+    let write: PortResultV1<StateWriteResultV1> | null;
+    try {
+      write = await deps.state.writeRepair(next, observedHead as GitSha);
+    } catch {
+      return failed("write_unavailable", observedHead, actions);
+    }
+    if (write === null || !write.ok) {
+      return failed("write_unavailable", observedHead, actions);
+    }
+    if (write.value.status === "conflict") {
+      return skipped("write_conflict", observedHead, actions);
+    }
+    if (write.value.status === "ambiguous") {
+      return failed("write_ambiguous", observedHead, actions);
+    }
+    const readback = await readRepairSafely(deps.state);
+    if (
+      readback === null || !readback.ok ||
+      readback.value.status !== "found" ||
+      readback.value.head !== write.value.head ||
+      canonicalStringify(readback.value.snapshot) !== canonicalStringify(next)
+    ) {
+      return failed("readback_unverified", observedHead, actions);
+    }
+    for (const record of revalidated) {
+      actions.push(`revalidate:${record.id}:cleared`);
+    }
+    return {
+      kind: "hosted_autonomy",
+      status: "applied",
+      reason: "applied",
+      beforeHead: observedHead,
+      appliedHead: write.value.head,
+      actions,
+      revisions,
+    };
+  }
 
   // ---- retry pass ---------------------------------------------------------
   // A task whose pull request is already merged or closed is delivered or
@@ -2986,6 +3190,11 @@ export function createHostedAutonomyGitHub(
         `/repos/${scope}/git/ref/heads/${branch}`,
       );
       if (ref === null || typeof ref !== "object") return null;
+      // The response must name exactly the requested branch: a ref for another
+      // branch (or one without a ref identity) is never this branch's tip.
+      if ((ref as Record<string, unknown>)["ref"] !== `refs/heads/${branch}`) {
+        return null;
+      }
       const object = (ref as Record<string, unknown>)["object"];
       if (object === null || typeof object !== "object") return null;
       const sha = (object as Record<string, unknown>)["sha"];
