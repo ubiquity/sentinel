@@ -535,7 +535,7 @@ export const OWNER_DEVELOPMENT_INSTALL_CONCURRENCY_RETRY_GENERATION = 59;
  * at generation 61; the earlier 0fc generation 60 rollback remains terminal.
  */
 export const OWNER_DEVELOPMENT_INSTALL_CONCURRENCY_PLANNER_REVISION =
-  "ee9aa0c010148af8d08bca637523ebfbc1988e21" as GitSha;
+  "ddc98af7062b63e2b6b0f1e6b877e32f4675d442" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_CONCURRENCY_PLANNER_GENERATION = 60;
 /** Monotonic rollback target the failed generation 45 candidate rolled to. */
 export const OWNER_DEVELOPMENT_INSTALL_ROLLBACK_TARGET_GENERATION =
