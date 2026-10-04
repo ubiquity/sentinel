@@ -514,6 +514,89 @@ export interface HostedAutonomyDepsV1 {
   historicalMatrix?: HistoricalMatrixQuarantineDepsV1;
 }
 
+/** Exact authenticated legacy wave identities; no runtime-selected history. */
+export const HOSTED_HISTORICAL_RELEASE_WITNESSES = [
+  {
+    commit: "d3e5fe3afcdb22e91e5adbc8c9c842a2fb3b632b" as GitSha,
+    "executionId": "37136320870:1:repair",
+    "logDigest":
+      "42a15377b48d6c450a48ec576601b2c309952bba6d14b4fb5e66bdcfaf16a382",
+    "reservationIds": [
+      "a5a5a4eb8def3fb0dd206be5ef2e75bdcc2650c32ed69fd82949e86864ef3dc3",
+      "2728ed37da51affad5ac17c398e225e75d3cee1072cc4a767843940a37ceb67e",
+      "f99343ab71054a98b8c4a9c29f9f2b19a67437147d52d7b6c366f9e145b84a17",
+      "0df2dcacd998b4d6fbf3feb09ac84bab9364455286eafcab5b1b7f856add56f7",
+      "448359fb26b85d331c68ea900a670be80bcd8545efab306d69530e3a440ea402",
+      "7b91eca5b9a29cc65f1e212194c9b56a8e224165f42e3e6a5f7db629e89632c3",
+      "d5cbbdd18a86599ac27d2f7fe17a0bd9d926b40571205a70baee3caa6bf1882e",
+      "99b14f1d04d90b2406f686d11d76379cc1387766047f8bef75c1a03b36c53741",
+      "40376755c0596ef299de3727841b4b1f09d48584ea7983ee28906d8ce773c1f8",
+      "18c28151264422816eac473c9ba9d24146c44d73a2b35f8b399f71dc0e7a9813",
+      "56c6f2b4f30243601743e10a168e64b94f2ef41b5594220a9fbe03e3d900f32a",
+      "a384e381e286775a57948c62afe39b7bc2377194260b3f5256b3de8929c2345d",
+      "df86a3969fcda87556c790a1657859a16518e8e60e5ab56970d6dfd3b299e418",
+      "8be524c6a84d2437e409cbf1d20f41d0f2494bda32a1134010e712df7afdf22d",
+      "39b9a47b246bc52d0b15eee5ffcae5f33adb1d59a4b4d22822b3f801703a1217",
+      "0e5ef4a90f4a3e96c989640652cd115087d1d5b786bcf44d6f356416c145076c",
+      "421ad1ffb88498aa18bc2d8bc23bded5040872000e0777f8da9a7981c4e8fc84",
+    ],
+  },
+  {
+    commit: "6f7d7807b3735d97641704d6afa5c4e659e849da" as GitSha,
+    "executionId": "37156933037:1:repair",
+    "logDigest":
+      "9e2cd0411cf981d23d9aca67e41f10a8d7bce559c1c0280f58631450f3a16136",
+    "reservationIds": [
+      "05914e39fc4b2d04752f67041dfcef3b22353aecab648e9ab84b576641dcc951",
+      "c574901f8e8976026d9313e620612dceb6a331b425443d3f7182f45b834e8d3b",
+      "b70df1a941fbf9f21192b0925fe3d1a8b21670ece85360f3e8ebad4d4107a213",
+      "39cc9b44691f9664ad7ca565ab4977b19e76435964dbbe2a5a2a59a618f8c2ca",
+      "b7e2233c8ba405373805dadef6403ec8d24a0da5b6442153d33d427b5763930d",
+      "b7275d76529d103fe7da3e7a2fcb3b8e6e444c3b2107e1f4b1d8a0ccd65babc1",
+      "6a86c8363fefd915b575ce2a21b737c0cf4dd48651d1e3e5a38ad9c2495bc63c",
+      "3903063fbf3b049a16ab323283932d3758f624595193633de6dd2528560b2bc4",
+      "be97f92573f794189512e8cffef4e6fb1277abb9d32da8dd3ddada5c4d3f84ec",
+      "0ca007a49aa57177fe054e16a8c76b6f9d20919feb0edde79638eeb63b0339a1",
+      "4977b245da20cd0741801efeb29ab1ce399797e55dbf5e896eb1dc3097e3dd7c",
+      "d36b9d8e05ce00f3d696daba691b442ba84df3db7294bc9138e79e690235c956",
+      "3c8d01b2842eb6c085351099835c120f47dd533d1e96841e59986f038cf6b215",
+      "f55ec1fc902224ab8e70f085778620525febdae37f3fd334e2a2c41ff30589f1",
+      "6d2d0f1b6f462bb134774a46c1642529cc350477f3f8146cba135070399e21a2",
+      "fb5dc155319f94be9d273044c1b3bf1be031b18fc73211803b20811919c815fc",
+      "1333409255344a59b15eff709136f80f0c78a63a5695b7c60a7b2d2323854558",
+      "fb6ffebb981f6f2b815adc0644b867db67886ab1d103542c61391321a75d95e2",
+      "feec7f11741630755a8df4640f80ed1999bd43d4bd01425ede1d44a32cfb3e9e",
+      "9ace0199e2d63e597a400357b74a40d12123dbe5837aa57be5885ae276c68b86",
+      "1e59655194095dc16a9193105b57c1e7c68528f286f6f8e79f6e537fb729551a",
+      "5c1b2a234ec5bd050b17bc7a6cb525ed0dc2534e25bc6b7d01a3952e53fd0f36",
+      "8aa6c1cf368a45c0f0e9f3eab962109a8cc9bb8f002d912adb0c19b85e323549",
+      "b693cb12d961d68bc90e2f0bd36aec9a1822b50135fc69df4c0ce04858445290",
+      "d2d7ae3b0540e7348c75a70ee1d4b9eb058df17690a3752e3b5eb5bf078d263b",
+    ],
+  },
+  {
+    commit: "1a706850cf981273a98521c4b1222a765b9c90ed" as GitSha,
+    "executionId": "37160285420:1:repair",
+    "logDigest":
+      "3a03c95cbc4a10faa78f90cc61444911bddd7ef2f35eb4dadd1daff85ef3cb5a",
+    "reservationIds": [
+      "537ab0051c0d8b1b20002cc45e40b198a96cde83bff3ad1dbe8fa918be06197f",
+      "9bd37b5aa6fe58fc8348699ef437cc08f2b73c115488dcfbb217460dbd4d606b",
+      "83bd09f94fe5895264eb91e972b754e287503c637f3d1a1d0a0c7e1fe6daf793",
+      "b9b116ae25fcf76903209a6bcfc40237c092406d9948448398195b8dacf0052b",
+      "f2f5ace0a637da758688b40c25b953caa57db5db0aa9bdabf339a1953280f08c",
+      "d3e308bab83964b714ad94ae4ea4b361b2d0fcd406ebeba71cb87c0182bbe787",
+      "c89f4a3377ef1c8b2062a0a98599fe9d5f23a44f0b31dcf8367a4d1a0fe74061",
+      "5b3f11483b67d4c3ff407f14ae43ba1c0e1071e32a7beea9db34acbb02828a91",
+      "a2aae7ba3e7e121598ba70fe8a8a5b30f1598efc887b590e6ed9be582a889088",
+      "1ac673010b05e5217222c0e57adeccad1db6f75bf60b2d1bc81f240043fa6263",
+      "43be66f33a484a7d0653cd151fb9f5a3a620cbaad6182fa06a319999306c1c2f",
+      "74bb67bf09a54e1544ba910379a5ac4a31e1faa99a322585209ab0b240e1fff6",
+      "95027b082bcd340e05422cabcb81632908e7a40bb20c51667525716005bea252",
+    ],
+  },
+] as const;
+
 /** Existing native token and read-only artifact route; no release writer or model. */
 export function createHostedHistoricalMatrixQuarantine(input: {
   state: StateReadView & RepairStateWriter;
@@ -523,18 +606,15 @@ export function createHostedHistoricalMatrixQuarantine(input: {
   http?: HttpTransportV1;
   artifactHttp?: HttpTransportV1;
   cooldownMode?: string;
-  historicalReleaseWitness?: {
+  historicalReleaseWitnesses?: readonly {
     commit: GitSha;
     executionId: string;
     logDigest: string;
-  };
+    reservationIds: readonly string[];
+  }[];
 }): HistoricalMatrixQuarantineDepsV1 {
-  const witness = input.historicalReleaseWitness ?? {
-    commit: "d3e5fe3afcdb22e91e5adbc8c9c842a2fb3b632b" as GitSha,
-    executionId: "37136320870:1:repair",
-    logDigest:
-      "42a15377b48d6c450a48ec576601b2c309952bba6d14b4fb5e66bdcfaf16a382",
-  };
+  const witnesses = input.historicalReleaseWitnesses ??
+    HOSTED_HISTORICAL_RELEASE_WITNESSES;
   const client = new GitHubApiClient({
     repository: { owner: "ubiquity", name: "sentinel", installationId: 0 },
     apiBaseUrl: "https://api.github.com",
@@ -559,7 +639,7 @@ export function createHostedHistoricalMatrixQuarantine(input: {
       configs: [],
     }),
     readExecution: (execution) => client.readHostedExecution(execution),
-    historicalReleaseWitness: {
+    historicalReleaseWitnesses: witnesses.map((witness) => ({
       ...witness,
       reject: (proof, expectedHead) => {
         const historicalState: StateReadView = {
@@ -586,7 +666,7 @@ export function createHostedHistoricalMatrixQuarantine(input: {
             createActionsMatrixArtifactHttpTransport(),
         }).rejectHistorical!({ proof });
       },
-    },
+    })),
     transport: createActionsMatrixArtifactTransport({
       state: input.state,
       clock: input.clock,

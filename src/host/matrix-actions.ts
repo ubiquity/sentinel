@@ -64,16 +64,17 @@ export interface HistoricalMatrixQuarantineDepsV1 {
   clock: Clock;
   budget: Pick<BudgetControllerV1, "settleModelStart">;
   transport: MatrixArtifactTransportV1;
-  /** One owner-selected release witness; never a history scan or fallback. */
-  historicalReleaseWitness?: {
+  /** Closed owner-selected release witnesses; never a history scan or fallback. */
+  historicalReleaseWitnesses?: readonly {
     commit: GitSha;
     executionId: string;
     logDigest: string;
+    reservationIds: readonly string[];
     reject(
       proof: HostedRunProofV1,
       expectedHead: GitSha,
     ): Promise<readonly MatrixRejectedWaveV1[]>;
-  };
+  }[];
   readExecution(
     execution: HostedExecutionIntentV1,
   ): Promise<PortResultV1<HostedExecutionSettlementV1 | null>>;
@@ -285,6 +286,43 @@ export async function runHistoricalMatrixQuarantine(
   if (!repair.ok || repair.value.status !== "found") {
     throw new Error("historical matrix state unavailable");
   }
+  const [witness, ...remainingWitnesses] = deps.historicalReleaseWitnesses ??
+    [];
+  if (witness) {
+    const selected = repair.value.snapshot.work.filter((row) =>
+      row.intent?.kind === "implementation" && row.nextStep !== "done" &&
+      !(row.nextStep === "blocked" && row.blocker?.kind === "other" &&
+        row.blocker.message === HISTORICAL_MATRIX_QUARANTINE) &&
+      witness.reservationIds.some((id) =>
+        row.intent?.requestId === id ||
+        row.intent?.key === implementationIntentKey(id)
+      )
+    );
+    if (selected.length === 0) {
+      return runHistoricalMatrixQuarantine({
+        ...deps,
+        historicalReleaseWitnesses: remainingWitnesses,
+      });
+    }
+    for (const work of selected) {
+      const reservation = repair.value.snapshot.reservations.find((row) =>
+        row.id === work.intent?.requestId
+      );
+      if (
+        work.nextStep !== "work" || work.target.candidateState !== undefined ||
+        !reservation || !witness.reservationIds.includes(reservation.id) ||
+        work.intent?.key !== implementationIntentKey(reservation.id) ||
+        canonicalStringify(work.repository) !==
+          canonicalStringify(reservation.repository) ||
+        (reservation.outcome !== "reserved" &&
+          reservation.outcome !== "ambiguous")
+      ) {
+        throw new Error(
+          "historical matrix selected reservation binding unavailable",
+        );
+      }
+    }
+  }
   if (
     !repair.value.snapshot.work.some((row) =>
       row.nextStep === "work" && row.intent?.kind === "implementation" &&
@@ -337,8 +375,7 @@ export async function runHistoricalMatrixQuarantine(
   const savedProof = freshRuntime?.lastExecutionProof;
   let historical: HistoricalProofCustodyV1 | undefined;
   let witnessedProof: HostedRunProofV1 | undefined;
-  if (deps.historicalReleaseWitness) {
-    const witness = deps.historicalReleaseWitness;
+  if (witness) {
     const saved = await deps.state.readReleaseAt?.({
       commit: witness.commit,
       expectedHead: freshRelease.value.head,
@@ -368,12 +405,12 @@ export async function runHistoricalMatrixQuarantine(
     };
   }
   const execution = witnessedProof?.execution ??
-    (savedProof?.execution.purpose === "ordinary" &&
-        savedProof.outcome !== "not_started"
-      ? savedProof.execution
-      : current?.purpose === "ordinary" &&
-          currentNative?.outcome !== "not_started"
+    (current?.purpose === "ordinary" && currentNative !== null &&
+        currentNative.outcome !== "not_started"
       ? current
+      : savedProof?.execution.purpose === "ordinary" &&
+          savedProof.outcome !== "not_started"
+      ? savedProof.execution
       : null);
   if (!execution) {
     throw new Error("historical matrix saved execution unavailable");
@@ -397,11 +434,14 @@ export async function runHistoricalMatrixQuarantine(
     throw new Error("historical matrix native custody unavailable");
   }
   const waves = historical
-    ? await deps.historicalReleaseWitness!.reject(
+    ? await witness!.reject(
       proof,
       historical.expectedHead,
     )
     : await deps.transport.rejectHistorical({ proof });
+  if (historical && waves.length === 0) {
+    throw new Error("historical matrix selected witness rejection unavailable");
+  }
   if (waves.length === 0) {
     const fresh = await deps.state.readRepair();
     if (
@@ -412,12 +452,6 @@ export async function runHistoricalMatrixQuarantine(
       canonicalStringify(fresh.value.snapshot.reservations) !==
         canonicalStringify(repair.value.snapshot.reservations)
     ) throw new Error("historical matrix applicability changed");
-    if (historical) {
-      return runHistoricalMatrixQuarantine({
-        ...deps,
-        historicalReleaseWitness: undefined,
-      });
-    }
   }
   let count = 0;
   for (const wave of waves) {
@@ -429,12 +463,25 @@ export async function runHistoricalMatrixQuarantine(
       throw new Error("historical matrix rejection identity unavailable");
     }
     for (const captured of wave.affected) {
+      if (
+        witness && !witness.reservationIds.includes(captured.reservation.id)
+      ) {
+        throw new Error(
+          "historical matrix rejection reservation outside witness",
+        );
+      }
       await quarantineRow(deps, wave, captured, current, historical);
       count++;
     }
   }
   if (!await proofInCustody(deps, proof, current, historical)) {
     throw new Error("historical matrix final custody changed");
+  }
+  if (historical) {
+    count += await runHistoricalMatrixQuarantine({
+      ...deps,
+      historicalReleaseWitnesses: remainingWitnesses,
+    });
   }
   return count;
 }
