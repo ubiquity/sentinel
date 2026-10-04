@@ -833,7 +833,10 @@ for (
   });
 }
 
-async function freshMatrixArtifacts(noStart17 = false) {
+async function freshMatrixArtifacts(
+  noStart17 = false,
+  nativeScopedOnly = false,
+) {
   const r = await rig();
   try {
     if (noStart17) {
@@ -1146,6 +1149,25 @@ async function freshMatrixArtifacts(noStart17 = false) {
           });
         }
         if (parsed.pathname.endsWith("/artifacts")) {
+          if (
+            nativeScopedOnly &&
+            parsed.pathname === "/repos/ubiquity/sentinel/actions/artifacts"
+          ) {
+            return Promise.resolve(
+              new Response(
+                JSON.stringify({
+                  total_count: artifactRows.length + 100,
+                  artifacts: artifactRows,
+                }),
+                {
+                  headers: {
+                    link:
+                      '<https://api.github.com/repositories/123/actions/artifacts?per_page=100&page=2>; rel="next"',
+                  },
+                },
+              ),
+            );
+          }
           const rows = available && !parsed.pathname.includes("/runs/72/")
             ? artifactRows
             : [];
@@ -1238,6 +1260,37 @@ async function freshMatrixArtifacts(noStart17 = false) {
     };
     const digestControl = await r.store.readRepair();
     assert.ok(digestControl.ok && digestControl.value.status === "found");
+    if (nativeScopedOnly) {
+      await aggregate("native-scoped", true, {
+        planDigest: planner.planDigest,
+      });
+      assert.ok(
+        artifactCalls.some((url) =>
+          new URL(url).pathname ===
+            "/repos/ubiquity/sentinel/actions/runs/71/artifacts"
+        ),
+      );
+      assert.ok(
+        !artifactCalls.some((url) =>
+          new URL(url).pathname === "/repos/ubiquity/sentinel/actions/artifacts"
+        ),
+      );
+      const imported = await r.store.readRepair();
+      assert.ok(imported.ok && imported.value.status === "found");
+      assert.equal(
+        imported.value.snapshot.work.filter((row) =>
+          row.target.head !== null &&
+          row.intent?.kind === "candidate_preservation"
+        ).length,
+        2,
+      );
+      assert.equal(
+        modelCalls,
+        2,
+        "only isolated fake model cells ran; aggregate never starts inference",
+      );
+      return;
+    }
     if (noStart17) {
       const setPlan = async (plan: typeof planner.plan) => {
         const bytes = await zip([{ name: "plan.json", content: encode(plan) }]);
@@ -1436,6 +1489,8 @@ async function freshMatrixArtifacts(noStart17 = false) {
 }
 Deno.test("matrix actions: actual fresh intake plans both targets, isolated cells overlap, archive recovery publishes on a fresh aggregate", () =>
   freshMatrixArtifacts());
+Deno.test("matrix actions: native carrier scopes real in-progress artifact recovery before import", () =>
+  freshMatrixArtifacts(false, true));
 Deno.test("matrix actions: advancing planner clock recovers seventeen no-start cells", () =>
   freshMatrixArtifacts(true));
 for (

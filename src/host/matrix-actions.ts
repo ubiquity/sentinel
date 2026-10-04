@@ -921,6 +921,7 @@ export async function runActionsMatrixAggregateCycles(
     requests,
     runtimeSha: input.controllerSha,
     launcherSha: host.run.launcherSha,
+    ...(carrier === undefined ? {} : { currentRun: host.run }),
   });
   for (const wave of waves) {
     if (
