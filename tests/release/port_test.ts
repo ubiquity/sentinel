@@ -1211,7 +1211,23 @@ Deno.test(
         };
       },
     );
-    const port = client(transport, new TestClock(T0 + 65_001));
+    const clock = new TestClock(T0 + 35_001);
+    const port = client(transport, clock);
+
+    const early = await port.sampleMetrics({
+      baseUrl: MANAGED_URL,
+      metricsPath: "/health",
+      identity: DEP_1,
+      windowStart: T0,
+      windowEnd: T0 + 30_000,
+      domain: "ai.ubq.fi",
+    });
+    assert.ok(early.ok);
+    if (!early.ok) return;
+    assert.equal(early.value.requestCount, 1);
+    assert.equal(early.value.coverage.status, "incomplete");
+
+    clock.at(T0 + 65_001);
 
     const first = await port.sampleMetrics({
       baseUrl: MANAGED_URL,
@@ -1287,7 +1303,7 @@ Deno.test(
         };
       },
     );
-    const port = client(transport, new TestClock(T0 + 95_001));
+    const port = client(transport, new TestClock(T0 + 125_001));
     const sample = await port.sampleMetrics({
       baseUrl: MANAGED_URL,
       metricsPath: "/health",

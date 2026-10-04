@@ -850,18 +850,22 @@ export class ReleaseController {
       return this.blocked(record.id, custom.detail);
     }
 
-    // Candidate window slots, strictly from persisted state. All due slots
-    // since the last persisted sample are collected in one run; every slot
-    // keeps its exact persisted window. When the observation is late by more
-    // than one interval (an unobserved monitoring gap), continuity restarts:
+    // Candidate window slots, strictly from persisted state. A slot is due
+    // only after its own window, the following adjacent window, and the
+    // source lag have elapsed, so a boundary-spanning request can be joined
+    // before the slot is persisted. Every slot keeps its exact persisted
+    // window. When the observation is late by more than one interval beyond
+    // that safe point (an unobserved monitoring gap), continuity restarts:
     // historical slots are never accepted as if sampled while the monitor was
     // absent. A slot whose telemetry is incomplete/unreadable is likewise an
     // interrupted monitor and is never reconstructed.
     const startedAt = record.monitoring.startedAt;
     const now = this.clock.now();
     const collected = record.monitoring.samples;
+    const safeObservedAt = now - RELEASE_SAMPLE_INTERVAL_MS;
     const dueSlots = Math.floor(
-      (now - this.target.logsLagMs - startedAt) / RELEASE_SAMPLE_INTERVAL_MS,
+      (safeObservedAt - this.target.logsLagMs - startedAt) /
+        RELEASE_SAMPLE_INTERVAL_MS,
     ) - collected;
     if (dueSlots <= 0) {
       return portOk({
@@ -875,7 +879,7 @@ export class ReleaseController {
         startedAt,
         RELEASE_SAMPLE_INTERVAL_MS,
         collected,
-        now,
+        safeObservedAt,
         this.target.logsLagMs,
       )
     ) {

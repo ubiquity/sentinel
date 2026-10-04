@@ -452,13 +452,14 @@ export class DenoReleaseRESTClient implements DenoReleasePort {
     if (config.windowStart >= config.windowEnd) {
       return portError("invalid", "metrics window is inverted");
     }
-    if (config.windowEnd > this.clock.now()) {
+    const now = this.clock.now();
+    if (config.windowEnd > now) {
       return portError(
         "invalid",
         "a telemetry window cannot end in the future",
       );
     }
-    if (config.windowEnd + this.config.logsLagMs > this.clock.now()) {
+    if (config.windowEnd + this.config.logsLagMs > now) {
       // Trusted explicit coverage policy: a window is only due after the
       // source lag allowance, so missing in-flight telemetry is never read
       // as a complete zero-count sample.
@@ -507,6 +508,16 @@ export class DenoReleaseRESTClient implements DenoReleasePort {
       });
 
       for (const adjacent of adjacentWindows) {
+        // Do not ask the logs source for a complete future window. A sample
+        // with an accepted request at this boundary is retryable once that
+        // adjacent window's own lag has elapsed; treating the partial scan as
+        // a terminal gap would make the controller discard a healthy slot.
+        if (
+          adjacent.start >= config.windowEnd &&
+          adjacent.end + this.config.logsLagMs > now
+        ) {
+          break;
+        }
         const joined = await this.scanLogWindow(
           config,
           adjacent.start,

@@ -39,6 +39,7 @@ import {
 } from "../../src/release/acceptance.ts";
 import { RELEASE_SAMPLE_INTERVAL_MS } from "../../src/release/config.ts";
 import {
+  acceptedEvent,
   asTransport,
   DEP_0,
   DEP_1,
@@ -59,6 +60,7 @@ import {
   storeAt,
   T0,
   targetConfig,
+  terminalEvent,
   TestClock,
 } from "./helpers.ts";
 
@@ -173,9 +175,9 @@ async function promoteToMonitoring(
 }
 
 /**
- * Steps the monitoring window one slot per run: each run's observation is at
- * most one interval late, so the acceptance window is continuously sampled
- * (no unobserved gap). Returns the number of slots actually persisted.
+ * Steps the monitoring window one slot per run: each run waits for the next
+ * adjacent slot as well as the source lag, so every persisted sample has a
+ * complete boundary join. Returns the number of slots actually persisted.
  */
 async function stepSlots(
   scene: ScenarioV1,
@@ -188,10 +190,10 @@ async function stepSlots(
   }
   const startedAt = record.monitoring.startedAt;
   for (let k = 0; k < count; k++) {
-    // Slot k ends at startedAt + (k+1)*interval; it is due only after the
-    // trusted log lag has elapsed. Exactly one slot is due per run.
+    // Slot k is sampled after its following slot ends and the trusted log lag
+    // has elapsed. Exactly one slot is due per run.
     scene.clock.at(
-      startedAt + (k + 1) * RELEASE_SAMPLE_INTERVAL_MS + 5_000 + 1,
+      startedAt + (k + 2) * RELEASE_SAMPLE_INTERVAL_MS + 5_000 + 1,
     );
     const result = await scene.controller.run();
     assert.ok(result.ok, "expected a cycle result");
@@ -310,6 +312,13 @@ async function completeWindow(
   slotCount = 60,
 ): Promise<PortResultV1<ReleaseCycleResultV1>> {
   await seedMonitorWindow(scene, slotCount - 1);
+  const records = await scene.records();
+  const startedAt = records[0].monitoring.startedAt;
+  if (startedAt === null) throw new Error("missing window start");
+  scene.clock.at(
+    startedAt + (slotCount + 1) * RELEASE_SAMPLE_INTERVAL_MS +
+      targetConfig().logsLagMs + 1,
+  );
   return scene.controller.run();
 }
 
@@ -460,6 +469,7 @@ Deno.test(
       const written = await store.writeRelease(snapshot, read.value.head);
       assert.ok(written.ok, "null-counter fixture must be applied");
 
+      scene.clock.advance(RELEASE_SAMPLE_INTERVAL_MS);
       assertCycle(await scene.controller.run(), "advanced");
       const records = await scene.records();
       assert.equal(records[0].phase, "failed");
@@ -553,14 +563,14 @@ Deno.test("checkpoint: an interrupted monitor resets continuity and the observat
     if (firstStart === null) throw new Error("missing start");
     // One healthy slot persists, then the log source becomes unreadable for
     // the next slot: continuity restarts and nothing is reconstructed.
-    scene.clock.at(firstStart + 35_000);
+    scene.clock.at(firstStart + 65_000);
     assertCycle(await scene.controller.run(), "persisted");
     let records = await scene.records();
     assert.equal(records[0].monitoring.samples, 1);
     assert.notEqual(records[0].monitoring.startedAt, null);
     const secondStart = records[0].monitoring.startedAt!;
     scene.transport.logsReject = true;
-    scene.clock.at(secondStart + 65_000);
+    scene.clock.at(secondStart + 95_000);
     assertCycle(await scene.controller.run(), "persisted");
     records = await scene.records();
     assert.equal(records[0].monitoring.samples, 0);
@@ -619,7 +629,7 @@ Deno.test("checkpoint: managed pass plus Cloudflare-identified 403 warns only", 
     await promoteToMonitoring(scene);
     scene.transport.customStatus = 403;
     scene.transport.customCloudflare = true;
-    scene.clock.advance(35_001);
+    scene.clock.advance(65_001);
     const result = await scene.controller.run();
     assert.ok(result.ok);
     if (result.ok) {
@@ -764,6 +774,89 @@ Deno.test("checkpoint: consecutive slots persist their exact windows with contin
   }
 });
 
+Deno.test(
+  "checkpoint: a future adjacent terminal is revisited without losing the slot",
+  async () => {
+    const scene = await makeScenario();
+    try {
+      const record = await promoteToMonitoring(scene);
+      const startedAt = record.monitoring.startedAt;
+      if (startedAt === null) throw new Error("missing window start");
+      const interval = RELEASE_SAMPLE_INTERVAL_MS;
+      const lag = targetConfig().logsLagMs;
+
+      scene.transport.any(
+        "GET",
+        new RegExp("^/v2/apps/[^/]+/logs$"),
+        (url) => {
+          const revisionId = url.searchParams.get("revision_id");
+          const start = Date.parse(url.searchParams.get("start") ?? "0");
+          if (revisionId !== DEP_1.revisionId) {
+            return {
+              kind: "response",
+              status: 200,
+              body: JSON.stringify({ logs: [], next_cursor: null }),
+            };
+          }
+          const slot = Math.round((start - startedAt) / interval);
+          const events: { at: number; message: string }[] = [];
+          if (slot >= 0 && slot <= 3) {
+            if (slot < 3) {
+              const at = startedAt + (slot + 1) * interval - 1;
+              events.push({
+                at,
+                message: acceptedEvent({
+                  requestId: `boundary-${slot}`,
+                  identity: DEP_1,
+                  timestamp: at,
+                }),
+              });
+            }
+            if (slot > 0) {
+              const at = startedAt + slot * interval + 10_000;
+              events.push({
+                at,
+                message: terminalEvent({
+                  requestId: `boundary-${slot - 1}`,
+                  identity: DEP_1,
+                  timestamp: at,
+                }),
+              });
+            }
+          }
+          const visible = events.filter((event) =>
+            event.at + lag <= scene.clock.now()
+          );
+          return {
+            kind: "response",
+            status: 200,
+            body: JSON.stringify({
+              logs: visible.map((event) => ({
+                timestamp: new Date(event.at).toISOString(),
+                level: "info",
+                message: event.message,
+                revision_id: DEP_1.revisionId,
+              })),
+              next_cursor: null,
+            }),
+          };
+        },
+      );
+
+      for (let slot = 0; slot < 3; slot++) {
+        scene.clock.at(startedAt + (slot + 2) * interval + lag + 1);
+        assertCycle(await scene.controller.run(), "persisted");
+      }
+      const after = await scene.records();
+      assert.equal(after[0].monitoring.startedAt, startedAt);
+      assert.equal(after[0].monitoring.samples, 3);
+      assert.equal(after[0].acceptance?.samples.length, 3);
+    } finally {
+      await scene.cleanup();
+    }
+  },
+);
+
 Deno.test("checkpoint: an unobserved monitoring gap restarts the window, historical slots are never accepted", async () => {
   const scene = await makeScenario({
     logs: { accept: 100, fails: { fiveXx: 1 } },
@@ -772,8 +865,8 @@ Deno.test("checkpoint: an unobserved monitoring gap restarts the window, histori
     const record = await promoteToMonitoring(scene);
     const startedAt = record.monitoring.startedAt;
     if (startedAt === null) throw new Error("missing start");
-    // Slot 0 is due after its window end plus the trusted lag; collect it.
-    scene.clock.at(startedAt + 35_000);
+    // Slot 0 is due after its following window and the trusted lag; collect it.
+    scene.clock.at(startedAt + 65_000);
     assertCycle(await scene.controller.run(), "persisted");
     let records = await scene.records();
     assert.equal(records[0].monitoring.samples, 1);
@@ -782,14 +875,14 @@ Deno.test("checkpoint: an unobserved monitoring gap restarts the window, histori
     // than one interval late, so two slots are overdue — an unobserved gap.
     // The window must restart fresh; the historical slot telemetry must never
     // be queried or accepted as continuous coverage.
-    scene.clock.at(startedAt + 95_000);
+    scene.clock.at(startedAt + 125_000);
     assertCycle(await scene.controller.run(), "persisted");
     records = await scene.records();
     assert.equal(records[0].monitoring.samples, 0);
     assert.notEqual(records[0].monitoring.startedAt, startedAt);
     assert.equal(
       records[0].monitoring.startedAt,
-      nextAlignedWindowStart(RELEASE_SAMPLE_INTERVAL_MS, startedAt + 95_000),
+      nextAlignedWindowStart(RELEASE_SAMPLE_INTERVAL_MS, startedAt + 125_000),
     );
     assert.equal(records[0].acceptance, null);
     assert.equal(
@@ -813,7 +906,7 @@ Deno.test("checkpoint: a degraded managed health sample never advances the accep
     // The candidate identity serves 200 with exact identity headers but the
     // required body marker is missing: the managed sample is NOT healthy.
     scene.transport.managedBodyMissing = true;
-    scene.clock.at(startedAt + 35_000);
+    scene.clock.at(startedAt + 65_000);
     assertCycle(await scene.controller.run(), "persisted");
     const records = await scene.records();
     assert.equal(records[0].monitoring.samples, 0);
@@ -838,7 +931,7 @@ Deno.test("checkpoint: missing baseline telemetry persists explicit insufficient
     const record = await promoteToMonitoring(scene);
     const startedAt = record.monitoring.startedAt;
     if (startedAt === null) throw new Error("missing start");
-    scene.clock.at(startedAt + 35_000);
+    scene.clock.at(startedAt + 65_000);
     const result = await scene.controller.run(); // must resolve, never throw
     assert.ok(result.ok, "the missing baseline must not crash the run");
     if (!result.ok) return;
