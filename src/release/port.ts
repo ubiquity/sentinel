@@ -59,7 +59,12 @@ import {
   type DenoHttpTransportV1,
   denoRestCall,
 } from "./http.ts";
-import { CohortAccumulatorV1, parseCohortMessage } from "./log-cohort.ts";
+import {
+  CohortAccumulatorV1,
+  type CohortKindsV1,
+  type CohortWindowScopeV1,
+  parseCohortMessage,
+} from "./log-cohort.ts";
 
 /** Finite deadline for one unauthenticated health probe, in ms. */
 const DENO_HEALTH_TIMEOUT_MS = 5_000;
@@ -447,13 +452,14 @@ export class DenoReleaseRESTClient implements DenoReleasePort {
     if (config.windowStart >= config.windowEnd) {
       return portError("invalid", "metrics window is inverted");
     }
-    if (config.windowEnd > this.clock.now()) {
+    const now = this.clock.now();
+    if (config.windowEnd > now) {
       return portError(
         "invalid",
         "a telemetry window cannot end in the future",
       );
     }
-    if (config.windowEnd + this.config.logsLagMs > this.clock.now()) {
+    if (config.windowEnd + this.config.logsLagMs > now) {
       // Trusted explicit coverage policy: a window is only due after the
       // source lag allowance, so missing in-flight telemetry is never read
       // as a complete zero-count sample.
@@ -463,43 +469,77 @@ export class DenoReleaseRESTClient implements DenoReleasePort {
     }
 
     const accumulator = new CohortAccumulatorV1();
-    const kinds = {
+    const kinds: CohortKindsV1 = {
       timeoutFailureKinds: this.config.timeoutFailureKinds,
       upstreamWideFailureKinds: this.config.upstreamWideFailureKinds,
     };
-    let cursor: string | null = null;
-    let pages = 0;
-    let reason: string | null = null;
-    for (;;) {
-      pages++;
-      if (pages > DENO_MAX_LOG_PAGES) {
-        reason = "log pagination exceeded the page bound";
-        break;
+    const currentScan = await this.scanLogWindow(
+      config,
+      config.windowStart,
+      config.windowEnd,
+      accumulator,
+      kinds,
+      "sample",
+    );
+    if (!currentScan.ok) return currentScan;
+    let reason: string | null = currentScan.value;
+    let counts = accumulator.counts();
+
+    // A request cohort may straddle one slot boundary. Query each adjacent
+    // exact window only when the sample has an unmatched event, and use those
+    // events solely to close the sample's accepted cohort. This keeps the
+    // denominator bound to the requested window while allowing the terminal
+    // event to be observed on the other side of its boundary.
+    if (
+      reason === null && counts.unreadableCount === 0 &&
+      counts.unresolvedOutcomeCount > 0
+    ) {
+      const windowLength = config.windowEnd - config.windowStart;
+      const adjacentWindows: { start: number; end: number }[] = [];
+      if (config.windowStart >= windowLength) {
+        adjacentWindows.push({
+          start: config.windowStart - windowLength,
+          end: config.windowStart,
+        });
       }
-      const page = await this.readLogPage(config, cursor);
-      if (!page.ok) {
-        if (cursor === null && pages === 1) return page;
-        reason = "log pagination was interrupted";
-        break;
-      }
-      const parsed = page.value;
-      for (const entry of parsed.entries) {
-        accumulator.add(
-          parseCohortMessage(entry.message, config.identity),
+      adjacentWindows.push({
+        start: config.windowEnd,
+        end: config.windowEnd + windowLength,
+      });
+
+      for (const adjacent of adjacentWindows) {
+        // Do not ask the logs source for a complete future window. A sample
+        // with an accepted request at this boundary is retryable once that
+        // adjacent window's own lag has elapsed; treating the partial scan as
+        // a terminal gap would make the controller discard a healthy slot.
+        if (
+          adjacent.start >= config.windowEnd &&
+          adjacent.end + this.config.logsLagMs > now
+        ) {
+          break;
+        }
+        const joined = await this.scanLogWindow(
+          config,
+          adjacent.start,
+          adjacent.end,
+          accumulator,
           kinds,
+          "adjacent",
         );
+        if (!joined.ok) {
+          reason = "adjacent log pagination was interrupted";
+          break;
+        }
+        if (joined.value !== null) {
+          reason = joined.value;
+          break;
+        }
+        counts = accumulator.counts();
+        if (counts.unresolvedOutcomeCount === 0) break;
       }
-      for (let i = 0; i < parsed.unreadableEntries; i++) {
-        accumulator.add({ kind: "unreadable" }, kinds);
-      }
-      if (parsed.nextCursor === null) {
-        cursor = null;
-        break;
-      }
-      cursor = parsed.nextCursor;
     }
 
-    const counts = accumulator.counts();
+    counts = accumulator.counts();
     if (reason === null && counts.unreadableCount > 0) {
       reason = "log scan contained unreadable entries";
     }
@@ -550,6 +590,51 @@ export class DenoReleaseRESTClient implements DenoReleasePort {
   // -------------------------------------------------------------------------
   // Internals.
   // -------------------------------------------------------------------------
+
+  private async scanLogWindow(
+    config: MetricsSampleConfigV1,
+    windowStart: number,
+    windowEnd: number,
+    accumulator: CohortAccumulatorV1,
+    kinds: CohortKindsV1,
+    scope: CohortWindowScopeV1,
+  ): Promise<PortResultV1<string | null>> {
+    let cursor: string | null = null;
+    let pages = 0;
+    let reason: string | null = null;
+    for (;;) {
+      pages++;
+      if (pages > DENO_MAX_LOG_PAGES) {
+        reason = "log pagination exceeded the page bound";
+        break;
+      }
+      const page = await this.readLogPage(
+        config,
+        cursor,
+        windowStart,
+        windowEnd,
+      );
+      if (!page.ok) {
+        if (cursor === null && pages === 1) return page;
+        reason = "log pagination was interrupted";
+        break;
+      }
+      const parsed = page.value;
+      for (const entry of parsed.entries) {
+        accumulator.add(
+          parseCohortMessage(entry.message, config.identity),
+          kinds,
+          scope,
+        );
+      }
+      for (let i = 0; i < parsed.unreadableEntries; i++) {
+        accumulator.add({ kind: "unreadable" }, kinds, scope);
+      }
+      if (parsed.nextCursor === null) break;
+      cursor = parsed.nextCursor;
+    }
+    return portOk(reason);
+  }
 
   private missingSample(
     config: MetricsSampleConfigV1,
@@ -885,6 +970,8 @@ export class DenoReleaseRESTClient implements DenoReleasePort {
   private async readLogPage(
     config: MetricsSampleConfigV1,
     cursor: string | null,
+    windowStart = config.windowStart,
+    windowEnd = config.windowEnd,
   ): Promise<
     PortResultV1<{
       entries: { message: string }[];
@@ -893,8 +980,8 @@ export class DenoReleaseRESTClient implements DenoReleasePort {
     }>
   > {
     const query = new URLSearchParams({
-      start: toRfc3339(config.windowStart),
-      end: toRfc3339(config.windowEnd),
+      start: toRfc3339(windowStart),
+      end: toRfc3339(windowEnd),
       revision_id: config.identity.revisionId,
       limit: String(DENO_LOGS_PAGE_LIMIT),
     });
