@@ -41,7 +41,16 @@ import {
   SOURCE_TTL_MS,
   syntheticBytes,
 } from "../adapters/gateway/helpers.ts";
-import { ScriptedResolver } from "../release/helpers.ts";
+import {
+  acceptedEvent,
+  DEP_0,
+  LOGS_RE,
+  publishRepairRequest,
+  requestFor,
+  ScriptedResolver,
+  terminalEvent,
+} from "../release/helpers.ts";
+import { RELEASE_SAMPLE_INTERVAL_MS } from "../../src/release/config.ts";
 import { REPO_2, repositoryConfig } from "../budget/helpers.ts";
 import type { GitSha } from "../../src/contracts/brands.ts";
 import { portError, portOk } from "../../src/contracts/ports.ts";
@@ -390,6 +399,171 @@ Deno.test(
       );
     } finally {
       await rig.ctx.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "entrypoint: an adjacent terminal emitted after the old first-due instant completes the monitoring window without a restart",
+  async () => {
+    const ctx = await makeIntegrationCtx("adjacent-terminal");
+    try {
+      await publishRepairRequest(
+        ctx,
+        requestFor("release-request-adjacent-0001", {
+          revision: SHA3,
+          source: {
+            pullRequest: 1,
+            reviewRequestId: "review-req-1",
+            reviewReceiptId: null,
+            head: SHA3,
+            base: SHA2,
+          },
+        }),
+      );
+      const rig = makeReleaseRig(ctx, { resolver: new ScriptedResolver() });
+      rig.resolver!.outcome = {
+        ok: true,
+        value: {
+          status: "found",
+          receipt: {
+            buildTransactionId: `txn-${DEP_2.revisionId}`,
+            identity: DEP_2,
+          },
+        },
+      } as const;
+
+      // Time-driven log source: the boundary request is accepted at the end of
+      // the first candidate window and its 502 terminal is emitted inside the
+      // successor window, after the OLD first-due instant (slot end + source
+      // lag). Every other window serves a complete 100-request cohort.
+      const firstCandidateWindowStart: { value: number | null } = {
+        value: null,
+      };
+      const emitOffsetMs = RELEASE_SAMPLE_INTERVAL_MS + 10_000;
+      const cohort = (identity: typeof DEP_2, start: number): string[] => {
+        const messages: string[] = [];
+        for (let i = 0; i < 100; i++) {
+          const requestId = `${identity.revisionId}-adjacent-${i}`;
+          messages.push(
+            acceptedEvent({ requestId, identity, timestamp: start + i }),
+          );
+          messages.push(
+            terminalEvent({
+              requestId,
+              identity,
+              timestamp: start + i,
+              status: 200,
+            }),
+          );
+        }
+        return messages;
+      };
+      rig.transport.any("GET", LOGS_RE, (url) => {
+        const start = Date.parse(url.searchParams.get("start") ?? "0");
+        const revisionId = url.searchParams.get("revision_id") ?? "";
+        const candidate = revisionId === DEP_2.revisionId;
+        const identity = candidate ? DEP_2 : DEP_0;
+        if (candidate && firstCandidateWindowStart.value === null) {
+          firstCandidateWindowStart.value = start;
+        }
+        const first = firstCandidateWindowStart.value;
+        let messages: string[] = [];
+        if (!candidate) {
+          messages = cohort(identity, start);
+        } else if (first !== null && start === first) {
+          messages = cohort(identity, start);
+          messages.push(
+            acceptedEvent({
+              requestId: "adjacent-late",
+              identity,
+              timestamp: start + RELEASE_SAMPLE_INTERVAL_MS - 1,
+            }),
+          );
+        } else if (
+          first !== null && start === first + RELEASE_SAMPLE_INTERVAL_MS
+        ) {
+          messages = cohort(identity, start);
+          if (rig.clock.now() >= first + emitOffsetMs) {
+            messages.push(
+              terminalEvent({
+                requestId: "adjacent-late",
+                identity,
+                timestamp: first + emitOffsetMs,
+                status: 502,
+              }),
+            );
+          }
+        } else if (
+          first !== null && start > first + RELEASE_SAMPLE_INTERVAL_MS
+        ) {
+          messages = cohort(identity, start);
+        }
+        return {
+          kind: "response",
+          status: 200,
+          body: JSON.stringify({
+            logs: messages.map((message, index) => ({
+              timestamp: new Date(start + index).toISOString(),
+              level: "info",
+              message,
+              revision_id: identity.revisionId,
+            })),
+            next_cursor: null,
+          }),
+        };
+      });
+
+      const begun = await rig.run();
+      assert.ok(begun.ok, JSON.stringify(begun));
+      // The scheduled entrypoint keeps the active monitor alive and returns
+      // only after the window is accepted.
+      const completed = await rig.run();
+      assert.ok(completed.ok, JSON.stringify(completed));
+
+      const records = await rig.records();
+      assert.equal(records.length, 1);
+      const record = records[0];
+      assert.equal(record.phase, "accepted");
+      const acceptance = record.acceptance;
+      assert.ok(acceptance, "accepted record carries the persisted evidence");
+      if (acceptance === null) return;
+      assert.equal(acceptance.samples.length, 60);
+      assert.equal(acceptance.baseline.length, 60);
+      assert.equal(acceptance.continuous, true);
+      assert.equal(acceptance.passed, true);
+      // The monitor never restarted: the first persisted sample is the exact
+      // first candidate window whose telemetry was queried, at the 30-second
+      // slot cadence.
+      const firstStart = firstCandidateWindowStart.value;
+      assert.ok(firstStart !== null, "candidate telemetry was queried");
+      if (firstStart === null) return;
+      // Every slot keeps the exact 30-second persisted window from the single
+      // monitor start: no restart shifted, dropped or reconstructed a slot.
+      acceptance.samples.forEach((sample, index) => {
+        assert.equal(
+          sample.windowStart,
+          firstStart + index * RELEASE_SAMPLE_INTERVAL_MS,
+        );
+        assert.equal(
+          sample.windowEnd,
+          sample.windowStart + RELEASE_SAMPLE_INTERVAL_MS,
+        );
+      });
+      assert.equal(acceptance.samples[0].requestCount, 101);
+      assert.equal(acceptance.samples[0].fiveXxCount, 1);
+      assert.deepEqual(acceptance.samples[0].coverage, { status: "complete" });
+      // The late boundary failure is retained exactly once: never lost by a
+      // reset and never duplicated.
+      assert.equal(
+        acceptance.samples.reduce(
+          (sum, sample) => sum + (sample.fiveXxCount ?? 0),
+          0,
+        ),
+        1,
+      );
+    } finally {
+      await ctx.cleanup();
     }
   },
 );

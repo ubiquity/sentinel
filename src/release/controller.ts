@@ -852,16 +852,23 @@ export class ReleaseController {
 
     // Candidate window slots, strictly from persisted state. All due slots
     // since the last persisted sample are collected in one run; every slot
-    // keeps its exact persisted window. When the observation is late by more
-    // than one interval (an unobserved monitoring gap), continuity restarts:
-    // historical slots are never accepted as if sampled while the monitor was
-    // absent. A slot whose telemetry is incomplete/unreadable is likewise an
-    // interrupted monitor and is never reconstructed.
+    // keeps its exact persisted window. A slot's accepted cohort may only be
+    // closed against its successor exact window, so the slot becomes due one
+    // interval after its own end plus the trusted log lag: before that the
+    // monitor waits on the same window and evidence and never resets. When the
+    // observation is late by more than one interval beyond that horizon (an
+    // unobserved monitoring gap), continuity restarts: historical slots are
+    // never accepted as if sampled while the monitor was absent. A slot whose
+    // telemetry is incomplete/unreadable is likewise an interrupted monitor
+    // and is never reconstructed.
     const startedAt = record.monitoring.startedAt;
     const now = this.clock.now();
     const collected = record.monitoring.samples;
+    // One bounded interval of adjacent-join latency: a slot's successor exact
+    // window must itself have cleared the source lag before the slot is due.
+    const cohortJoinLagMs = this.target.logsLagMs + RELEASE_SAMPLE_INTERVAL_MS;
     const dueSlots = Math.floor(
-      (now - this.target.logsLagMs - startedAt) / RELEASE_SAMPLE_INTERVAL_MS,
+      (now - cohortJoinLagMs - startedAt) / RELEASE_SAMPLE_INTERVAL_MS,
     ) - collected;
     if (dueSlots <= 0) {
       return portOk({
@@ -876,7 +883,7 @@ export class ReleaseController {
         RELEASE_SAMPLE_INTERVAL_MS,
         collected,
         now,
-        this.target.logsLagMs,
+        cohortJoinLagMs,
       )
     ) {
       return this.restartMonitor(record, context);

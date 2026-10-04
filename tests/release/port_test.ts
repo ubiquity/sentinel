@@ -1304,6 +1304,94 @@ Deno.test(
   },
 );
 
+Deno.test(
+  "port: adjacent terminal arriving after the first due sample defers then completes the same slot",
+  async () => {
+    const transport = new ScriptedTransport();
+    // The boundary request is accepted a millisecond before its slot ends;
+    // its terminal is emitted in the next exact window and only becomes
+    // observable after that window has cleared the trusted source lag.
+    let terminalArrived = false;
+    transport.any(
+      "GET",
+      new RegExp("^/v2/apps/[^/]+/logs$"),
+      (url) => {
+        const start = Date.parse(url.searchParams.get("start") ?? "0");
+        const messages: string[] = [];
+        if (start === T0) {
+          messages.push(
+            acceptedEvent({
+              requestId: "adjacent-late",
+              identity: DEP_1,
+              timestamp: T0 + 29_999,
+            }),
+          );
+        } else if (start === T0 + 30_000 && terminalArrived) {
+          messages.push(
+            terminalEvent({
+              requestId: "adjacent-late",
+              identity: DEP_1,
+              timestamp: T0 + 40_000,
+              status: 502,
+            }),
+          );
+        }
+        return {
+          kind: "response",
+          status: 200,
+          body: JSON.stringify({
+            logs: messages.map((message, index) => ({
+              timestamp: new Date(start + index).toISOString(),
+              level: "info",
+              message,
+              revision_id: DEP_1.revisionId,
+            })),
+            next_cursor: null,
+          }),
+        };
+      },
+    );
+    // First due instant of [T0, T0+30000): slot end plus the source lag. The
+    // next window [T0+30000, T0+60000) is still inside the lag, so its
+    // terminal cannot exist in the source yet.
+    const clock = new TestClock(T0 + 35_001);
+    const port = client(transport, clock);
+    const slot = {
+      baseUrl: MANAGED_URL,
+      metricsPath: "/health",
+      identity: DEP_1,
+      windowStart: T0,
+      windowEnd: T0 + 30_000,
+      domain: "ai.ubq.fi",
+    };
+
+    const early = await port.sampleMetrics(slot);
+    assert.ok(early.ok);
+    if (!early.ok) return;
+    // Deferred, not a false evidence gap and not a partial complete-looking
+    // sample: nothing is fabricated and the accepted cohort is retained for
+    // the later sample of this exact window.
+    assert.equal(early.value.requestCount, null);
+    assert.deepEqual(early.value.coverage, {
+      status: "incomplete",
+      reason: "adjacent log source lag has not elapsed",
+      nextCursor: null,
+    });
+
+    // The terminal arrives later; the next window clears its source lag.
+    terminalArrived = true;
+    clock.at(T0 + 65_001);
+    const completed = await port.sampleMetrics(slot);
+    assert.ok(completed.ok);
+    if (!completed.ok) return;
+    // The same slot is now correctly completed: the late terminal joins the
+    // accepted cohort and its real failure is counted without a reset.
+    assert.equal(completed.value.requestCount, 1);
+    assert.equal(completed.value.fiveXxCount, 1);
+    assert.deepEqual(completed.value.coverage, { status: "complete" });
+  },
+);
+
 Deno.test("port: log sampling before the trusted lag is missing, never zero", async () => {
   const transport = new ScriptedTransport();
   logRoute(transport, { accept: 100 });

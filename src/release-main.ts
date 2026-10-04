@@ -111,11 +111,14 @@ export async function runReleaseEntrypoint(
   // contract requires a 30-second sample interval. Keep one bounded scheduled
   // invocation alive for the complete window and persist every slot through
   // the same controller path. A missing/delayed waiter or transport never
-  // relaxes the controller's persisted gap checks.
+  // relaxes the controller's persisted gap checks. Each slot is sampled only
+  // after its successor exact window has cleared the source lag, so the
+  // bounded deadline carries one extra sample interval in addition to the
+  // alignment slack for a monitor that starts just after a slot boundary.
   const wait = deps.wait ?? waitForDuration;
   const runStartedAt = deps.clock.now();
   const runDeadline = runStartedAt + RELEASE_WINDOW_MS +
-    RELEASE_SAMPLE_INTERVAL_MS + target.logsLagMs + DENO_DEFAULT_TIMEOUT_MS;
+    2 * RELEASE_SAMPLE_INTERVAL_MS + target.logsLagMs + DENO_DEFAULT_TIMEOUT_MS;
   const maxCycles = RELEASE_EXPECTED_SAMPLES + 4;
   let cycles = 0;
   let result = await controller.run();
@@ -159,8 +162,11 @@ async function nextSampleDelay(
   if (record?.monitoring.startedAt === null || record === undefined) {
     return null;
   }
+  // The next slot's accepted cohort may be completed by its successor exact
+  // window, so that window must also have cleared the source lag before the
+  // slot can be sampled.
   const nextDueAt = record.monitoring.startedAt +
-    (record.monitoring.samples + 1) * RELEASE_SAMPLE_INTERVAL_MS + logsLagMs;
+    (record.monitoring.samples + 2) * RELEASE_SAMPLE_INTERVAL_MS + logsLagMs;
   // A zero/negative delay means the state became due while it was being read;
   // yield one millisecond before retrying so the entrypoint cannot busy-loop.
   return Math.max(1, nextDueAt - now);

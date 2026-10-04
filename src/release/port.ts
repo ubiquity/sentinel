@@ -62,6 +62,7 @@ import {
 import {
   CohortAccumulatorV1,
   type CohortKindsV1,
+  type CohortParseV1,
   type CohortWindowScopeV1,
   parseCohortMessage,
 } from "./log-cohort.ts";
@@ -105,6 +106,41 @@ interface RevisionResourceV1 {
   id: string;
   status: string;
   labels: Record<string, string | string[]>;
+}
+
+/**
+ * Cohort accumulator that also tracks the sample window's accepted request
+ * ids and every terminal id observed anywhere in the bounded scan. A slot
+ * whose accepted requests have no terminal yet may simply still be inside the
+ * log source lag; that is distinguishable here from a terminal whose accepted
+ * event is genuinely outside the bounded scan. Both tracked id sets are
+ * bounded by the same scan page caps as the accumulator's own evidence.
+ */
+class CohortJoinAccumulatorV1 extends CohortAccumulatorV1 {
+  private readonly pendingAcceptedIds = new Set<string>();
+  private readonly joinedTerminalIds = new Set<string>();
+
+  override add(
+    parse: CohortParseV1,
+    kinds: CohortKindsV1,
+    scope: CohortWindowScopeV1 = "sample",
+  ): void {
+    if (parse.kind === "accepted" && scope === "sample") {
+      this.pendingAcceptedIds.add(parse.event.requestId);
+    } else if (parse.kind === "terminal") {
+      this.joinedTerminalIds.add(parse.event.requestId);
+    }
+    super.add(parse, kinds, scope);
+  }
+
+  /** Sample-window accepted requests with no terminal in the bounded scan. */
+  pendingAcceptedCount(): number {
+    let pending = 0;
+    for (const requestId of this.pendingAcceptedIds) {
+      if (!this.joinedTerminalIds.has(requestId)) pending++;
+    }
+    return pending;
+  }
 }
 
 export class DenoReleaseRESTClient implements DenoReleasePort {
@@ -467,7 +503,7 @@ export class DenoReleaseRESTClient implements DenoReleasePort {
       );
     }
 
-    const accumulator = new CohortAccumulatorV1();
+    const accumulator = new CohortJoinAccumulatorV1();
     const kinds: CohortKindsV1 = {
       timeoutFailureKinds: this.config.timeoutFailureKinds,
       upstreamWideFailureKinds: this.config.upstreamWideFailureKinds,
@@ -488,12 +524,15 @@ export class DenoReleaseRESTClient implements DenoReleasePort {
     // exact window only when the sample has an unmatched event, and use those
     // events solely to close the sample's accepted cohort. This keeps the
     // denominator bound to the requested window while allowing the terminal
-    // event to be observed on the other side of its boundary.
+    // event to be observed on the other side of its boundary. A next window
+    // still inside the source lag is queried optimistically; if it cannot
+    // show the terminal yet, the slot is deferred below, never reported as an
+    // evidence gap.
+    const windowLength = config.windowEnd - config.windowStart;
     if (
       reason === null && counts.unreadableCount === 0 &&
       counts.unresolvedOutcomeCount > 0
     ) {
-      const windowLength = config.windowEnd - config.windowStart;
       const adjacentWindows: { start: number; end: number }[] = [];
       if (config.windowStart >= windowLength) {
         adjacentWindows.push({
@@ -531,6 +570,20 @@ export class DenoReleaseRESTClient implements DenoReleasePort {
     counts = accumulator.counts();
     if (reason === null && counts.unreadableCount > 0) {
       reason = "log scan contained unreadable entries";
+    }
+    if (
+      reason === null && counts.unresolvedOutcomeCount > 0 &&
+      accumulator.pendingAcceptedCount() > 0 &&
+      config.windowEnd + windowLength + this.config.logsLagMs > this.clock.now()
+    ) {
+      // The next exact window still lies inside the trusted source lag, so a
+      // terminal for a request accepted in this slot cannot be observed yet.
+      // The slot is not yet due: defer it (all-null evidence) for a later
+      // sample of the SAME window instead of reporting a gap the scan cannot
+      // have produced or presenting an unclosed cohort as complete.
+      return portOk(
+        this.missingSample(config, "adjacent log source lag has not elapsed"),
+      );
     }
     if (reason === null && counts.unresolvedOutcomeCount > 0) {
       // A terminal whose accepted event is outside this exact window is a

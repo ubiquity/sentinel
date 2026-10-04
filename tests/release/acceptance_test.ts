@@ -39,6 +39,7 @@ import {
 } from "../../src/release/acceptance.ts";
 import { RELEASE_SAMPLE_INTERVAL_MS } from "../../src/release/config.ts";
 import {
+  acceptedEvent,
   asTransport,
   DEP_0,
   DEP_1,
@@ -59,6 +60,7 @@ import {
   storeAt,
   T0,
   targetConfig,
+  terminalEvent,
   TestClock,
 } from "./helpers.ts";
 
@@ -83,6 +85,12 @@ async function makeScenario(
       | null;
     request?: ReturnType<typeof requestFor>;
     resolver?: ScriptedResolver;
+    /**
+     * Custom logs responder for a scenario whose cohort timing differs from
+     * the shared fixture. It is registered after the health routes, and the
+     * last matching route wins, so it replaces any `logs` fixture.
+     */
+    logsRoute?: (transport: ScriptedTransport, clock: TestClock) => void;
   } = {},
 ): Promise<ScenarioV1> {
   const ctx = await makeGitCtx("acceptance");
@@ -103,6 +111,7 @@ async function makeScenario(
     promoteRoute(transport, promote.target, promote);
   }
   const clock = new TestClock(T0);
+  overrides.logsRoute?.(transport, clock);
   const resolver = overrides.resolver ?? new ScriptedResolver();
   const policy = overrides.policy ?? stabilityPolicy();
   const state = storeAt(ctx, "controller", "release");
@@ -188,10 +197,11 @@ async function stepSlots(
   }
   const startedAt = record.monitoring.startedAt;
   for (let k = 0; k < count; k++) {
-    // Slot k ends at startedAt + (k+1)*interval; it is due only after the
-    // trusted log lag has elapsed. Exactly one slot is due per run.
+    // Slot k ends at startedAt + (k+1)*interval; it is due only after its
+    // successor exact window (the bounded adjacent join) has also cleared the
+    // trusted log lag. Exactly one slot is due per run.
     scene.clock.at(
-      startedAt + (k + 1) * RELEASE_SAMPLE_INTERVAL_MS + 5_000 + 1,
+      startedAt + (k + 2) * RELEASE_SAMPLE_INTERVAL_MS + 5_000 + 1,
     );
     const result = await scene.controller.run();
     assert.ok(result.ok, "expected a cycle result");
@@ -223,7 +233,9 @@ async function seedMonitorWindow(
   const policy = scene.policy;
   const interval = RELEASE_SAMPLE_INTERVAL_MS;
   const lag = targetConfig().logsLagMs;
-  const now = startedAt + (slotCount + 1) * interval + lag + 1;
+  // Sample at the horizon of the last seeded slot: its own window and its
+  // successor exact window (the bounded adjacent join) have both cleared lag.
+  const now = startedAt + (slotCount + 2) * interval + lag + 1;
   scene.clock.at(now);
 
   const baseline: MetricsSampleV1[] = [];
@@ -311,6 +323,113 @@ async function completeWindow(
 ): Promise<PortResultV1<ReleaseCycleResultV1>> {
   await seedMonitorWindow(scene, slotCount - 1);
   return scene.controller.run();
+}
+
+/**
+ * Emission instant of the boundary request's terminal inside the successor
+ * exact window, relative to the first candidate window start: after the old
+ * first-due instant (window end + source lag) and before the corrected due
+ * instant (successor window end + source lag). That is exactly the lifecycle
+ * the bounded adjacent join must cover.
+ */
+const ADJACENT_TERMINAL_EMIT_MS = RELEASE_SAMPLE_INTERVAL_MS + 10_000;
+
+/**
+ * Time-driven log source for the adjacent-terminal lifecycle. Every window
+ * serves a complete 100-request cohort, except the first candidate window
+ * actually queried: its boundary request `adjacent-late` is accepted at the
+ * very end of that window and has no in-window terminal. Its 502 terminal
+ * exists only in the successor exact window and only once the clock has
+ * reached the terminal emission instant, so a sample taken at the old
+ * first-due instant cannot observe it. `emitLateTerminal: false` models a
+ * request whose terminal never arrives.
+ */
+function adjacentLateLogRoute(
+  transport: ScriptedTransport,
+  clock: TestClock,
+  options: {
+    emitLateTerminal: boolean;
+    /** Sink for the first candidate window start actually queried. */
+    observed: { firstCandidateWindowStart: number | null };
+  },
+): void {
+  const cohort = (
+    identity: DeploymentIdentityV1,
+    start: number,
+  ): string[] => {
+    const messages: string[] = [];
+    for (let i = 0; i < 100; i++) {
+      const requestId = `${identity.revisionId}-adjacent-${i}`;
+      messages.push(
+        acceptedEvent({ requestId, identity, timestamp: start + i }),
+      );
+      messages.push(
+        terminalEvent({
+          requestId,
+          identity,
+          timestamp: start + i,
+          status: 200,
+        }),
+      );
+    }
+    return messages;
+  };
+  transport.any("GET", LOGS_RE, (url) => {
+    const start = Date.parse(url.searchParams.get("start") ?? "0");
+    const revisionId = url.searchParams.get("revision_id") ?? "";
+    const candidate = revisionId === DEP_1.revisionId;
+    const identity = candidate ? DEP_1 : DEP_0;
+    if (candidate && options.observed.firstCandidateWindowStart === null) {
+      options.observed.firstCandidateWindowStart = start;
+    }
+    const first = options.observed.firstCandidateWindowStart;
+    let messages: string[] = [];
+    if (!candidate) {
+      // Baseline windows are complete historical evidence.
+      messages = cohort(identity, start);
+    } else if (first !== null && start === first) {
+      messages = cohort(identity, start);
+      messages.push(
+        acceptedEvent({
+          requestId: "adjacent-late",
+          identity,
+          timestamp: start + RELEASE_SAMPLE_INTERVAL_MS - 1,
+        }),
+      );
+    } else if (first !== null && start === first + RELEASE_SAMPLE_INTERVAL_MS) {
+      messages = cohort(identity, start);
+      if (
+        options.emitLateTerminal &&
+        clock.now() >= first + ADJACENT_TERMINAL_EMIT_MS
+      ) {
+        messages.push(
+          terminalEvent({
+            requestId: "adjacent-late",
+            identity,
+            timestamp: first + ADJACENT_TERMINAL_EMIT_MS,
+            status: 502,
+          }),
+        );
+      }
+    } else if (
+      first !== null && start > first + RELEASE_SAMPLE_INTERVAL_MS
+    ) {
+      messages = cohort(identity, start);
+    }
+    return {
+      kind: "response",
+      status: 200,
+      body: JSON.stringify({
+        logs: messages.map((message, index) => ({
+          timestamp: new Date(start + index).toISOString(),
+          level: "info",
+          message,
+          revision_id: identity.revisionId,
+        })),
+        next_cursor: null,
+      }),
+    };
+  });
 }
 
 Deno.test("checkpoint: discovery binds exactly one build and persists candidate+prior", async () => {
@@ -551,16 +670,17 @@ Deno.test("checkpoint: an interrupted monitor resets continuity and the observat
     const record = await promoteToMonitoring(scene);
     const firstStart = record.monitoring.startedAt;
     if (firstStart === null) throw new Error("missing start");
-    // One healthy slot persists, then the log source becomes unreadable for
-    // the next slot: continuity restarts and nothing is reconstructed.
-    scene.clock.at(firstStart + 35_000);
+    // One healthy slot persists once its successor window has cleared the
+    // source lag, then the log source becomes unreadable for the next slot:
+    // continuity restarts and nothing is reconstructed.
+    scene.clock.at(firstStart + 65_000);
     assertCycle(await scene.controller.run(), "persisted");
     let records = await scene.records();
     assert.equal(records[0].monitoring.samples, 1);
     assert.notEqual(records[0].monitoring.startedAt, null);
     const secondStart = records[0].monitoring.startedAt!;
     scene.transport.logsReject = true;
-    scene.clock.at(secondStart + 65_000);
+    scene.clock.at(secondStart + 95_000);
     assertCycle(await scene.controller.run(), "persisted");
     records = await scene.records();
     assert.equal(records[0].monitoring.samples, 0);
@@ -619,7 +739,7 @@ Deno.test("checkpoint: managed pass plus Cloudflare-identified 403 warns only", 
     await promoteToMonitoring(scene);
     scene.transport.customStatus = 403;
     scene.transport.customCloudflare = true;
-    scene.clock.advance(35_001);
+    scene.clock.advance(65_001);
     const result = await scene.controller.run();
     assert.ok(result.ok);
     if (result.ok) {
@@ -772,8 +892,9 @@ Deno.test("checkpoint: an unobserved monitoring gap restarts the window, histori
     const record = await promoteToMonitoring(scene);
     const startedAt = record.monitoring.startedAt;
     if (startedAt === null) throw new Error("missing start");
-    // Slot 0 is due after its window end plus the trusted lag; collect it.
-    scene.clock.at(startedAt + 35_000);
+    // Slot 0 is due once its successor window has also cleared the trusted
+    // lag; collect it.
+    scene.clock.at(startedAt + 65_000);
     assertCycle(await scene.controller.run(), "persisted");
     let records = await scene.records();
     assert.equal(records[0].monitoring.samples, 1);
@@ -782,14 +903,14 @@ Deno.test("checkpoint: an unobserved monitoring gap restarts the window, histori
     // than one interval late, so two slots are overdue — an unobserved gap.
     // The window must restart fresh; the historical slot telemetry must never
     // be queried or accepted as continuous coverage.
-    scene.clock.at(startedAt + 95_000);
+    scene.clock.at(startedAt + 125_000);
     assertCycle(await scene.controller.run(), "persisted");
     records = await scene.records();
     assert.equal(records[0].monitoring.samples, 0);
     assert.notEqual(records[0].monitoring.startedAt, startedAt);
     assert.equal(
       records[0].monitoring.startedAt,
-      nextAlignedWindowStart(RELEASE_SAMPLE_INTERVAL_MS, startedAt + 95_000),
+      nextAlignedWindowStart(RELEASE_SAMPLE_INTERVAL_MS, startedAt + 125_000),
     );
     assert.equal(records[0].acceptance, null);
     assert.equal(
@@ -801,6 +922,120 @@ Deno.test("checkpoint: an unobserved monitoring gap restarts the window, histori
     await scene.cleanup();
   }
 });
+
+Deno.test(
+  "checkpoint: a late adjacent terminal defers the slot and then completes the same window without a reset",
+  async () => {
+    const observed: { firstCandidateWindowStart: number | null } = {
+      firstCandidateWindowStart: null,
+    };
+    const scene = await makeScenario({
+      logsRoute: (transport, clock) => {
+        adjacentLateLogRoute(transport, clock, {
+          emitLateTerminal: true,
+          observed,
+        });
+      },
+    });
+    try {
+      const record = await promoteToMonitoring(scene);
+      const startedAt = record.monitoring.startedAt;
+      if (startedAt === null) throw new Error("missing start");
+
+      // The old first-due instant (slot end + source lag) is before the
+      // successor window's terminal exists. The monitor must wait on the same
+      // window and evidence instead of sampling and restarting.
+      scene.clock.at(startedAt + RELEASE_SAMPLE_INTERVAL_MS + 5_000);
+      assertCycle(await scene.controller.run(), "waiting");
+      assert.equal(
+        scene.transport.callCount("GET", LOGS_RE),
+        0,
+        "a slot before its adjacent horizon is never queried",
+      );
+      let records = await scene.records();
+      assert.equal(records[0].phase, "monitoring");
+      assert.equal(records[0].monitoring.startedAt, startedAt);
+      assert.equal(records[0].monitoring.samples, 0);
+      assert.equal(records[0].acceptance, null);
+
+      // The boundary terminal is emitted inside the successor window; once
+      // that window has cleared the source lag the SAME slot is due.
+      scene.clock.at(
+        startedAt + 2 * RELEASE_SAMPLE_INTERVAL_MS + 5_000,
+      );
+      assertCycle(await scene.controller.run(), "persisted");
+      records = await scene.records();
+      assert.equal(records[0].monitoring.startedAt, startedAt);
+      assert.equal(records[0].monitoring.continuous, true);
+      assert.equal(records[0].monitoring.samples, 1);
+      const acceptance = records[0].acceptance;
+      assert.ok(acceptance, "the sampled slot persists acceptance evidence");
+      if (acceptance === null) return;
+      assert.equal(acceptance.samples.length, 1);
+      const sample = acceptance.samples[0];
+      assert.equal(sample.windowStart, startedAt);
+      assert.equal(
+        sample.windowEnd,
+        startedAt + RELEASE_SAMPLE_INTERVAL_MS,
+      );
+      assert.deepEqual(sample.coverage, { status: "complete" });
+      assert.equal(sample.requestCount, 101);
+      assert.equal(sample.fiveXxCount, 1);
+      assert.equal(
+        observed.firstCandidateWindowStart,
+        startedAt,
+        "the completed window is the original monitor window",
+      );
+    } finally {
+      await scene.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "checkpoint: an adjacent terminal that never arrives stays an explicit gap and restarts the monitor",
+  async () => {
+    const observed: { firstCandidateWindowStart: number | null } = {
+      firstCandidateWindowStart: null,
+    };
+    const scene = await makeScenario({
+      logsRoute: (transport, clock) => {
+        adjacentLateLogRoute(transport, clock, {
+          emitLateTerminal: false,
+          observed,
+        });
+      },
+    });
+    try {
+      const record = await promoteToMonitoring(scene);
+      const startedAt = record.monitoring.startedAt;
+      if (startedAt === null) throw new Error("missing start");
+
+      // Once the successor window has cleared the source lag the slot IS due;
+      // its terminal is genuinely missing, so the monitor must sample it and
+      // restart on the real gap instead of waiting forever or reporting a
+      // complete cohort.
+      const dueAt = startedAt + 2 * RELEASE_SAMPLE_INTERVAL_MS + 5_000;
+      scene.clock.at(dueAt);
+      assertCycle(await scene.controller.run(), "persisted");
+      assert.ok(
+        scene.transport.callCount("GET", LOGS_RE) > 0,
+        "the due slot is sampled before the missing terminal is rejected",
+      );
+      const records = await scene.records();
+      assert.equal(records[0].phase, "monitoring");
+      assert.equal(records[0].monitoring.samples, 0);
+      assert.equal(records[0].acceptance, null);
+      assert.notEqual(records[0].monitoring.startedAt, startedAt);
+      assert.equal(
+        records[0].monitoring.startedAt,
+        nextAlignedWindowStart(RELEASE_SAMPLE_INTERVAL_MS, dueAt),
+      );
+    } finally {
+      await scene.cleanup();
+    }
+  },
+);
 
 Deno.test("checkpoint: a degraded managed health sample never advances the acceptance window", async () => {
   const scene = await makeScenario({
@@ -838,7 +1073,7 @@ Deno.test("checkpoint: missing baseline telemetry persists explicit insufficient
     const record = await promoteToMonitoring(scene);
     const startedAt = record.monitoring.startedAt;
     if (startedAt === null) throw new Error("missing start");
-    scene.clock.at(startedAt + 35_000);
+    scene.clock.at(startedAt + 65_000);
     const result = await scene.controller.run(); // must resolve, never throw
     assert.ok(result.ok, "the missing baseline must not crash the run");
     if (!result.ok) return;
