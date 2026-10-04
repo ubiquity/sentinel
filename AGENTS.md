@@ -102,3 +102,14 @@ This section governs coding-agent development, debugging and target onboarding, 
 - Separate local tests, reviewed code, merged code, deployed runtime, and live
   delivery proof. Do not report completion on module tests alone.
 - No paid/model calls, GitHub writes or deployment inside the local test harness.
+
+## Orchestration throughput — owner update, 2026-10-04
+
+- Keep one authoritative task, head and publisher owner across local, native, DSH and Actions work, recorded in the existing docs/build-status.md; reconcile current reservations, producer state and refs before competing implementation or publication, and give parallel scopes explicit isolation and ownership.
+- Prioritize already-authorized durable continuation, publication, base-refresh, review, merge and bookkeeping work before new model planning wherever a supported path exists; never bypass authorization or the hosted-attempt approval boundary.
+- Prefer supported event or job watches when the running interface provides one; every wait names its live handle, expected result or checkpoint and recovery action, so unchanged model polling and blind sleeps are not progress, and elapsed time alone is never stop or restart authority.
+- Keep coordinator checkpoints to roughly one or two minutes: read the current evidence, identify the one actually unmet requirement, and execute or relay one concrete next action; a missing fact gets one bounded lookup or handback instead of speculative serial planning, and estimates are checkpoints, never kill deadlines.
+- Read each mandatory reference fully once at its required revision with bounded output, and reuse known hashes and receipts; do not dump whole histories or raw API envelopes, and keep immutable inputs concise.
+- Before reopening a gate or owner decision, read the latest completed handback and the canonical ledger; integrate, accept or reject ready work promptly, and do not rerun the same input test or review without a new change, failure or gap; preserve original goals, models, budgets and accounting.
+- Bind acceptance to the actual user or issue contract and the exact current input; a stronger side-candidate assumption is not a required invariant, and never weaken meaningful temporal or cohort constraints or transfer CI and reviews between different bytes.
+- Report accepted canonical deliveries, ready-to-action latency, parent and worker elapsed time and any no-progress cause; tool counts, token counts and status chatter are not progress, and measured outcomes select the next bounded throughput improvement without inventing new authority.
