@@ -3246,10 +3246,24 @@ export async function runOwnerDevelopmentInstallMain(input?: {
   let recovery: OwnerMatrixRecoveryEvidenceV1 | undefined;
   const recoveryBinding = input?.matrixRecoveryBinding ?? CLOSED_C_WAVE;
   const pointer = current.snapshot.hostedRuntimes[0];
+  const closedExecution = [
+    pointer?.execution,
+    pointer?.lastExecutionProof?.execution,
+  ].some((execution) =>
+    execution !== null && execution !== undefined &&
+    execution.id ===
+      `${recoveryBinding.run.runId}:${recoveryBinding.run.runAttempt}:repair` &&
+    execution.runId === recoveryBinding.run.runId &&
+    execution.runAttempt === recoveryBinding.run.runAttempt &&
+    execution.launcherSha === recoveryBinding.run.launcherSha &&
+    execution.revision === recoveryBinding.runtimeSha &&
+    execution.generation === recoveryBinding.generation &&
+    execution.purpose === "ordinary" && execution.releaseId === null
+  );
   if (
     recoveryRevision !== null && pointer !== undefined &&
     ((pointer.activeRevision === recoveryBinding.runtimeSha &&
-      (pointer.generation === recoveryBinding.generation ||
+      ((pointer.generation === recoveryBinding.generation && closedExecution) ||
         pointer.generation === recoveryBinding.generation + 2)) ||
       (pointer.activeRevision === recoveryRevision &&
         pointer.generation === recoveryBinding.generation + 1))
