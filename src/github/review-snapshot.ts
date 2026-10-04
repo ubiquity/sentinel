@@ -185,6 +185,39 @@ const PUBLICATION_SECRET_DETAIL =
   "publication validation unavailable: a newly exposed blob contains secret-shaped text";
 
 /**
+ * Publication failures that are determined by the immutable candidate. These
+ * must not be reported as transport unavailability: preservation can settle a
+ * submitted attempt only when the caller can distinguish a permanent content
+ * refusal from a retryable Git/read failure.
+ */
+const DETERMINISTIC_PUBLICATION_DETAILS: readonly string[] = [
+  PUBLICATION_OVERBOUND_DETAIL,
+  PUBLICATION_COMMIT_DETAIL,
+  PUBLICATION_STALE_BASE_DETAIL,
+  PUBLICATION_PUBLISHED_HEAD_DETAIL,
+  PUBLICATION_EMPTY_DETAIL,
+  PUBLICATION_COMMIT_BOUND_DETAIL,
+  PUBLICATION_OBJECT_BOUND_DETAIL,
+  PUBLICATION_LIST_DETAIL,
+  PUBLICATION_BOUND_DETAIL,
+  PUBLICATION_METADATA_DETAIL,
+  PUBLICATION_METADATA_BOUND_DETAIL,
+  PUBLICATION_METADATA_SECRET_DETAIL,
+  PUBLICATION_ISSUE_DETAIL,
+  PUBLICATION_PROTECTED_DETAIL,
+  PUBLICATION_STRUCTURE_DETAIL,
+  PUBLICATION_PATH_DETAIL,
+  PUBLICATION_MODE_DETAIL,
+  PUBLICATION_SYMLINK_DETAIL,
+  PUBLICATION_SUBMODULE_DETAIL,
+  PUBLICATION_STATUS_DETAIL,
+  PUBLICATION_BINARY_DETAIL,
+  PUBLICATION_UTF8_DETAIL,
+  PUBLICATION_FILE_BOUND_DETAIL,
+  PUBLICATION_SECRET_DETAIL,
+];
+
+/**
  * Fixed global argv: no optional locks, no pager, literal pathspecs, no
  * fsmonitor, no hooks, no external diff, no text conversion and no credential
  * helper. Combined with the cleared child environment
@@ -1326,8 +1359,15 @@ export class GitReviewSnapshot {
     }
     const deadline = this.now() + this.totalDeadlineMs;
     let inspectedBytes = 0;
-    const fail = (detail: string): PortResultV1<void> =>
-      portError("unavailable", publicationReadDetail(detail));
+    const fail = (detail: string): PortResultV1<never> => {
+      const normalized = publicationReadDetail(detail);
+      return portError(
+        DETERMINISTIC_PUBLICATION_DETAILS.includes(normalized)
+          ? "invalid"
+          : "unavailable",
+        normalized,
+      );
+    };
     const readTracked = async (
       args: readonly string[],
       allowExitCodes: readonly number[],
@@ -1439,8 +1479,7 @@ export class GitReviewSnapshot {
         MAX_TREE_ENTRY_BYTES,
       );
       if (!read.ok) {
-        return portError(
-          "unavailable",
+        return fail(
           read.detail === SNAPSHOT_OVERBOUND_DETAIL
             ? PUBLICATION_PROTECTED_DETAIL
             : read.detail,
@@ -1448,11 +1487,11 @@ export class GitReviewSnapshot {
       }
       const text = this.text(read.bytes);
       if (text === null) {
-        return portError("unavailable", PUBLICATION_PROTECTED_DETAIL);
+        return fail(PUBLICATION_PROTECTED_DETAIL);
       }
       const entry = parseProtectedTreeEntry(text, path);
       if (entry === null) {
-        return portError("unavailable", PUBLICATION_PROTECTED_DETAIL);
+        return fail(PUBLICATION_PROTECTED_DETAIL);
       }
       return portOk(entry);
     };
