@@ -546,6 +546,7 @@ Deno.test("owner install matrix recovery: exact metadata and charges install, bo
       );
       assert.deepEqual(await fixture.readRepair(), repair);
       if (failedBootstrap) {
+        fixture.expireArchives();
         assert.deepEqual(
           after.value.snapshot.hostedRuntimes[0].lastHealthyProof,
           own,
@@ -598,6 +599,64 @@ Deno.test("owner install matrix recovery: exact metadata and charges install, bo
           "failed restored verification cannot reinstall or advance to generation 63",
         );
         assert.deepEqual(await fixture.readRepair(), repair);
+      } else {
+        fixture.expireArchives();
+        const ordinaryRun = { ...run, runId: run.runId + 2 };
+        const ordinary = await runHostedSupervisorPrepare({
+          state: fixture.releaseStore,
+          clock: { now: () => NOW + 600 },
+          run: ordinaryRun,
+          evidence: {
+            readExecution: () => Promise.resolve(portOk(null)),
+            verifyRevision: () => Promise.resolve(portOk(true)),
+            verifyMatrixOrdinaryRevision: () => Promise.resolve(portOk(true)),
+            verifyRequest: () => Promise.resolve(portOk(false)),
+          },
+        });
+        assert.equal(ordinary.status, "run");
+        if (ordinary.status !== "run") throw new Error("missing ordinary61");
+        assert.equal(ordinary.execution.purpose, "ordinary");
+        const ordinaryFailure = parseHostedRunProofV1({
+          ...failure,
+          execution: ordinary.execution,
+          startedAt: NOW + 700,
+          finishedAt: NOW + 800,
+          observedAt: NOW + 900,
+        });
+        const failed = await runHostedSupervisorFinalize({
+          state: fixture.releaseStore,
+          clock: { now: () => NOW + 900 },
+          run: ordinaryRun,
+          evidence: {
+            readExecution: () => Promise.resolve(portOk(ordinaryFailure)),
+            verifyRevision: () => Promise.resolve(portOk(true)),
+            verifyRequest: () => Promise.resolve(portOk(false)),
+          },
+        });
+        assert.equal(failed.status, "idle");
+        fixture.setNow(NOW + 1000);
+        assert.equal(await fixture.run(), 0);
+        assert.equal(
+          fixture.reports.at(-1)?.status,
+          "rolled_back",
+          "healthy61 then failed ordinary61 restores C62 after original archives disappear",
+        );
+        const restored = await fixture.read();
+        assert.ok(restored.ok && restored.value.status === "found");
+        assert.equal(restored.value.snapshot.hostedRuntimes[0].generation, 62);
+        assert.deepEqual(
+          restored.value.snapshot.hostedRuntimes[0].lastHealthyProof,
+          proof,
+          "healthy61 history must remain verbatim",
+        );
+        assert.deepEqual(
+          restored.value.snapshot.hostedRuntimes[0].lastExecutionProof,
+          ordinaryFailure,
+        );
+        assert.equal(await fixture.run(), 0);
+        assert.equal(fixture.reports.at(-1)?.status, "waiting");
+        assert.equal(fixture.patches(), 2);
+        assert.deepEqual(await fixture.readRepair(), repair);
       }
       assert.ok(
         fixture.requests.filter((row) => row.method === "GET").every((row) =>
@@ -608,17 +667,51 @@ Deno.test("owner install matrix recovery: exact metadata and charges install, bo
       await fixture.close();
     }
   }
-  for (const refusal of ["ci", "parent", "readback", "native"] as const) {
+  for (
+    const refusal of [
+      "ci",
+      "parent",
+      "readback",
+      "native",
+      "repair-active",
+      "repair-unknown",
+      "repair-expired",
+    ] as const
+  ) {
+    const repairHold = refusal.startsWith("repair-");
     const fixture = await concurrencyInstallerFixture(
       state,
-      refusal === "native" ? undefined : refusal,
+      refusal === "native" || repairHold
+        ? undefined
+        : refusal as "ci" | "parent" | "readback",
       candidate,
-      { ...cells, binding: CLOSED_C_WAVE, nativeRefusal: refusal === "native" },
+      {
+        ...cells,
+        ingested: repairHold
+          ? parseRepairStateSnapshotV1({
+            ...cells.ingested,
+            githubCooldowns: [cooldown(
+              refusal === "repair-unknown"
+                ? null
+                : refusal === "repair-active"
+                ? NOW + 1000
+                : NOW - 1,
+            )],
+          })
+          : cells.ingested,
+        binding: CLOSED_C_WAVE,
+        nativeRefusal: refusal === "native",
+      },
     );
     try {
       assert.equal(await fixture.run(), 0);
-      assert.notEqual(fixture.reports.at(-1)?.status, "installed");
-      assert.equal(fixture.patches(), refusal === "readback" ? 1 : 0);
+      if (refusal === "repair-expired") {
+        assert.equal(fixture.reports.at(-1)?.status, "installed");
+      } else assert.notEqual(fixture.reports.at(-1)?.status, "installed");
+      assert.equal(
+        fixture.patches(),
+        refusal === "readback" || refusal === "repair-expired" ? 1 : 0,
+      );
     } finally {
       await fixture.close();
     }
@@ -647,6 +740,7 @@ async function concurrencyInstallerFixture(
   const originalLog = console.log;
   const originalNow = Date.now;
   let fixtureNow = NOW;
+  let archivesUnavailable = false;
   const originalCwd = Deno.cwd();
   const originalEnvironmentGet = Deno.env.get;
   const environment: Record<string, string> = {
@@ -930,6 +1024,9 @@ async function concurrencyInstallerFixture(
           });
         }
         if (url.pathname.endsWith("/artifacts")) {
+          if (archivesUnavailable) {
+            return response({ total_count: 0, artifacts: [] });
+          }
           const binding = recoveryBinding!;
           return response({
             total_count: binding.cells.length + 1,
@@ -1111,6 +1208,9 @@ async function concurrencyInstallerFixture(
       releaseStore: store,
       setNow: (value: number) => {
         fixtureNow = value;
+      },
+      expireArchives: () => {
+        archivesUnavailable = true;
       },
       message: () => git([...gitArgs, "log", "-1", "--format=%B", ref]),
       close: async () => {

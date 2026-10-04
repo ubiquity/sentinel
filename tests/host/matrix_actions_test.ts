@@ -37,6 +37,7 @@ import { runActionsRepairHost } from "../../src/host/actions.ts";
 import type { ActionsTargetCyclesInputV1 } from "../../src/host/actions.ts";
 import {
   closedCWaveHandledReservations,
+  closedCWaveNeedsRecovery,
   ingestClosedCWave,
 } from "../../src/host/modern-matrix-recovery.ts";
 import { createGitBundleImporter } from "../../src/host/matrix-git.ts";
@@ -45,6 +46,7 @@ import { implementationIntentKey } from "../../src/repair/keys.ts";
 import {
   OPERATION_MARGIN_MS,
   REPAIR_MODEL_CUTOFF_MS,
+  runRepairCycle,
 } from "../../src/repair/loop.ts";
 import { FakeClock, FakeGithub, MemoryState } from "../repair/helpers.ts";
 import { GitHubApiClient } from "../../src/github/client.ts";
@@ -704,6 +706,56 @@ Deno.test("closed C recovery: real mixed ingestion preserves charges and rehydra
         }),
       /native failure proof changed/,
     );
+    const self = input.configs.find((config) =>
+      config.repository.name === "sentinel"
+    )!;
+    await runRepairCycle({ ...deps.cycleFor(self), configs: [self] }, {
+      deadline: r.clock.now() + 240_000,
+      stepLimit: 1,
+      modelStartsEnabled: false,
+    });
+    const retired = await r.store.readRepair();
+    assert.ok(retired.ok && retired.value.status === "found");
+    assert.equal(
+      retired.value.snapshot.work.find((row) => row.id.includes("sentinel-1"))
+        ?.intent,
+      null,
+      "actual preservation consumer must finish actionable custody",
+    );
+    assert.equal(
+      closedCWaveNeedsRecovery(retired.value.snapshot, binding),
+      false,
+      "handled protected BLOCKED candidate cannot keep old archives a global prerequisite",
+    );
+    for (const missing of [false, true]) {
+      const unavailable = {
+        ...deps,
+        transportFor: () => ({
+          recover: () => {
+            throw new Error(missing ? "archive missing" : "archive expired");
+          },
+        }),
+      };
+      if (closedCWaveNeedsRecovery(retired.value.snapshot, binding)) {
+        await ingestClosedCWave(unavailable);
+      }
+      const maintenance = await runHostedAutonomy({
+        state: r.store,
+        clock: r.clock,
+        githubFor: () => null,
+        closedMatrix: () => Promise.resolve(unavailable),
+      });
+      assert.notEqual(
+        maintenance.status,
+        "failed",
+        "retired protected disposition cannot block automatic maintenance on expired or missing archives",
+      );
+      assert.deepEqual(
+        await r.store.readRepair(),
+        retired,
+        "retirement preserves blocked head/checkpoint, charges and all state",
+      );
+    }
   } finally {
     await r.cleanup();
   }

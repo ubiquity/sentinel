@@ -697,25 +697,12 @@ export function planOwnerDevelopmentInstall(
       revision === recovery.candidate && generation === binding.generation + 1
     ) {
       if (failed !== null) {
-        const rollback = healthyProofFor(
-          runtime,
-          binding.runtimeSha,
-          binding.generation,
-        );
-        if (
-          rollback === null ||
-          canonicalStringify(rollback) !== canonicalStringify(prior.value)
-        ) {
-          return waiting(
-            "the saved C generation 60 health proof for rollback is unavailable",
-          );
-        }
         return movePlan(
           "rollback",
           runtime,
           binding.runtimeSha,
           generation + 1,
-          rollback,
+          prior.value,
           "restore exact C after failed matrix recovery bootstrap or ordinary execution",
         );
       }
@@ -3016,6 +3003,7 @@ export function buildOwnerDevelopmentInstallSnapshot(
   head: GitSha,
   move: OwnerDevelopmentInstallMoveV1,
   now: number,
+  recovery?: OwnerMatrixRecoveryEvidenceV1,
 ): ReleaseStateSnapshotV1 {
   const parsed = tryParse(parseReleaseStateSnapshotV1, snapshot);
   if (!parsed.ok || !isGitSha(head)) throw new Error(STATIC_PLAN);
@@ -3025,14 +3013,26 @@ export function buildOwnerDevelopmentInstallSnapshot(
     ? state.hostedRuntimes[0]
     : null;
   if (runtime === null) throw new Error(STATIC_PLAN);
+  const binding = recovery?.binding ?? CLOSED_C_WAVE;
+  const recoveryPlan = recovery === undefined
+    ? undefined
+    : planOwnerDevelopmentInstall(state, now, recovery);
+  const heldMatrixRollback = recovery !== undefined &&
+    recovery.releaseHead === head &&
+    move.action === "rollback" && move.priorRevision === recovery.candidate &&
+    move.priorGeneration === binding.generation + 1 &&
+    move.nextRevision === binding.runtimeSha &&
+    move.nextGeneration === binding.generation + 2 &&
+    recoveryPlan?.status === "rollback" &&
+    canonicalStringify(recoveryPlan.move) === canonicalStringify(move);
   if (
     runtime.activeRevision !== move.priorRevision ||
     runtime.generation !== move.priorGeneration ||
     runtime.generation + 1 !== move.nextGeneration ||
     runtime.activeRevision === move.nextRevision ||
-    runtime.lastHealthyProof === null ||
-    canonicalStringify(runtime.lastHealthyProof) !==
-      canonicalStringify(move.priorHealthyProof)
+    (!heldMatrixRollback && (runtime.lastHealthyProof === null ||
+      canonicalStringify(runtime.lastHealthyProof) !==
+        canonicalStringify(move.priorHealthyProof)))
   ) {
     throw new Error(STATIC_PLAN);
   }
@@ -3299,7 +3299,10 @@ export async function runOwnerDevelopmentInstallMain(input?: {
     const repair = await state.readRepair();
     if (
       !repair.ok || repair.value.status !== "found" ||
-      repair.value.head !== recovery.repairHead
+      repair.value.head !== recovery.repairHead ||
+      repair.value.snapshot.githubCooldowns.some((row) =>
+        row.retryNotBefore === null || Date.now() < row.retryNotBefore
+      )
     ) {
       return report(
         waitingResult(
@@ -3320,6 +3323,7 @@ export async function runOwnerDevelopmentInstallMain(input?: {
       current.head,
       move,
       now,
+      recovery,
     );
     files = await ownerDevelopmentInstallFiles(planned, current.head);
     message = ownerDevelopmentInstallCommitMessage({
@@ -3404,32 +3408,41 @@ async function readOwnerMatrixRecoveryEvidence(
 ): Promise<OwnerMatrixRecoveryEvidenceV1 | undefined> {
   if (!state.readRepairAt || !state.readReleaseAt) return undefined;
   const repair = await state.readRepair();
-  if (!repair.ok || repair.value.status !== "found") return undefined;
-  const [original, witness] = await Promise.all([
-    state.readRepairAt({
-      commit: binding.repairCommit,
-      expectedHead: repair.value.head,
-    }),
-    state.readReleaseAt({
-      commit: binding.releaseCommit,
-      expectedHead: current.head,
-    }),
-  ]);
   if (
-    !original.ok || original.value.status !== "found" || !witness.ok ||
-    witness.value.status !== "found" ||
-    !closedCWaveChargeReadbackVerified(
-      original.value.snapshot,
-      repair.value.snapshot,
-      binding,
+    !repair.ok || repair.value.status !== "found" ||
+    repair.value.snapshot.githubCooldowns.some((row) =>
+      row.retryNotBefore === null || Date.now() < row.retryNotBefore
     )
   ) return undefined;
+  const pointer = current.snapshot.hostedRuntimes[0];
+  const initialInstall = pointer?.activeRevision === binding.runtimeSha &&
+    pointer.generation === binding.generation;
+  const witness = await state.readReleaseAt({
+    commit: binding.releaseCommit,
+    expectedHead: current.head,
+  });
+  if (!witness.ok || witness.value.status !== "found") return undefined;
+  if (initialInstall) {
+    const original = await state.readRepairAt({
+      commit: binding.repairCommit,
+      expectedHead: repair.value.head,
+    });
+    if (
+      !original.ok || original.value.status !== "found" ||
+      !closedCWaveChargeReadbackVerified(
+        original.value.snapshot,
+        repair.value.snapshot,
+        binding,
+      )
+    ) return undefined;
+  }
   const runtime = witness.value.snapshot.hostedRuntimes[0];
   if (
     !runtime?.lastHealthyProof || !runtime.lastExecutionProof ||
     runtime.lastExecutionProof.outcome !== "failed"
   ) return undefined;
   if (
+    initialInstall &&
     !await ownerMatrixNativeCustody(
       token,
       runtime.lastExecutionProof,
@@ -3439,6 +3452,8 @@ async function readOwnerMatrixRecoveryEvidence(
   ) return undefined;
   const liveFailure = current.snapshot.hostedRuntimes[0]?.lastExecutionProof;
   if (
+    pointer?.activeRevision === candidate &&
+    pointer.generation === binding.generation + 1 &&
     liveFailure?.outcome === "failed" &&
     liveFailure.execution.revision === candidate &&
     !await ownerMatrixNativeCustody(token, liveFailure, binding, false)
@@ -3450,6 +3465,9 @@ async function readOwnerMatrixRecoveryEvidence(
   if (
     !freshRepair.ok || freshRepair.value.status !== "found" ||
     freshRepair.value.head !== repair.value.head || !freshRelease.ok ||
+    freshRepair.value.snapshot.githubCooldowns.some((row) =>
+      row.retryNotBefore === null || Date.now() < row.retryNotBefore
+    ) ||
     freshRelease.value.status !== "found" ||
     freshRelease.value.head !== current.head
   ) return undefined;

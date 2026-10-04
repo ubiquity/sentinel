@@ -492,11 +492,11 @@ export function closedCWaveNeedsRecovery(
     const work = snapshot.work.find((row) =>
       row.id === cell.taskId && sameRepo(row.repository, cell.repository)
     );
+    // Submitted/BLOCKED is a positive protected disposition. Its original
+    // head/checkpoint remain available to explicit recovery, but only an
+    // actionable preservation intent keeps archives an automatic prerequisite.
     return work?.intent?.kind === "candidate_preservation" &&
-        work.intent.requestId === charge.id ||
-      charge.outcome === "submitted" && work?.nextStep === "blocked" &&
-        work.target.candidateState?.preserved === null &&
-        work.target.head !== null;
+      work.intent.requestId === charge.id;
   });
 }
 /** Read-only installer gate reuses the consumer's positive handled predicate. */
