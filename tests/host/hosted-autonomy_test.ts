@@ -44,6 +44,7 @@ import {
 import { repositoryConfig } from "../budget/helpers.ts";
 import type { HttpTransportV1 } from "../../src/github/http.ts";
 import type { HostedExecutionIntentV1 } from "../../src/contracts/hosted-supervisor.ts";
+import { parseHostedExecutionSettlementV1 } from "../../src/contracts/hosted-supervisor.ts";
 
 import type { GitSha, WorkItemId } from "../../src/contracts/brands.ts";
 import type {
@@ -4826,6 +4827,7 @@ async function historicalMalformedRig(
     artifacts,
     archives,
     logs,
+    jobs,
     checkout,
     setFault: (next: typeof fault) => {
       fault = next;
@@ -6449,6 +6451,241 @@ Deno.test("historical closed list: three distinct witnesses then current, retire
           mode === "selected" ? [101, 102, 103, 73] : [73],
         );
       }
+    } finally {
+      Deno.chdir(previousCwd);
+      await Deno.remove(f.rig.tmp, { recursive: true });
+    }
+  }
+});
+
+Deno.test("historical verification: healthy bootstrap preserves thirteen unrelated intents", async () => {
+  for (
+    const purpose of [
+      "bootstrap",
+      "prior",
+      "candidate",
+      "rollback",
+      "failed-candidate",
+    ] as const
+  ) {
+    const f = await historicalMalformedRig(false, 13);
+    const previousCwd = Deno.cwd();
+    Deno.chdir(f.checkout);
+    try {
+      const failed = purpose === "failed-candidate";
+      const verificationPurpose = failed ? "candidate" : purpose;
+      const execution: HostedExecutionIntentV1 = {
+        ...f.execution,
+        purpose: verificationPurpose,
+        releaseId: verificationPurpose === "bootstrap"
+          ? null
+          : "verification-release",
+      };
+      const job = f.jobs.find((row) => row.id === 499)!;
+      job.conclusion = failed ? "failure" : "success";
+      job.steps[0].conclusion = job.conclusion;
+      f.logs.set(
+        499,
+        `${new Date(T0 + 30_000).toISOString()} ${
+          JSON.stringify({
+            version: "v1",
+            kind: "hosted_runtime_terminal",
+            execution,
+            controllerSha: execution.revision,
+            startedAt: T0,
+            finishedAt: T0 + 30_000,
+            outcome: failed ? "failed" : "healthy",
+            startupReady: !failed,
+            settled: true,
+            baseSha: BASE,
+          })
+        }\n`,
+      );
+      const native = await f.client.readHostedExecution(execution);
+      assert(
+        native.ok && native.value !== null &&
+          native.value.outcome === (failed ? "failed" : "healthy"),
+      );
+      const release = await f.rig.state.readRelease();
+      assert(release.ok && release.value.status === "found");
+      const snapshot = parseReleaseStateSnapshotV1({
+        ...release.value.snapshot,
+        hostedRuntimes: [{
+          ...release.value.snapshot.hostedRuntimes[0],
+          execution: null,
+          lastExecutionProof: native.value,
+          lastHealthyProof: failed ? null : native.value,
+        }],
+      });
+      f.rig.state.readRelease = () =>
+        Promise.resolve(portOk({ ...release.value, snapshot }));
+      f.rig.state.writeRepair = () => {
+        throw new Error("unexpected task write");
+      };
+      f.historicalMatrix.budget.settleModelStart = () => {
+        throw new Error("unexpected charge settlement");
+      };
+      const before = await f.rig.state.readRepair();
+      assert.equal(
+        await runHistoricalMatrixQuarantine({
+          ...f.historicalMatrix,
+          historicalReleaseWitnesses: [],
+        }),
+        0,
+      );
+      assert.deepEqual(await f.rig.state.readRepair(), before);
+    } finally {
+      Deno.chdir(previousCwd);
+      await Deno.remove(f.rig.tmp, { recursive: true });
+    }
+  }
+});
+
+Deno.test("historical verification: missing proof ordinary pending mismatch and drift remain incomplete", async () => {
+  for (
+    const fault of [
+      "missing",
+      "ordinary-artifact",
+      "active-ordinary",
+      "notstarted-ordinary",
+      "pending",
+      "mismatch",
+      "release-drift",
+      "repair-drift",
+    ]
+  ) {
+    const f = await historicalMalformedRig(false, 1);
+    const previousCwd = Deno.cwd();
+    Deno.chdir(f.checkout);
+    try {
+      const purpose = fault === "ordinary-artifact" ? "ordinary" : "bootstrap";
+      const execution = {
+        ...f.execution,
+        purpose: purpose as "ordinary" | "bootstrap",
+      };
+      const job = f.jobs.find((row) => row.id === 499)!;
+      job.conclusion = "success";
+      job.steps[0].conclusion = "success";
+      f.logs.set(
+        499,
+        `${new Date(T0 + 30_000).toISOString()} ${
+          JSON.stringify({
+            version: "v1",
+            kind: "hosted_runtime_terminal",
+            execution,
+            controllerSha: execution.revision,
+            startedAt: T0,
+            finishedAt: T0 + 30_000,
+            outcome: "healthy",
+            startupReady: true,
+            settled: true,
+            baseSha: BASE,
+          })
+        }\n`,
+      );
+      const native = await f.client.readHostedExecution(execution);
+      assert(
+        native.ok && native.value !== null &&
+          native.value.outcome === "healthy",
+      );
+      const release = await f.rig.state.readRelease();
+      assert(release.ok && release.value.status === "found");
+      const active = {
+        ...f.execution,
+        id: "72:1:repair",
+        runId: 72,
+        runAttempt: 1,
+        createdAt: T0 + 31_000,
+      };
+      const snapshot = parseReleaseStateSnapshotV1({
+        ...release.value.snapshot,
+        hostedRuntimes: [{
+          ...release.value.snapshot.hostedRuntimes[0],
+          execution:
+            fault === "active-ordinary" || fault === "notstarted-ordinary"
+              ? active
+              : null,
+          lastExecutionProof: fault === "missing" ? null : native.value,
+          lastHealthyProof: native.value,
+        }],
+      });
+      f.rig.state.readRelease = () =>
+        Promise.resolve(portOk({ ...release.value, snapshot }));
+      f.rig.state.writeRepair = () => {
+        throw new Error("unexpected task write");
+      };
+      f.historicalMatrix.budget.settleModelStart = () => {
+        throw new Error("unexpected charge settlement");
+      };
+      const before = await f.rig.state.readRepair();
+      assert(before.ok && before.value.status === "found");
+      const repairBefore = before.value;
+      if (fault === "ordinary-artifact") f.setFault("missing");
+      if (fault === "pending") f.setFault("pending");
+      if (fault === "notstarted-ordinary") {
+        f.historicalMatrix.transport.confirmCompletedExecution = () =>
+          Promise.resolve(true);
+        f.historicalMatrix.readExecution = () =>
+          Promise.resolve(portOk(parseHostedExecutionSettlementV1({
+            execution: active,
+            workflowId: 357012162,
+            workflowPath: ".github/workflows/supervisor.yml",
+            repository: "ubiquity/sentinel",
+            ref: "refs/heads/sentinel-supervisor",
+            jobId: null,
+            outcome: "not_started",
+            finishedAt: T0 + 40_000,
+            observedAt: f.clock.now(),
+            evidenceDigest: "b".repeat(64),
+          })));
+      }
+      if (
+        fault === "mismatch" || fault === "release-drift" ||
+        fault === "repair-drift"
+      ) {
+        const read = f.historicalMatrix.readExecution;
+        f.historicalMatrix.readExecution = async (input) => {
+          const observed = await read(input);
+          if (fault === "release-drift") {
+            f.rig.state.readRelease = () =>
+              Promise.resolve(
+                portOk({
+                  ...release.value,
+                  snapshot,
+                  head: "f".repeat(40) as GitSha,
+                }),
+              );
+          }
+          if (fault === "repair-drift") {
+            f.rig.state.readRepair = () =>
+              Promise.resolve(
+                portOk({
+                  ...repairBefore,
+                  snapshot: {
+                    ...repairBefore.snapshot,
+                    work: repairBefore.snapshot.work.map((row) => ({
+                      ...row,
+                      updatedAt: row.updatedAt + 1,
+                    })),
+                  },
+                }),
+              );
+          }
+          return fault === "mismatch" && observed.ok &&
+              observed.value !== null &&
+              observed.value.outcome !== "not_started"
+            ? portOk({ ...observed.value, logDigest: "a".repeat(64) })
+            : observed;
+        };
+      }
+      await assert.rejects(
+        () =>
+          runHistoricalMatrixQuarantine({
+            ...f.historicalMatrix,
+            historicalReleaseWitnesses: [],
+          }),
+        /historical matrix|matrix artifact/,
+      );
     } finally {
       Deno.chdir(previousCwd);
       await Deno.remove(f.rig.tmp, { recursive: true });

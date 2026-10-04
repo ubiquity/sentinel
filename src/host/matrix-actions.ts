@@ -413,6 +413,71 @@ export async function runHistoricalMatrixQuarantine(
       ? savedProof.execution
       : null);
   if (!execution) {
+    const verification = current ?? savedProof?.execution;
+    if (
+      verification &&
+      ["bootstrap", "prior", "candidate", "rollback"].includes(
+        verification.purpose,
+      )
+    ) {
+      if (
+        freshRelease.value.head !== release.value.head ||
+        canonicalStringify(freshRuntime) !== canonicalStringify(runtime)
+      ) {
+        throw new Error("historical matrix verification custody changed");
+      }
+      if (
+        current === null && (!deps.transport.confirmCompletedExecution ||
+          !await deps.transport.confirmCompletedExecution(verification))
+      ) {
+        throw new Error(
+          "historical matrix verification completion unavailable",
+        );
+      }
+      const observed = current !== null
+        ? { ok: true as const, value: currentNative }
+        : await deps.readExecution(verification);
+      if (
+        !observed.ok || observed.value === null ||
+        observed.value.outcome === "not_started"
+      ) {
+        throw new Error("historical matrix verification proof unavailable");
+      }
+      const verificationProof = parseHostedRunProofV1(observed.value);
+      if (
+        canonicalStringify(verificationProof.execution) !==
+          canonicalStringify(verification) ||
+        (current === null &&
+          (!savedProof || savedProof.outcome === "not_started" ||
+            canonicalStringify({
+                ...savedProof,
+                observedAt: verificationProof.observedAt,
+              }) !== canonicalStringify(verificationProof)))
+      ) {
+        throw new Error("historical matrix verification binding changed");
+      }
+      const [afterRelease, afterRepair] = await Promise.all([
+        deps.state.readRelease(),
+        deps.state.readRepair(),
+      ]);
+      if (
+        !afterRelease.ok || afterRelease.value.status !== "found" ||
+        afterRelease.value.head !== release.value.head ||
+        canonicalStringify(
+            afterRelease.value.snapshot.hostedRuntimes.find((row) =>
+              row.id === HOSTED_RUNTIME_ID
+            ),
+          ) !== canonicalStringify(runtime) ||
+        !afterRepair.ok || afterRepair.value.status !== "found" ||
+        canonicalStringify(afterRepair.value.snapshot.work) !==
+          canonicalStringify(repair.value.snapshot.work) ||
+        canonicalStringify(afterRepair.value.snapshot.reservations) !==
+          canonicalStringify(repair.value.snapshot.reservations)
+      ) {
+        throw new Error("historical matrix verification observation changed");
+      }
+      return 0;
+    }
     throw new Error("historical matrix saved execution unavailable");
   }
   const native = currentNative &&

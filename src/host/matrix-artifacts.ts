@@ -204,6 +204,9 @@ export function createActionsMatrixArtifactTransport(options: {
             canonicalStringify(current) !==
               canonicalStringify(input.completedExecution) ||
             (!runtime?.execution &&
+              !["bootstrap", "prior", "candidate", "rollback"].includes(
+                current.purpose,
+              ) &&
               (runtime?.activeRevision !== current.revision ||
                 runtime.generation !== current.generation))
           ) refuse();

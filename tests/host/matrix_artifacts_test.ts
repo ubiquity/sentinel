@@ -507,6 +507,69 @@ Deno.test("matrix artifacts: authenticated paginated old wave recovers exact bun
   }
 });
 
+Deno.test("matrix verification completion: exact held verification survives pointer advance", async () => {
+  for (
+    const purpose of ["bootstrap", "prior", "candidate", "rollback"] as const
+  ) {
+    const f = await fixture();
+    const previousCwd = Deno.cwd();
+    Deno.chdir(`${f.tmp}/checkout`);
+    try {
+      const runtime = f.release.hostedRuntimes[0];
+      const execution = {
+        ...runtime.execution!,
+        id: WAVE,
+        ...RUN,
+        purpose,
+        releaseId: purpose === "bootstrap" ? null : "verification-release",
+      };
+      runtime.execution = null;
+      runtime.lastExecutionProof = parseHostedExecutionSettlementV1({
+        execution,
+        workflowId: HOSTED_SUPERVISOR_WORKFLOW_ID,
+        workflowPath: HOSTED_SUPERVISOR_WORKFLOW_PATH,
+        repository: "ubiquity/sentinel",
+        ref: "refs/heads/sentinel-supervisor",
+        jobId: 401,
+        startedAt: T0,
+        finishedAt: T0,
+        observedAt: T0 + 10_000,
+        outcome: "failed",
+        startupReady: false,
+        settled: true,
+        baseSha: null,
+        terminalAt: null,
+        logDigest: "a".repeat(64),
+      });
+      runtime.activeRevision = SHA3;
+      runtime.generation++;
+      f.attempt.status = "completed";
+      const transport = createActionsMatrixArtifactTransport({
+        state: f.state,
+        token: "fake-local-token",
+        http: f.http,
+        clock: { now: () => T0 + 10_000 },
+        artifactRoot: `${f.tmp}/verification`,
+      });
+      assert.equal(await transport.confirmCompletedExecution!(execution), true);
+      runtime.execution = {
+        ...execution,
+        id: "99:1:repair",
+        runId: 99,
+        runAttempt: 1,
+        revision: SHA3,
+        generation: runtime.generation,
+      };
+      await assert.rejects(() =>
+        transport.confirmCompletedExecution!(execution)
+      );
+    } finally {
+      Deno.chdir(previousCwd);
+      await Deno.remove(f.tmp, { recursive: true });
+    }
+  }
+});
+
 Deno.test("matrix completion: exact settled latest authenticates and custody failures refuse", async () => {
   for (
     const fault of [
