@@ -36,7 +36,7 @@ jobs:
   maintenance:
     if: github.ref == 'refs/heads/sentinel-supervisor'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 5
     # `issues: write` is what the autonomy pass needs to close an issue once its
     # exact reviewed head has an ACCEPTED hosted release, and `actions: write`
     # is what it needs to approve the credential-free deterministic check that
