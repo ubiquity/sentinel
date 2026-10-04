@@ -1170,6 +1170,76 @@ Deno.test("port: log sampling produces exact-window Cohort counts with complete 
   assert.deepEqual(sample.value.coverage, { status: "complete" });
 });
 
+Deno.test(
+  "port: correlates a request cohort across adjacent telemetry windows",
+  async () => {
+    const transport = new ScriptedTransport();
+    transport.any(
+      "GET",
+      new RegExp("^/v2/apps/[^/]+/logs$"),
+      (url) => {
+        const start = Date.parse(url.searchParams.get("start") ?? "0");
+        const messages = start === T0
+          ? [
+            acceptedEvent({
+              requestId: "boundary-request",
+              identity: DEP_1,
+              timestamp: T0 + 29_999,
+            }),
+          ]
+          : start === T0 + 30_000
+          ? [
+            terminalEvent({
+              requestId: "boundary-request",
+              identity: DEP_1,
+              timestamp: T0 + 30_001,
+            }),
+          ]
+          : [];
+        return {
+          kind: "response",
+          status: 200,
+          body: JSON.stringify({
+            logs: messages.map((message, index) => ({
+              timestamp: new Date(start + index).toISOString(),
+              level: "info",
+              message,
+              revision_id: DEP_1.revisionId,
+            })),
+            next_cursor: null,
+          }),
+        };
+      },
+    );
+    const port = client(transport, new TestClock(T0 + 65_001));
+
+    const first = await port.sampleMetrics({
+      baseUrl: MANAGED_URL,
+      metricsPath: "/health",
+      identity: DEP_1,
+      windowStart: T0,
+      windowEnd: T0 + 30_000,
+      domain: "ai.ubq.fi",
+    });
+    const second = await port.sampleMetrics({
+      baseUrl: MANAGED_URL,
+      metricsPath: "/health",
+      identity: DEP_1,
+      windowStart: T0 + 30_000,
+      windowEnd: T0 + 60_000,
+      domain: "ai.ubq.fi",
+    });
+
+    assert.ok(first.ok);
+    assert.ok(second.ok);
+    if (!first.ok || !second.ok) return;
+    assert.equal(first.value.requestCount, 1);
+    assert.deepEqual(first.value.coverage, { status: "complete" });
+    assert.equal(second.value.requestCount, 0);
+    assert.deepEqual(second.value.coverage, { status: "complete" });
+  },
+);
+
 Deno.test("port: log sampling before the trusted lag is missing, never zero", async () => {
   const transport = new ScriptedTransport();
   logRoute(transport, { accept: 100 });
