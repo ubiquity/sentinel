@@ -1,3 +1,7 @@
+## Ralph loop sol/max worker override - 2026-10-05
+
+The owner directed the Sentinel Ralph loop (the host-side autonomous repair loop started 2026-10-05) to use native Codex subagents with model `gpt-6.1-sol` and reasoning effort `max` for all execution legwork, replacing the DSH/DeepSeek Ultra workers for this loop only. Launch acceptance requires the child's persisted session header to show `gpt-6.1-sol`/`max` plus its terminal report, with no silent substitution. This supersedes the execution-legwork model default in `agents/deepseek-harness.md` for this loop only. It does not change the Sentinel runtime model policy (gpt-5.6-luna/max), credentials, review, promotion or state ownership.
+
 ## Manually dispatched Actions runs - 2026-10-05
 
 The owner directed that Sentinel's GitHub Actions schedules are disabled and every hosted run is dispatched explicitly. `observe.yml`, `repair.yml` and `supervisor-dispatch.yml` no longer declare `schedule` triggers; `sentinel-release` stays disabled. Runs are dispatched and verified with `ops/sentinel-cli.ts`, installed on the trusted host as `sentinel`: `sentinel status`, `sentinel run observe`, `sentinel run supervisor`, `sentinel receipts <run-id>`. The trusted supervisor workflow remains dispatch-only at the protected `sentinel-supervisor` ref and is never selected by time or list order. This supersedes the cron-triggered runtime statement in AGENTS.md; model routing, review, credential, promotion and state ownership are unchanged.
