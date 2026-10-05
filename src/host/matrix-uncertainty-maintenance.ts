@@ -17,7 +17,11 @@ import { portOk } from "../contracts/ports.ts";
 import type { RepairStateSnapshotV1 } from "../contracts/state-snapshots.ts";
 import { GitHubApiClient } from "../github/client.ts";
 import { fetchHttpTransport, type HttpTransportV1 } from "../github/http.ts";
-import { implementationIntentKey } from "../repair/keys.ts";
+import {
+  candidateBranch,
+  candidatePreservationRef,
+  implementationIntentKey,
+} from "../repair/keys.ts";
 import {
   type RepairCycleDepsV1,
   settleFailedImplementation,
@@ -31,6 +35,15 @@ import {
 
 export const MATRIX_UNCERTAINTY_DETAIL =
   "implementation outcome uncertain; original admission retained without usable artifact evidence";
+export const MATRIX_PRESERVATION_UNCERTAINTY_DETAIL =
+  "candidate preservation unresolved; exact candidate and submitted admission retained";
+const PRESERVATION_IDS = [
+  "c0d668a23d4c5230f6349d8368d964ea566509bd2e23a9476279108bc74dbc8b",
+  "536ffe5515e1bcee3105412af0f419566b76ae422095ac54039f7a6789e1f02b",
+  "739b0d9b59604f1fa163f5f90bf9fb37fd33d93ae8eee8d606e0fa174016671d",
+  "11acb1590ed849db9e3fa8c4fe071ed169142c74c122deb8b40bc4ad55d7c6b3",
+  "971b6ea4516e09c84a94083705353228a5d2ef31d652ddc9346fd5cae34081d9",
+] as const;
 
 export interface MatrixUncertaintyBindingV1 {
   repairCommit: GitSha;
@@ -119,21 +132,32 @@ function chargeIdentity(row: RepairStateSnapshotV1["reservations"][number]) {
   return { ...row, outcome: "reserved", settledAt: null, proofRef: null };
 }
 
-/** Only the existing charged failure consumer may mutate the exact captured rows. */
+/** Charged failure handling and conservative parking of exact captured preservation. */
 export async function runMatrixUncertaintyMaintenance(
   deps: MatrixUncertaintyMaintenanceDepsV1,
 ) {
   const binding = deps.binding ?? MATRIX_UNCERTAINTY_BINDING;
   const first = await deps.state.readRepair();
   if (!first.ok || first.value.status !== "found") refuse();
+  const initialSnapshot = first.value.snapshot;
   const ids = new Set(binding.reservationIds);
   if (
     ids.size !== 13 || binding.reservationIds.length !== 13 ||
     binding.reservationIds.some((id) => !/^[0-9a-f]{64}$/.test(id))
   ) refuse();
+  // The existing trusted fixture binding may describe only the thirteen
+  // implementation admissions. Production always owns all five captured IDs.
+  const preservationIds = deps.binding === undefined
+    ? PRESERVATION_IDS
+    : PRESERVATION_IDS.filter((id) =>
+      initialSnapshot.work.some((row) => row.intent?.requestId === id)
+    );
+  if (preservationIds.some((id) => ids.has(id))) refuse();
   if (
-    !first.value.snapshot.work.some((row) =>
-      row.nextStep === "work" && ids.has(row.intent?.requestId ?? "")
+    !initialSnapshot.work.some((row) =>
+      row.nextStep === "work" &&
+      (ids.has(row.intent?.requestId ?? "") ||
+        preservationIds.some((id) => id === row.intent?.requestId))
     )
   ) {
     return {
@@ -188,6 +212,7 @@ export async function runMatrixUncertaintyMaintenance(
   let expected = first.value;
   let activeId = "";
   let activeTask = "";
+  let activePreservation = false;
   async function custody() {
     const fresh = await deps.state.readRelease();
     if (
@@ -216,21 +241,28 @@ export async function runMatrixUncertaintyMaintenance(
       );
       if (
         !reservation || !nextCharge ||
-        !same(chargeIdentity(reservation), chargeIdentity(nextCharge)) ||
-        nextCharge.outcome !== "ambiguous" || nextCharge.settledAt === null ||
-        nextCharge.proofRef !== null
+        (activePreservation
+          ? (!same(reservation, nextCharge) ||
+            nextCharge.outcome !== "submitted" || nextCharge.settledAt === null)
+          : (!same(chargeIdentity(reservation), chargeIdentity(nextCharge)) ||
+            nextCharge.outcome !== "ambiguous" ||
+            nextCharge.settledAt === null ||
+            nextCharge.proofRef !== null))
       ) refuse();
       const block = next.work.find((work) => work.id === activeTask);
       if (
-        !block ||
+        !block || block.updatedAt < row.updatedAt ||
+        block.updatedAt > next.updatedAt || next.updatedAt > deps.clock.now() ||
         (!same(block, row) &&
           !same(
             block,
             markBlocked(
               row,
               "other",
-              MATRIX_UNCERTAINTY_DETAIL,
-              next.updatedAt,
+              activePreservation
+                ? MATRIX_PRESERVATION_UNCERTAINTY_DETAIL
+                : MATRIX_UNCERTAINTY_DETAIL,
+              block.updatedAt,
             ),
           ))
       ) refuse();
@@ -374,6 +406,89 @@ export async function runMatrixUncertaintyMaintenance(
     );
     if (
       !settled || settled.outcome !== "ambiguous" || settled.settledAt === null
+    ) refuse();
+    quarantined++;
+  }
+  for (const id of preservationIds) {
+    const source = original.value.snapshot.work.filter((row) =>
+      row.intent?.requestId === id
+    );
+    const originalCharge = original.value.snapshot.reservations.filter((row) =>
+      row.id === id
+    );
+    const work = expected.snapshot.work.filter((row) =>
+      row.intent?.requestId === id
+    );
+    const charge = expected.snapshot.reservations.filter((row) =>
+      row.id === id
+    );
+    if (
+      source.length !== 1 || originalCharge.length !== 1 || work.length !== 1 ||
+      charge.length !== 1
+    ) refuse();
+    const saved = source[0],
+      row = work[0],
+      submitted = charge[0],
+      intent = row.intent;
+    if (
+      saved.nextStep !== "work" ||
+      saved.intent?.kind !== "candidate_preservation" ||
+      submitted.outcome !== "submitted" || submitted.settledAt === null ||
+      submitted.proofRef !== null ||
+      !same(submitted, originalCharge[0]) ||
+      submitted.purpose === "review_request" ||
+      intent?.kind !== "candidate_preservation" || intent.requestId !== id ||
+      intent.key !== implementationIntentKey(id) || intent.resultId !== null ||
+      intent.pr !== null ||
+      row.target.head === null || row.target.head === row.target.base ||
+      row.target.branch !== candidateBranch(row.id) ||
+      row.target.candidateState?.preserved !== null ||
+      intent.expectedHead !== row.target.head ||
+      intent.observedBase !== row.target.base ||
+      intent.branch !==
+        await candidatePreservationRef(row.repository, row.id, intent.key) ||
+      submitted.head !== row.target.base || submitted.taskId !== row.id ||
+      submitted.attempt !== row.counters.attempts ||
+      !same(submitted.repository, row.repository)
+    ) refuse();
+    if (
+      same(
+        row,
+        markBlocked(
+          saved,
+          "other",
+          MATRIX_PRESERVATION_UNCERTAINTY_DETAIL,
+          row.updatedAt,
+        ),
+      )
+    ) continue;
+    if (!same(row, saved)) refuse();
+    await custody();
+    activeId = id;
+    activeTask = row.id;
+    activePreservation = true;
+    const at = deps.clock.now();
+    const blocked = markBlocked(
+      row,
+      "other",
+      MATRIX_PRESERVATION_UNCERTAINTY_DETAIL,
+      at,
+    );
+    const next = {
+      ...expected.snapshot,
+      sequence: expected.snapshot.sequence + 1,
+      stateHead: expected.head,
+      updatedAt: at,
+      work: expected.snapshot.work.map((work) =>
+        work.id === row.id ? blocked : work
+      ),
+    };
+    const written = await guarded.writeRepair(next, expected.head);
+    if (!written.ok || written.value.status !== "applied") refuse();
+    const readback = await deps.state.readRepair();
+    if (
+      !readback.ok || readback.value.status !== "found" ||
+      !same(readback.value, expected)
     ) refuse();
     quarantined++;
   }
