@@ -2,6 +2,7 @@
 import { RollingStartBudget } from "../budget/mod.ts";
 import { canonicalStringify } from "../contracts/canonical.ts";
 import type { GitSha } from "../contracts/brands.ts";
+import { parseReleaseRequestV1 } from "../contracts/release.ts";
 import {
   HOSTED_RUNTIME_ID,
   type HostedExecutionIntentV1,
@@ -16,7 +17,11 @@ import type {
 import { portOk } from "../contracts/ports.ts";
 import type { RepairStateSnapshotV1 } from "../contracts/state-snapshots.ts";
 import { GitHubApiClient } from "../github/client.ts";
-import { fetchHttpTransport, type HttpTransportV1 } from "../github/http.ts";
+import {
+  fetchHttpTransport,
+  type HttpResponseV1,
+  type HttpTransportV1,
+} from "../github/http.ts";
 import {
   candidateBranch,
   candidatePreservationRef,
@@ -83,6 +88,8 @@ export interface MatrixUncertaintyMaintenanceDepsV1 {
   readExecution(execution: HostedExecutionIntentV1): Promise<
     PortResultV1<HostedExecutionSettlementV1 | null>
   >;
+  /** Task-bound native PR/commit evidence, never a bare verifier refusal. */
+  confirmHistoricalStaleBase?(): Promise<boolean>;
   /** Trusted in-process fixture binding; production uses the fixed custody above. */
   binding?: MatrixUncertaintyBindingV1;
 }
@@ -94,10 +101,11 @@ export function createMatrixUncertaintyMaintenance(input: {
   artifactRoot: string;
   http?: HttpTransportV1;
 }): MatrixUncertaintyMaintenanceDepsV1 {
-  const client = new GitHubApiClient({
+  const http = input.http ?? fetchHttpTransport();
+  const options = {
     repository: { owner: "ubiquity", name: "sentinel", installationId: 0 },
     apiBaseUrl: "https://api.github.com",
-    http: input.http ?? fetchHttpTransport(),
+    http,
     clock: input.clock,
     auth: {
       authorizationHeader: () =>
@@ -107,7 +115,8 @@ export function createMatrixUncertaintyMaintenance(input: {
       state: input.state,
       clock: input.clock,
     }),
-  });
+  };
+  const client = new GitHubApiClient(options);
   const transport = createActionsMatrixArtifactTransport({
     ...input,
     http: input.http ?? createActionsMatrixArtifactHttpTransport(),
@@ -118,7 +127,202 @@ export function createMatrixUncertaintyMaintenance(input: {
     confirmCompletedExecution: (execution) =>
       transport.confirmCompletedExecution!(execution),
     readExecution: (execution) => client.readHostedExecution(execution),
+    confirmHistoricalStaleBase: async () => {
+      // Capture only this invocation's authenticated native reads through the
+      // existing verifier, including its deadlines and durable cooldown gate.
+      let pull: HttpResponseV1 | null = null;
+      let commit: HttpResponseV1 | null = null;
+      const verifier = new GitHubApiClient({
+        ...options,
+        http: async (wire) => {
+          const response = await http(wire);
+          if (wire.method === "GET") {
+            if (
+              wire.url ===
+                "https://api.github.com/repos/ubiquity/sentinel/pulls/110"
+            ) pull = response;
+            if (
+              wire.url ===
+                `https://api.github.com/repos/ubiquity/sentinel/commits/${STALE_BASE_REQUEST.revision}`
+            ) commit = response;
+          }
+          return response;
+        },
+      });
+      const verified = await verifier.verifyHostedReleaseRequest(
+        STALE_BASE_REQUEST,
+      );
+      if (!verified.ok || verified.value !== false) return false;
+      try {
+        const read = (response: HttpResponseV1 | null) => {
+          if (
+            response?.status !== 200 || response.bodyText.length > 1_000_000
+          ) refuse();
+          return JSON.parse(response.bodyText);
+        };
+        const pr = read(pull);
+        const merged = read(commit);
+        return pr.number === 110 && pr.state === "closed" &&
+          pr.merged === true &&
+          pr.merge_commit_sha === STALE_BASE_REQUEST.revision &&
+          pr.head?.sha === STALE_BASE_REQUEST.source.head &&
+          pr.head?.repo?.full_name === "ubiquity/sentinel" &&
+          pr.base?.ref === "development" &&
+          pr.base?.repo?.full_name === "ubiquity/sentinel" &&
+          merged.sha === STALE_BASE_REQUEST.revision &&
+          Array.isArray(merged.parents) && merged.parents.length === 2 &&
+          merged.parents[0]?.sha === STALE_BASE_RUNTIME &&
+          merged.parents[1]?.sha === STALE_BASE_REQUEST.source.head &&
+          merged.parents.every((parent: { sha?: string }) =>
+            parent.sha !== STALE_BASE_REQUEST.source.base
+          );
+      } catch {
+        return false;
+      }
+    },
   };
+}
+
+const STALE_BASE_RUNTIME = "e4cef46332cf124a8c283d798a963cf5f66e45c2";
+const STALE_BASE_REPAIR = "50bb001920827e31816c0d7ed37b8143965c0cf7" as GitSha;
+const STALE_BASE_REASON =
+  "historical PR110 merged against an unreviewed base; release authorization cancelled";
+const STALE_BASE_REQUEST = parseReleaseRequestV1({
+  version: "v1",
+  kind: "release_request",
+  id:
+    "release:5e6390da3991207f7fb7cdd8f0fa5268c0e9daf0fe12c04d3e8e44245f09a5da",
+  target: {
+    repository: { owner: "ubiquity", name: "sentinel", installationId: 0 },
+    environment: "production",
+  },
+  revision: "accc96c8e8eeb5cca71e9641f674a96bf75c77d1",
+  source: {
+    pullRequest: 110,
+    reviewRequestId:
+      "review-review:110:28e2aac95f0dbcc79b3c41333f5a2eb92194ccea:attempt-3",
+    reviewReceiptId:
+      "review-receipt:a62d1e2150592b28b358978f7c5781aff45dce6899dc668b67b72b97094b908e",
+    head: "28e2aac95f0dbcc79b3c41333f5a2eb92194ccea",
+    base: "2bca04186b3e462c63ba3d9ce996f4a5d3fd03b6",
+  },
+  status: "open",
+  failureReason: null,
+  createdAt: 1791208786131,
+});
+
+/** Cancel one invalid historical authorization; never promote or claim delivery. */
+async function disposeHistoricalStaleBase(
+  deps: MatrixUncertaintyMaintenanceDepsV1,
+) {
+  const first = await deps.state.readRepair();
+  if (!first.ok || first.value.status !== "found") refuse();
+  const held = first.value;
+  const request = held.snapshot.releaseRequests.find((row) =>
+    row.id === STALE_BASE_REQUEST.id
+  );
+  if (request === undefined) return;
+  const cancelled = {
+    ...STALE_BASE_REQUEST,
+    status: "cancelled",
+    failureReason: STALE_BASE_REASON,
+  };
+  if (same(request, cancelled)) return;
+  if (
+    !same(request, STALE_BASE_REQUEST) || !deps.state.readRepairAt ||
+    !deps.confirmHistoricalStaleBase
+  ) refuse();
+  const original = await deps.state.readRepairAt({
+    commit: STALE_BASE_REPAIR,
+    expectedHead: held.head,
+  });
+  if (
+    !original.ok || original.value.status !== "found" ||
+    original.value.head !== STALE_BASE_REPAIR ||
+    !same(
+      original.value.snapshot.releaseRequests.find((row) =>
+        row.id === request.id
+      ),
+      request,
+    )
+  ) refuse();
+  const priorReview = original.value.snapshot.reviews.find((row) =>
+    row.id === request.source.reviewReceiptId
+  );
+  const review = held.snapshot.reviews.find((row) =>
+    row.id === request.source.reviewReceiptId
+  );
+  if (
+    !priorReview || !review || !same(priorReview, review) ||
+    review.requestId !== request.source.reviewRequestId ||
+    review.pullRequest.number !== 110 ||
+    review.pullRequest.head !== request.source.head ||
+    review.pullRequest.base !== request.source.base
+  ) refuse();
+  const release = await deps.state.readRelease();
+  if (!release.ok || release.value.status !== "found") refuse();
+  const captured = release.value;
+  const runtime = captured.snapshot.hostedRuntimes[0];
+  const healthy = runtime?.lastHealthyProof;
+  if (
+    captured.snapshot.hostedRuntimes.length !== 1 || !runtime ||
+    runtime.id !== HOSTED_RUNTIME_ID ||
+    runtime.activeRevision !== STALE_BASE_RUNTIME ||
+    runtime.generation !== 63 || runtime.execution !== null ||
+    !healthy || healthy.execution.revision !== STALE_BASE_RUNTIME ||
+    healthy.execution.generation !== 63 ||
+    !same(runtime.lastExecutionProof, healthy) ||
+    captured.snapshot.hostedReleases.some((row) =>
+      row.id === request.id || row.pointerIntent !== null ||
+      (row.phase !== "accepted" && row.phase !== "rolled_back")
+    ) ||
+    [...held.snapshot.githubCooldowns, ...captured.snapshot.githubCooldowns]
+      .some((row) =>
+        row.retryNotBefore === null || row.retryNotBefore > deps.clock.now()
+      )
+  ) refuse();
+  if (!await deps.confirmCompletedExecution(healthy.execution)) refuse();
+  const native = await deps.readExecution(healthy.execution);
+  if (
+    !native.ok || !native.value || native.value.outcome !== "healthy" ||
+    native.value.observedAt < healthy.observedAt ||
+    native.value.observedAt > deps.clock.now() ||
+    !same({ ...healthy, observedAt: native.value.observedAt }, native.value) ||
+    !await deps.confirmHistoricalStaleBase()
+  ) refuse();
+  async function custody() {
+    const current = await deps.state.readRelease();
+    if (
+      !current.ok || current.value.status !== "found" ||
+      !same(current.value, captured)
+    ) refuse();
+  }
+  await custody();
+  const current = await deps.state.readRepair();
+  if (
+    !current.ok || current.value.status !== "found" ||
+    !same(current.value, held)
+  ) refuse();
+  const now = deps.clock.now();
+  if (!Number.isSafeInteger(now) || now < held.snapshot.updatedAt) refuse();
+  const next = {
+    ...held.snapshot,
+    sequence: held.snapshot.sequence + 1,
+    stateHead: held.head,
+    updatedAt: now,
+    releaseRequests: held.snapshot.releaseRequests.map((row) =>
+      row.id === request.id ? parseReleaseRequestV1(cancelled) : row
+    ),
+  };
+  const written = await deps.state.writeRepair(next, held.head);
+  if (!written.ok || written.value.status !== "applied") refuse();
+  const after = await deps.state.readRepair();
+  if (
+    !after.ok || after.value.status !== "found" ||
+    !same(after.value.snapshot, next) ||
+    after.value.head !== written.value.head
+  ) refuse();
+  await custody();
 }
 
 function refuse(): never {
@@ -136,6 +340,7 @@ function chargeIdentity(row: RepairStateSnapshotV1["reservations"][number]) {
 export async function runMatrixUncertaintyMaintenance(
   deps: MatrixUncertaintyMaintenanceDepsV1,
 ) {
+  await disposeHistoricalStaleBase(deps);
   const binding = deps.binding ?? MATRIX_UNCERTAINTY_BINDING;
   const first = await deps.state.readRepair();
   if (!first.ok || first.value.status !== "found") refuse();
