@@ -40,6 +40,7 @@ import {
   FakeIncidents,
   FakeModel,
   FakeReplay,
+  MemoryState,
 } from "../repair/helpers.ts";
 import { repositoryConfig } from "../budget/helpers.ts";
 import type { HttpTransportV1 } from "../../src/github/http.ts";
@@ -48,8 +49,11 @@ import { parseHostedExecutionSettlementV1 } from "../../src/contracts/hosted-sup
 
 import type { GitSha, WorkItemId } from "../../src/contracts/brands.ts";
 import type {
+  PortResultV1,
   RepairStateWriter,
+  StateReadResultV1,
   StateReadView,
+  StateWriteResultV1,
 } from "../../src/contracts/ports.ts";
 import { portError, portOk } from "../../src/contracts/ports.ts";
 import {
@@ -613,10 +617,112 @@ function healthyProof(
   };
 }
 
+/**
+ * Test-local adapter over the shared MemoryState. The historical rigs persist
+ * ONLY their repair half through this adapter: it keeps the real store's
+ * expected-head CAS, snapshot validation and sequence/time rules, answers with
+ * a promise like the real store, and hands out/accepts independent copies so no
+ * consumer can mutate the fixture's authoritative snapshot in place. It is
+ * deliberately repair-only (MemoryState also lacks the real store's
+ * validateRepairTransition parity); the explicit small real-Git recovery plus
+ * sibling case proves connected persistence transitions. Release reads never
+ * come from here; the real Git release store stays authoritative.
+ */
+class CopyingRepairState
+  implements Pick<StateReadView, "readRepair">, RepairStateWriter {
+  private readonly inner = new MemoryState();
+
+  async readRepair(): Promise<
+    PortResultV1<StateReadResultV1<RepairStateSnapshotV1>>
+  > {
+    const read = await this.inner.readRepair();
+    if (!read.ok || read.value.status !== "found") return read;
+    return portOk({
+      ...read.value,
+      snapshot: structuredClone(read.value.snapshot),
+    });
+  }
+
+  async writeRepair(
+    next: RepairStateSnapshotV1,
+    expectedHead: GitSha | null,
+  ): Promise<PortResultV1<StateWriteResultV1>> {
+    // The real store rejects a snapshot whose stateHead is not the expected
+    // remote head before any transition check; MemoryState omits that check, so
+    // this adapter applies it with the identical typed diagnostic.
+    if (next.stateHead !== expectedHead) {
+      return portError(
+        "invalid",
+        "snapshot stateHead must equal the expected remote head",
+      );
+    }
+    return await this.inner.writeRepair(
+      structuredClone(next),
+      expectedHead,
+    );
+  }
+}
+
+/**
+ * Test-local, multiwave-only read-through view of the REAL release store.
+ * Every read first proves the actual current authoritative remote head with a
+ * cheap native `git ls-remote` against the fixture's own real bare remote, and
+ * returns the cloned cached snapshot only when that fresh head exactly equals
+ * the head the cached full read observed. Otherwise it reads the real store and
+ * caches that actual snapshot/head. A ref-read error, malformed/missing
+ * identity or a moved head always falls through to the real read, so a stale
+ * cache is never returned; writes and readReleaseAt stay fully real/uncached.
+ */
+function releaseReadThrough(
+  delegate: () => ReturnType<StateReadView["readRelease"]>,
+  remoteUrl: string,
+): StateReadView["readRelease"] {
+  let cached: {
+    head: GitSha;
+    value: Awaited<ReturnType<StateReadView["readRelease"]>>;
+  } | null = null;
+  return async () => {
+    const probe = await gitRun(
+      remoteUrl,
+      ["ls-remote", remoteUrl, "refs/heads/sentinel-state/release"],
+      ENV,
+    );
+    const nativeHead = probe.ok
+      ? (probe.stdout.trim().split(/\s+/)[0] ?? "")
+      : "";
+    const proven = /^[0-9a-f]{40}$/.test(nativeHead)
+      ? nativeHead as GitSha
+      : null;
+    if (proven !== null && cached !== null && cached.head === proven) {
+      return structuredClone(cached.value);
+    }
+    const read = await delegate();
+    if (
+      proven !== null && read.ok && read.value.status === "found" &&
+      read.value.head === proven
+    ) {
+      cached = { head: proven, value: structuredClone(read) };
+    }
+    return read;
+  };
+}
+
 async function makeRig(
   prefix: string,
   options: {
     repair?: RepairStateSnapshotV1;
+    /**
+     * Test-local repair persistence override. When present it replaces only the
+     * repair half (memory CAS); the release store and every release read stay
+     * the real Git authority.
+     */
+    repairState?: Pick<StateReadView, "readRepair"> & RepairStateWriter;
+    /**
+     * Multiwave rigs only: compose the read-through release view here, so the
+     * returned rig value stays immutable and every other closure keeps binding
+     * the same instance.
+     */
+    releaseReadThrough?: boolean;
     /** Scoped archive fixtures use the repository's existing CI read scope. */
     fixtureDir?: string;
     release?: ReleaseStateSnapshotV1;
@@ -661,10 +767,25 @@ async function makeRig(
     scratchDir: `${tmp}/release`,
     remoteUrl: ctx.remoteUrl,
   });
-  const repairSeed = await repair.writeRepair(
-    options.repair ?? repairSnapshot(),
-    null,
-  );
+  // Historical fixtures persist their repair TRANSITIONS in memory with the real
+  // store's CAS/sequence/validation rules so the six legacy cases fit their
+  // bounded window; the release half stays the real Git store, so every
+  // readRelease/readReleaseAt authority and custody gate is unchanged.
+  const seedSnapshot = options.repair ?? repairSnapshot();
+  // The real repair branch is ALWAYS initialized with that exact seed: the
+  // fixture's real checkout/clone, native launcher identity and source paths
+  // bind to this honest commit, never to a fabricated one.
+  const realSeed = await repair.writeRepair(seedSnapshot, null);
+  if (!realSeed.ok || realSeed.value.status !== "applied") {
+    throw new Error(
+      `repair fixture seed failed: ${JSON.stringify(realSeed)}`,
+    );
+  }
+  const repairState: Pick<StateReadView, "readRepair"> & RepairStateWriter =
+    options.repairState ?? repair;
+  const repairSeed = options.repairState === undefined
+    ? realSeed
+    : await repairState.writeRepair(seedSnapshot, null);
   if (!repairSeed.ok || repairSeed.value.status !== "applied") {
     throw new Error(
       `repair fixture seed failed: ${JSON.stringify(repairSeed)}`,
@@ -697,11 +818,14 @@ async function makeRig(
       phase: "accepted",
     });
   }
+  const realReadRelease = () => release.readRelease();
   const rig: RigV1 = {
     tmp,
     state: {
-      readRepair: () => repair.readRepair(),
-      readRelease: () => release.readRelease(),
+      readRepair: () => repairState.readRepair(),
+      readRelease: options.releaseReadThrough
+        ? releaseReadThrough(realReadRelease, `${tmp}/remote.git`)
+        : realReadRelease,
       readReleaseAt: (input: { commit: GitSha; expectedHead: GitSha }) =>
         release.readReleaseAt!(input),
       writeRepair: (
@@ -709,7 +833,7 @@ async function makeRig(
         expectedHead: GitSha | null,
       ) => {
         rig.writes++;
-        return repair.writeRepair(next, expectedHead);
+        return repairState.writeRepair(next, expectedHead);
       },
     } as unknown as StateReadView & RepairStateWriter,
     githubFor: () => github,
@@ -4887,6 +5011,8 @@ Deno.test(
 async function historicalMalformedRig(
   includeSibling = true,
   historicalCount = 17,
+  realRepair = false,
+  cacheRelease = false,
 ) {
   const launcher = "1".repeat(40) as GitSha;
   const revision = "2".repeat(40) as GitSha;
@@ -4957,10 +5083,18 @@ async function historicalMalformedRig(
   const { rig, github } = await makeRig("historical-malformed", {
     fixtureDir: decodeURIComponent(new URL("../../", import.meta.url).pathname),
     repair: repairSnapshot(records, [], [], charges),
+    // The legacy guard cases persist only their repair half in memory (real
+    // CAS rules) so they fit the bounded window; the small real-Git recovery
+    // proof passes realRepair to keep the real state transport.
+    repairState: realRepair ? undefined : new CopyingRepairState(),
     release,
     pull: null,
     issueOpen: null,
     baseTip: BASE,
+    // Multiwave rigs only: every custody read still proves the actual current
+    // remote release head before any cached snapshot may be reused. The view is
+    // composed by the constructor so the rig value itself stays immutable.
+    releaseReadThrough: cacheRelease,
   });
   const checkout = `${rig.tmp}/checkout`;
   const cloned = await gitRun(rig.tmp, [
@@ -5230,9 +5364,18 @@ async function historicalMalformedRig(
     },
     cooldownGate: new HostedRepairCooldownGate({ state: rig.state, clock }),
   });
-  const historicalMatrix = {
+  // The concrete controller stays visible (the aggregate fixture call uses its
+  // full interface) while the quarantine capability keeps the declared
+  // mutable revalidation flag.
+  const historicalMatrix: HistoricalMatrixQuarantineDepsV1 & {
+    budget: RollingStartBudget;
+  } = {
     state: rig.state,
     clock,
+    // Default closed: only a test (or the trusted production route) that
+    // explicitly enables authenticated not-started revalidation reconciles
+    // already-quarantined records.
+    revalidateNotStarted: false,
     budget: new RollingStartBudget({ state: rig.state, clock, configs: [] }),
     readExecution: (saved: typeof execution) =>
       client.readHostedExecution(saved),
@@ -6326,7 +6469,11 @@ Deno.test("historical release witness: overwritten ordinary proof still quaranti
 });
 
 Deno.test("historical not started: real already-quarantined ambiguous state recovers through the authenticated transport", async () => {
-  const f = await historicalMalformedRig(true, 1);
+  const f = await historicalMalformedRig(true, 1, true);
+  // Authenticated not-started revalidation is explicit: the trusted production
+  // maintenance route enables it, and this consumer proves that exact path. The
+  // default quarantine pass keeps every already-quarantined record closed.
+  f.historicalMatrix.revalidateNotStarted = true;
   const recoveredCount = 1;
   const siblingIndex = recoveredCount;
   try {
@@ -6435,6 +6582,9 @@ Deno.test("historical not started: real already-quarantined ambiguous state reco
 
 Deno.test("historical not started: another blocker never recovers and mutates nothing", async () => {
   const f = await historicalMalformedRig();
+  // The capability is ACTIVE here: an unrelated blocker must still never be
+  // reconciled, read or mutated even under explicit not-started revalidation.
+  f.historicalMatrix.revalidateNotStarted = true;
   try {
     const seeded = await f.rig.state.readRepair();
     assert(seeded.ok && seeded.value.status === "found");
@@ -6477,7 +6627,7 @@ async function historicalMultiWaveRig(
   currentCount = 3,
   finalizeCurrent = true,
 ) {
-  const f = await historicalMalformedRig(false, historicalCount);
+  const f = await historicalMalformedRig(false, historicalCount, false, true);
   const release = createReleaseStateStore({
     scratchDir: `${f.rig.tmp}/multi-release`,
     remoteUrl: `${f.rig.tmp}/remote.git`,
@@ -7371,6 +7521,18 @@ Deno.test("historical multiwave: first maintenance drains old seventeen and newe
         evidence: f.evidence,
       })).status,
       "idle",
+    );
+    // The first maintenance populated the read-through view; the successor
+    // writes then moved the REAL release head. The product-visible read must
+    // observe the moved head and never the cached snapshot.
+    const afterSuccessor = await f.rig.state.readRelease();
+    assert(afterSuccessor.ok && afterSuccessor.value.status === "found");
+    const successorRuntime = afterSuccessor.value.snapshot.hostedRuntimes[0];
+    assert.equal(
+      successorRuntime.lastExecutionProof?.execution.runId ??
+        successorRuntime.execution?.runId,
+      74,
+      "an externally moved release head is observed after a cached custody read",
     );
     assert(
       !((await f.run()).actions.some((action) =>

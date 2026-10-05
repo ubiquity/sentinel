@@ -789,6 +789,13 @@ export function createHostedHistoricalMatrixQuarantine(input: {
   http?: HttpTransportV1;
   artifactHttp?: HttpTransportV1;
   cooldownMode?: string;
+  /**
+   * Explicit authenticated not-started revalidation of already-quarantined
+   * records. Defaults to false so every existing caller keeps the original
+   * closed quarantine pass; the trusted production maintenance route enables
+   * it explicitly.
+   */
+  revalidateNotStarted?: boolean;
   historicalReleaseWitnesses?: readonly {
     commit: GitSha;
     executionId: string;
@@ -816,6 +823,7 @@ export function createHostedHistoricalMatrixQuarantine(input: {
   return {
     state: input.state,
     clock: input.clock,
+    revalidateNotStarted: input.revalidateNotStarted === true,
     budget: new RollingStartBudget({
       state: input.state,
       clock: input.clock,
@@ -847,7 +855,10 @@ export function createHostedHistoricalMatrixQuarantine(input: {
           artifactRoot: input.artifactRoot,
           http: input.artifactHttp ??
             createActionsMatrixArtifactHttpTransport(),
-        }).rejectHistorical!({ proof });
+        }).rejectHistorical!({
+          proof,
+          revalidateNotStarted: input.revalidateNotStarted === true,
+        });
       },
     })),
     transport: createActionsMatrixArtifactTransport({
@@ -3600,6 +3611,10 @@ export async function runHostedAutonomyMain(input?: {
             token: stateToken,
             artifactRoot,
             cooldownMode: env("SENTINEL_COOLDOWN_MODE") ?? undefined,
+            // The trusted production maintenance route is the one caller that
+            // revalidates already-quarantined records against authenticated
+            // not-started evidence.
+            revalidateNotStarted: true,
           }),
         });
       } finally {

@@ -13,6 +13,7 @@ import {
   parseHostedRunProofV1,
 } from "../contracts/hosted-supervisor.ts";
 import { canonicalStringify } from "../contracts/canonical.ts";
+import { isGitSha } from "../contracts/brands.ts";
 import {
   matrixCellIdV1,
   type MatrixCellPlanV1,
@@ -148,6 +149,12 @@ export function createActionsMatrixArtifactTransport(options: {
   type RecoveryInput = Parameters<MatrixArtifactTransportV1["recover"]>[0] & {
     rejectionProof?: HostedRunProofV1;
     completedExecution?: HostedExecutionIntentV1;
+    /**
+     * Explicit authenticated not-started revalidation, forwarded verbatim from
+     * the trusted caller. Absent or false keeps every already-quarantined
+     * record closed exactly as in the original rejection pass.
+     */
+    revalidateNotStarted?: boolean;
   };
   const recovery = {
     async run(input: RecoveryInput): Promise<{
@@ -241,11 +248,13 @@ export function createActionsMatrixArtifactTransport(options: {
             ...input,
             requests: snapshot.work.flatMap((task) => {
               const intent = task.intent;
-              // The exact original quarantine class is the only non-work state
-              // a rejection proof may re-examine; every other blocked class is
-              // left outside the rejection request set entirely.
+              // The exact original quarantine class is re-examined ONLY when the
+              // trusted caller explicitly enabled authenticated not-started
+              // revalidation; the default rejection pass leaves every
+              // already-quarantined record closed exactly as before.
               const recoverable = task.nextStep === "work" ||
-                (task.nextStep === "blocked" &&
+                (input.revalidateNotStarted === true &&
+                  task.nextStep === "blocked" &&
                   task.blocker?.kind === "other" &&
                   task.blocker.message === HISTORICAL_MATRIX_QUARANTINE);
               if (
@@ -280,11 +289,13 @@ export function createActionsMatrixArtifactTransport(options: {
             intent = task.intent;
           const implementing = intent?.kind === "implementation" &&
             intent.expectedHead === null && intent.resultId === null;
-          // The exact original quarantine class is the only non-work state the
-          // authenticated rejection may still bind; every other blocked class
+          // The exact original quarantine class is bound only under explicit
+          // authenticated not-started revalidation; every other blocked class
           // refuses here exactly as before.
           const recoverable = task.nextStep === "work" ||
-            (task.nextStep === "blocked" && task.blocker?.kind === "other" &&
+            (input.revalidateNotStarted === true &&
+              task.nextStep === "blocked" &&
+              task.blocker?.kind === "other" &&
               task.blocker.message === HISTORICAL_MATRIX_QUARANTINE);
           const preserving = intent?.kind === "candidate_preservation" &&
             reservation.outcome === "submitted" &&
@@ -695,12 +706,17 @@ export function createActionsMatrixArtifactTransport(options: {
           const [, runId, runAttempt] = (artifact.name as string).match(
             /^sentinel-matrix-plan-(\d+)-(\d+)$/,
           )!;
-          const run = {
+          const runIdentity = {
             runId: positive(Number(runId)),
             runAttempt: positive(Number(runAttempt)),
-            launcherSha: input.launcherSha,
           };
-          if (input.currentRun && !sameRun(input.currentRun, run)) continue;
+          if (
+            input.currentRun &&
+            !sameRun(input.currentRun, {
+              ...runIdentity,
+              launcherSha: input.launcherSha,
+            })
+          ) continue;
           const planFiles = await archive(artifact);
           if (planFiles.size !== 1 || !planFiles.has("plan.json")) refuse();
           const plan = parseMatrixPlanV1(
@@ -718,10 +734,22 @@ export function createActionsMatrixArtifactTransport(options: {
             continue;
           }
           const attempt = await json(
-            `${API}/runs/${run.runId}/attempts/${run.runAttempt}`,
+            `${API}/runs/${runIdentity.runId}/attempts/${runIdentity.runAttempt}`,
           );
           const repo = record(attempt.repository),
             headRepo = record(attempt.head_repository);
+          // A historical selected run binds to its OWN authenticated native
+          // attempt head, never to the current caller's launcher and never to
+          // a plan-supplied SHA. Only the exact current run stays pinned to the
+          // trusted caller launcher.
+          const nativeLauncher = attempt.head_sha;
+          if (!isGitSha(nativeLauncher)) refuse();
+          const run = {
+            ...runIdentity,
+            launcherSha: input.currentRun === undefined
+              ? nativeLauncher
+              : input.launcherSha,
+          };
           if (
             attempt.id !== run.runId ||
             attempt.run_attempt !== run.runAttempt ||
@@ -730,7 +758,7 @@ export function createActionsMatrixArtifactTransport(options: {
             attempt.event !== "workflow_dispatch" ||
             attempt.head_branch !==
               HOSTED_SUPERVISOR_REF.replace("refs/heads/", "") ||
-            attempt.head_sha !== input.launcherSha ||
+            attempt.head_sha !== run.launcherSha ||
             repo.full_name !== REPOSITORY || headRepo.full_name !== REPOSITORY
           ) refuse();
           positive(repo.id);
@@ -742,7 +770,7 @@ export function createActionsMatrixArtifactTransport(options: {
               provenance.repository_id !== repo.id ||
               provenance.head_repository_id !== headRepo.id ||
               provenance.head_branch !== attempt.head_branch ||
-              provenance.head_sha !== input.launcherSha
+              provenance.head_sha !== run.launcherSha
             ) refuse();
           };
           artifactIdentity(artifact);
@@ -1053,7 +1081,7 @@ export function createActionsMatrixArtifactTransport(options: {
     async recover(input) {
       return (await recovery.run(input)).recovered;
     },
-    async rejectHistorical({ proof }) {
+    async rejectHistorical({ proof, revalidateNotStarted }) {
       return (await recovery.run({
         requests: [],
         runtimeSha: proof.execution.revision,
@@ -1064,6 +1092,7 @@ export function createActionsMatrixArtifactTransport(options: {
           launcherSha: proof.execution.launcherSha,
         },
         rejectionProof: proof,
+        revalidateNotStarted: revalidateNotStarted === true,
       })).rejected;
     },
   };

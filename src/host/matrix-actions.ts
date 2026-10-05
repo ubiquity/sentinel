@@ -127,6 +127,14 @@ export interface HistoricalMatrixQuarantineDepsV1 {
   state: StateReadView & RepairStateWriter;
   clock: Clock;
   budget: Pick<BudgetControllerV1, "settleModelStart">;
+  /**
+   * Explicit authenticated not-started revalidation. When true, the exact
+   * already-quarantined blocked class may be re-examined and reconciled to the
+   * proven not-started disposition. When false (default), every
+   * already-quarantined record stays closed exactly as in the original
+   * quarantine pass: no repeat action, no witness/archive read, no count.
+   */
+  revalidateNotStarted?: boolean;
   transport: MatrixArtifactTransportV1;
   /** Closed owner-selected release witnesses; never a history scan or fallback. */
   historicalReleaseWitnesses?: readonly {
@@ -137,6 +145,7 @@ export interface HistoricalMatrixQuarantineDepsV1 {
     reject(
       proof: HostedRunProofV1,
       expectedHead: GitSha,
+      revalidateNotStarted?: boolean,
     ): Promise<readonly MatrixRejectedWaveV1[]>;
   }[];
   readExecution(
@@ -213,9 +222,10 @@ async function quarantineRow(
   currentExecution: HostedExecutionIntentV1 | null,
   historical?: HistoricalProofCustodyV1,
 ) {
+  const revalidate = deps.revalidateNotStarted === true;
   if (
     wave.reason !== "reservation_after_manifest" ||
-    (!isHistoricalQuarantineBlocked(captured.work) &&
+    ((!revalidate || !isHistoricalQuarantineBlocked(captured.work)) &&
       captured.work.nextStep !== "work") ||
     captured.work.intent?.kind !== "implementation" ||
     captured.work.target.candidateState !== undefined ||
@@ -251,7 +261,8 @@ async function quarantineRow(
   );
   if (
     !work || !reservation ||
-    (!isHistoricalQuarantineBlocked(work) && work.nextStep !== "work") ||
+    ((!revalidate || !isHistoricalQuarantineBlocked(work)) &&
+      work.nextStep !== "work") ||
     work.intent?.kind !== "implementation" ||
     work.target.candidateState !== undefined ||
     await matrixDigestV1(work) !== captured.workDigest ||
@@ -260,16 +271,20 @@ async function quarantineRow(
   ) {
     throw new Error("historical matrix captured identity changed");
   }
-  const provenNotStarted = isHistoricalQuarantineBlocked(work) &&
+  const provenNotStarted = revalidate &&
+    isHistoricalQuarantineBlocked(work) &&
     historicalNotStartedProven(
       wave,
       wave.cells.find((cell) => cell.reservationId === reservation.id),
       reservation,
     );
-  // An already-quarantined record is only reconciled when the authenticated
-  // witness proves this exact reservation never started; every other class is
-  // refused before any settlement or write.
-  if (isHistoricalQuarantineBlocked(work) && !provenNotStarted) {
+  // An already-quarantined record is only reconciled when explicit not-started
+  // revalidation is enabled AND the authenticated witness proves this exact
+  // reservation never started; every other class is refused before any
+  // settlement or write.
+  if (
+    revalidate && isHistoricalQuarantineBlocked(work) && !provenNotStarted
+  ) {
     throw new Error("historical matrix not-started admission unproven");
   }
   if (!await proofInCustody(deps, wave.proof, currentExecution, historical)) {
@@ -374,10 +389,12 @@ export async function runHistoricalMatrixQuarantine(
   }
   const [witness, ...remainingWitnesses] = deps.historicalReleaseWitnesses ??
     [];
+  const revalidate = deps.revalidateNotStarted === true;
   if (witness) {
     const selected = repair.value.snapshot.work.filter((row) =>
       row.intent?.kind === "implementation" && row.nextStep !== "done" &&
-      (row.nextStep === "work" || isHistoricalQuarantineBlocked(row)) &&
+      (row.nextStep === "work" ||
+        (revalidate && isHistoricalQuarantineBlocked(row))) &&
       row.target.candidateState === undefined &&
       witness.reservationIds.some((id) =>
         row.intent?.requestId === id ||
@@ -395,7 +412,8 @@ export async function runHistoricalMatrixQuarantine(
         row.id === work.intent?.requestId
       );
       if (
-        (!isHistoricalQuarantineBlocked(work) && work.nextStep !== "work") ||
+        ((!revalidate || !isHistoricalQuarantineBlocked(work)) &&
+          work.nextStep !== "work") ||
         work.target.candidateState !== undefined ||
         !reservation || !witness.reservationIds.includes(reservation.id) ||
         work.intent?.key !== implementationIntentKey(reservation.id) ||
@@ -412,7 +430,8 @@ export async function runHistoricalMatrixQuarantine(
   }
   if (
     !repair.value.snapshot.work.some((row) =>
-      (row.nextStep === "work" || isHistoricalQuarantineBlocked(row)) &&
+      (row.nextStep === "work" ||
+        (revalidate && isHistoricalQuarantineBlocked(row))) &&
       row.intent?.kind === "implementation" &&
       row.target.candidateState === undefined
     )
@@ -590,8 +609,12 @@ export async function runHistoricalMatrixQuarantine(
     ? await witness!.reject(
       proof,
       historical.expectedHead,
+      revalidate,
     )
-    : await deps.transport.rejectHistorical({ proof });
+    : await deps.transport.rejectHistorical({
+      proof,
+      revalidateNotStarted: revalidate,
+    });
   if (historical && waves.length === 0) {
     throw new Error("historical matrix selected witness rejection unavailable");
   }

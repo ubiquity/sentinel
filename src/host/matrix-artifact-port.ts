@@ -81,9 +81,15 @@ export interface MatrixArtifactTransportV1 {
   confirmCompletedExecution?(
     execution: HostedExecutionIntentV1,
   ): Promise<boolean>;
-  /** Selects only the exact freshly saved, natively settled execution. */
+  /**
+   * Selects only the exact freshly saved, natively settled execution. The
+   * proof-based not-started revalidation of already-quarantined records is
+   * enabled ONLY when the trusted caller explicitly asks for it; the default
+   * rejection pass keeps every already-quarantined record closed.
+   */
   rejectHistorical?(input: {
     proof: HostedRunProofV1;
+    revalidateNotStarted?: boolean;
   }): Promise<readonly MatrixRejectedWaveV1[]>;
   recover(input: {
     requests: readonly MatrixArtifactRequestV1[];

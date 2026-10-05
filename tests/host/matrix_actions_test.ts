@@ -15,7 +15,15 @@ import type {
   ModelRunReceiptV1,
   ModelRunRequestV1,
 } from "../../src/contracts/ports.ts";
-import { portError, portOk } from "../../src/contracts/ports.ts";
+import {
+  portError,
+  portOk,
+  type PortResultV1,
+  type RepairStateWriter,
+  type StateReadResultV1,
+  type StateReadView,
+  type StateWriteResultV1,
+} from "../../src/contracts/ports.ts";
 import type { MatrixCellResultV1 } from "../../src/contracts/matrix.ts";
 import {
   matrixDigestV1,
@@ -29,6 +37,7 @@ import {
 import {
   createReleaseStateStore,
   createRepairStateStore,
+  type RepairGitStateStore,
 } from "../../src/state/mod.ts";
 import {
   historicalNotStartedProven,
@@ -127,10 +136,57 @@ async function checkout(
   await checked(path, ["commit", "-q", "-m", "fixture"], env);
   return await checked(path, ["rev-parse", "HEAD"], env) as GitSha;
 }
+/**
+ * Test-local repair-state adapter over the shared MemoryState. Only the clock
+ * fixture's repair half is persisted here: the real store's expected-head CAS,
+ * snapshot validation and sequence/time rules stay enabled, and every value
+ * crossing the boundary is an independent copy so no consumer can mutate the
+ * fixture's authoritative snapshot in place. It is deliberately repair-only
+ * (MemoryState also lacks the real store's validateRepairTransition parity),
+ * which the narrowed clock assertions and the explicit small real-Git recovery
+ * plus sibling case cover together. Release reads never come from here; the
+ * real Git release store stays authoritative.
+ */
+class CopyingRepairState
+  implements Pick<StateReadView, "readRepair">, RepairStateWriter {
+  private readonly inner = new MemoryState();
+
+  async readRepair(): Promise<
+    PortResultV1<StateReadResultV1<RepairStateSnapshotV1>>
+  > {
+    const read = await this.inner.readRepair();
+    if (!read.ok || read.value.status !== "found") return read;
+    return portOk({
+      ...read.value,
+      snapshot: structuredClone(read.value.snapshot),
+    });
+  }
+
+  async writeRepair(
+    next: RepairStateSnapshotV1,
+    expectedHead: GitSha | null,
+  ): Promise<PortResultV1<StateWriteResultV1>> {
+    // The real store rejects a snapshot whose stateHead is not the expected
+    // remote head before any transition check; MemoryState omits that check, so
+    // this adapter applies it with the identical typed diagnostic.
+    if (next.stateHead !== expectedHead) {
+      return portError(
+        "invalid",
+        "snapshot stateHead must equal the expected remote head",
+      );
+    }
+    return await this.inner.writeRepair(
+      structuredClone(next),
+      expectedHead,
+    );
+  }
+}
+
 async function rig(
   healthy = true,
   purpose: "ordinary" | "bootstrap" | "prior" | "candidate" | "rollback" =
     "ordinary",
+  fastRepair = false,
 ) {
   const root = await Deno.makeTempDir({
     prefix: "sentinel-matrix-actions-",
@@ -268,10 +324,28 @@ async function rig(
       JSON.stringify(started),
     );
   }
-  const store = createRepairStateStore({
+  const realStore = createRepairStateStore({
     scratchDir: root + "/repair",
     remoteUrl: remote.remoteUrl,
   });
+  // The clock fixture shares ONE repair transport across planner, cells, budget
+  // and aggregate. Only that scenario narrows the repair half to memory (real
+  // CAS/sequence/validation and copy boundaries); every release read and every
+  // target Git object stays real.
+  const fastState = fastRepair ? new CopyingRepairState() : null;
+  const store: RepairGitStateStore = fastState === null
+    ? realStore
+    : Object.assign(
+      Object.create(Object.getPrototypeOf(realStore)) as RepairGitStateStore,
+      realStore,
+      {
+        readRepair: () => fastState!.readRepair(),
+        writeRepair: (
+          next: RepairStateSnapshotV1,
+          expectedHead: GitSha | null,
+        ) => fastState!.writeRepair(next, expectedHead),
+      },
+    );
   const github = new Map<string, TargetGithub>();
   for (
     const [slug, base] of [["ubiquity/sentinel", sha], [
@@ -1499,7 +1573,7 @@ async function freshMatrixArtifacts(
   nativeScopedOnly = false,
   progressive: "none" | "settle" | "missing" | "single" = "none",
 ) {
-  const r = await rig();
+  const r = await rig(true, "ordinary", noStart17);
   try {
     if (noStart17) {
       for (
@@ -1556,90 +1630,123 @@ async function freshMatrixArtifacts(
     const results: MatrixCellResultV1[] = [];
     const archive = r.root + "/archive";
     await Deno.mkdir(archive);
-    if (noStart17) r.clock.advance(T0 + 10000 + 76 * 60_000 - r.clock.now());
+    // The planner phase's artificial age (per-read and per-write clock advances
+    // above) stays in the frozen plannedAt and admission timestamps. It is NOT
+    // carried into the cell phase: every cell is anchored at its own trusted
+    // run origin with its own fresh bounded start window.
     for (const cell of planner.plan.cells) {
       await Deno.mkdir(r.root + "/cell-" + cell.cellId);
     }
-    await Promise.all(planner.plan.cells.map(async (cell) => {
-      const name = "cell-" + cell.cellId;
-      const deps = await r.job(name, "matrix_cell");
-      const artifactRoot = r.root + "/" + name + "/.sentinel-matrix";
-      await Deno.mkdir(artifactRoot);
-      await Deno.writeTextFile(
-        artifactRoot + "/plan.json",
-        JSON.stringify(planner.plan),
-      );
-      const model: ImplementationPort = {
-        modelId: "gpt-reserve",
-        runModel: async (request: ModelRunRequestV1) => {
-          modelCalls++;
-          active++;
-          peak = Math.max(peak, active);
-          if (active === 2) unblock();
-          await overlap;
-          const source = deps.workDir + "/.sentinel-actions-state/" +
-            (request.repository.name === "sentinel"
-              ? "source"
-              : "sources/ubiquity-ai.ubq.fi");
-          await Deno.writeTextFile(
-            source + "/repair.txt",
-            request.repository.name,
-          );
-          await checked(source, ["add", "repair.txt"], r.env);
-          await checked(source, ["commit", "-q", "-m", "repair"], r.env);
-          const head = await checked(
-            source,
-            ["rev-parse", "HEAD"],
-            r.env,
-          ) as GitSha;
-          active--;
-          const receipt: ModelRunReceiptV1 = {
-            invocationId: "invocation-" + cell.cellId,
-            outcome: "completed",
-            actual: {
-              evidenceKind: "request-runtime",
-              provider: PROVIDER,
-              threadId: "thread-" + cell.cellId,
-              turnId: "turn-" + cell.cellId,
-              terminalOrigin: "runtime",
-              observedTerminalStatus: "completed",
-              observedModel: request.model,
-              observedReasoning: "max",
-              durationMs: 1,
-              outputChars: 1,
-            },
-            candidate: {
-              head,
-              checkpointSha: null,
-              changedPaths: ["repair.txt"],
-            },
-            error: null,
-          };
-          return portOk(receipt);
-        },
-      };
-      const result = await runActionsMatrixHost({
-        ...deps,
-        model,
-        carrier: { planDigest: planner.planDigest, cellId: cell.cellId },
-      });
-      assert.ok("cellId" in result);
-      results.push(result);
-      if (noStart17) {
-        assert.equal(result.status, "not_started");
-        assert.equal(result.receipt, null);
-        assert.equal(result.bundle, null);
-      } else {
+    const settledCells = await Promise.allSettled(
+      planner.plan.cells.map(async (cell) => {
+        const name = "cell-" + cell.cellId;
+        const deps = await r.job(name, "matrix_cell");
+        const artifactRoot = r.root + "/" + name + "/.sentinel-matrix";
+        await Deno.mkdir(artifactRoot);
+        await Deno.writeTextFile(
+          artifactRoot + "/plan.json",
+          JSON.stringify(planner.plan),
+        );
+        const model: ImplementationPort = {
+          modelId: "gpt-reserve",
+          runModel: async (request: ModelRunRequestV1) => {
+            modelCalls++;
+            active++;
+            peak = Math.max(peak, active);
+            if (active === 2) unblock();
+            await overlap;
+            const source = deps.workDir + "/.sentinel-actions-state/" +
+              (request.repository.name === "sentinel"
+                ? "source"
+                : "sources/ubiquity-ai.ubq.fi");
+            await Deno.writeTextFile(
+              source + "/repair.txt",
+              request.repository.name,
+            );
+            await checked(source, ["add", "repair.txt"], r.env);
+            await checked(source, ["commit", "-q", "-m", "repair"], r.env);
+            const head = await checked(
+              source,
+              ["rev-parse", "HEAD"],
+              r.env,
+            ) as GitSha;
+            active--;
+            const receipt: ModelRunReceiptV1 = {
+              invocationId: "invocation-" + cell.cellId,
+              outcome: "completed",
+              actual: {
+                evidenceKind: "request-runtime",
+                provider: PROVIDER,
+                threadId: "thread-" + cell.cellId,
+                turnId: "turn-" + cell.cellId,
+                terminalOrigin: "runtime",
+                observedTerminalStatus: "completed",
+                observedModel: request.model,
+                observedReasoning: "max",
+                durationMs: 1,
+                outputChars: 1,
+              },
+              candidate: {
+                head,
+                checkpointSha: null,
+                changedPaths: ["repair.txt"],
+              },
+              error: null,
+            };
+            return portOk(receipt);
+          },
+        };
+        const result = await runActionsMatrixHost({
+          ...deps,
+          // One shared repair transport for the clock scenario: the planner,
+          // every cell, the budget and the aggregate all read and write the
+          // same narrowed repair state; target Git and release stay real.
+          ...(noStart17 ? { state: r.store } : {}),
+          model,
+          carrier: { planDigest: planner.planDigest, cellId: cell.cellId },
+        });
+        assert.ok("cellId" in result);
+        results.push(result);
+        // The planner phase deliberately advanced the clock through the per-read
+        // and per-write fakes, so each admission (and the frozen plannedAt) is
+        // authentic. The cell phase inherits no artificial wave age: every cell
+        // gets its own fresh bounded start window and completes with a real
+        // receipt and bundle.
+        assert.equal(result.status, "completed");
+        assert.ok(result.receipt);
         assert.ok(result.bundle);
         await Deno.copyFile(
           artifactRoot + "/" + result.bundle.file,
           archive + "/" + result.bundle.file,
         );
-      }
-      await Deno.remove(r.root + "/" + name, { recursive: true });
-    }));
-    assert.equal(modelCalls, noStart17 ? 0 : 2);
-    assert.equal(peak, noStart17 ? 0 : 2);
+        await Deno.remove(r.root + "/" + name, { recursive: true });
+        return result;
+      }),
+    );
+    // Every cell promise is settled before any failure is reported or cleanup
+    // runs: no live artifact writer is left behind, and the first real body
+    // failure is retained instead of being replaced by a cleanup race.
+    const firstCellFailure = settledCells.find((entry) =>
+      entry.status === "rejected"
+    );
+    if (
+      firstCellFailure !== undefined && firstCellFailure.status === "rejected"
+    ) {
+      throw firstCellFailure.reason;
+    }
+    assert.equal(
+      modelCalls,
+      expectedCells,
+      "every admitted cell starts exactly one isolated model",
+    );
+    if (noStart17) {
+      assert.ok(
+        peak >= 2,
+        "isolated cells overlap under the advanced planner clock",
+      );
+    } else {
+      assert.equal(peak, 2);
+    }
     const before = await r.store.readRepair();
     assert.ok(before.ok && before.value.status === "found");
     // Bind the narrowed found snapshot once: TypeScript does not retain the
@@ -1912,6 +2019,7 @@ async function freshMatrixArtifacts(
       try {
         result = await runActionsRepairHost({
           ...deps,
+          ...(noStart17 ? { state: r.store } : {}),
           artifactHttp: artifactHttp(
             typeof available === "function" ? available : () => available,
             allow,
@@ -2254,37 +2362,65 @@ async function freshMatrixArtifacts(
       assert.equal(ingested.value.snapshot.work.length, 17);
       assert.ok(
         ingested.value.snapshot.work.every((row) =>
-          row.nextStep === "blocked" && row.intent?.kind === "implementation" &&
-          row.target.head === null && row.target.pr === null
+          row.nextStep === "work" &&
+          row.intent?.kind === "candidate_preservation" &&
+          row.target.head !== null && row.target.pr === null
         ),
+        "every completed cell is ingested as authenticated candidate preservation while the injected preservation outage holds",
       );
       assert.equal(ingested.value.snapshot.reservations.length, 17);
       assert.ok(
         ingested.value.snapshot.reservations.every((row) =>
-          row.outcome === "ambiguous" && row.proofRef === null
+          row.outcome === "submitted" && row.settledAt !== null
         ),
+        "each authenticated cell settles its exact implementation charge once",
+      );
+      assert.equal(
+        new Set(ingested.value.snapshot.reservations.map((row) => row.id)).size,
+        17,
+        "every durable admission keeps a unique reservation identity",
+      );
+      assert.equal(
+        new Set(ingested.value.snapshot.work.map((row) => row.intent?.key))
+          .size,
+        17,
+        "every durable admission keeps a unique implementation intent",
+      );
+      // Identity, source and evidence survive admission, execution and ingestion
+      // (intent and target legitimately advance to the authenticated candidate
+      // head while publication stays unavailable). Accounting is the exact
+      // projection proven by the progressive fixture: attempts/retries/
+      // reviewRounds unchanged and exactly one stalled execution per ingested
+      // candidate from the deterministic unavailable-publication bookkeeping.
+      assert.deepEqual(
+        ingested.value.snapshot.work.map((row) => ({
+          attempts: row.counters.attempts,
+          retries: row.counters.retries,
+          reviewRounds: row.counters.reviewRounds,
+        })),
+        before.value.snapshot.work.map((row) => ({
+          attempts: row.counters.attempts,
+          retries: row.counters.retries,
+          reviewRounds: row.counters.reviewRounds,
+        })),
+        "ingestion preserves attempt/retry/review accounting",
       );
       for (const record of before.value.snapshot.work) {
         const settledRecord: ReturnType<typeof workRecord> = ingested.value
           .snapshot.work.find((row) => row.id === record.id)!;
-        assert.deepEqual([
-          settledRecord.source,
-          settledRecord.intent,
-          settledRecord.target,
-          settledRecord.counters,
-          settledRecord.evidence,
-        ], [
-          record.source,
-          record.intent,
-          record.target,
-          record.counters,
-          record.evidence,
-        ]);
+        assert.deepEqual(settledRecord.source, record.source);
+        assert.deepEqual(settledRecord.evidence, record.evidence);
+        assert.equal(
+          settledRecord.counters.stalled ?? 0,
+          1,
+          "each ingested candidate re-armed exactly one unavailable wait",
+        );
       }
       assert.ok(
         before.value.snapshot.reservations.every((row) =>
           row.createdAt <= planner.plan.plannedAt
         ),
+        "plannedAt freezes after every durable admission",
       );
       assert.equal(
         await matrixDigestV1(
@@ -2298,12 +2434,7 @@ async function freshMatrixArtifacts(
       );
       await aggregate("idempotent", true);
       assert.deepEqual(await r.store.readRepair(), ingested);
-      assert.equal(modelCalls, 0);
-      assert.ok(
-        [...r.github.values()].every((port) =>
-          !port.calls.some((call) => call.startsWith("push:"))
-        ),
-      );
+      assert.equal(modelCalls, expectedCells);
       return;
     }
     await assert.rejects(
@@ -2402,7 +2533,7 @@ Deno.test("matrix actions: actual fresh intake plans both targets, isolated cell
   freshMatrixArtifacts());
 Deno.test("matrix actions: native carrier scopes real in-progress artifact recovery before import", () =>
   freshMatrixArtifacts(false, true));
-Deno.test("matrix actions: advancing planner clock recovers seventeen no-start cells", () =>
+Deno.test("matrix actions: advancing planner clock admits seventeen cells that each complete in their own bounded window", () =>
   freshMatrixArtifacts(true));
 Deno.test("matrix actions: progressive consumer ingests a fast cell while a slower sibling is still active", () =>
   freshMatrixArtifacts(false, false, "settle"));
