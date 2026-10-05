@@ -1825,6 +1825,95 @@ for (
   });
 }
 
+Deno.test("matrix actions: planner preserves native handoff time for prepared cells", async () => {
+  const r = await rig();
+  try {
+    const rows = Array.from({ length: 3 }, (_, index) => issue(index + 1));
+    const source = r.github.get("ubiquity/sentinel")!;
+    source.listOpenIssues = () => Promise.resolve(portOk(rows));
+    let sourceReads = 0;
+    source.readIssue = async (number) => {
+      await Promise.resolve();
+      sourceReads++;
+      r.clock.advance(number === 3 ? OPERATION_MARGIN_MS : 60_000);
+      return portOk(rows[number - 1] ?? null);
+    };
+    r.github.get("ubiquity/ai.ubq.fi")!.listOpenIssues = () =>
+      Promise.resolve(portOk([]));
+    const startedAt = r.clock.now();
+    r.clock.advance(68 * 60_000);
+    const planned = await runActionsMatrixHost({
+      ...await r.job("handoff-plan", "matrix_plan"),
+      model: {
+        modelId: "gpt-reserve",
+        runModel: () => Promise.reject(new Error("planner cannot infer")),
+      },
+    });
+    assert.ok("plan" in planned);
+    assert.ok(planned.prepared > 0, "real intake must prepare fresh grants");
+    const cell = planned.plan.cells[0]!;
+    const sourceReadsAtPublication = sourceReads;
+    source.readIssue = (number) =>
+      Promise.resolve(portOk(rows[number - 1] ?? null));
+    const deps = await r.job("handoff-cell", "matrix_cell");
+    const artifactRoot = r.root + "/handoff-cell/.sentinel-matrix";
+    await Deno.mkdir(artifactRoot);
+    await Deno.writeTextFile(
+      artifactRoot + "/plan.json",
+      JSON.stringify(planned.plan),
+    );
+    r.clock.advance(60_000);
+    let modelCalls = 0;
+    const result = await runActionsMatrixHost({
+      ...deps,
+      model: {
+        modelId: "gpt-reserve",
+        runModel: () => {
+          modelCalls++;
+          return Promise.resolve(
+            portError("unavailable", "bounded fake model outcome"),
+          );
+        },
+      },
+      carrier: { planDigest: planned.planDigest, cellId: cell.cellId },
+    });
+    assert.ok("cellId" in result);
+    console.log(JSON.stringify({
+      kind: "planner_native_handoff",
+      prepared: planned.prepared,
+      sourceReads: sourceReadsAtPublication,
+      plannedElapsedMs: planned.plan.plannedAt - startedAt,
+      status: result.status,
+      modelCalls,
+    }));
+    assert.equal(
+      modelCalls,
+      1,
+      "native handoff must retain a full configured session and margin",
+    );
+    assert.ok(
+      planned.plan.plannedAt + cell.request.maxDurationMs +
+          2 * OPERATION_MARGIN_MS <=
+        startedAt + 110 * 60_000,
+      "publication must leave the existing additional handoff reserve",
+    );
+    assert.ok(
+      sourceReadsAtPublication < rows.length,
+      "stop reading unstartable grants before the handoff reserve",
+    );
+    const after = await r.store.readRepair();
+    assert.ok(after.ok && after.value.status === "found");
+    assert.equal(after.value.snapshot.reservations.length, planned.prepared);
+    assert.ok(
+      after.value.snapshot.reservations.every((entry) =>
+        entry.outcome === "reserved"
+      ),
+    );
+  } finally {
+    await r.cleanup();
+  }
+});
+
 async function freshMatrixArtifacts(
   noStart17 = false,
   nativeScopedOnly = false,
