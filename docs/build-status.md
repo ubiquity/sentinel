@@ -2,6 +2,20 @@
 
 ## Active task register — primary agent owned
 
+### Ralph iteration 038 — 2026-10-05 19:19 UTC
+
+19:25 disposition: accepted native worker terminal report `runtime-report.json`, SHA256 `cad243225ef7848f0fc519012851b850bd8e68705feb8c8ea740ec6f921c50f9`. Primary verified persisted sol/max contexts, final-answer/task-complete records and saved API artifact hashes in `worker-terminal-acceptance.json`. Fresh worker19:22 readback independently confirms planner111914668159 remains active, zero artifacts, upload pending and no failed job/step or repair/finalize job. No new leaf failure or stall is established. Runtime startup, manifest binding, settlement, finalization and qualifying App delivery remain unproved; no hosted acceptance progress is claimed.
+
+Only this ledger changed in the repository. Worker commands settled with no descendants or background jobs. No source edit, test rerun, review request, PR, merge, dispatch, cancellation, credential/admission/state/pointer write, schedule/ruleset change or sentinel-release action occurred. Orchestration overhead: oversized bootstrap and metadata reads again required narrowing; report assembly and bounded waits exceeded the expected three-minute worker handback. Existing source/admission evidence was reused without another source audit or moving-state inventory.
+
+Next single action: at the runner's next checkpoint, inspect existing run37354374590/attempt1 read-only for planner111914668159's terminal native log and immutable manifest/digest, bind the saved20 reservations to runtimee4cef463/gen63/launcherb261c367, then follow execution settlement. Do not redispatch to replace the expired CLI observer. The runner retains the next verification checkpoint; no local observer remains. Observe recovery and delivery gates remain pending, and the previously recorded healthy/succeeded external-gate mismatch remains outside this writer lane.
+
+Astra reconciled the sole Ralph writer lane at clean `68b431fb9a1ed432eb6450dc93d9f250d76f9ff6`. Explicit all-head fetch and ancestry checks confirm development `78fabed30fa13cb6c2beb4f358bef5c4161c8833` and protected supervisor `b261c3672b29c29cfe6858fe96beb05687018c8f` remain ancestors (development behind 0/ahead 71); no upstream merge is needed. Other writers remain untouched. Required rules, full MASTER-PLAN, active register and reports035–037 were read; hashes and exact command/exit evidence are in `iterations/038/rule-hashes.json`, `primary-refresh.json` and `primary-ancestry.json`. Current explicit manual-loop/native sol/max authority supersedes historical DSH, cron and per-attempt approval text.
+
+Primary19:20 GitHub readback confirms supervisor37354374590/attempt1 remains in planner111914668159, with maintenance and prepare successful, immutable-plan upload pending and no failed job/step. Eight post-loop merges are owner-authored; none qualifies as App delivery. Observer1336618 already exited at the prior iteration's CLI deadline; its timeout is not a hosted failure. No replacement observer or dispatch was started. Shared runtime deadline remains20:07:50.177 UTC. Repair ref now resolves to `ac03f4f9ee5828ff2345620f67d673fb9329e90d`, but its movement is not execution proof and no new state inventory was requested. Release remains `5f18055632a743a0ff97b99c4246afc6fb901782`.
+
+Native read-only worker `/root/ralph038_runtime` owns only private `iterations/038/runtime-*` evidence. Primary verified persisted session01a10d82-c199-7393-953c-c1c9fead5611 at gpt-6.1-sol/max and exact cwd in `launch-acceptance.json`. Feedback is by supported messages; expected first finding90 seconds/terminal3 minutes, with task-owned stopping only for diagnosed failure or unsafe action. No source/ledger/Git/hosted writes, tests, formatting, descendants, credential/state/pointer changes, cancellation or dispatch were delegated. Primary retains ledger, Git and acceptance ownership. Existing033 source audit and034/037 admission evidence are reused; this assignment checks only native terminal-log/manifest availability rather than repeating those audits.
+
 
 ### Ralph iteration 037 — 2026-10-05 19:10 UTC
 
