@@ -13,6 +13,7 @@ import {
   parseHostedRunProofV1,
 } from "../contracts/hosted-supervisor.ts";
 import { canonicalStringify } from "../contracts/canonical.ts";
+import { isGitSha } from "../contracts/brands.ts";
 import {
   matrixCellIdV1,
   type MatrixCellPlanV1,
@@ -680,12 +681,17 @@ export function createActionsMatrixArtifactTransport(options: {
           const [, runId, runAttempt] = (artifact.name as string).match(
             /^sentinel-matrix-plan-(\d+)-(\d+)$/,
           )!;
-          const run = {
+          const runIdentity = {
             runId: positive(Number(runId)),
             runAttempt: positive(Number(runAttempt)),
-            launcherSha: input.launcherSha,
           };
-          if (input.currentRun && !sameRun(input.currentRun, run)) continue;
+          if (
+            input.currentRun &&
+            !sameRun(input.currentRun, {
+              ...runIdentity,
+              launcherSha: input.launcherSha,
+            })
+          ) continue;
           const planFiles = await archive(artifact);
           if (planFiles.size !== 1 || !planFiles.has("plan.json")) refuse();
           const plan = parseMatrixPlanV1(
@@ -703,10 +709,22 @@ export function createActionsMatrixArtifactTransport(options: {
             continue;
           }
           const attempt = await json(
-            `${API}/runs/${run.runId}/attempts/${run.runAttempt}`,
+            `${API}/runs/${runIdentity.runId}/attempts/${runIdentity.runAttempt}`,
           );
           const repo = record(attempt.repository),
             headRepo = record(attempt.head_repository);
+          // A historical selected run binds to its OWN authenticated native
+          // attempt head, never to the current caller's launcher and never to
+          // a plan-supplied SHA. Only the exact current run stays pinned to the
+          // trusted caller launcher.
+          const nativeLauncher = attempt.head_sha;
+          if (!isGitSha(nativeLauncher)) refuse();
+          const run = {
+            ...runIdentity,
+            launcherSha: input.currentRun === undefined
+              ? nativeLauncher
+              : input.launcherSha,
+          };
           if (
             attempt.id !== run.runId ||
             attempt.run_attempt !== run.runAttempt ||
@@ -715,7 +733,7 @@ export function createActionsMatrixArtifactTransport(options: {
             attempt.event !== "workflow_dispatch" ||
             attempt.head_branch !==
               HOSTED_SUPERVISOR_REF.replace("refs/heads/", "") ||
-            attempt.head_sha !== input.launcherSha ||
+            attempt.head_sha !== run.launcherSha ||
             repo.full_name !== REPOSITORY || headRepo.full_name !== REPOSITORY
           ) refuse();
           positive(repo.id);
@@ -727,7 +745,7 @@ export function createActionsMatrixArtifactTransport(options: {
               provenance.repository_id !== repo.id ||
               provenance.head_repository_id !== headRepo.id ||
               provenance.head_branch !== attempt.head_branch ||
-              provenance.head_sha !== input.launcherSha
+              provenance.head_sha !== run.launcherSha
             ) refuse();
           };
           artifactIdentity(artifact);

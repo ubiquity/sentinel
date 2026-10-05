@@ -655,6 +655,65 @@ Deno.test("matrix artifacts: numeric repository pagination refuses foreign ident
   }
 });
 
+Deno.test("matrix artifacts: historical native launcher binds to its own authenticated attempt head", async () => {
+  const rig = await fixture(true);
+  try {
+    const { currentRun: _oldRun, ...input } = rig.input;
+    // The current caller's launcher differs from the honest historical native
+    // attempt head: the historical wave must bind to the authenticated native
+    // head, never to the caller or to a plan-supplied SHA.
+    const waves = await rig.transport.recover({ ...input, launcherSha: SHA2 });
+    assert.equal(waves.length, 1);
+    assert.equal(waves[0].results.length, 1);
+    assert.deepEqual(waves[0].provenance, {
+      run: RUN,
+      plannerJobId: 401,
+      cellJobIds: [402],
+    });
+  } finally {
+    await Deno.remove(rig.tmp, { recursive: true });
+  }
+});
+
+Deno.test("matrix artifacts: historical native launcher mismatches and malformed heads refuse", async (t) => {
+  for (const mutation of ["artifact", "job", "attempt-malformed"] as const) {
+    await t.step(mutation, async () => {
+      const rig = await fixture();
+      try {
+        const { currentRun: _oldRun, ...input } = rig.input;
+        if (mutation === "artifact") {
+          rig.artifacts[0]!.workflow_run = {
+            ...(rig.artifacts[0]!.workflow_run as Record<string, unknown>),
+            head_sha: SHA2,
+          };
+        } else if (mutation === "job") {
+          rig.jobs[0]!.head_sha = SHA2;
+        } else {
+          rig.attempt.head_sha = "not-a-sha";
+        }
+        await assert.rejects(
+          () => rig.transport.recover({ ...input, launcherSha: SHA3 }),
+          /matrix artifact provenance/,
+        );
+      } finally {
+        await Deno.remove(rig.tmp, { recursive: true });
+      }
+    });
+  }
+});
+
+Deno.test("matrix artifacts: ordinary current-run launcher mismatch still refuses", async () => {
+  const rig = await fixture();
+  try {
+    await assert.rejects(
+      () => rig.transport.recover({ ...rig.input, launcherSha: SHA2 }),
+      /matrix artifact provenance/,
+    );
+  } finally {
+    await Deno.remove(rig.tmp, { recursive: true });
+  }
+});
+
 Deno.test("matrix artifacts: authenticated paginated old wave recovers exact bundle after local cells disappeared", async () => {
   const rig = await fixture(true);
   try {
