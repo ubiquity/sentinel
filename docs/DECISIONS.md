@@ -2,6 +2,10 @@
 
 Read before changing Sentinel runtime or delivery. These are scoped user exceptions; they do not broadly override higher authority.
 
+## Codex review scope - 2026-10-05
+
+The owner directed that Codex review requests apply only to runtime code changes. A change limited to tests, fixtures, boot scripts, dev tooling, documentation or other non-runtime files gets no Codex review request, locally or on a PR. When a hosted review is required, check the PR body for the thumbs-up review-passed reaction first (`gh pr view <N> --json isDraft,reactionGroups`) and post `@codex review` only when it is absent. Development still has no development PRs or reviews; runtime target PR gates are unchanged for runtime code, and non-runtime-only changes do not consume them.
+
 ## Task-scoped local execution override - 2026-10-03
 
 For the current Sentinel concurrency task, the owner explicitly selected `gpt-6.1-sol` with `ultra` reasoning and Fast mode (`service_tier=fast`, mapped to request tier `priority`) for remaining local execution and new delegation. This supersedes the local DeepSeek default only for this task. Relay the instruction through supported parent controls, preserve current workers and artifacts, and change settings only at supported safe boundaries. A message or resume alone is not evidence that an existing request changed model or tier; distinguish requested settings from actual readback. Do not directly start turns on native multi-agent children or restart shared services.
