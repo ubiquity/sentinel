@@ -10,6 +10,10 @@ The owner directed that Sentinel's GitHub Actions schedules are disabled and eve
 
 Read before changing Sentinel runtime or delivery. These are scoped user exceptions; they do not broadly override higher authority.
 
+## Gateway failure diagnostics - 2026-10-05
+
+Retain the numeric HTTP response status in the existing unavailable diagnostic for unmapped gateway responses. Keep the error kind and fail-closed observation behavior unchanged, and do not include response bodies, URLs, authentication headers or credential values. Hosted run `37275381981` discarded this status, preventing the integration owner from distinguishing the producer response from an edge response. This diagnostic change does not establish the cause of that run or restore gateway availability.
+
 ## Codex review scope - 2026-10-05
 
 The owner directed that Codex review requests apply only to runtime code changes. A change limited to tests, fixtures, boot scripts, dev tooling, documentation or other non-runtime files gets no Codex review request, locally or on a PR. When a hosted review is required, check the PR body for the thumbs-up review-passed reaction first (`gh pr view <N> --json isDraft,reactionGroups`) and post `@codex review` only when it is absent. Development still has no development PRs or reviews; runtime target PR gates are unchanged for runtime code, and non-runtime-only changes do not consume them.
