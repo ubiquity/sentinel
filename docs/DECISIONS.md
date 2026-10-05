@@ -1,3 +1,7 @@
+## Protected maintenance job budget - 2026-10-05
+
+Align only the protected supervisor maintenance job with the existing development workflow’s 15-minute timeout. Run `37311823847` at launcher `e0d053a54935e908a9b5411f9180763c6cdcfe3c` made safe partial recovery progress but exceeded its five-minute job limit before preparation and runtime startup. Keep the trusted recovery checks, durable charges, runtime deadlines and separate 300-second local validation limit unchanged. The increased hosted budget needs exact protected-source validation, publication and real execution before acceptance.
+
 ## Conservative preservation uncertainty - 2026-10-05
 
 For the owner-authorized Ralph recovery loop, extend trusted maintenance only to the five exact candidate-preservation requests in repair capture `83997ba19af28ca46186962139931d18cef9e170`, using existing BLOCKED semantics to isolate unresolved preservation from installed-runtime startup. Retain every intent, candidate, target, evidence binding and submitted reservation; do not claim permanent loss, successful preservation, health or delivery. Issue730 retains its existing PR893 and published head. Require the same exact custody, native quiescence, guarded CAS/readback, partial-replay and unchanged-release checks as interrupted-admission maintenance.
