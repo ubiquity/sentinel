@@ -1,3 +1,7 @@
+## Matrix planner handoff time - 2026-10-05
+
+Finish matrix grant planning with the existing five-minute operation margin reserved for native job handoff. Run 37354374590 published its 24-cell plan only 56 seconds before the latest safe full-session start; authenticated cells then returned `not_started` because their configured session and completion margin no longer fit. Apply the reserve only to planning and stop reading further candidates once a full session cannot fit that planning window. Preserve the original shared execution start/deadline, configured model session, cell-side refusal, durable reservations/settlement and uncapped cell throughput. This source correction needs exact-candidate validation, reviewed publication and trusted installation before it establishes hosted recovery.
+
 ## Ralph loop sol/max worker override - 2026-10-05
 
 The owner directed the Sentinel Ralph loop (the host-side autonomous repair loop started 2026-10-05) to use native Codex subagents with model `gpt-6.1-sol` and reasoning effort `max` for all execution legwork, replacing the DSH/DeepSeek Ultra workers for this loop only. Launch acceptance requires the child's persisted session header to show `gpt-6.1-sol`/`max` plus its terminal report, with no silent substitution. This supersedes the execution-legwork model default in `agents/deepseek-harness.md` for this loop only. It does not change the Sentinel runtime model policy (gpt-5.6-luna/max), credentials, review, promotion or state ownership.
