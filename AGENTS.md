@@ -26,6 +26,7 @@ identity and isolated worker lanes are invariants. Preserve unrelated work.
   Make the scoped change, test it immediately, then deliver it directly.
   This supersedes development acceptance-review and PR requirements below.
   Autonomous target repairs retain their existing PR, review and merge gates.
+- Owner update, 2026-10-05: Codex review requests apply only to runtime code changes. A change limited to tests, fixtures, boot scripts, dev tooling, documentation or other non-runtime files gets no Codex review request, locally or on a PR. When a hosted review is required, check the PR body for the thumbs-up review-passed reaction first (`gh pr view <N> --json isDraft,reactionGroups`) and post `@codex review` only when it is absent.
 
 - Never add branch protection rules or branch rulesets to this project.
   Do not recreate deleted protection rules.
