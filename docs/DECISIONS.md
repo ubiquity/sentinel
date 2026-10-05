@@ -1,3 +1,9 @@
+## Conservative interrupted-admission maintenance - 2026-10-05
+
+For the owner-authorized Ralph repair loop, prepare a bounded trusted maintenance phase for the exact 13 incomplete implementation admissions retained in repair snapshot `83997ba19af28ca46186962139931d18cef9e170`. Their original matrix-plan membership cannot be authenticated from retained evidence. Use the existing failed-implementation consumer to retain charged AMBIGUOUS reservations and BLOCKED work with original intents and candidate bindings; this is an uncertainty disposition, not a producer receipt, refund, retry or completion.
+
+Require exact historical/current record custody, authenticated native quiescence, guarded CAS and readback, idempotent partial settlement, and unchanged release state. Exclude submitted or candidate-bearing admissions and all five candidate-preservation requests. Preserve the requested release and genuine healthy-prior gate. Activation requires reviewed, tested source on the protected supervisor ref; source tests do not establish hosted startup or autonomous delivery.
+
 ## Ralph loop sol/max worker override - 2026-10-05
 
 The owner directed the Sentinel Ralph loop (the host-side autonomous repair loop started 2026-10-05) to use native Codex subagents with model `gpt-6.1-sol` and reasoning effort `max` for all execution legwork, replacing the DSH/DeepSeek Ultra workers for this loop only. Launch acceptance requires the child's persisted session header to show `gpt-6.1-sol`/`max` plus its terminal report, with no silent substitution. This supersedes the execution-legwork model default in `agents/deepseek-harness.md` for this loop only. It does not change the Sentinel runtime model policy (gpt-5.6-luna/max), credentials, review, promotion or state ownership.

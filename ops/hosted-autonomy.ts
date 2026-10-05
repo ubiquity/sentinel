@@ -89,6 +89,10 @@ import {
 } from "../src/host/modern-matrix-recovery.ts";
 import { createGitBundleImporter } from "../src/host/matrix-git.ts";
 import {
+  createMatrixUncertaintyMaintenance,
+  runMatrixUncertaintyMaintenance,
+} from "../src/host/matrix-uncertainty-maintenance.ts";
+import {
   createDefaultBranchResolver,
   loadTargetConfigsV1,
 } from "../src/host/targets.ts";
@@ -538,6 +542,8 @@ export interface HostedAutonomyDepsV1 {
   /** Present on protected maintenance; rejection-only, before retry/delivery. */
   historicalMatrix?: HistoricalMatrixQuarantineDepsV1;
   closedMatrix?: () => Promise<ClosedCWaveRecoveryDepsV1>;
+  /** Charged uncertainty only; no producer, artifact, health or release authority. */
+  uncertainMatrix?: () => ReturnType<typeof runMatrixUncertaintyMaintenance>;
 }
 
 /** The maintenance slice has no implementation, review or publication capability. */
@@ -1894,6 +1900,10 @@ export async function runHostedAutonomy(
       throw new HistoricalQuarantineIncomplete();
     }
     if (count > 0) actions.push(`historical-matrix:quarantined:${count}`);
+  }
+  const uncertainty = await deps.uncertainMatrix?.();
+  if (uncertainty && uncertainty.quarantined > 0) {
+    actions.push(`matrix-uncertainty:quarantined:${uncertainty.quarantined}`);
   }
   const revisions: string[] = [];
   const initial = await readRepairSafely(deps.state);
@@ -3363,6 +3373,13 @@ export async function runHostedAutonomyMain(input?: {
           state,
           githubFor,
           clock: { now: () => Date.now() },
+          uncertainMatrix: () =>
+            runMatrixUncertaintyMaintenance(createMatrixUncertaintyMaintenance({
+              state,
+              clock: { now: () => Date.now() },
+              token: stateToken,
+              artifactRoot,
+            })),
           closedMatrix: () =>
             createHostedClosedMatrixRecovery({
               state,
