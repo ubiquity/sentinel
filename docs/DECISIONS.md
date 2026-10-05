@@ -1,3 +1,7 @@
+## Manually dispatched Actions runs - 2026-10-05
+
+The owner directed that Sentinel's GitHub Actions schedules are disabled and every hosted run is dispatched explicitly. `observe.yml`, `repair.yml` and `supervisor-dispatch.yml` no longer declare `schedule` triggers; `sentinel-release` stays disabled. Runs are dispatched and verified with `ops/sentinel-cli.ts`, installed on the trusted host as `sentinel`: `sentinel status`, `sentinel run observe`, `sentinel run supervisor`, `sentinel receipts <run-id>`. The trusted supervisor workflow remains dispatch-only at the protected `sentinel-supervisor` ref and is never selected by time or list order. This supersedes the cron-triggered runtime statement in AGENTS.md; model routing, review, credential, promotion and state ownership are unchanged.
+
 # Sentinel Decisions
 
 Read before changing Sentinel runtime or delivery. These are scoped user exceptions; they do not broadly override higher authority.
