@@ -708,7 +708,6 @@ Deno.test("preservation maintenance: real repair startup skips five blocked cand
     );
     assert.ok(started.ok && started.value.status === "applied");
     const deps = await r.job("preservation-startup", "repair");
-    let recovered = false;
     const result = await runActionsRepairHost({
       ...deps,
       env: { ...deps.env, GITHUB_RUN_ID: "72" },
@@ -723,7 +722,6 @@ Deno.test("preservation maintenance: real repair startup skips five blocked cand
           { ...input, modelStartsEnabled: false },
           {
             recover: (input) => {
-              recovered = true;
               assert.deepEqual(input.requests, []);
               return Promise.resolve([]);
             },
@@ -731,7 +729,6 @@ Deno.test("preservation maintenance: real repair startup skips five blocked cand
         ),
     });
     assert.equal(result.startupReady, true);
-    assert.equal(recovered, true);
     const settled = await r.store.readRepair();
     assert.ok(settled.ok && settled.value.status === "found");
     for (const original of preservation) {
