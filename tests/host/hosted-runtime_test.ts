@@ -1398,6 +1398,7 @@ Deno.test("hosted runtime: early child failure diagnostic is sanitized, bounded 
       "hosted-runtime.ts:42:7",
       "loop.ts:9:3",
     ]);
+    assert.equal(early.reasonCode, null);
     const serialized = JSON.stringify(result);
     for (const marker of forbidden) {
       assert.equal(serialized.includes(marker), false, marker);
@@ -1415,6 +1416,7 @@ Deno.test("hosted runtime: early child failure diagnostic is sanitized, bounded 
     assert.equal(result.status, "failed");
     assert.equal(result.earlyFailure?.category, "module_not_found");
     assert.deepEqual(result.earlyFailure?.frames, []);
+    assert.equal(result.earlyFailure?.reasonCode, null);
     assert.equal(JSON.stringify(result).includes(fakeSecret), false);
 
     // A zero exit with no status record is unattestable: neither success nor
@@ -1460,6 +1462,115 @@ Deno.test("hosted runtime: early child failure diagnostic is sanitized, bounded 
     result = await launch(rig);
     assert.equal(result.status, "healthy");
     assert.equal(result.earlyFailure, undefined);
+  } finally {
+    await rig.cleanup();
+  }
+});
+
+Deno.test("hosted runtime: ANSI-wrapped early diagnostics recover frames and known reason codes", async () => {
+  const rig = await makeRig();
+  try {
+    await seedRelease(rig);
+    const ansi = (text: string) => `\u001b[31m${text}\u001b[0m`;
+    const fakeSecret = "sentinel-fake-secret-7c1d9f42ab";
+
+    // ANSI style sequences wrap the real abort line and its frames: the
+    // stripped text must recover the closed category and code-owned frames,
+    // and no control sequence may survive into the advisory.
+    rig.process.child = exited("", 9, {
+      stderr: new TextEncoder().encode(
+        [
+          ansi("error: Uncaught (in promise) Error: fixture abort"),
+          ansi(
+            "    at main (file:///home/runner/work/sentinel/src/host/hosted-runtime.ts:42:7)",
+          ),
+          ansi(
+            "    at async file:///home/runner/work/sentinel/src/repair/loop.ts:9:3",
+          ),
+        ].join("\n") + "\n",
+      ),
+    });
+    let result = await launch(rig);
+    assert.equal(result.status, "failed");
+    assert.equal(result.terminal?.outcome, "failed");
+    const early = result.earlyFailure;
+    assert.ok(early);
+    assert.equal(early.category, "uncaught");
+    assert.deepEqual(early.frames, [
+      "hosted-runtime.ts:42:7",
+      "loop.ts:9:3",
+    ]);
+    assert.equal(early.reasonCode, null);
+    const serialized = JSON.stringify(result);
+    assert.equal(serialized.includes("\u001b"), false);
+    assert.equal(serialized.includes("fixture abort"), false);
+    assert.equal(serialized.includes("/home/runner"), false);
+
+    // Exact known code-owned pre-status literals behind the real Deno
+    // Error/TypeError/RangeError and literal-string prefixes map to their
+    // closed codes; the raw message text is never copied.
+    const known = [
+      {
+        stderr:
+          "error: Uncaught (in promise) Error: hosted repair host sessions did not settle",
+        code: "repair_sessions_unsettled",
+        literal: "hosted repair host sessions did not settle",
+      },
+      {
+        stderr:
+          "error: Uncaught TypeError: hosted repair host could not resolve Codex",
+        code: "repair_executable_unavailable",
+        literal: "hosted repair host could not resolve Codex",
+      },
+      {
+        stderr:
+          "error: Uncaught RangeError: committed target setting lists no repository",
+        code: "targets_empty",
+        literal: "committed target setting lists no repository",
+      },
+      {
+        stderr:
+          'error: Uncaught (in promise) "local repair host git command failed; output withheld"',
+        code: "local_git_command_failed",
+        literal: "local repair host git command failed; output withheld",
+      },
+      {
+        stderr:
+          "error: Uncaught (in promise) Error: C recovery authoritative state unavailable",
+        code: "c_recovery_state_unavailable",
+        literal: "C recovery authoritative state unavailable",
+      },
+    ] as const;
+    for (const { stderr, code, literal } of known) {
+      rig.process.child = exited("", 7, {
+        stderr: new TextEncoder().encode(`${ansi(stderr)}\n`),
+      });
+      result = await launch(rig);
+      assert.equal(result.earlyFailure?.reasonCode, code, stderr);
+      const text = JSON.stringify(result);
+      assert.equal(text.includes(literal), false, literal);
+      assert.equal(text.includes("\u001b"), false);
+    }
+
+    // Unknown secret-bearing Error and literal-string throws, URL/path labels
+    // and near-miss known text stay null and fully redacted.
+    for (
+      const hostile of [
+        `error: Uncaught (in promise) Error: failed at https://example.invalid/private?token=${fakeSecret}`,
+        `error: Uncaught (in promise) "${fakeSecret} literal"`,
+        `error: Uncaught (in promise) Error: ${fakeSecret}\n    at ${fakeSecret}.ts:1:2`,
+        `error: Uncaught (in promise) Error: historical matrix custody unavailable (${fakeSecret})`,
+      ]
+    ) {
+      rig.process.child = exited("", 7, {
+        stderr: new TextEncoder().encode(`${hostile}\n`),
+      });
+      result = await launch(rig);
+      assert.equal(result.earlyFailure?.reasonCode, null, hostile);
+      const text = JSON.stringify(result);
+      assert.equal(text.includes(fakeSecret), false);
+      assert.equal(text.includes("example.invalid"), false);
+    }
   } finally {
     await rig.cleanup();
   }
