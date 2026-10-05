@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { Uint8ArrayReader, Uint8ArrayWriter, ZipWriter } from "@zip.js/zip.js";
 import { createActionsMatrixArtifactHttpTransport } from "../../src/host/matrix-artifacts.ts";
-import type { GitSha } from "../../src/contracts/brands.ts";
+import type { GitSha, WorkItemId } from "../../src/contracts/brands.ts";
 import {
   HOSTED_RUNTIME_ID,
   HOSTED_SUPERVISOR_WORKFLOW_ID,
@@ -24,12 +24,14 @@ import {
 import {
   parseReleaseStateSnapshotV1,
   parseRepairStateSnapshotV1,
+  type RepairStateSnapshotV1,
 } from "../../src/contracts/state-snapshots.ts";
 import {
   createReleaseStateStore,
   createRepairStateStore,
 } from "../../src/state/mod.ts";
 import {
+  historicalNotStartedProven,
   type MatrixAggregateOptionsV1,
   runActionsMatrixAggregateCycles,
   runActionsMatrixHost,
@@ -2537,6 +2539,329 @@ for (
     }
   });
 }
+
+Deno.test("matrix timing: queued cells keep their own bounded start window", async (t) => {
+  const setup = async (name: string) => {
+    const r = await rig();
+    const planned = await runActionsMatrixHost({
+      ...await r.job(name + "-plan", "matrix_plan"),
+      model: {
+        modelId: "gpt-reserve",
+        runModel: () => Promise.reject(new Error("planner cannot infer")),
+      },
+    });
+    assert.ok("plan" in planned);
+    const cell = planned.plan.cells.find((entry) =>
+      entry.repository.name === "sentinel"
+    )!;
+    assert.ok(cell);
+    const before = await r.store.readRepair();
+    assert.ok(before.ok && before.value.status === "found");
+    // Bind the narrowed found snapshot once: TypeScript does not retain the
+    // assertion narrowing inside the step closures below.
+    const beforeSnapshot: RepairStateSnapshotV1 = before.value.snapshot;
+    const deps = await r.job(name + "-cell", "matrix_cell");
+    const artifactRoot = r.root + "/" + name + "-cell/.sentinel-matrix";
+    await Deno.mkdir(artifactRoot);
+    await Deno.writeTextFile(
+      artifactRoot + "/plan.json",
+      JSON.stringify(planned.plan),
+    );
+    const state = {
+      readRelease: () => r.store.readRelease(),
+      writeRepair: (
+        snapshot: Parameters<typeof r.store.writeRepair>[0],
+        expected: Parameters<typeof r.store.writeRepair>[1],
+      ) => r.store.writeRepair(snapshot, expected),
+      readRepair: () => r.store.readRepair(),
+    };
+    return {
+      r,
+      planned,
+      cell,
+      before,
+      beforeSnapshot,
+      deps,
+      artifactRoot,
+      state,
+    };
+  };
+  const completedReceipt = (model: string): ModelRunReceiptV1 => ({
+    invocationId: "timing-invocation",
+    outcome: "completed" as const,
+    actual: {
+      evidenceKind: "request-runtime" as const,
+      provider: PROVIDER,
+      threadId: "timing-thread",
+      turnId: "timing-turn",
+      terminalOrigin: "runtime" as const,
+      observedTerminalStatus: "completed" as const,
+      observedModel: model,
+      observedReasoning: "max" as const,
+      durationMs: 1,
+      outputChars: 1,
+    },
+    candidate: { head: null, checkpointSha: null, changedPaths: [] },
+    error: null,
+  });
+
+  await t.step(
+    "long planning or queued runner delay starts exactly one model and one charge",
+    async () => {
+      const { r, planned, cell, beforeSnapshot, deps, state } = await setup(
+        "timing-queued",
+      );
+      try {
+        // The execution row predates the planner; this cell's own runner starts
+        // 100 minutes later. It must still own its full bounded window from its
+        // own trusted invocation origin.
+        r.clock.advance(100 * 60_000);
+        let modelCalls = 0;
+        const result = await runActionsMatrixHost({
+          ...deps,
+          state,
+          model: {
+            modelId: "gpt-reserve",
+            runModel: (request) => {
+              modelCalls++;
+              return Promise.resolve(portOk(completedReceipt(request.model)));
+            },
+          },
+          carrier: { planDigest: planned.planDigest, cellId: cell.cellId },
+        });
+        assert.ok("cellId" in result);
+        assert.equal(modelCalls, 1, "the queued cell starts exactly one model");
+        assert.equal(result.status, "completed");
+        assert.ok(result.receipt !== null);
+        assert.equal(result.bundle, null);
+        const after = await r.store.readRepair();
+        assert.ok(after.ok && after.value.status === "found");
+        assert.deepEqual(
+          after.value.snapshot.reservations.map((row) => [
+            row.id,
+            row.attempt,
+            row.purpose,
+          ]),
+          beforeSnapshot.reservations.map((row) => [
+            row.id,
+            row.attempt,
+            row.purpose,
+          ]),
+          "one start keeps exactly one reservation and charge",
+        );
+        assert.deepEqual(
+          after.value.snapshot.work.map((row) => row.intent),
+          beforeSnapshot.work.map((row) => row.intent),
+          "the cell start keeps the exact admitted intent",
+        );
+      } finally {
+        await r.cleanup();
+      }
+    },
+  );
+
+  await t.step(
+    "own actual execution exhaustion still refuses with zero model starts",
+    async () => {
+      const { r, planned, cell, before, deps, state } = await setup(
+        "timing-exhausted",
+      );
+      try {
+        const github = r.github.get("ubiquity/sentinel")!;
+        const readIssue = github.readIssue.bind(github);
+        const origin = r.clock.now();
+        let armed = false;
+        github.readIssue = async (number) => {
+          const read = await readIssue(number);
+          if (!armed) {
+            armed = true;
+            // The cell's OWN absolute deadline lands here, after its trusted
+            // invocation origin, so its remaining window cannot fit a session.
+            r.clock.advance(origin + 110 * 60_000 - r.clock.now());
+          }
+          return read;
+        };
+        let modelCalls = 0;
+        const result = await runActionsMatrixHost({
+          ...deps,
+          state,
+          model: {
+            modelId: "gpt-reserve",
+            runModel: () => {
+              modelCalls++;
+              return Promise.resolve(portOk(completedReceipt("gpt-reserve")));
+            },
+          },
+          carrier: { planDigest: planned.planDigest, cellId: cell.cellId },
+        });
+        assert.ok("cellId" in result);
+        assert.equal(
+          modelCalls,
+          0,
+          "an exhausted own window never starts a model",
+        );
+        assert.equal(result.status, "not_started");
+        assert.equal(result.receipt, null);
+        assert.equal(result.bundle, null);
+        assert.match(result.detail!, /cutoff|run bounds/);
+        assert.deepEqual(
+          await r.store.readRepair(),
+          before,
+          "the refusal preserves reservation, intent and charge",
+        );
+      } finally {
+        await r.cleanup();
+      }
+    },
+  );
+
+  await t.step(
+    "wrong generation or stale runtime binding refuses before any model",
+    async () => {
+      const { r, planned, cell, before, deps, artifactRoot, state } =
+        await setup(
+          "timing-stale",
+        );
+      try {
+        let modelCalls = 0;
+        const model = {
+          modelId: "gpt-reserve",
+          runModel: () => {
+            modelCalls++;
+            return Promise.resolve(portOk(completedReceipt("gpt-reserve")));
+          },
+        };
+        const rewritten = (change: Record<string, unknown>) =>
+          JSON.stringify({
+            ...planned.plan,
+            cells: planned.plan.cells.map((entry) =>
+              entry.cellId === cell.cellId ? { ...entry, ...change } : entry
+            ),
+          });
+        await Deno.writeTextFile(
+          artifactRoot + "/plan.json",
+          rewritten({ generation: cell.generation + 1 }),
+        );
+        await assert.rejects(
+          runActionsMatrixHost({
+            ...deps,
+            state,
+            model,
+            carrier: { planDigest: planned.planDigest, cellId: cell.cellId },
+          }),
+          /matrix plan does not match the trusted native digest/,
+        );
+        await Deno.writeTextFile(
+          artifactRoot + "/plan.json",
+          rewritten({ runtimeSha: "f".repeat(40) }),
+        );
+        await assert.rejects(
+          runActionsMatrixHost({
+            ...deps,
+            state,
+            model,
+            carrier: { planDigest: planned.planDigest, cellId: cell.cellId },
+          }),
+          /matrix plan does not match the trusted native digest/,
+        );
+        assert.equal(modelCalls, 0, "a stale cell never starts a model");
+        assert.deepEqual(
+          await r.store.readRepair(),
+          before,
+          "a stale cell preserves reservation, intent and charge",
+        );
+      } finally {
+        await r.cleanup();
+      }
+    },
+  );
+});
+
+Deno.test("historical not started: only the exact authenticated window and null-receipt result prove non-start", () => {
+  const wave = {
+    reason: "reservation_after_manifest" as const,
+    plannerStartedAt: new Date(T0).toISOString(),
+    plannerCompletedAt: new Date(T0 + 3_600_000).toISOString(),
+  };
+  const admission = { id: "r-historical", createdAt: T0 + 1_000 };
+  const cell = {
+    cellId: "cell-historical",
+    taskId: "issue-ubiquity-sentinel-1" as WorkItemId,
+    reservationId: "r-historical",
+    status: "not_started" as const,
+    receiptNull: true,
+    bundleNull: true,
+    completedAt: T0 + 2_000,
+    resultDigest: "a".repeat(64),
+  };
+  assert.equal(
+    historicalNotStartedProven(wave, cell, admission),
+    true,
+    "the exact authenticated not-started admission is proven",
+  );
+  assert.equal(
+    historicalNotStartedProven(
+      wave,
+      { ...cell, status: "completed" },
+      admission,
+    ),
+    false,
+    "a completed payload is never a not-started recovery",
+  );
+  assert.equal(
+    historicalNotStartedProven(
+      wave,
+      { ...cell, receiptNull: false },
+      admission,
+    ),
+    false,
+    "a receipt-bearing payload is never a not-started recovery",
+  );
+  assert.equal(
+    historicalNotStartedProven(wave, { ...cell, bundleNull: false }, admission),
+    false,
+    "a bundle-bearing payload is never a not-started recovery",
+  );
+  assert.equal(
+    historicalNotStartedProven(
+      wave,
+      { ...cell, reservationId: "other" },
+      admission,
+    ),
+    false,
+    "evidence for another reservation is never adopted",
+  );
+  assert.equal(
+    historicalNotStartedProven(wave, undefined, admission),
+    false,
+    "missing evidence is never inferred",
+  );
+  assert.equal(
+    historicalNotStartedProven(wave, cell, {
+      id: "r-historical",
+      createdAt: T0 - 1,
+    }),
+    false,
+    "an admission before the planner window is refused",
+  );
+  assert.equal(
+    historicalNotStartedProven(wave, cell, {
+      id: "r-historical",
+      createdAt: T0 + 3_600_001,
+    }),
+    false,
+    "an admission after the planner window is refused",
+  );
+  assert.equal(
+    historicalNotStartedProven(
+      { ...wave, plannerCompletedAt: "not-a-time" },
+      cell,
+      admission,
+    ),
+    false,
+    "a malformed authenticated window fails closed",
+  );
+});
 
 Deno.test("matrix actions: ordinary missing-health and verification purposes produce zero model admissions", async () => {
   for (

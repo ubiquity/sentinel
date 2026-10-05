@@ -236,6 +236,14 @@ export interface ActionsTargetCyclesInputV1 {
   budget: BudgetControllerV1;
   /** ONE absolute run deadline shared by every cycle; never restarted. */
   deadline: number;
+  /**
+   * Trusted origin of THIS child invocation, captured before any identity,
+   * credential, state, source or target preparation. A matrix cell anchors its
+   * own bounded start window here, so a long planner run or a queued runner
+   * cannot spend the cell's window before its runner starts. Ordinary serial
+   * and aggregate callers keep their existing entrypoint anchor.
+   */
+  runOrigin?: number;
   stepLimit: number;
   modelStartsEnabled: boolean;
   externalImplementations?: boolean;
@@ -965,6 +973,7 @@ export async function runActionsRepairHost(
       model,
       budget,
       deadline,
+      runOrigin,
       stepLimit: STEP_LIMIT,
       // Only an ordinary hosted execution may start a model. Bootstrap, prior,
       // candidate and rollback runs execute the deterministic entrypoint with

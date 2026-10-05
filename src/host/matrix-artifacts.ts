@@ -43,8 +43,10 @@ import type {
   MatrixArtifactRequestV1,
   MatrixArtifactTransportV1,
   MatrixAuthenticatedWaveV1,
+  MatrixRejectedCellEvidenceV1,
   MatrixRejectedWaveV1,
 } from "./matrix-artifact-port.ts";
+import { HISTORICAL_MATRIX_QUARANTINE } from "./matrix-actions.ts";
 
 const API = `https://api.github.com/repos/${REPOSITORY}/actions`;
 const MAX_ITEMS = 10_000;
@@ -239,8 +241,15 @@ export function createActionsMatrixArtifactTransport(options: {
             ...input,
             requests: snapshot.work.flatMap((task) => {
               const intent = task.intent;
+              // The exact original quarantine class is the only non-work state
+              // a rejection proof may re-examine; every other blocked class is
+              // left outside the rejection request set entirely.
+              const recoverable = task.nextStep === "work" ||
+                (task.nextStep === "blocked" &&
+                  task.blocker?.kind === "other" &&
+                  task.blocker.message === HISTORICAL_MATRIX_QUARANTINE);
               if (
-                task.nextStep !== "work" || intent?.kind !== "implementation" ||
+                !recoverable || intent?.kind !== "implementation" ||
                 task.target.candidateState !== undefined
               ) return [];
               if (intent.requestId === null) refuse();
@@ -271,6 +280,12 @@ export function createActionsMatrixArtifactTransport(options: {
             intent = task.intent;
           const implementing = intent?.kind === "implementation" &&
             intent.expectedHead === null && intent.resultId === null;
+          // The exact original quarantine class is the only non-work state the
+          // authenticated rejection may still bind; every other blocked class
+          // refuses here exactly as before.
+          const recoverable = task.nextStep === "work" ||
+            (task.nextStep === "blocked" && task.blocker?.kind === "other" &&
+              task.blocker.message === HISTORICAL_MATRIX_QUARANTINE);
           const preserving = intent?.kind === "candidate_preservation" &&
             reservation.outcome === "submitted" &&
             reservation.settledAt !== null && task.target.head !== null &&
@@ -292,7 +307,7 @@ export function createActionsMatrixArtifactTransport(options: {
             reservation.head !== request.expectedBase ||
             reservation.purpose === "review_request" ||
             reservation.outcome === "confirmed_not_submitted" ||
-            task.nextStep !== "work" ||
+            !recoverable ||
             task.target.base !== request.expectedBase ||
             (!implementing && !preserving) ||
             intent?.key !== request.intentKey ||
@@ -862,6 +877,7 @@ export function createActionsMatrixArtifactTransport(options: {
           const bundlesDir = `${staging}/${run.runId}-${run.runAttempt}`;
           await Deno.mkdir(bundlesDir, { mode: 0o700 });
           const results = [], cellJobIds = [];
+          const evidence: MatrixRejectedCellEvidenceV1[] = [];
           for (const cell of selected) {
             const name =
               `sentinel-matrix-cell-${run.runId}-${run.runAttempt}-${cell.cellId}`;
@@ -954,18 +970,46 @@ export function createActionsMatrixArtifactTransport(options: {
             }
             results.push(result);
             cellJobIds.push(positive(cellJobs[0].id));
+            evidence.push({
+              cellId: cell.cellId,
+              taskId: cell.taskId,
+              reservationId: cell.reservationId,
+              status: result.status,
+              receiptNull: result.receipt === null,
+              bundleNull: result.bundle === null,
+              completedAt: result.completedAt,
+              resultDigest: sha(cellMarker.resultDigest),
+            });
           }
           if (input.rejectionProof) {
             if (!malformed) refuse();
-            if (malformed) {
-              rejected.push({
-                reason: "reservation_after_manifest",
-                proof: input.rejectionProof,
-                planDigest,
-                plannerJobId: positive(planners[0].id),
-                affected,
-              });
-            }
+            // The authenticated planner job interval is the only admission
+            // window a legacy manifest rejection may use; a missing or
+            // non-causal interval fails closed instead of inventing authority.
+            const plannerStartedAt = planners[0].started_at;
+            const plannerCompletedAt = planners[0].completed_at;
+            const startedMs = typeof plannerStartedAt === "string"
+              ? Date.parse(plannerStartedAt)
+              : Number.NaN;
+            const completedMs = typeof plannerCompletedAt === "string"
+              ? Date.parse(plannerCompletedAt)
+              : Number.NaN;
+            if (
+              typeof plannerStartedAt !== "string" ||
+              typeof plannerCompletedAt !== "string" ||
+              !Number.isSafeInteger(startedMs) ||
+              !Number.isSafeInteger(completedMs) || completedMs < startedMs
+            ) refuse();
+            rejected.push({
+              reason: "reservation_after_manifest",
+              proof: input.rejectionProof,
+              planDigest,
+              plannerJobId: positive(planners[0].id),
+              plannerStartedAt,
+              plannerCompletedAt,
+              affected,
+              cells: evidence,
+            });
             continue;
           }
           recovered.push({

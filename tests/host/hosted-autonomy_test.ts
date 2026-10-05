@@ -6285,6 +6285,8 @@ Deno.test("historical release witness: overwritten ordinary proof still quaranti
         proof,
         planDigest: "d".repeat(64),
         plannerJobId: 2501,
+        plannerStartedAt: new Date(T0).toISOString(),
+        plannerCompletedAt: new Date(T0 + 3_600_000).toISOString(),
         affected: [{
           request,
           requestDigest: await matrixDigestV1(request),
@@ -6293,6 +6295,7 @@ Deno.test("historical release witness: overwritten ordinary proof still quaranti
           reservation: charge,
           reservationDigest: await matrixDigestV1(charge),
         }],
+        cells: [],
       }];
     };
     const result = await runHostedAutonomy({
@@ -6318,6 +6321,153 @@ Deno.test("historical release witness: overwritten ordinary proof still quaranti
     console.log(`historical witness native requests: ${f.calls.length}`);
   } finally {
     Deno.chdir(priorCwd);
+    await Deno.remove(f.rig.tmp, { recursive: true });
+  }
+});
+
+Deno.test("historical not started: real already-quarantined ambiguous state recovers through the authenticated transport", async () => {
+  const f = await historicalMalformedRig(true, 1);
+  const recoveredCount = 1;
+  const siblingIndex = recoveredCount;
+  try {
+    const seeded = await f.rig.state.readRepair();
+    assert(seeded.ok && seeded.value.status === "found");
+    // Model the exact original quarantined class: every target record is
+    // already blocked with the historical manifest rejection and its original
+    // charge is already settled ambiguous with its original instant.
+    const quarantinedAt = f.clock.now();
+    const write = await f.rig.state.writeRepair({
+      ...seeded.value.snapshot,
+      stateHead: seeded.value.head,
+      sequence: seeded.value.snapshot.sequence + 1,
+      updatedAt: quarantinedAt,
+      work: seeded.value.snapshot.work.map((row) => {
+        const index = f.records.findIndex((record) => record.id === row.id);
+        return index >= 0 && index < recoveredCount
+          ? {
+            ...row,
+            nextStep: "blocked" as const,
+            blocker: {
+              kind: "other" as const,
+              message: HISTORICAL_MATRIX_QUARANTINE,
+              since: row.updatedAt,
+            },
+            wait: null,
+          }
+          : row;
+      }),
+      reservations: seeded.value.snapshot.reservations.map((row) => {
+        const index = f.charges.findIndex((charge) => charge.id === row.id);
+        return index >= 0 && index < recoveredCount
+          ? {
+            ...row,
+            outcome: "ambiguous" as const,
+            settledAt: row.createdAt + 1_000,
+            proofRef: null,
+          }
+          : row;
+      }),
+    }, seeded.value.head);
+    assert(write.ok && write.value.status === "applied", JSON.stringify(write));
+    const before = await f.rig.state.readRepair();
+    assert(before.ok && before.value.status === "found");
+    const result = await f.run();
+    assert(
+      result.actions.includes(
+        `historical-matrix:quarantined:${recoveredCount}`,
+      ),
+      JSON.stringify(result.actions),
+    );
+    assert(
+      result.actions.some((action) => action.startsWith("retry:historical-")),
+      "the existing retry authority grants fresh eligible work",
+    );
+    const after = await f.rig.state.readRepair();
+    assert(after.ok && after.value.status === "found");
+    for (let i = 0; i < recoveredCount; i++) {
+      const record: WorkRecordV1 = after.value.snapshot.work.find((row) =>
+        row.id === f.records[i].id
+      )!;
+      assert.equal(
+        record.nextStep,
+        "work",
+        `record ${i} rejoined the lifecycle`,
+      );
+      assert.equal(record.blocker, null);
+      assert.deepEqual(record.counters, f.records[i].counters);
+      // The already-settled ambiguous charge is preserved byte for byte: it is
+      // never re-settled and never receives a new settlement instant.
+      assert.deepEqual(
+        after.value.snapshot.reservations.find((row) =>
+          row.id === f.charges[i].id
+        ),
+        before.value.snapshot.reservations.find((row) =>
+          row.id === f.charges[i].id
+        ),
+        `charge ${i} bytes preserved`,
+      );
+    }
+    assert.deepEqual(
+      after.value.snapshot.work.find((row) =>
+        row.id === f.records[siblingIndex].id
+      ),
+      f.records[siblingIndex],
+    );
+    assert.deepEqual(
+      after.value.snapshot.reservations.find((row) =>
+        row.id === f.charges[siblingIndex].id
+      ),
+      f.charges[siblingIndex],
+    );
+    // A replay of the same already-recovered wave has nothing left to
+    // quarantine and mutates nothing.
+    const replayBefore = await f.rig.state.readRepair();
+    const replay = await f.run();
+    assert.ok(
+      !replay.actions.some((action) => action.startsWith("historical-matrix:")),
+      JSON.stringify(replay.actions),
+    );
+    assert.deepEqual(await f.rig.state.readRepair(), replayBefore);
+  } finally {
+    await Deno.remove(f.rig.tmp, { recursive: true });
+  }
+});
+
+Deno.test("historical not started: another blocker never recovers and mutates nothing", async () => {
+  const f = await historicalMalformedRig();
+  try {
+    const seeded = await f.rig.state.readRepair();
+    assert(seeded.ok && seeded.value.status === "found");
+    const blocked = await f.rig.state.writeRepair({
+      ...seeded.value.snapshot,
+      stateHead: seeded.value.head,
+      sequence: seeded.value.snapshot.sequence + 1,
+      updatedAt: f.clock.now(),
+      work: seeded.value.snapshot.work.map((row) => {
+        const index = f.records.findIndex((record) => record.id === row.id);
+        return index >= 0 && index < 17
+          ? {
+            ...row,
+            nextStep: "blocked" as const,
+            blocker: {
+              kind: "other" as const,
+              message: "unrelated terminal blocker",
+              since: row.updatedAt,
+            },
+            wait: null,
+          }
+          : row;
+      }),
+    }, seeded.value.head);
+    assert(blocked.ok && blocked.value.status === "applied");
+    const before = await f.rig.state.readRepair();
+    const result = await f.run();
+    assert.ok(
+      !result.actions.some((action) => action.startsWith("historical-matrix:")),
+      JSON.stringify(result.actions),
+    );
+    assert.deepEqual(await f.rig.state.readRepair(), before);
+  } finally {
     await Deno.remove(f.rig.tmp, { recursive: true });
   }
 });
@@ -6851,6 +7001,8 @@ Deno.test("historical closed list: three distinct witnesses then current, retire
               proof,
               planDigest: "d".repeat(64),
               plannerJobId: 1000 + proof.execution.runId,
+              plannerStartedAt: new Date(T0).toISOString(),
+              plannerCompletedAt: new Date(T0 + 3_600_000).toISOString(),
               affected: [{
                 request: witness.cell.request,
                 requestDigest: witness.cell.requestDigest,
@@ -6859,6 +7011,7 @@ Deno.test("historical closed list: three distinct witnesses then current, retire
                 reservation: charge,
                 reservationDigest: await matrixDigestV1(charge),
               }],
+              cells: [],
             }];
           },
         })),

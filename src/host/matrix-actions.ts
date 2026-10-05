@@ -34,6 +34,7 @@ import {
 } from "./matrix-git.ts";
 import type {
   MatrixArtifactTransportV1,
+  MatrixRejectedCellEvidenceV1,
   MatrixRejectedWaveV1,
 } from "./matrix-artifact-port.ts";
 import type { BudgetControllerV1 } from "../budget/mod.ts";
@@ -63,6 +64,64 @@ import {
 
 export const HISTORICAL_MATRIX_QUARANTINE =
   "authenticated historical matrix manifest rejected: reservation_after_manifest; model outcome uncertain";
+
+/**
+ * The exact truthful disposition of one legacy manifest rejection whose
+ * authenticated cell never started. It is the proven not-started outcome, not
+ * a fresh-work authorization: the existing maintenance retry authority decides
+ * separately whether an eligible retry may follow.
+ */
+export const HISTORICAL_NOT_STARTED_DETAIL =
+  "authenticated historical matrix cell did not start: implementation start is past the model cutoff or no longer fits the run bounds";
+
+/**
+ * True only for the exact original legacy quarantine class: a record blocked
+ * with the historical manifest rejection itself. It is the ONLY non-work state
+ * the authenticated recovery may reconcile; every other blocker refuses.
+ */
+function isHistoricalQuarantineBlocked(record: {
+  readonly nextStep: string;
+  readonly blocker: {
+    readonly kind: string;
+    readonly message: string;
+  } | null;
+}): boolean {
+  return record.nextStep === "blocked" &&
+    record.blocker?.kind === "other" &&
+    record.blocker.message === HISTORICAL_MATRIX_QUARANTINE;
+}
+
+/**
+ * True only when the authenticated legacy witness proves this exact
+ * reservation never started: the wave is the exact diagnosed
+ * `reservation_after_manifest` class, the cell's own authenticated result is
+ * `not_started` with no receipt and no bundle, and the reservation's admission
+ * instant falls inside the authenticated planner job interval. Unknown,
+ * completed, receipt-bearing, bundle-bearing, missing-evidence or
+ * outside-the-window admissions return false and stay quarantined.
+ */
+export function historicalNotStartedProven(
+  wave: Pick<
+    MatrixRejectedWaveV1,
+    "reason" | "plannerStartedAt" | "plannerCompletedAt"
+  >,
+  cell: MatrixRejectedCellEvidenceV1 | undefined,
+  reservation: Pick<BudgetReservationV1, "id" | "createdAt">,
+): boolean {
+  if (wave.reason !== "reservation_after_manifest") return false;
+  if (cell === undefined) return false;
+  if (
+    cell.status !== "not_started" || !cell.receiptNull || !cell.bundleNull ||
+    cell.reservationId !== reservation.id
+  ) return false;
+  const started = Date.parse(wave.plannerStartedAt);
+  const completed = Date.parse(wave.plannerCompletedAt);
+  if (
+    !Number.isSafeInteger(started) || !Number.isSafeInteger(completed) ||
+    completed < started
+  ) return false;
+  return reservation.createdAt >= started && reservation.createdAt <= completed;
+}
 
 export interface HistoricalMatrixQuarantineDepsV1 {
   state: StateReadView & RepairStateWriter;
@@ -156,7 +215,8 @@ async function quarantineRow(
 ) {
   if (
     wave.reason !== "reservation_after_manifest" ||
-    captured.work.nextStep !== "work" ||
+    (!isHistoricalQuarantineBlocked(captured.work) &&
+      captured.work.nextStep !== "work") ||
     captured.work.intent?.kind !== "implementation" ||
     captured.work.target.candidateState !== undefined ||
     captured.work.intent.requestId !== captured.reservation.id ||
@@ -190,7 +250,8 @@ async function quarantineRow(
     row.id === captured.reservation.id
   );
   if (
-    !work || !reservation || work.nextStep !== "work" ||
+    !work || !reservation ||
+    (!isHistoricalQuarantineBlocked(work) && work.nextStep !== "work") ||
     work.intent?.kind !== "implementation" ||
     work.target.candidateState !== undefined ||
     await matrixDigestV1(work) !== captured.workDigest ||
@@ -199,23 +260,41 @@ async function quarantineRow(
   ) {
     throw new Error("historical matrix captured identity changed");
   }
+  const provenNotStarted = isHistoricalQuarantineBlocked(work) &&
+    historicalNotStartedProven(
+      wave,
+      wave.cells.find((cell) => cell.reservationId === reservation.id),
+      reservation,
+    );
+  // An already-quarantined record is only reconciled when the authenticated
+  // witness proves this exact reservation never started; every other class is
+  // refused before any settlement or write.
+  if (isHistoricalQuarantineBlocked(work) && !provenNotStarted) {
+    throw new Error("historical matrix not-started admission unproven");
+  }
   if (!await proofInCustody(deps, wave.proof, currentExecution, historical)) {
     throw new Error("historical matrix pre-settlement custody unavailable");
   }
-  const settled = await deps.budget.settleModelStart({
-    id: reservation.id,
-    outcome: "ambiguous",
-    proofRef: null,
-  });
-  if (
-    (settled.status !== "settled" && settled.status !== "idempotent") ||
-    settled.reservation.outcome !== "ambiguous" ||
-    settled.reservation.settledAt === null ||
-    settled.reservation.proofRef !== null ||
-    reservationIdentity(settled.reservation) !==
-      reservationIdentity(reservation)
-  ) {
-    throw new Error("historical matrix settlement incomplete");
+  // An already-settled ambiguous charge is preserved byte for byte: it is
+  // never re-settled and never receives a new settlement instant.
+  let settledReservation = reservation;
+  if (reservation.outcome !== "ambiguous" || reservation.settledAt === null) {
+    const settled = await deps.budget.settleModelStart({
+      id: reservation.id,
+      outcome: "ambiguous",
+      proofRef: null,
+    });
+    if (
+      (settled.status !== "settled" && settled.status !== "idempotent") ||
+      settled.reservation.outcome !== "ambiguous" ||
+      settled.reservation.settledAt === null ||
+      settled.reservation.proofRef !== null ||
+      reservationIdentity(settled.reservation) !==
+        reservationIdentity(reservation)
+    ) {
+      throw new Error("historical matrix settlement incomplete");
+    }
+    settledReservation = settled.reservation;
   }
   const fresh = await deps.state.readRepair();
   if (
@@ -234,7 +313,7 @@ async function quarantineRow(
   if (
     !current || await matrixDigestV1(current) !== captured.workDigest ||
     !charged ||
-    canonicalStringify(charged) !== canonicalStringify(settled.reservation)
+    canonicalStringify(charged) !== canonicalStringify(settledReservation)
   ) {
     throw new Error("historical matrix post-settlement identity changed");
   }
@@ -245,7 +324,9 @@ async function quarantineRow(
   const blocked = markBlocked(
     current,
     "other",
-    HISTORICAL_MATRIX_QUARANTINE,
+    provenNotStarted
+      ? HISTORICAL_NOT_STARTED_DETAIL
+      : HISTORICAL_MATRIX_QUARANTINE,
     now,
   );
   if (!await proofInCustody(deps, wave.proof, currentExecution, historical)) {
@@ -296,8 +377,8 @@ export async function runHistoricalMatrixQuarantine(
   if (witness) {
     const selected = repair.value.snapshot.work.filter((row) =>
       row.intent?.kind === "implementation" && row.nextStep !== "done" &&
-      !(row.nextStep === "blocked" && row.blocker?.kind === "other" &&
-        row.blocker.message === HISTORICAL_MATRIX_QUARANTINE) &&
+      (row.nextStep === "work" || isHistoricalQuarantineBlocked(row)) &&
+      row.target.candidateState === undefined &&
       witness.reservationIds.some((id) =>
         row.intent?.requestId === id ||
         row.intent?.key === implementationIntentKey(id)
@@ -314,7 +395,8 @@ export async function runHistoricalMatrixQuarantine(
         row.id === work.intent?.requestId
       );
       if (
-        work.nextStep !== "work" || work.target.candidateState !== undefined ||
+        (!isHistoricalQuarantineBlocked(work) && work.nextStep !== "work") ||
+        work.target.candidateState !== undefined ||
         !reservation || !witness.reservationIds.includes(reservation.id) ||
         work.intent?.key !== implementationIntentKey(reservation.id) ||
         canonicalStringify(work.repository) !==
@@ -330,7 +412,8 @@ export async function runHistoricalMatrixQuarantine(
   }
   if (
     !repair.value.snapshot.work.some((row) =>
-      row.nextStep === "work" && row.intent?.kind === "implementation" &&
+      (row.nextStep === "work" || isHistoricalQuarantineBlocked(row)) &&
+      row.intent?.kind === "implementation" &&
       row.target.candidateState === undefined
     )
   ) return 0;
@@ -840,15 +923,23 @@ export async function runActionsMatrixHost(
       } else {
         await input.prepareTarget?.(config);
         const github = input.composeGithub(config);
+        // A queued cell anchors its OWN bounded start window at this trusted
+        // child invocation, never at the earlier prepare-time execution
+        // creation: a long planner run or runner queue must not spend the
+        // cell's window before its runner starts. The child's own absolute
+        // deadline and every generation/lease/binding check below are
+        // unchanged, so a cell with insufficient remaining time in its own
+        // actual execution still refuses.
+        const cellOrigin = input.runOrigin ?? host.execution.createdAt;
         result = await runMatrixCell(
           {
             clock: input.clock,
             bounds: createRunBounds(targetDeps(input, config), {
               deadline: Math.min(
                 input.deadline,
-                childRunDeadlineV1(host.execution.createdAt),
+                childRunDeadlineV1(cellOrigin),
               ),
-              runStartedAt: host.execution.createdAt,
+              runStartedAt: cellOrigin,
               modelStartsEnabled: input.modelStartsEnabled,
             }),
             sessionBound: config.sessionBound,

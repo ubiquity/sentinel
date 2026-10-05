@@ -137,6 +137,7 @@ import {
   createActionsMatrixArtifactTransport,
 } from "../src/host/matrix-artifacts.ts";
 import {
+  HISTORICAL_NOT_STARTED_DETAIL,
   type HistoricalMatrixQuarantineDepsV1,
   runHistoricalMatrixQuarantine,
 } from "../src/host/matrix-actions.ts";
@@ -346,6 +347,14 @@ export const HOSTED_AUTONOMY_RETRYABLE: readonly {
   },
   {
     prefix: "model run did not complete with a trusted candidate",
+    nextStep: "work",
+  },
+  {
+    // A truthfully proven historical not-started admission is resolved
+    // uncertainty, not a model outcome: the existing retry authority still
+    // owns whether a fresh eligible start follows, under its own attempt
+    // ceiling, durable reservation identity, source and closed-issue gates.
+    prefix: HISTORICAL_NOT_STARTED_DETAIL,
     nextStep: "work",
   },
   {
