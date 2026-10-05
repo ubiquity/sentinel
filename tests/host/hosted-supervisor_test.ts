@@ -29,6 +29,11 @@ import { portError, portOk } from "../../src/contracts/ports.ts";
 import { parseReleaseRequestV1 } from "../../src/contracts/release.ts";
 import type { ReleaseRequestV1 } from "../../src/contracts/release.ts";
 import {
+  createMatrixUncertaintyMaintenance,
+  runMatrixUncertaintyMaintenance,
+} from "../../src/host/matrix-uncertainty-maintenance.ts";
+import type { MatrixUncertaintyMaintenanceDepsV1 } from "../../src/host/matrix-uncertainty-maintenance.ts";
+import {
   parseReviewReceiptV1,
   reviewTaskStatementDigest,
   type ReviewTaskStatementV1,
@@ -58,6 +63,7 @@ import {
 import {
   gitRun,
   makeRemoteCtx,
+  pushRawTree,
   sha256Hex,
   T0,
   testGitEnv,
@@ -363,6 +369,7 @@ interface RigV1 {
     run: HostedSupervisorRunIdentityV1,
   ): Promise<HostedSupervisorOutcomeV1>;
   snapshot(): Promise<ReleaseStateSnapshotV1>;
+  seedCapturedRelease(snapshot: ReleaseStateSnapshotV1): Promise<void>;
   seedRepair(
     requests: ReleaseRequestV1[],
     reviews: ReviewReceiptV1[],
@@ -415,6 +422,39 @@ async function makeRig(): Promise<RigV1> {
         throw new Error("missing release state");
       }
       return read.value.snapshot;
+    },
+    seedCapturedRelease: async (snapshot) => {
+      const seed = await release.writeRelease({
+        ...snapshot,
+        hostedRuntimes: [],
+      }, null);
+      assert.ok(
+        seed.ok && seed.value.status === "applied",
+        JSON.stringify(seed),
+      );
+      // Restore a captured historical tree in disposable Git only. The real
+      // writer correctly refuses introducing generation 63 as a new runtime.
+      const files: Record<string, string> = {
+        "manifest.json": canonicalStringify({
+          version: "v1",
+          kind: "release_state_manifest",
+          sequence: 2,
+          updatedAt: snapshot.updatedAt,
+          stateHead: seed.value.head,
+        }) + "\n",
+      };
+      for (const row of snapshot.hostedRuntimes) {
+        files[`hostedRuntimes/${await sha256Hex(row.id)}.json`] =
+          canonicalStringify(row) + "\n";
+      }
+      const restored = await pushRawTree(
+        remote,
+        seed.value.head,
+        "refs/heads/sentinel-state/release",
+        files,
+        env,
+      );
+      assert.ok(restored.ok, restored.stderr);
     },
     seedRepair: async (requests, reviews, overrides = {}) => {
       const current = await repair.readRepair();
@@ -1532,6 +1572,241 @@ Deno.test("hosted supervisor core: unreviewed or unverified requests never move 
     state = await rig.snapshot();
     assert.equal(state.hostedReleases.length, 0);
     assert.equal(state.hostedRuntimes[0].activeRevision, LAUNCHER);
+  } finally {
+    await rig.cleanup();
+  }
+});
+
+Deno.test("hosted supervisor PR110: trusted stale-base maintenance permits ordinary work without promotion", async () => {
+  const rig = await makeRig();
+  try {
+    const active = "e4cef46332cf124a8c283d798a963cf5f66e45c2" as GitSha;
+    const request = releaseRequest({
+      id:
+        "release:5e6390da3991207f7fb7cdd8f0fa5268c0e9daf0fe12c04d3e8e44245f09a5da",
+      revision: "accc96c8e8eeb5cca71e9641f674a96bf75c77d1",
+      source: {
+        pullRequest: 110,
+        reviewRequestId:
+          "review-review:110:28e2aac95f0dbcc79b3c41333f5a2eb92194ccea:attempt-3",
+        reviewReceiptId:
+          "review-receipt:a62d1e2150592b28b358978f7c5781aff45dce6899dc668b67b72b97094b908e",
+        head: "28e2aac95f0dbcc79b3c41333f5a2eb92194ccea",
+        base: "2bca04186b3e462c63ba3d9ce996f4a5d3fd03b6",
+      },
+      createdAt: 1791208786131,
+    });
+    rig.clock.advance(1791208886131 - rig.clock.now());
+    const boot = execution({ revision: active, generation: 63 });
+    const proof = runProof(boot, "healthy");
+    const seed = parseReleaseStateSnapshotV1({
+      version: "v1",
+      kind: "release_state_snapshot",
+      stateHead: null,
+      sequence: 1,
+      updatedAt: rig.clock.now(),
+      releases: [],
+      hostedReleases: [],
+      githubCooldowns: [],
+      hostedRuntimes: [{
+        version: "v1",
+        kind: "hosted_runtime",
+        id: "ubiquity/sentinel:0:production",
+        activeRevision: active,
+        generation: 63,
+        lastHealthyProof: proof,
+        lastExecutionProof: proof,
+        execution: null,
+        nextOrdinaryAt: T0,
+        createdAt: T0,
+        updatedAt: rig.clock.now(),
+      }],
+    });
+    await rig.seedCapturedRelease(seed);
+    await rig.seedRepair([request], [reviewReceipt(request)]);
+    const beforeRepair = await rig.repair.readRepair();
+    assert.ok(beforeRepair.ok && beforeRepair.value.status === "found");
+    const repairCapture = beforeRepair.value;
+    const beforeRelease = await rig.release.readRelease();
+    assert.ok(
+      beforeRelease.ok && beforeRelease.value.status === "found",
+      JSON.stringify(beforeRelease),
+    );
+    const releaseCapture = beforeRelease.value;
+    let commitMode = "exact";
+    const http = (wire: { url: string }) =>
+      Promise.resolve({
+        status: commitMode === "unavailable" ? 403 : 200,
+        headers: new Headers(),
+        bodyText: JSON.stringify(
+          wire.url.endsWith("/pulls/110")
+            ? {
+              number: 110,
+              state: "closed",
+              merged: true,
+              merge_commit_sha: request.revision,
+              head: {
+                sha: request.source.head,
+                ref: "sentinel/repair/issue-98",
+                repo: { full_name: "ubiquity/sentinel" },
+              },
+              base: {
+                ref: "development",
+                repo: { full_name: "ubiquity/sentinel" },
+              },
+            }
+            : {
+              sha: commitMode === "foreign" ? LAUNCHER : request.revision,
+              parents: [{ sha: active }, { sha: request.source.head }],
+            },
+        ),
+      });
+    const client = new GitHubApiClient({
+      repository: SELF,
+      apiBaseUrl: "https://api.github.com",
+      http,
+      auth: {
+        authorizationHeader: () => Promise.resolve(portOk("Bearer fixture")),
+      },
+      clock: rig.clock,
+      cooldownGate: {
+        beforeRequest: () => Promise.resolve(portOk(undefined)),
+        recordRateLimit: () => Promise.resolve(portOk(undefined)),
+      },
+    });
+    rig.evidence.verifyRequest = (value) =>
+      client.verifyHostedReleaseRequest(value);
+    assert.deepEqual(await rig.prepare(run(2)), {
+      status: "pending",
+      detail: "hosted supervisor release request is not verified",
+    });
+    const state = {
+      readRepair: () => rig.repair.readRepair(),
+      readRelease: () => rig.release.readRelease(),
+      writeRepair: rig.repair.writeRepair.bind(rig.repair),
+      readRepairAt: async (input: { commit: GitSha; expectedHead: GitSha }) => {
+        assert.equal(input.commit, "50bb001920827e31816c0d7ed37b8143965c0cf7");
+        const original = await rig.repair.readRepairAt!({
+          commit: repairCapture.head,
+          expectedHead: input.expectedHead,
+        });
+        assert.ok(original.ok && original.value.status === "found");
+        return portOk({ ...original.value, head: input.commit });
+      },
+    };
+    const maintenance = createMatrixUncertaintyMaintenance({
+      state,
+      clock: rig.clock,
+      token: "fixture",
+      http,
+      artifactRoot: ROOT,
+    });
+    const deps: MatrixUncertaintyMaintenanceDepsV1 = {
+      ...maintenance,
+      state,
+      confirmCompletedExecution: () => Promise.resolve(true),
+      readExecution: () => Promise.resolve(portOk(proof)),
+    };
+    for (const mode of ["unavailable", "foreign"]) {
+      commitMode = mode;
+      await assert.rejects(
+        () => runMatrixUncertaintyMaintenance(deps),
+        /custody unavailable or changed/,
+      );
+      assert.deepEqual(await rig.repair.readRepair(), beforeRepair);
+      assert.deepEqual(await rig.release.readRelease(), beforeRelease);
+    }
+    commitMode = "exact";
+    const controls: Partial<MatrixUncertaintyMaintenanceDepsV1>[] = [
+      { confirmCompletedExecution: () => Promise.resolve(false) },
+      {
+        readExecution: () =>
+          Promise.resolve(
+            portError("unavailable", "native evidence unavailable"),
+          ),
+      },
+      {
+        state: {
+          ...state,
+          readRepairAt: () =>
+            Promise.resolve(
+              portError("unavailable", "original custody unavailable"),
+            ),
+        },
+      },
+      {
+        state: {
+          ...state,
+          readRelease: () =>
+            Promise.resolve(portOk({
+              ...releaseCapture,
+              snapshot: {
+                ...releaseCapture.snapshot,
+                hostedRuntimes: releaseCapture.snapshot.hostedRuntimes.map((
+                  row,
+                ) => ({ ...row, execution: boot })),
+              },
+            })),
+        },
+      },
+      {
+        state: {
+          ...state,
+          writeRepair: () =>
+            Promise.resolve(
+              portOk({ status: "conflict", currentHead: repairCapture.head }),
+            ),
+        },
+      },
+      {
+        state: {
+          ...state,
+          writeRepair: () =>
+            Promise.resolve(
+              portOk({ status: "ambiguous", currentHead: repairCapture.head }),
+            ),
+        },
+      },
+      {
+        state: {
+          ...state,
+          writeRepair: () =>
+            Promise.resolve(portOk({ status: "applied", head: LAUNCHER })),
+        },
+      },
+    ];
+    for (const control of controls) {
+      await assert.rejects(
+        () => runMatrixUncertaintyMaintenance({ ...deps, ...control }),
+        /custody unavailable or changed/,
+      );
+      assert.deepEqual(await rig.repair.readRepair(), beforeRepair);
+      assert.deepEqual(await rig.release.readRelease(), beforeRelease);
+    }
+    await runMatrixUncertaintyMaintenance(deps);
+    const after = await rig.repair.readRepair();
+    assert.ok(after.ok && after.value.status === "found");
+    assert.equal(after.value.snapshot.releaseRequests[0].status, "cancelled");
+    assert.deepEqual(
+      after.value.snapshot.reviews,
+      beforeRepair.value.snapshot.reviews,
+    );
+    assert.deepEqual(
+      after.value.snapshot.work,
+      beforeRepair.value.snapshot.work,
+    );
+    assert.deepEqual(
+      after.value.snapshot.reservations,
+      beforeRepair.value.snapshot.reservations,
+    );
+    assert.deepEqual(await rig.release.readRelease(), beforeRelease);
+    await runMatrixUncertaintyMaintenance({ ...maintenance, state });
+    assert.deepEqual(await rig.repair.readRepair(), after);
+    const ordinary = requireRun(await rig.prepare(run(2)));
+    assert.equal(ordinary.purpose, "ordinary");
+    assert.equal(ordinary.revision, active);
+    assert.equal(ordinary.generation, 63);
+    assert.equal((await rig.snapshot()).hostedReleases.length, 0);
   } finally {
     await rig.cleanup();
   }
