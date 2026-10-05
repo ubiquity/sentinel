@@ -321,7 +321,10 @@ function mapStatus(
   if (status === 429) {
     return { kind: "rate_limited", detail: "gateway rate limit reached" };
   }
-  return { kind: "unavailable", detail: "gateway producer is unavailable" };
+  return {
+    kind: "unavailable",
+    detail: `gateway producer is unavailable (HTTP ${status})`,
+  };
 }
 
 /**
