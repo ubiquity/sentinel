@@ -1,8 +1,16 @@
+## Conservative preservation uncertainty - 2026-10-05
+
+For the owner-authorized Ralph recovery loop, extend trusted maintenance only to the five exact candidate-preservation requests in repair capture `83997ba19af28ca46186962139931d18cef9e170`, using existing BLOCKED semantics to isolate unresolved preservation from installed-runtime startup. Retain every intent, candidate, target, evidence binding and submitted reservation; do not claim permanent loss, successful preservation, health or delivery. Issue730 retains its existing PR893 and published head. Require the same exact custody, native quiescence, guarded CAS/readback, partial-replay and unchanged-release checks as interrupted-admission maintenance.
+
+Prevent hosted retirement from clearing this exact preservation-uncertainty blocker and intent even after the source issue and unmerged PR close. Ordinary selection and startup must skip these retained records without retry, model admission, publication or refund. Preserve all unrelated retirement behavior and the genuine fresh healthy-prior activation gate. Exact protected-source review/CI and real hosted execution remain separate acceptance requirements.
+
 ## Conservative interrupted-admission maintenance - 2026-10-05
 
 For the owner-authorized Ralph repair loop, prepare a bounded trusted maintenance phase for the exact 13 incomplete implementation admissions retained in repair snapshot `83997ba19af28ca46186962139931d18cef9e170`. Their original matrix-plan membership cannot be authenticated from retained evidence. Use the existing failed-implementation consumer to retain charged AMBIGUOUS reservations and BLOCKED work with original intents and candidate bindings; this is an uncertainty disposition, not a producer receipt, refund, retry or completion.
 
 Require exact historical/current record custody, authenticated native quiescence, guarded CAS and readback, idempotent partial settlement, and unchanged release state. Exclude submitted or candidate-bearing admissions and all five candidate-preservation requests. Preserve the requested release and genuine healthy-prior gate. Activation requires reviewed, tested source on the protected supervisor ref; source tests do not establish hosted startup or autonomous delivery.
+
+The shared failure consumer samples its blocked-row time before asynchronous reservation settlement and its snapshot time afterward. Validate the actual row time within original-row ≤ blocked-row ≤ snapshot ≤ trusted-now bounds while retaining exact permitted-snapshot equality; do not require those two sampled times to be equal. Once neither pinned request set has pending WORK, maintenance must be a no-op even after a legitimate runtime promotion. Submitted preservation requests use only the separate preservation-uncertainty disposition above.
 
 ## Ralph loop sol/max worker override - 2026-10-05
 

@@ -90,6 +90,7 @@ import {
 import { createGitBundleImporter } from "../src/host/matrix-git.ts";
 import {
   createMatrixUncertaintyMaintenance,
+  MATRIX_PRESERVATION_UNCERTAINTY_DETAIL,
   runMatrixUncertaintyMaintenance,
 } from "../src/host/matrix-uncertainty-maintenance.ts";
 import {
@@ -1630,6 +1631,12 @@ export function planHostedRetirements(
   const plans: HostedClosurePlanV1[] = [];
   for (const record of snapshot.work) {
     if (record.nextStep === "done") continue;
+    if (
+      record.nextStep === "blocked" &&
+      record.intent?.kind === "candidate_preservation" &&
+      record.blocker?.kind === "other" &&
+      record.blocker.message === MATRIX_PRESERVATION_UNCERTAINTY_DETAIL
+    ) continue;
     const issueNumber = record.related.issueNumber;
     if (
       issueNumber === null ||
