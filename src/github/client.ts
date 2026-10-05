@@ -1255,9 +1255,18 @@ export class GitHubApiClient {
       if (repair.conclusion !== "success" && repair.conclusion !== "failure") {
         return portError("unavailable", HOSTED_EXECUTION_METADATA);
       }
+      const interrupted = repair.conclusion === "failure" &&
+        step.conclusion === "cancelled";
+      if (
+        interrupted &&
+        (attempt.value.status !== "completed" || !jobs.value.allCompleted)
+      ) {
+        return portError("unavailable", HOSTED_EXECUTION_METADATA);
+      }
       if (
         step.status !== "completed" ||
-        (step.conclusion !== "success" && step.conclusion !== "failure") ||
+        (!interrupted && step.conclusion !== "success" &&
+          step.conclusion !== "failure") ||
         repair.startedAt === null || step.startedAt === null ||
         step.completedAt === null
       ) {
@@ -1282,18 +1291,18 @@ export class GitHubApiClient {
         step,
         observedAt,
       );
-      // A runtime step that STARTED and then concluded failure without
+      // A runtime step that STARTED and then failed or was interrupted without
       // publishing any terminal is an explicit, observable failure of that
       // exact execution: the child ran and died before it could emit one.
       // Returning unavailable here would strand the pointer's saved execution
       // forever, because no later observation of that completed job can ever
       // produce a terminal. Only the no-terminal case is rewritten, and only
-      // when the step itself concluded failure with coherent timestamps; every
+      // when failure/interruption has coherent timestamps; every
       // other metadata fault stays unavailable.
       if (
         !parsedTerminal.ok &&
         parsedTerminal.error.detail === HOSTED_EXECUTION_TERMINAL &&
-        step.conclusion === "failure" &&
+        (step.conclusion === "failure" || interrupted) &&
         !HOSTED_EXECUTION_TERMINAL_LOOKING.test(log.value) &&
         repair.startedAt !== null && step.startedAt !== null &&
         step.completedAt !== null && repair.completedAt !== null &&
@@ -1319,6 +1328,11 @@ export class GitHubApiClient {
           terminalAt: step.completedAt,
           logDigest: await sha256Hex(log.value),
         }, parseHostedRunProofV1);
+      }
+      // Cancelled-step evidence is admitted only by the no-terminal failure
+      // path above. Any terminal-looking record contradicts that interruption.
+      if (interrupted) {
+        return portError("unavailable", HOSTED_EXECUTION_TERMINAL);
       }
       if (!parsedTerminal.ok) return parsedTerminal;
       const terminal = parsedTerminal.value.terminal;
@@ -1379,7 +1393,7 @@ export class GitHubApiClient {
     intent: HostedExecutionIntentV1,
     deadline: DeadlineV1,
   ): Promise<
-    PortResultV1<{ raw: unknown; repair: HostedRepairJobV1 | null }>
+    PortResultV1<{ raw: unknown } & HostedJobsV1>
   > {
     const path = `/repos/${
       repoPath(this.repository)
@@ -1435,7 +1449,7 @@ export class GitHubApiClient {
         if (!complete.ok) return complete;
         return portOk({
           raw: pages.length === 1 ? pages[0] : pages,
-          repair: complete.value.repair,
+          ...complete.value,
         });
       }
       if (
@@ -2517,6 +2531,7 @@ interface HostedRepairJobV1 {
 
 interface HostedJobsV1 {
   repair: HostedRepairJobV1 | null;
+  allCompleted: boolean;
 }
 
 /** Exact scope-0 production open reviewed request. */
@@ -2737,6 +2752,7 @@ function parseHostedJobs(
   }
   const matches: Array<{ job: Record<string, unknown>; path: string }> = [];
   const ids = new Set<number>();
+  let allCompleted = true;
   for (const [index, item] of jobs.entries()) {
     const path = `$.jobs[${index}]`;
     const job = expectRecord(item, path);
@@ -2756,6 +2772,7 @@ function parseHostedJobs(
       );
     }
     ids.add(id);
+    if (job.status !== "completed") allCompleted = false;
     // Fixed job names are short, but a native matrix cell carries its full
     // 64-hex cell id in the job name (`matrix_cell (<cellId>)`, 78 chars),
     // so the 64-char label bound cannot apply to the native job list.
@@ -2769,7 +2786,7 @@ function parseHostedJobs(
   if (matches.length > 1) {
     fail("$.jobs", "invalid_value", "expected at most one repair job");
   }
-  if (matches.length === 0) return { repair: null };
+  if (matches.length === 0) return { repair: null, allCompleted };
   const { job, path } = matches[0]!;
   const id = expectPositiveInt(job.id, `${path}.id`);
   if (
@@ -2891,6 +2908,7 @@ function parseHostedJobs(
   }
   return {
     repair: { id, status, conclusion, startedAt, completedAt, runtimeStep },
+    allCompleted,
   };
 }
 
