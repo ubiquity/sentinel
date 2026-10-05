@@ -16,6 +16,7 @@ import {
 } from "../../src/contracts/state-snapshots.ts";
 import {
   candidateBranch,
+  candidatePreservationRef,
   implementationIntentKey,
 } from "../../src/repair/keys.ts";
 import {
@@ -23,7 +24,13 @@ import {
   createRepairStateStore,
   DenoGitRunner,
 } from "../../src/state/mod.ts";
-import { runHostedAutonomy } from "../../ops/hosted-autonomy.ts";
+import {
+  hostedIssueKey,
+  planHostedRetirements,
+  planHostedRetries,
+  runHostedAutonomy,
+} from "../../ops/hosted-autonomy.ts";
+import { markBlocked } from "../../src/repair/transitions.ts";
 import {
   createMatrixUncertaintyMaintenance,
   MATRIX_UNCERTAINTY_DETAIL,
@@ -45,7 +52,14 @@ const ROOT = decodeURIComponent(new URL("../../", import.meta.url).pathname);
 const NOW = T0 + 60_000;
 const clock = { now: () => NOW };
 const REPO = { owner: "ubiquity", name: "ai.ubq.fi", installationId: 7 };
-async function fixture() {
+const PRESERVATION_IDS = [
+  "c0d668a23d4c5230f6349d8368d964ea566509bd2e23a9476279108bc74dbc8b",
+  "536ffe5515e1bcee3105412af0f419566b76ae422095ac54039f7a6789e1f02b",
+  "739b0d9b59604f1fa163f5f90bf9fb37fd33d93ae8eee8d606e0fa174016671d",
+  "11acb1590ed849db9e3fa8c4fe071ed169142c74c122deb8b40bc4ad55d7c6b3",
+  "971b6ea4516e09c84a94083705353228a5d2ef31d652ddc9346fd5cae34081d9",
+];
+async function fixture(submittedPreservation = false) {
   const root = await Deno.makeTempDir({
     dir: ROOT,
     prefix: "sentinel-uncertainty-",
@@ -91,34 +105,51 @@ async function fixture() {
       },
     });
   });
-  const preservation = Array.from(
+  const preservation = await Promise.all(Array.from(
     { length: 5 },
-    (_, index) =>
-      workRecord("preservation-" + index, {
+    async (_, index) => {
+      const number = [884, 880, 730, 754, 879][index];
+      const id = submittedPreservation
+        ? ("issue-ubiquity-ai.ubq.fi-" + number) as WorkItemId
+        : ("preservation-" + index) as WorkItemId;
+      const requestId = submittedPreservation
+        ? PRESERVATION_IDS[index]
+        : (index + 14).toString(16).padStart(64, "0");
+      return workRecord(id, {
+        repository: REPO,
+        related: { incidentId: null, issueNumber: number },
         target: {
           base: SHA1,
-          branch: "saved-candidate-" + index,
+          branch: candidateBranch(id),
           head: SHA2,
           checkpoint: null,
-          pr: null,
-          candidateState: { preserved: null, publishedHead: null },
+          pr: submittedPreservation && number === 730 ? 893 : null,
+          candidateState: {
+            preserved: null,
+            publishedHead: submittedPreservation && number === 730
+              ? SHA1
+              : null,
+          },
         },
         counters: { attempts: 1, retries: 0, reviewRounds: 0 },
         intent: {
           kind: "candidate_preservation",
-          key: implementationIntentKey(
-            (index + 14).toString(16).padStart(64, "0"),
-          ),
-          requestId: (index + 14).toString(16).padStart(64, "0"),
+          key: implementationIntentKey(requestId),
+          requestId,
           startedAt: T0 + 3000,
-          branch: "refs/heads/sentinel-candidates/" + "a".repeat(63) + index,
+          branch: await candidatePreservationRef(
+            REPO,
+            id,
+            implementationIntentKey(requestId),
+          ),
           expectedHead: SHA2,
           observedBase: SHA1,
           resultId: null,
           pr: null,
         },
-      }),
-  );
+      });
+    },
+  ));
   const charges = records.map((row) =>
     reservation(row.intent!.requestId!, {
       repository: REPO,
@@ -128,6 +159,19 @@ async function fixture() {
       createdAt: T0 + 1000,
     })
   );
+  const submitted = submittedPreservation
+    ? preservation.map((row) =>
+      reservation(row.intent!.requestId!, {
+        repository: REPO,
+        taskId: row.id,
+        attempt: 1,
+        head: SHA1,
+        outcome: "submitted",
+        createdAt: T0 + 1000,
+        settledAt: T0 + 3000,
+      })
+    )
+    : [];
   const sibling = workRecord("unrelated");
   const seed = parseRepairStateSnapshotV1({
     version: "v1",
@@ -138,7 +182,7 @@ async function fixture() {
     incidents: [],
     evidence: [],
     work: [...records, ...preservation, sibling],
-    reservations: charges,
+    reservations: [...charges, ...submitted],
     reviews: [],
     replays: [],
     releaseRequests: [],
@@ -286,6 +330,28 @@ async function fixture() {
     readExecution: () =>
       Promise.resolve(portOk(releaseSeed.hostedRuntimes[0].lastExecutionProof)),
   };
+  if (submittedPreservation) {
+    const parked = await repair.writeRepair(
+      parseRepairStateSnapshotV1({
+        ...seed,
+        sequence: seed.sequence + 1,
+        stateHead: saved.value.head,
+        updatedAt: NOW,
+        work: seed.work.map((row) =>
+          records.some((held) => held.id === row.id)
+            ? markBlocked(row, "other", MATRIX_UNCERTAINTY_DETAIL, NOW)
+            : row
+        ),
+        reservations: seed.reservations.map((row) =>
+          charges.some((held) => held.id === row.id)
+            ? { ...row, outcome: "ambiguous", settledAt: NOW }
+            : row
+        ),
+      }),
+      saved.value.head,
+    );
+    assert.ok(parked.ok && parked.value.status === "applied");
+  }
   return {
     root,
     repair,
@@ -350,6 +416,171 @@ Deno.test("uncertainty maintenance retains thirteen charged admissions and reque
     assert.equal(
       canonicalStringify(await f.release.readRelease()),
       canonicalStringify(beforeRelease),
+    );
+  } finally {
+    await f.cleanup();
+  }
+});
+
+Deno.test("uncertainty maintenance retains thirteen admissions with an advancing clock", async () => {
+  const f = await fixture();
+  try {
+    let tick = NOW;
+    const advancingClock = { now: () => ++tick };
+    let failure: unknown;
+    try {
+      await runHostedAutonomy({
+        state: f.state,
+        clock: advancingClock,
+        githubFor: () => {
+          throw Error("ordinary publication refused");
+        },
+        uncertainMatrix: () =>
+          runMatrixUncertaintyMaintenance({ ...f.deps, clock: advancingClock }),
+      });
+    } catch (error) {
+      failure = error;
+    }
+    const after = await f.repair.readRepair();
+    assert.ok(after.ok && after.value.status === "found");
+    assert.equal(
+      after.value.snapshot.work.filter((row) =>
+        row.blocker?.message === MATRIX_UNCERTAINTY_DETAIL
+      ).length,
+      13,
+      String(failure),
+    );
+    assert.ok(
+      after.value.snapshot.reservations.every((row) =>
+        row.outcome === "ambiguous" && row.settledAt !== null
+      ),
+    );
+    for (const original of f.records) {
+      const current: WorkRecordV1 = after.value.snapshot.work.find((row) =>
+        row.id === original.id
+      )!;
+      assert.deepEqual(current.target, original.target);
+      assert.deepEqual(current.intent, original.intent);
+    }
+    assert.deepEqual(after.value.snapshot.work.slice(13), [
+      ...f.preservation,
+      f.sibling,
+    ]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+Deno.test("uncertainty maintenance parks five submitted preservation admissions without losing PR893", async (t) => {
+  const f = await fixture(true);
+  try {
+    const before = await f.repair.readRepair();
+    const beforeRelease = await f.release.readRelease();
+    assert.ok(before.ok && before.value.status === "found");
+    const result = await runHostedAutonomy({
+      state: f.state,
+      clock,
+      githubFor: () => {
+        throw Error("ordinary publication refused");
+      },
+      uncertainMatrix: () => runMatrixUncertaintyMaintenance(f.deps),
+    });
+    const after = await f.repair.readRepair();
+    assert.ok(after.ok && after.value.status === "found");
+    assert.equal(
+      after.value.snapshot.work.filter((row) =>
+        PRESERVATION_IDS.includes(row.intent?.requestId ?? "") &&
+        row.nextStep === "blocked"
+      ).length,
+      5,
+    );
+    for (const original of f.preservation) {
+      const current: WorkRecordV1 = after.value.snapshot.work.find((row) =>
+        row.id === original.id
+      )!;
+      assert.equal(current.nextStep, "blocked");
+      assert.deepEqual(current.target, original.target);
+      assert.deepEqual(current.intent, original.intent);
+      assert.deepEqual(current.evidence, original.evidence);
+      assert.deepEqual(current.counters, original.counters);
+    }
+    const published = after.value.snapshot.work.find((row) =>
+      row.related.issueNumber === 730
+    )!;
+    assert.equal(published.target.pr, 893);
+    assert.equal(published.target.candidateState?.publishedHead, SHA1);
+    assert.deepEqual(
+      after.value.snapshot.reservations,
+      before.value.snapshot.reservations,
+    );
+    assert.deepEqual(
+      after.value.snapshot.work.filter((row) =>
+        f.records.some((held) => held.id === row.id)
+      ),
+      before.value.snapshot.work.filter((row) =>
+        f.records.some((held) => held.id === row.id)
+      ),
+    );
+    assert.deepEqual(
+      after.value.snapshot.work.find((row) => row.id === f.sibling.id),
+      f.sibling,
+    );
+    assert.deepEqual(await f.release.readRelease(), beforeRelease);
+    assert.equal(result.reason, "release_not_terminal");
+    assert.deepEqual(planHostedRetries(after.value.snapshot, NOW), []);
+    assert.deepEqual(
+      planHostedRetirements(
+        after.value.snapshot,
+        new Set([hostedIssueKey(published.repository, 730)]),
+        new Set([published.id]),
+      ),
+      [],
+    );
+    await runMatrixUncertaintyMaintenance(f.deps);
+    assert.deepEqual(await f.repair.readRepair(), after);
+    await t.step(
+      "all eighteen parked admissions leave successor runtime untouched without native custody",
+      async () => {
+        assert.ok(beforeRelease.ok && beforeRelease.value.status === "found");
+        const successor = {
+          ...beforeRelease.value,
+          snapshot: parseReleaseStateSnapshotV1({
+            ...beforeRelease.value.snapshot,
+            hostedRuntimes: beforeRelease.value.snapshot.hostedRuntimes.map((
+              row,
+            ) => ({
+              ...row,
+              activeRevision: SHA2,
+              generation: 2,
+            })),
+          }),
+        };
+        let confirmations = 0;
+        const state = {
+          ...f.state,
+          readRelease: () => Promise.resolve(portOk(successor)),
+        };
+        const result = await runHostedAutonomy({
+          state,
+          clock,
+          githubFor: () => {
+            throw Error("ordinary publication refused");
+          },
+          uncertainMatrix: () =>
+            runMatrixUncertaintyMaintenance({
+              ...f.deps,
+              state,
+              confirmCompletedExecution: () => {
+                confirmations++;
+                throw Error("parked work needs no native custody");
+              },
+            }),
+        });
+        assert.equal(result.reason, "release_not_terminal");
+        assert.equal(confirmations, 0);
+        assert.deepEqual(await f.repair.readRepair(), after);
+        assert.deepEqual(await f.release.readRelease(), beforeRelease);
+      },
     );
   } finally {
     await f.cleanup();
