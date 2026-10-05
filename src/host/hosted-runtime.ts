@@ -22,6 +22,7 @@
  *     kind because the wrapper terminal is emitted by this trusted process.
  */
 
+import { stripVTControlCharacters } from "node:util";
 import { isGitSha } from "../contracts/brands.ts";
 import type { GitSha } from "../contracts/brands.ts";
 import { canonicalStringify } from "../contracts/canonical.ts";
@@ -313,6 +314,26 @@ export type HostedRuntimeEarlyFailureCategoryV1 =
   | "unknown";
 
 /**
+ * Closed reason code for one exact code-owned pre-status abort literal that the
+ * deployed child runtime (`ac98dc80f`) can throw before it prints a status
+ * record. This is a small finite map of named high-value abort sources, never a
+ * general error catalogue, and it is never derived from arbitrary stderr text.
+ */
+export type HostedRuntimeEarlyFailureReasonV1 =
+  | "local_git_command_failed"
+  | "local_git_output_bound"
+  | "targets_invalid"
+  | "targets_empty"
+  | "repair_credentials_unavailable"
+  | "repair_controller_unavailable"
+  | "repair_executable_unavailable"
+  | "repair_sessions_unsettled"
+  | "repair_installation_scope_invalid"
+  | "repair_deadline_reached"
+  | "historical_custody_unavailable"
+  | "c_recovery_state_unavailable";
+
+/**
  * One sanitized advisory summary of a settled nonzero child exit that produced
  * no status record (the genuine early-abort path). The category comes from a
  * closed allow-list and the frames are reduced to `<basename>:<line>:<column>`
@@ -326,6 +347,13 @@ export interface HostedRuntimeEarlyFailureV1 {
   advisory: true;
   exitCode: number;
   category: HostedRuntimeEarlyFailureCategoryV1;
+  /**
+   * Optional nullable closed reason code for one exact code-owned pre-status
+   * abort literal recognized in the stripped stderr prefix; null when the
+   * message is not one of the finite known literals. It is never raw message
+   * text, a URL, a path or a credential.
+   */
+  reasonCode?: HostedRuntimeEarlyFailureReasonV1 | null;
   /** Bounded basename-only stack locations; empty when none are recognizable. */
   frames: string[];
 }
@@ -658,6 +686,92 @@ function classifyEarlyChildFailure(
   return "unknown";
 }
 
+/**
+ * Finite map of exact pre-status throw literals in the deployed child runtime
+ * (`ac98dc80f`): the named high-value abort sources only, read from those
+ * modules' own constants. Exact payload equality is required; every other
+ * message, including credential-shaped, path, URL or arbitrary text, stays
+ * null.
+ */
+const EARLY_FAILURE_REASON_BY_LITERAL: readonly (
+  readonly [string, HostedRuntimeEarlyFailureReasonV1]
+)[] = [
+  [
+    "local repair host git command failed; output withheld",
+    "local_git_command_failed",
+  ],
+  [
+    "local repair host git command exceeded its bounded output",
+    "local_git_output_bound",
+  ],
+  [
+    "committed target setting is not a valid repository slug array",
+    "targets_invalid",
+  ],
+  ["committed target setting lists no repository", "targets_empty"],
+  [
+    "hosted repair host requires its configured credentials",
+    "repair_credentials_unavailable",
+  ],
+  [
+    "hosted repair host could not read an exact controller commit",
+    "repair_controller_unavailable",
+  ],
+  [
+    "hosted repair host could not resolve Codex",
+    "repair_executable_unavailable",
+  ],
+  [
+    "hosted repair host sessions did not settle",
+    "repair_sessions_unsettled",
+  ],
+  [
+    "hosted repair host rejected: SENTINEL_APP_INSTALLATION_ID is not a positive safe integer",
+    "repair_installation_scope_invalid",
+  ],
+  [
+    "hosted repair host reached its run deadline before addressing any target",
+    "repair_deadline_reached",
+  ],
+  [
+    "historical matrix custody unavailable",
+    "historical_custody_unavailable",
+  ],
+  [
+    "C recovery authoritative state unavailable",
+    "c_recovery_state_unavailable",
+  ],
+];
+
+/** Actual Deno uncaught rendering of an Error, TypeError or RangeError. */
+const EARLY_FAILURE_UNCAUGHT_ERROR_PATTERN =
+  /^error: Uncaught (?:\(in promise\) )?(?:Error|TypeError|RangeError): (.+)$/;
+/** Actual Deno uncaught rendering of a literal string throw. */
+const EARLY_FAILURE_UNCAUGHT_STRING_PATTERN =
+  /^error: Uncaught (?:\(in promise\) )?"(.*)"$/;
+
+/**
+ * Closed reason code for one exact known code-owned abort literal, else null.
+ * The line must carry the actual Deno uncaught prefix and its captured payload
+ * is compared by exact equality against the finite map, so no partial,
+ * arbitrary or credential-shaped message can ever become a code.
+ */
+function earlyChildFailureReason(
+  stderr: string,
+): HostedRuntimeEarlyFailureReasonV1 | null {
+  for (const rawLine of stderr.split("\n")) {
+    const line = rawLine.trim();
+    const match = EARLY_FAILURE_UNCAUGHT_ERROR_PATTERN.exec(line) ??
+      EARLY_FAILURE_UNCAUGHT_STRING_PATTERN.exec(line);
+    if (match === null) continue;
+    const literal = match[1];
+    for (const [text, code] of EARLY_FAILURE_REASON_BY_LITERAL) {
+      if (literal === text) return code;
+    }
+  }
+  return null;
+}
+
 /** Bounded, deduplicated locations from actual `at ` frames of known files. */
 function earlyChildFailureFrames(stderr: string): string[] {
   const frames: string[] = [];
@@ -697,12 +811,17 @@ function earlyChildFailureDiagnostic(
   if (run.exitCode === null || run.exitCode === 0) return null;
   const scan = scanChildStatusRecords(new TextDecoder().decode(run.stdout));
   if (scan.kind !== "none") return null;
-  const stderr = new TextDecoder().decode(
+  const retained = new TextDecoder().decode(
     run.stderr.slice(0, MAX_EARLY_FAILURE_STDERR_BYTES),
   );
   // Nothing was retained on the error stream: there is no abort site to
   // summarize, so the existing empty-stderr result stays exactly as it was.
-  if (stderr.trim().length === 0) return null;
+  if (retained.trim().length === 0) return null;
+  // Terminal control sequences can wrap or hide the real Deno abort text and
+  // its stack frames; strip them from the already-bounded prefix before any
+  // classification or frame parsing. Only the stripped text is inspected, so
+  // no control sequence can reach a category, frame or reason code.
+  const stderr = stripVTControlCharacters(retained);
   return {
     version: "v1",
     kind: "hosted_runtime_early_failure",
@@ -710,6 +829,7 @@ function earlyChildFailureDiagnostic(
     exitCode: run.exitCode,
     category: classifyEarlyChildFailure(stderr),
     frames: earlyChildFailureFrames(stderr),
+    reasonCode: earlyChildFailureReason(stderr),
   };
 }
 
