@@ -5802,8 +5802,11 @@ Deno.test("historical malformed wave: missing archive and malformed parser never
       } else if (mode === "valid-applicable") {
         f.plan.plannedAt = T0 + 1000;
         await f.refreshPlan();
-        assert.equal(await f.runMain(), 1);
-        await assert.rejects(f.run);
+        // A valid, non-malformed plan is not a reservation-after-manifest
+        // case: the historical rejection skips it instead of refusing, so the
+        // run succeeds with nothing quarantined.
+        assert.equal(await f.runMain(), 0);
+        await f.run();
       } else {
         Object.assign(f.plan, { kind: "invalid_fixture_kind" });
         await f.refreshPlan();
