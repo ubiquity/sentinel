@@ -1932,11 +1932,25 @@ Deno.test("hosted supervisor PR110: trusted stale-base maintenance permits ordin
         },
       },
     ];
-    for (const control of controls) {
-      await assert.rejects(
-        () => runMatrixUncertaintyMaintenance({ ...deps, ...control }),
-        /custody unavailable or changed/,
-      );
+    // A recorded execution means the main hosted flow owns settlement: the
+    // optional historical quarantine yields gracefully (no claim, no state
+    // change) instead of refusing. Every other degraded control still fails
+    // closed.
+    const executionControl = controls[3];
+    for (const [index, control] of controls.entries()) {
+      if (index === 3) {
+        const yielded = await runMatrixUncertaintyMaintenance({
+          ...deps,
+          ...executionControl,
+        });
+        assert.equal(yielded.quarantined, 0);
+        assert.equal(yielded.beforeHead, yielded.appliedHead);
+      } else {
+        await assert.rejects(
+          () => runMatrixUncertaintyMaintenance({ ...deps, ...control }),
+          /custody unavailable or changed/,
+        );
+      }
       assert.deepEqual(await rig.repair.readRepair(), beforeRepair);
       assert.deepEqual(await rig.release.readRelease(), beforeRelease);
     }
