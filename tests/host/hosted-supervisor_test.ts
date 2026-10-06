@@ -1335,6 +1335,163 @@ Deno.test("hosted supervisor core: ordinary cadence advances on each dispatch wi
   }
 });
 
+Deno.test("hosted supervisor interrupted step: actual client settles ordinary failure without granting health", async () => {
+  const rig = await makeRig();
+  try {
+    await bootstrapHealthy(rig);
+    const identity = run(2);
+    const ordinary = requireRun(await rig.prepare(identity));
+    assert.equal(ordinary.purpose, "ordinary");
+    const before = await rig.snapshot();
+    const repairBefore = await rig.repair.readRepair();
+    const startedAt = ordinary.createdAt + 1000;
+    const finishedAt = ordinary.createdAt + 4000;
+    rig.clock.advance(5000);
+    const signedUrl =
+      "https://productionresultssa17.blob.core.windows.net/logs/interrupted?sv=1&sig=fixture";
+    const log = `${
+      new Date(finishedAt).toISOString()
+    } ##[error]The runner has received a shutdown signal.\n`;
+    let control = "coherent";
+    const calls: string[] = [];
+    const client = new GitHubApiClient({
+      repository: SELF,
+      apiBaseUrl: "https://api.github.com",
+      clock: rig.clock,
+      auth: {
+        authorizationHeader: () => Promise.resolve(portOk("Bearer fixture")),
+      },
+      cooldownGate: {
+        beforeRequest: () => Promise.resolve(portOk(undefined)),
+        recordRateLimit: () => Promise.resolve(portOk(undefined)),
+      },
+      http: (request) => {
+        assert.equal(request.method, "GET");
+        const path = new URL(request.url).pathname;
+        calls.push(path);
+        let body: unknown;
+        let status = 200;
+        const headers = new Headers();
+        if (path === `/repos/ubiquity/sentinel/actions/runs/2/attempts/1`) {
+          body = {
+            id: ordinary.runId,
+            run_attempt: ordinary.runAttempt,
+            workflow_id: 357012162,
+            path: ".github/workflows/supervisor.yml",
+            head_sha: ordinary.launcherSha,
+            head_branch: "sentinel-supervisor",
+            event: "workflow_dispatch",
+            status: "completed",
+            conclusion: "failure",
+            repository: { full_name: "ubiquity/sentinel" },
+            head_repository: { full_name: "ubiquity/sentinel" },
+            run_started_at: new Date(startedAt).toISOString(),
+            updated_at: new Date(finishedAt).toISOString(),
+          };
+        } else if (
+          path === `/repos/ubiquity/sentinel/actions/runs/2/attempts/1/jobs`
+        ) {
+          body = {
+            total_count: 1,
+            jobs: [{
+              id: 7,
+              name: "repair",
+              run_id: ordinary.runId,
+              run_attempt: ordinary.runAttempt,
+              head_sha: control === "foreign launcher"
+                ? CANDIDATE
+                : ordinary.launcherSha,
+              status: "completed",
+              conclusion: "failure",
+              started_at: new Date(startedAt).toISOString(),
+              completed_at: new Date(finishedAt).toISOString(),
+              steps: [{
+                name: "Run selected Sentinel runtime",
+                number: 10,
+                status: "completed",
+                conclusion: "cancelled",
+                started_at: control === "missing step start"
+                  ? null
+                  : new Date(startedAt).toISOString(),
+                completed_at: new Date(finishedAt).toISOString(),
+              }],
+            }],
+          };
+        } else if (path === "/repos/ubiquity/sentinel/actions/jobs/7/logs") {
+          status = 302;
+          headers.set("location", signedUrl);
+          body = "";
+        } else if (request.url === signedUrl) {
+          body = control === "terminal-looking log"
+            ? `${
+              new Date(finishedAt).toISOString()
+            } {"kind":"hosted_runtime_terminal","execution":\n`
+            : log;
+        } else throw new Error(`unscripted fixture path: ${path}`);
+        return Promise.resolve(
+          {
+            status,
+            headers,
+            bodyText: typeof body === "string" ? body : JSON.stringify(body),
+          } satisfies HttpResponseV1,
+        );
+      },
+    });
+    rig.evidence.readExecution = (saved) => client.readHostedExecution(saved);
+    // Neither native contradictions nor an unrelated finalizer can clear the intent.
+    for (
+      const bad of [
+        "foreign launcher",
+        "missing step start",
+        "terminal-looking log",
+      ]
+    ) {
+      control = bad;
+      assert.equal((await rig.finalize(identity)).status, "pending", bad);
+      assert.deepEqual(await rig.snapshot(), before);
+    }
+    control = "coherent";
+    assert.equal((await rig.finalize(run(3))).status, "pending");
+    assert.deepEqual(await rig.snapshot(), before);
+    // A later prepare must settle the still-saved old execution before selecting
+    // new ordinary work, just as the protected workflow does after interruption.
+    const next = requireRun(await rig.prepare(run(3)));
+    assert.equal(next.purpose, "ordinary");
+    assert.equal(next.revision, ordinary.revision);
+    const after = await rig.snapshot();
+    const runtime = after.hostedRuntimes[0];
+    assert.deepEqual(runtime.execution, next);
+    assert.deepEqual(runtime.lastExecutionProof?.execution, ordinary);
+    assert.equal(runtime.lastExecutionProof?.outcome, "failed");
+    assert.equal(runtime.lastExecutionProof?.startupReady, false);
+    assert.equal(runtime.lastExecutionProof?.baseSha, null);
+    assert.equal(runtime.lastExecutionProof?.logDigest, await sha256Hex(log));
+    assert.deepEqual(
+      runtime.lastHealthyProof,
+      before.hostedRuntimes[0].lastHealthyProof,
+    );
+    assert.equal(
+      runtime.activeRevision,
+      before.hostedRuntimes[0].activeRevision,
+    );
+    assert.equal(runtime.generation, before.hostedRuntimes[0].generation);
+    assert.deepEqual(after.hostedReleases, before.hostedReleases);
+    assert.deepEqual(await rig.repair.readRepair(), repairBefore);
+    assert.ok(calls.includes("/repos/ubiquity/sentinel/actions/jobs/7/logs"));
+    assert.ok(calls.includes("/logs/interrupted"));
+    assert.equal((await rig.finalize(identity)).status, "pending");
+    assert.deepEqual(await rig.snapshot(), after);
+    assert.deepEqual(requireRun(await rig.prepare(run(3))), next);
+    assert.deepEqual(await rig.snapshot(), after);
+    assert.deepEqual(
+      (await rig.snapshot()).hostedRuntimes[0].lastHealthyProof,
+      before.hostedRuntimes[0].lastHealthyProof,
+    );
+  } finally {
+    await rig.cleanup();
+  }
+});
+
 Deno.test("hosted supervisor core: a lost write response is reconciled by exact reread", async () => {
   const rig = await makeRig();
   try {

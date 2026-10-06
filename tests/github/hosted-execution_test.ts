@@ -508,6 +508,120 @@ Deno.test("hosted execution: a started runtime step that concluded failure with 
   );
 });
 
+Deno.test("hosted execution: failed job with a started cancelled runtime step settles only without a terminal", async (t) => {
+  const interruptedLog = `${
+    iso(STEP_FINISHED)
+  } ##[error]The runner has received a shutdown signal.\n`;
+  const stranded = makeRig();
+  scriptAttemptAndJobs(
+    stranded,
+    attemptBody({ conclusion: "failure" }),
+    jobsBody([
+      jobBody({
+        conclusion: "failure",
+        steps: [runtimeStep({ number: 10, conclusion: "cancelled" })],
+      }),
+    ]),
+  );
+  scriptLog(stranded, interruptedLog);
+  const proof = settlementProof(
+    await stranded.client.readHostedExecution(intent()),
+  );
+  assert.deepEqual(proof.execution, intent());
+  assert.equal(proof.outcome, "failed");
+  assert.equal(proof.startupReady, false);
+  assert.equal(proof.baseSha, null);
+  assert.equal(proof.settled, true);
+  assert.equal(proof.jobId, JOB_ID);
+  assert.equal(proof.startedAt, JOB_STARTED);
+  assert.equal(proof.finishedAt, JOB_FINISHED);
+  assert.equal(proof.terminalAt, STEP_FINISHED);
+  assert.equal(
+    proof.logDigest,
+    [
+      ...new Uint8Array(
+        await crypto.subtle.digest(
+          "SHA-256",
+          new TextEncoder().encode(interruptedLog),
+        ),
+      ),
+    ].map((byte) => byte.toString(16).padStart(2, "0")).join(""),
+  );
+
+  const controls: Array<{
+    name: string;
+    attempt?: Parameters<typeof attemptBody>[0];
+    job?: Parameters<typeof jobBody>[0];
+    step?: Record<string, unknown>;
+    sibling?: Parameters<typeof jobBody>[0];
+    log?: string;
+    location?: string;
+  }> = [
+    { name: "successful job", job: { conclusion: "success" } },
+    {
+      name: "unfinished attempt",
+      attempt: { status: "in_progress", conclusion: null },
+    },
+    {
+      name: "unfinished native cell",
+      sibling: { status: "in_progress", conclusion: null },
+    },
+    { name: "foreign launcher", job: { headSha: REVISION } },
+    { name: "foreign attempt", job: { attempt: RUN_ATTEMPT + 1 } },
+    { name: "missing step start", step: { started_at: null } },
+    { name: "inverted step", step: { started_at: iso(STEP_FINISHED + 1) } },
+    { name: "future step", step: { completed_at: iso(OBSERVED + 60_000) } },
+    { name: "healthy terminal", log: logText([terminalRecord()]) },
+    {
+      name: "failed terminal",
+      log: logText([
+        terminalRecord(intent(), {
+          outcome: "failed",
+          startupReady: false,
+          baseSha: null,
+        }),
+      ]),
+    },
+    {
+      name: "malformed terminal",
+      log: `${iso(TERM_AT)} {"kind":"hosted_runtime_terminal","execution":\n`,
+    },
+    { name: "untrusted log", location: "https://evil.example/log" },
+  ];
+  for (const control of controls) {
+    await t.step(control.name, async () => {
+      const rig = makeRig();
+      const jobs = [jobBody({
+        conclusion: "failure",
+        ...control.job,
+        steps: [
+          runtimeStep({ number: 10, conclusion: "cancelled", ...control.step }),
+        ],
+      })];
+      if (control.sibling) {
+        jobs.push(
+          jobBody({
+            id: JOB_ID + 1,
+            name: "matrix_cell (fixture)",
+            ...control.sibling,
+          }),
+        );
+      }
+      scriptAttemptAndJobs(
+        rig,
+        attemptBody({ conclusion: "failure", ...control.attempt }),
+        jobsBody(jobs),
+      );
+      scriptLog(rig, control.log ?? interruptedLog, control.location);
+      assert.equal(
+        (await rig.client.readHostedExecution(intent())).ok,
+        false,
+        control.name,
+      );
+    });
+  }
+});
+
 Deno.test("hosted execution: skipped, cancelled, timed-out or absent completed repair jobs are explicit not_started", async () => {
   const skipped = makeRig();
   scriptAttemptAndJobs(
