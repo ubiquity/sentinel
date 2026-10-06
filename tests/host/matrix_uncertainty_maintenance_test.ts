@@ -594,37 +594,9 @@ Deno.test("uncertainty maintenance refuses active foreign candidate and custody 
     const release = await f.release.readRelease();
     assert.ok(release.ok && release.value.status === "found");
     const releaseValue = release.value;
-    const readRelease = (
-      change: (snapshot: typeof f.releaseSeed) => typeof f.releaseSeed,
-    ) =>
-      Promise.resolve(
-        portOk({
-          ...releaseValue,
-          snapshot: parseReleaseStateSnapshotV1(change(releaseValue.snapshot)),
-        }),
-      );
     const variants: MatrixUncertaintyMaintenanceDepsV1[] = [
       { ...f.deps, confirmCompletedExecution: () => Promise.resolve(false) },
       { ...f.deps, readExecution: () => Promise.resolve(portOk(null)) },
-      {
-        ...f.deps,
-        state: {
-          ...f.state,
-          readRelease: () =>
-            readRelease((snapshot) => ({
-              ...snapshot,
-              hostedRuntimes: snapshot.hostedRuntimes.map((runtime) => ({
-                ...runtime,
-                execution: {
-                  ...runtime.lastExecutionProof!.execution,
-                  id: "72:1:repair",
-                  runId: 72,
-                  createdAt: NOW,
-                },
-              })),
-            })),
-        },
-      },
       {
         ...f.deps,
         state: {
@@ -694,8 +666,10 @@ Deno.test("uncertainty maintenance refuses active foreign candidate and custody 
         ...f.state,
         readRelease: () => {
           reads++;
+          // The maintenance now reads release once up front for the
+          // execution-yield check; drift the third read onward.
           return Promise.resolve(
-            reads === 1 ? release : portOk({ ...releaseValue, head: SHA2 }),
+            reads <= 2 ? release : portOk({ ...releaseValue, head: SHA2 }),
           );
         },
       },
@@ -705,6 +679,55 @@ Deno.test("uncertainty maintenance refuses active foreign candidate and custody 
       /custody/,
     );
     assert.deepEqual(await f.repair.readRepair(), before);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+Deno.test("uncertainty maintenance yields gracefully when an execution is recorded", async () => {
+  const f = await fixture();
+  try {
+    const before = await f.repair.readRepair();
+    assert.ok(before.ok && before.value.status === "found");
+    const release = await f.release.readRelease();
+    assert.ok(release.ok && release.value.status === "found");
+    const releaseValue = release.value;
+    const deps: MatrixUncertaintyMaintenanceDepsV1 = {
+      ...f.deps,
+      state: {
+        ...f.state,
+        readRelease: () =>
+          Promise.resolve(
+            portOk({
+              ...releaseValue,
+              snapshot: parseReleaseStateSnapshotV1({
+                ...releaseValue.snapshot,
+                hostedRuntimes: releaseValue.snapshot.hostedRuntimes.map(
+                  (runtime) => ({
+                    ...runtime,
+                    execution: {
+                      ...runtime.lastExecutionProof!.execution,
+                      id: "72:1:repair",
+                      runId: 72,
+                      createdAt: NOW,
+                    },
+                  }),
+                ),
+              }),
+            }),
+          ),
+      },
+    };
+    // A recorded execution (active or stale) must not fail the maintenance run.
+    // The historical quarantine yields; the main hosted flow owns settlement.
+    const result = await runMatrixUncertaintyMaintenance(deps);
+    assert.deepEqual(result, {
+      beforeHead: before.value.head,
+      appliedHead: before.value.head,
+      quarantined: 0,
+    });
+    assert.deepEqual(await f.repair.readRepair(), before);
+    assert.deepEqual(await f.release.readRelease(), release);
   } finally {
     await f.cleanup();
   }

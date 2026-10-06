@@ -60,8 +60,8 @@ export interface MatrixUncertaintyBindingV1 {
 /** Exact state custody, not a claim that these IDs belonged to a lost plan. */
 export const MATRIX_UNCERTAINTY_BINDING: MatrixUncertaintyBindingV1 = {
   repairCommit: "83997ba19af28ca46186962139931d18cef9e170" as GitSha,
-  runtimeSha: "ac98dc80ff9c3eca5f36aca91493168e9ff74596" as GitSha,
-  generation: 61,
+  runtimeSha: "e4cef46332cf124a8c283d798a963cf5f66e45c2" as GitSha,
+  generation: 63,
   reservationIds: [
     "8843dd098e28e8a5b17ef0f0c341da1cf88e2d38ce4cc9034476cb7850625c30",
     "1f167fa400e87b0e03fb7b35bf964ada6ec6311c45c4fc49752ef16705f26b10",
@@ -211,23 +211,25 @@ const STALE_BASE_REQUEST = parseReleaseRequestV1({
   createdAt: 1791208786131,
 });
 
-/** Cancel one invalid historical authorization; never promote or claim delivery. */
+/** Cancel one invalid historical authorization; never promote or claim delivery.
+ * Returns false when a recorded execution means the main hosted flow owns
+ * settlement; the caller yields gracefully instead of failing. */
 async function disposeHistoricalStaleBase(
   deps: MatrixUncertaintyMaintenanceDepsV1,
-) {
+): Promise<boolean> {
   const first = await deps.state.readRepair();
   if (!first.ok || first.value.status !== "found") refuse();
   const held = first.value;
   const request = held.snapshot.releaseRequests.find((row) =>
     row.id === STALE_BASE_REQUEST.id
   );
-  if (request === undefined) return;
+  if (request === undefined) return true;
   const cancelled = {
     ...STALE_BASE_REQUEST,
     status: "cancelled",
     failureReason: STALE_BASE_REASON,
   };
-  if (same(request, cancelled)) return;
+  if (same(request, cancelled)) return true;
   if (
     !same(request, STALE_BASE_REQUEST) || !deps.state.readRepairAt ||
     !deps.confirmHistoricalStaleBase
@@ -263,12 +265,17 @@ async function disposeHistoricalStaleBase(
   if (!release.ok || release.value.status !== "found") refuse();
   const captured = release.value;
   const runtime = captured.snapshot.hostedRuntimes[0];
+  // A recorded execution (active or stale) means the main hosted flow owns
+  // settlement; yield instead of failing the maintenance run. This also
+  // covers the race where an execution appears after the caller's upfront
+  // check but before this reread.
+  if (runtime?.execution != null) return false;
   const healthy = runtime?.lastHealthyProof;
   if (
     captured.snapshot.hostedRuntimes.length !== 1 || !runtime ||
     runtime.id !== HOSTED_RUNTIME_ID ||
     runtime.activeRevision !== STALE_BASE_RUNTIME ||
-    runtime.generation !== 63 || runtime.execution !== null ||
+    runtime.generation !== 63 ||
     !healthy || healthy.execution.revision !== STALE_BASE_RUNTIME ||
     healthy.execution.generation !== 63 ||
     !same(runtime.lastExecutionProof, healthy) ||
@@ -323,6 +330,7 @@ async function disposeHistoricalStaleBase(
     after.value.head !== written.value.head
   ) refuse();
   await custody();
+  return true;
 }
 
 function refuse(): never {
@@ -340,7 +348,32 @@ function chargeIdentity(row: RepairStateSnapshotV1["reservations"][number]) {
 export async function runMatrixUncertaintyMaintenance(
   deps: MatrixUncertaintyMaintenanceDepsV1,
 ) {
-  await disposeHistoricalStaleBase(deps);
+  // An execution record (active or stale from an interrupted run) means the
+  // main hosted flow owns settlement. The historical quarantine is optional
+  // work; it yields rather than failing the entire maintenance run.
+  const yieldOnExecution = async () => {
+    const repair = await deps.state.readRepair();
+    if (!repair.ok || repair.value.status !== "found") refuse();
+    return {
+      beforeHead: repair.value.head,
+      appliedHead: repair.value.head,
+      quarantined: 0,
+    };
+  };
+  const preRelease = await deps.state.readRelease();
+  if (!preRelease.ok || preRelease.value.status !== "found") refuse();
+  if (
+    preRelease.value.snapshot.hostedRuntimes.some((row) =>
+      row.execution !== null
+    )
+  ) {
+    return await yieldOnExecution();
+  }
+  // disposeHistoricalStaleBase returns false if an execution appeared after
+  // the upfront check; yield gracefully instead of failing.
+  if (!await disposeHistoricalStaleBase(deps)) {
+    return await yieldOnExecution();
+  }
   const binding = deps.binding ?? MATRIX_UNCERTAINTY_BINDING;
   const first = await deps.state.readRepair();
   if (!first.ok || first.value.status !== "found") refuse();
@@ -395,8 +428,7 @@ export async function runMatrixUncertaintyMaintenance(
     held.execution.generation !== runtime.generation ||
     release.value.snapshot.hostedReleases.some((row) =>
       row.pointerIntent !== null
-    ) ||
-    release.value.snapshot.hostedRuntimes.some((row) => row.execution !== null)
+    )
   ) refuse();
   if (
     [
