@@ -5675,7 +5675,29 @@ Deno.test("historical malformed wave: maintenance leaf diagnostic is secret-free
     const before = await f.rig.state.readRepair();
     const releaseBefore = await f.rig.state.readRelease();
     assert.equal(await f.runMain(), 1);
-    assert.deepEqual(errors.map((value) => JSON.parse(value)), [{
+    const diagnostics = errors.map((value) => JSON.parse(value));
+    const frames = diagnostics[0].frames;
+    assert.ok(Array.isArray(frames) && frames.length > 0 && frames.length <= 3);
+    for (const frame of frames) {
+      assert.deepEqual(Object.keys(frame).sort(), ["column", "line"]);
+      assert.ok(
+        Number.isSafeInteger(frame.line) && frame.line > 0 &&
+          frame.line <= 999999,
+      );
+      assert.ok(
+        Number.isSafeInteger(frame.column) && frame.column > 0 &&
+          frame.column <= 999999,
+      );
+    }
+    assert.ok(errors[0].length <= 180);
+    assert.doesNotMatch(
+      errors[0],
+      /private|token|https|file:|matrix-artifacts/,
+    );
+    assert.deepEqual(diagnostics, [{
+      kind: "sentinel_matrix_artifact_error",
+      frames,
+    }, {
       kind: "sentinel_historical_quarantine_error",
       name: "Error",
       message: "matrix artifact provenance unavailable or conflicting",
