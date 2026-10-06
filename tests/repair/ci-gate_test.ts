@@ -146,3 +146,12 @@ Deno.test("ci_pending wait reason is a valid WorkWaitReasonV1", async () => {
   const parsed = parseWorkRecordV1(base);
   assert.equal(parsed.wait?.reason, "ci_pending");
 });
+
+Deno.test("decideCiGate: failed check blocks even when another is pending", () => {
+  const checks = [
+    check("ci", "completed", "failure"),
+    check("lint", "queued", null, null),
+  ];
+  const result = decideCiGate(checks);
+  assert.ok(typeof result === "object" && "blocked" in result);
+});

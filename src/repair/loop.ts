@@ -5703,15 +5703,19 @@ export function decideCiGate(
     }
   }
   const deduped = [...latest.values()];
-  const pending = deduped.some((check) => check.status !== "completed");
-  if (pending) return "wait";
-  const failed = deduped.filter((check) => check.conclusion !== "success");
+  // Failed checks are terminal: classify them before pending so a queued
+  // check cannot mask a failure (CodeRabbit #131 review).
+  const failed = deduped.filter(
+    (check) => check.status === "completed" && check.conclusion !== "success",
+  );
   if (failed.length > 0) {
     const names = failed.map((check) =>
       `${check.name}(${check.conclusion ?? "unknown"})`
     ).join(", ");
     return { blocked: `CI checks failed: ${names}` };
   }
+  const pending = deduped.some((check) => check.status !== "completed");
+  if (pending) return "wait";
   return "proceed";
 }
 
