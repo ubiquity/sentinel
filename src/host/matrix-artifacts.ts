@@ -964,6 +964,17 @@ export function createActionsMatrixArtifactTransport(options: {
             seen.add(cell.reservationId);
             selected.push(cell);
           }
+          if (input.rejectionProof && !malformed) {
+            // A non-malformed plan carries no reservation-after-manifest
+            // claim: no reservation postdates the plan manifest. The
+            // historical rejection skips it here, before downloading any
+            // cell evidence — verifying cell results first would refuse on
+            // legitimately executed cells (a healthy prior run whose records
+            // remain in work for retry), deadlocking every later
+            // maintenance on a plan the rejection skips anyway. No claim is
+            // made, no record is touched.
+            continue;
+          }
           if (selected.length === 0) continue;
           const bundlesDir = `${staging}/${run.runId}-${run.runAttempt}`;
           await Deno.mkdir(bundlesDir, { mode: 0o700 });
