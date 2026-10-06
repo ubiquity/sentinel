@@ -5688,23 +5688,34 @@ async function executeDeliveryStep(
 }
 
 /**
- * Pure CI gate decision. Returns "proceed" when all checks are green (or no
- * checks recorded), "wait" when any check is still running, or a block detail
- * when any check failed. Exported for focused testing.
+ * Pure CI gate decision. Returns "proceed" only when every (deduped by name)
+ * check is completed with `success` conclusion. Returns "wait" when any check
+ * is still running or when no checks are recorded (no evidence CI ran).
+ * Returns a block detail when any check failed (including skipped/neutral,
+ * matching requiredChecksState semantics). Exported for focused testing.
  */
 export function decideCiGate(
   checks: GitHubCheckV1[],
 ): "proceed" | "wait" | { blocked: string } {
-  const pending = checks.some((check) => check.status !== "completed");
+  if (checks.length === 0) return "wait";
+  // Dedupe: GitHub returns historical observations; only the latest per name
+  // counts. An old pending/failed must not override a newer pass.
+  const latest = new Map<string, GitHubCheckV1>();
+  for (const check of checks) {
+    const prev = latest.get(check.name);
+    const time = (c: GitHubCheckV1) => c.completedAt ?? c.startedAt ?? -1;
+    if (prev === undefined || time(check) > time(prev)) {
+      latest.set(check.name, check);
+    }
+  }
+  const deduped = [...latest.values()];
+  const pending = deduped.some((check) => check.status !== "completed");
   if (pending) return "wait";
-  const failed = checks.filter((check) =>
-    check.conclusion === "failure" ||
-    check.conclusion === "timed_out" ||
-    check.conclusion === "cancelled" ||
-    check.conclusion === "action_required"
-  );
+  const failed = deduped.filter((check) => check.conclusion !== "success");
   if (failed.length > 0) {
-    const names = failed.map((check) => check.name).join(", ");
+    const names = failed.map((check) =>
+      `${check.name}(${check.conclusion ?? "unknown"})`
+    ).join(", ");
     return { blocked: `CI checks failed: ${names}` };
   }
   return "proceed";
@@ -5726,6 +5737,19 @@ export async function gateDeliveryOnChecks(
   if (head === null) {
     return { kind: "state_error", detail: "delivery without PR/head identity" };
   }
+  // CI observation is a GitHub read: gate before the external call, like the
+  // surrounding operations. A cooldown deferral mutates nothing.
+  const cooling = await checkGithubCooldown(
+    deps,
+    record.repository,
+    context.bounds,
+  );
+  if (cooling.kind === "state_error") {
+    return { kind: "state_error", detail: cooling.detail };
+  }
+  if (cooling.kind === "deferred") {
+    return { kind: "deferred", detail: cooling.detail };
+  }
   const observed = await deps.github.readChecks(head);
   if (!observed.ok) {
     // Transient read failure: defer without a wait so the next turn retries.
@@ -5733,8 +5757,8 @@ export async function gateDeliveryOnChecks(
   }
   const decision = decideCiGate(observed.value.checks);
   if (decision === "proceed") {
-    // All checks completed with success/skipped/neutral (or no checks
-    // recorded): the CI gate passes and the merge authorization proceeds.
+    // Every (deduped) check completed with `success`: the CI gate passes and
+    // the merge authorization proceeds.
     return null;
   }
   if (decision === "wait") {
