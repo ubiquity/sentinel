@@ -2045,7 +2045,74 @@ export async function runHostedAutonomy(
     let count: number;
     try {
       count = await runHistoricalMatrixQuarantine(deps.historicalMatrix);
-    } catch {
+    } catch (error) {
+      // Only fixed quarantine vocabulary reaches hosted logs, never transport text.
+      let errorName: unknown;
+      let errorMessage: unknown;
+      try {
+        if (error instanceof Error) {
+          errorName = error.name;
+          errorMessage = error.message;
+        }
+      } catch {
+        // A throwing accessor must not replace the quarantine refusal.
+      }
+      const name = typeof errorName === "string" && [
+          "Error",
+          "TypeError",
+          "RangeError",
+          "SyntaxError",
+          "ReferenceError",
+          "URIError",
+          "EvalError",
+          "AggregateError",
+        ].includes(errorName)
+        ? errorName
+        : "UnknownError";
+      const message = typeof errorMessage === "string" && [
+          "matrix artifact provenance unavailable or conflicting",
+          "historical matrix not-started admission unproven",
+          "historical matrix state unavailable",
+          "historical matrix selected reservation binding unavailable",
+          "historical matrix release unavailable",
+          "historical matrix current native writers unsettled",
+          "historical matrix current native settlement unavailable",
+          "historical matrix current native binding changed",
+          "historical matrix saved custody unavailable",
+          "historical matrix current custody changed",
+          "historical matrix release witness unavailable",
+          "historical matrix release witness binding changed",
+          "historical matrix verification custody changed",
+          "historical matrix verification completion unavailable",
+          "historical matrix verification proof unavailable",
+          "historical matrix verification binding changed",
+          "historical matrix verification observation changed",
+          "historical matrix saved execution unavailable",
+          "historical matrix native settlement unavailable",
+          "historical matrix native custody unavailable",
+          "historical matrix selected witness rejection unavailable",
+          "historical matrix applicability changed",
+          "historical matrix rejection identity unavailable",
+          "historical matrix rejection reservation outside witness",
+          "historical matrix final custody changed",
+          "historical matrix custody unavailable",
+          "historical matrix captured identity changed",
+          "historical matrix pre-settlement custody unavailable",
+          "historical matrix settlement incomplete",
+          "historical matrix post-settlement custody unavailable",
+          "historical matrix post-settlement identity changed",
+          "historical matrix clock unavailable",
+          "historical matrix pre-block custody unavailable",
+          "historical matrix block incomplete",
+          "historical matrix block readback incomplete",
+        ].includes(errorMessage)
+        ? errorMessage
+        : "[redacted]";
+      console.error(JSON.stringify({
+        kind: "sentinel_historical_quarantine_error",
+        name,
+        message,
+      }));
       throw new HistoricalQuarantineIncomplete();
     }
     if (count > 0) actions.push(`historical-matrix:quarantined:${count}`);

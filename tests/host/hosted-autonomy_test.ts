@@ -5664,6 +5664,88 @@ Deno.test("historical malformed wave: actual maintenance entrypoint blocks prepa
   }
 });
 
+Deno.test("historical malformed wave: maintenance leaf diagnostic is secret-free and fail-closed", async () => {
+  const f = await historicalMalformedRig(false, 1);
+  const errors: string[] = [];
+  const originalError = console.error;
+  const readRepair = f.rig.state.readRepair;
+  console.error = (value: unknown) => errors.push(String(value));
+  try {
+    f.setFault("auth");
+    const before = await f.rig.state.readRepair();
+    const releaseBefore = await f.rig.state.readRelease();
+    assert.equal(await f.runMain(), 1);
+    assert.deepEqual(errors.map((value) => JSON.parse(value)), [{
+      kind: "sentinel_historical_quarantine_error",
+      name: "Error",
+      message: "matrix artifact provenance unavailable or conflicting",
+    }]);
+    assert.deepEqual(await f.rig.state.readRepair(), before);
+    assert.deepEqual(await f.rig.state.readRelease(), releaseBefore);
+    const privateError = new Error(
+      "historical matrix state unavailable https://example.invalid/?token=private-token",
+    );
+    privateError.name = "Bearer private-token";
+    let nameReads = 0;
+    let messageReads = 0;
+    const switchingError = Object.defineProperties(new Error(), {
+      name: {
+        get: () => nameReads++ === 0 ? "Error" : "Bearer private-token",
+      },
+      message: {
+        get: () =>
+          messageReads++ === 0
+            ? "historical matrix state unavailable"
+            : "https://example.invalid/?token=private-response-body",
+      },
+    });
+    for (
+      const [error, name, message] of [
+        [switchingError, "Error", "historical matrix state unavailable"],
+        [
+          new Error("historical matrix not-started admission unproven"),
+          "Error",
+          "historical matrix not-started admission unproven",
+        ],
+        [
+          new Error("historical matrix state unavailable"),
+          "Error",
+          "historical matrix state unavailable",
+        ],
+        [privateError, "UnknownError", "[redacted]"],
+        [
+          new TypeError("private-response-body".repeat(1000)),
+          "TypeError",
+          "[redacted]",
+        ],
+        [{ message: "private-response-body" }, "UnknownError", "[redacted]"],
+      ] as const
+    ) {
+      errors.length = 0;
+      f.rig.state.readRepair = () => Promise.reject(error);
+      assert.equal(await f.runMain(), 1);
+      assert.deepEqual(errors.map((value) => JSON.parse(value)), [{
+        kind: "sentinel_historical_quarantine_error",
+        name,
+        message,
+      }]);
+    }
+    assert.equal(nameReads, 1);
+    assert.equal(messageReads, 1);
+    f.rig.state.readRepair = readRepair;
+    assert.deepEqual(await f.rig.state.readRepair(), before);
+    assert.deepEqual(await f.rig.state.readRelease(), releaseBefore);
+    f.setFault(null);
+    errors.length = 0;
+    assert.equal(await f.runMain(), 0);
+    assert.deepEqual(errors, []);
+  } finally {
+    f.rig.state.readRepair = readRepair;
+    console.error = originalError;
+    await Deno.remove(f.rig.tmp, { recursive: true });
+  }
+});
+
 Deno.test("historical malformed wave: missing archive and malformed parser never quarantine", async () => {
   for (
     const mode of [
