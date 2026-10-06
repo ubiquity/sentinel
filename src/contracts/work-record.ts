@@ -63,6 +63,13 @@ export type WorkWaitReasonV1 =
    * simply not posted yet keeps the ordinary bounded `review_pending` poll.
    */
   | "review_quota"
+  /**
+   * Explicit TRANSIENT CI-not-yet-green state for the delivery phase. The
+   * repair PR's checks are still running; the record waits bounded (like
+   * `review_pending`) and the next turn re-observes. Never blocks by itself;
+   * a failed check transitions to a terminal blocker instead.
+   */
+  | "ci_pending"
   | "backoff"
   | "unavailable"
   | "manual";

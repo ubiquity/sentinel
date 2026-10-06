@@ -17,6 +17,7 @@ import { isGitSha } from "../contracts/brands.ts";
 import { canonicalStringify } from "../contracts/canonical.ts";
 import type {
   Clock,
+  GitHubCheckV1,
   GitHubCooldownGateV1,
   GitHubPort,
   ImplementationPort,
@@ -5624,6 +5625,7 @@ async function executeDeliveryStep(
   context: LoopContextV1,
   record: WorkRecordV1,
 ): Promise<StepResultV1> {
+  const now = deps.clock.now();
   if (record.target.pr === null || record.target.head === null) {
     return {
       kind: "state_error",
@@ -5675,7 +5677,86 @@ async function executeDeliveryStep(
     const refresh = await ensureBaseRefreshIntent(deps, context, record);
     if (refresh !== null) return refresh;
   }
+  // CI gate (async, non-blocking): the merge requires green checks on the
+  // exact candidate head. Still-running checks park the record in a bounded
+  // `ci_pending` wait and the turn completes; the next turn re-observes.
+  // Failed checks terminally block (never merge broken code). This matches
+  // the `review_pending` turn-based pattern: no blocking wait inside a turn.
+  const ciGate = await gateDeliveryOnChecks(deps, context, record, now);
+  if (ciGate !== null) return ciGate;
   return executeMerge(deps, context, record);
+}
+
+/**
+ * Pure CI gate decision. Returns "proceed" when all checks are green (or no
+ * checks recorded), "wait" when any check is still running, or a block detail
+ * when any check failed. Exported for focused testing.
+ */
+export function decideCiGate(
+  checks: GitHubCheckV1[],
+): "proceed" | "wait" | { blocked: string } {
+  const pending = checks.some((check) => check.status !== "completed");
+  if (pending) return "wait";
+  const failed = checks.filter((check) =>
+    check.conclusion === "failure" ||
+    check.conclusion === "timed_out" ||
+    check.conclusion === "cancelled" ||
+    check.conclusion === "action_required"
+  );
+  if (failed.length > 0) {
+    const names = failed.map((check) => check.name).join(", ");
+    return { blocked: `CI checks failed: ${names}` };
+  }
+  return "proceed";
+}
+
+/**
+ * Delivery-phase CI gate. Returns null when checks are green (or absent) and
+ * the merge may proceed; otherwise returns the step result (deferred wait for
+ * in-progress checks, terminal block for failed checks). Never blocks the
+ * turn: in-progress checks persist a bounded `ci_pending` wait.
+ */
+export async function gateDeliveryOnChecks(
+  deps: RepairCycleDepsV1,
+  context: LoopContextV1,
+  record: WorkRecordV1,
+  now: number,
+): Promise<StepResultV1 | null> {
+  const head = record.target.head;
+  if (head === null) {
+    return { kind: "state_error", detail: "delivery without PR/head identity" };
+  }
+  const observed = await deps.github.readChecks(head);
+  if (!observed.ok) {
+    // Transient read failure: defer without a wait so the next turn retries.
+    return { kind: "deferred", detail: "CI check observation unavailable" };
+  }
+  const decision = decideCiGate(observed.value.checks);
+  if (decision === "proceed") {
+    // All checks completed with success/skipped/neutral (or no checks
+    // recorded): the CI gate passes and the merge authorization proceeds.
+    return null;
+  }
+  if (decision === "wait") {
+    const since =
+      record.wait?.reason === "ci_pending" && record.wait.since < now
+        ? record.wait.since
+        : now;
+    return persistWork(
+      deps,
+      context,
+      setWait(
+        record,
+        { reason: "ci_pending", since, until: since + CHECK_POLL_MS },
+        now,
+      ),
+    );
+  }
+  return persistWork(
+    deps,
+    context,
+    markBlocked(record, "other", decision.blocked, now),
+  );
 }
 
 /**
