@@ -6,6 +6,8 @@ import { canonicalStringify } from "../../src/contracts/canonical.ts";
 import {
   HOSTED_SUPERVISOR_WORKFLOW_ID,
   HOSTED_SUPERVISOR_WORKFLOW_PATH,
+  type HostedExecutionIntentV1,
+  type HostedRunProofV1,
   parseHostedExecutionSettlementV1,
 } from "../../src/contracts/hosted-supervisor.ts";
 import {
@@ -1418,6 +1420,76 @@ Deno.test("matrix artifacts: missing artifact preserves charged intent and never
     assert.equal(waves[0].results.length, 0);
     assert.equal(canonicalStringify(rig.repair), before);
     assert.equal(rig.repair.reservations[0].outcome, "reserved");
+  } finally {
+    await Deno.remove(rig.tmp, { recursive: true });
+  }
+});
+
+Deno.test("matrix artifacts: historical rejection with missing cell artifact leaves the record untouched", async () => {
+  const rig = await fixture();
+  try {
+    // The historical wave's cell artifact was never uploaded (cancelled cell):
+    // not-started can never be proven for this record.
+    rig.artifacts.splice(1, 1);
+    // Malformed admission (reservation created after the plan manifest) so the
+    // historical rejection pass engages for the recorded execution's wave.
+    const admittedAt = T0 + 5000;
+    rig.repair.reservations[0].createdAt = admittedAt;
+    const intent = rig.repair.work[0].intent;
+    assert.ok(intent);
+    intent.startedAt = admittedAt;
+    rig.repair.work[0].counters.attempts = 1;
+    const execution: HostedExecutionIntentV1 = {
+      id: "71:2:repair",
+      runId: 71,
+      runAttempt: 2,
+      launcherSha: LAUNCHER,
+      purpose: "ordinary",
+      revision: RUNTIME,
+      generation: 3,
+      releaseId: null,
+      createdAt: T0,
+    };
+    rig.release.hostedRuntimes[0].execution = execution;
+    const proof: HostedRunProofV1 = {
+      execution,
+      workflowId: HOSTED_SUPERVISOR_WORKFLOW_ID,
+      workflowPath: HOSTED_SUPERVISOR_WORKFLOW_PATH,
+      repository: "ubiquity/sentinel",
+      ref: "refs/heads/sentinel-supervisor",
+      jobId: 401,
+      startedAt: T0,
+      finishedAt: T0,
+      observedAt: T0,
+      outcome: "failed",
+      startupReady: true,
+      settled: true,
+      baseSha: null,
+      terminalAt: T0,
+      logDigest: "f".repeat(64),
+    };
+    const transport = createActionsMatrixArtifactTransport({
+      state: rig.state,
+      token: "fake-local-token",
+      http: rig.http,
+      clock: { now: () => T0 + 10_000 },
+      artifactRoot: `${rig.tmp}/recovered-reject`,
+    });
+    const originalCwd = Deno.cwd();
+    Deno.chdir(`${rig.tmp}/checkout`);
+    let waves;
+    try {
+      waves = await transport.rejectHistorical!({ proof });
+    } finally {
+      Deno.chdir(originalCwd);
+    }
+    assert.equal(waves.length, 1);
+    assert.equal(waves[0].reason, "reservation_after_manifest");
+    // The unprovable record is left untouched instead of failing the run: no
+    // affected entry is quarantined and no not-started claim is made without
+    // the artifact proof.
+    assert.equal(waves[0].affected.length, 0);
+    assert.equal(waves[0].cells.length, 0);
   } finally {
     await Deno.remove(rig.tmp, { recursive: true });
   }
