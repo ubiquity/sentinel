@@ -40,12 +40,13 @@ import {
   type HttpResponseV1,
   type HttpTransportV1,
 } from "../github/http.ts";
-import type {
-  MatrixArtifactRequestV1,
-  MatrixArtifactTransportV1,
-  MatrixAuthenticatedWaveV1,
-  MatrixRejectedCellEvidenceV1,
-  MatrixRejectedWaveV1,
+import {
+  type MatrixArtifactRequestV1,
+  type MatrixArtifactTransportV1,
+  type MatrixAuthenticatedWaveV1,
+  MatrixMissingCellArtifactError,
+  type MatrixRejectedCellEvidenceV1,
+  type MatrixRejectedWaveV1,
 } from "./matrix-artifact-port.ts";
 import { HISTORICAL_MATRIX_QUARANTINE } from "./matrix-actions.ts";
 
@@ -792,6 +793,7 @@ export function createActionsMatrixArtifactTransport(options: {
           // Artifact contents only select relevant grants; native provenance below remains mandatory.
           if (
             !input.rejectionProof &&
+            input.currentRun === undefined &&
             !plan.cells.some((cell) => requested.has(cell.reservationId))
           ) {
             continue;
@@ -975,7 +977,10 @@ export function createActionsMatrixArtifactTransport(options: {
             // made, no record is touched.
             continue;
           }
-          if (selected.length === 0) continue;
+          if (
+            selected.length === 0 &&
+            (input.rejectionProof || input.currentRun === undefined)
+          ) continue;
           const bundlesDir = `${staging}/${run.runId}-${run.runAttempt}`;
           await Deno.mkdir(bundlesDir, { mode: 0o700 });
           const results = [], cellJobIds = [];
@@ -986,19 +991,24 @@ export function createActionsMatrixArtifactTransport(options: {
             if (names.filter((value) => value === name).length > 1) refuse();
             const cellArtifact = artifacts.find((row) => row.name === name);
             if (!cellArtifact) {
-              // Missing evidence never establishes non-submission. In the
-              // historical revalidation path the record simply stays
-              // unquarantined; failing the entire run here would deadlock the
-              // supervisor on any permanently unrecoverable historical
-              // artifact (expired, never uploaded, or otherwise lost). The
-              // safe default is preserved: no not-started claim is made
-              // without the artifact proof. Remove the prematurely added
-              // affected entry so the unprovable record is left untouched.
-              const affectedIndex = affected.findIndex(
-                (entry) => entry.reservation.id === cell.reservationId,
-              );
-              if (affectedIndex >= 0) affected.splice(affectedIndex, 1);
-              continue;
+              if (input.rejectionProof) {
+                const captured = affected.find((row) =>
+                  row.reservation.id === cell.reservationId
+                );
+                const started = Date.parse(String(planners[0].started_at));
+                const completed = Date.parse(String(planners[0].completed_at));
+                if (
+                  !captured || typeof planners[0].started_at !== "string" ||
+                  typeof planners[0].completed_at !== "string" ||
+                  !Number.isSafeInteger(started) ||
+                  !Number.isSafeInteger(completed) || completed < started
+                ) refuse();
+                throw new MatrixMissingCellArtifactError(
+                  input.rejectionProof,
+                  captured,
+                );
+              }
+              continue; // Missing evidence never establishes non-submission.
             }
             artifactIdentity(cellArtifact);
             const cellJobs = jobs.filter((job) =>
@@ -1095,11 +1105,6 @@ export function createActionsMatrixArtifactTransport(options: {
             });
           }
           if (input.rejectionProof) {
-            // A non-malformed plan is not a reservation-after-manifest case;
-            // skip it instead of refusing. This happens when cells were
-            // skipped due to missing artifacts (the record stays quarantined,
-            // the safe default) or when the plan simply isn't malformed.
-            // No claim is made, no record is touched.
             if (!malformed) continue;
             // The authenticated planner job interval is the only admission
             // window a legacy manifest rejection may use; a missing or
@@ -1160,6 +1165,7 @@ export function createActionsMatrixArtifactTransport(options: {
         } catch {
           refuse();
         }
+        if (error instanceof MatrixMissingCellArtifactError) throw error;
         refuse();
       } finally {
         controller.abort();

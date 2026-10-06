@@ -32,10 +32,11 @@ import {
   createGitBundleExporter,
   createGitBundleImporter,
 } from "./matrix-git.ts";
-import type {
-  MatrixArtifactTransportV1,
-  MatrixRejectedCellEvidenceV1,
-  MatrixRejectedWaveV1,
+import {
+  type MatrixArtifactTransportV1,
+  MatrixMissingCellArtifactError,
+  type MatrixRejectedCellEvidenceV1,
+  type MatrixRejectedWaveV1,
 } from "./matrix-artifact-port.ts";
 import type { BudgetControllerV1 } from "../budget/mod.ts";
 import type {
@@ -65,6 +66,9 @@ import {
 export const HISTORICAL_MATRIX_QUARANTINE =
   "authenticated historical matrix manifest rejected: reservation_after_manifest; model outcome uncertain";
 
+export const HISTORICAL_MATRIX_QUARANTINE_UNPROVABLE =
+  "authenticated historical matrix artifact missing under rejection proof; absence unproven; model outcome uncertain";
+
 /**
  * The exact truthful disposition of one legacy manifest rejection whose
  * authenticated cell never started. It is the proven not-started outcome, not
@@ -75,9 +79,9 @@ export const HISTORICAL_NOT_STARTED_DETAIL =
   "authenticated historical matrix cell did not start: implementation start is past the model cutoff or no longer fits the run bounds";
 
 /**
- * True only for the exact original legacy quarantine class: a record blocked
- * with the historical manifest rejection itself. It is the ONLY non-work state
- * the authenticated recovery may reconcile; every other blocker refuses.
+ * The two named historical quarantine blockers remain closed. Only the
+ * original manifest class may enter explicit not-started revalidation;
+ * missing-cell quarantine is excluded by selection before any witness read.
  */
 function isHistoricalQuarantineBlocked(record: {
   readonly nextStep: string;
@@ -88,7 +92,8 @@ function isHistoricalQuarantineBlocked(record: {
 }): boolean {
   return record.nextStep === "blocked" &&
     record.blocker?.kind === "other" &&
-    record.blocker.message === HISTORICAL_MATRIX_QUARANTINE;
+    (record.blocker.message === HISTORICAL_MATRIX_QUARANTINE ||
+      record.blocker.message === HISTORICAL_MATRIX_QUARANTINE_UNPROVABLE);
 }
 
 /**
@@ -217,14 +222,15 @@ async function proofInCustody(
 }
 async function quarantineRow(
   deps: HistoricalMatrixQuarantineDepsV1,
-  wave: MatrixRejectedWaveV1,
+  wave: MatrixRejectedWaveV1 | MatrixMissingCellArtifactError,
   captured: MatrixRejectedWaveV1["affected"][number],
   currentExecution: HostedExecutionIntentV1 | null,
   historical?: HistoricalProofCustodyV1,
 ) {
   const revalidate = deps.revalidateNotStarted === true;
+  const unprovable = wave instanceof MatrixMissingCellArtifactError;
   if (
-    wave.reason !== "reservation_after_manifest" ||
+    (!unprovable && wave.reason !== "reservation_after_manifest") ||
     ((!revalidate || !isHistoricalQuarantineBlocked(captured.work)) &&
       captured.work.nextStep !== "work") ||
     captured.work.intent?.kind !== "implementation" ||
@@ -271,7 +277,7 @@ async function quarantineRow(
   ) {
     throw new Error("historical matrix captured identity changed");
   }
-  const provenNotStarted = revalidate &&
+  const provenNotStarted = !unprovable && revalidate &&
     isHistoricalQuarantineBlocked(work) &&
     historicalNotStartedProven(
       wave,
@@ -283,7 +289,8 @@ async function quarantineRow(
   // reservation never started; every other class is refused before any
   // settlement or write.
   if (
-    revalidate && isHistoricalQuarantineBlocked(work) && !provenNotStarted
+    !unprovable && revalidate && isHistoricalQuarantineBlocked(work) &&
+    !provenNotStarted
   ) {
     throw new Error("historical matrix not-started admission unproven");
   }
@@ -293,7 +300,10 @@ async function quarantineRow(
   // An already-settled ambiguous charge is preserved byte for byte: it is
   // never re-settled and never receives a new settlement instant.
   let settledReservation = reservation;
-  if (reservation.outcome !== "ambiguous" || reservation.settledAt === null) {
+  if (
+    !unprovable &&
+    (reservation.outcome !== "ambiguous" || reservation.settledAt === null)
+  ) {
     const settled = await deps.budget.settleModelStart({
       id: reservation.id,
       outcome: "ambiguous",
@@ -339,7 +349,9 @@ async function quarantineRow(
   const blocked = markBlocked(
     current,
     "other",
-    provenNotStarted
+    unprovable
+      ? HISTORICAL_MATRIX_QUARANTINE_UNPROVABLE
+      : provenNotStarted
       ? HISTORICAL_NOT_STARTED_DETAIL
       : HISTORICAL_MATRIX_QUARANTINE,
     now,
@@ -392,6 +404,7 @@ export async function runHistoricalMatrixQuarantine(
   const revalidate = deps.revalidateNotStarted === true;
   if (witness) {
     const selected = repair.value.snapshot.work.filter((row) =>
+      row.blocker?.message !== HISTORICAL_MATRIX_QUARANTINE_UNPROVABLE &&
       row.intent?.kind === "implementation" && row.nextStep !== "done" &&
       (row.nextStep === "work" ||
         (revalidate && isHistoricalQuarantineBlocked(row))) &&
@@ -430,6 +443,7 @@ export async function runHistoricalMatrixQuarantine(
   }
   if (
     !repair.value.snapshot.work.some((row) =>
+      row.blocker?.message !== HISTORICAL_MATRIX_QUARANTINE_UNPROVABLE &&
       (row.nextStep === "work" ||
         (revalidate && isHistoricalQuarantineBlocked(row))) &&
       row.intent?.kind === "implementation" &&
@@ -605,16 +619,24 @@ export async function runHistoricalMatrixQuarantine(
   ) {
     throw new Error("historical matrix native custody unavailable");
   }
-  const waves = historical
-    ? await witness!.reject(
-      proof,
-      historical.expectedHead,
-      revalidate,
-    )
-    : await deps.transport.rejectHistorical({
-      proof,
-      revalidateNotStarted: revalidate,
-    });
+  let waves: readonly MatrixRejectedWaveV1[];
+  try {
+    waves = historical
+      ? await witness!.reject(proof, historical.expectedHead, revalidate)
+      : await deps.transport.rejectHistorical({
+        proof,
+        revalidateNotStarted: revalidate,
+      });
+  } catch (error) {
+    if (!(error instanceof MatrixMissingCellArtifactError)) throw error;
+    if (
+      canonicalStringify(error.proof) !== canonicalStringify(proof) ||
+      (witness &&
+        !witness.reservationIds.includes(error.captured.reservation.id))
+    ) throw new Error("historical matrix missing-cell identity unavailable");
+    await quarantineRow(deps, error, error.captured, current, historical);
+    return 1 + await runHistoricalMatrixQuarantine(deps);
+  }
   if (historical && waves.length === 0) {
     throw new Error("historical matrix selected witness rejection unavailable");
   }
