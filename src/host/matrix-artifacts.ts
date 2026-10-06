@@ -1084,7 +1084,12 @@ export function createActionsMatrixArtifactTransport(options: {
             });
           }
           if (input.rejectionProof) {
-            if (!malformed) refuse();
+            // A non-malformed plan is not a reservation-after-manifest case;
+            // skip it instead of refusing. This happens when cells were
+            // skipped due to missing artifacts (the record stays quarantined,
+            // the safe default) or when the plan simply isn't malformed.
+            // No claim is made, no record is touched.
+            if (!malformed) continue;
             // The authenticated planner job interval is the only admission
             // window a legacy manifest rejection may use; a missing or
             // non-causal interval fails closed instead of inventing authority.
