@@ -1,3 +1,7 @@
+## One-time additional review request for PR 123 - 2026-10-06
+
+The owner granted a one-time exception to the one-review-request-per-PR limit so the current head `64d417bf3dc94524aaa7c1316c648d73eccfceb8` of PR #123 could receive a fresh Codex review after the single request was consumed on the prior head. The connector returned a clean review at 03:26 UTC ("Didn't find any major issues", reviewed commit `64d417bf3d`), both `test-local` checks were green, and the Ralph loop merged #123 at 03:29:38 UTC. The general one-review-request-per-PR limit stays in force; this exception is consumed and applies to no other PR or head.
+
 ## Matrix planner handoff time - 2026-10-05
 
 Finish matrix grant planning with the existing five-minute operation margin reserved for native job handoff. Run 37354374590 published its 24-cell plan only 56 seconds before the latest safe full-session start; authenticated cells then returned `not_started` because their configured session and completion margin no longer fit. Apply the reserve only to planning and stop reading further candidates once a full session cannot fit that planning window. Preserve the original shared execution start/deadline, configured model session, cell-side refusal, durable reservations/settlement and uncapped cell throughput. This source correction needs exact-candidate validation, reviewed publication and trusted installation before it establishes hosted recovery.
