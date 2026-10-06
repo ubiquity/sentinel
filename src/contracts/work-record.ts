@@ -781,6 +781,7 @@ function parseWait(input: unknown, path: string): WorkWaitV1 {
       "budget_cap",
       "review_pending",
       "review_quota",
+      "ci_pending",
       "backoff",
       "unavailable",
       "manual",

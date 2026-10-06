@@ -96,3 +96,52 @@ Deno.test("decideCiGate: dedupes by name, latest pending waits", () => {
   ];
   assert.equal(decideCiGate(checks), "wait");
 });
+
+Deno.test("ci_pending wait reason is a valid WorkWaitReasonV1", async () => {
+  const { parseWorkRecordV1 } = await import(
+    "../../src/contracts/work-record.ts"
+  );
+  // Use a minimal record and only override the wait; parseWorkRecordV1
+  // validates the full structure, so we build from a known-good base.
+  const base = {
+    version: "v1",
+    kind: "work",
+    id: "i:1",
+    repository: { owner: "ubiquity", name: "ai.ubq.fi", installationId: 1 },
+    source: {
+      kind: "issue",
+      id: "1",
+      revision: "abc123abc123abc123abc123abc123abc123abcd",
+    },
+    related: { incidentId: null, issueNumber: 1 },
+    fingerprint: null,
+    failingRevision: null,
+    sourceSnapshotDigest: null,
+    classification: { severity: "P3", priority: null },
+    urgency: {
+      activeProduction: false,
+      reproducible5xx: false,
+      severeSecurityOrDataLoss: false,
+    },
+    dependencies: [],
+    controller: { sha: "abc123abc123abc123abc123abc123abc123abcd" },
+    target: {
+      base: "abc123abc123abc123abc123abc123abc123abcd",
+      branch: null,
+      checkpoint: null,
+      head: null,
+      pr: null,
+    },
+    nextStep: "work",
+    wait: { reason: "ci_pending", since: 1786000000000, until: 1786000300000 },
+    blocker: null,
+    counters: { attempts: 0, retries: 0, reviewRounds: 0 },
+    evidence: [],
+    intent: null,
+    firstSeenAt: null,
+    createdAt: 1786000000000,
+    updatedAt: 1786000000000,
+  };
+  const parsed = parseWorkRecordV1(base);
+  assert.equal(parsed.wait?.reason, "ci_pending");
+});
