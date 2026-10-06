@@ -975,8 +975,19 @@ export function createActionsMatrixArtifactTransport(options: {
             if (names.filter((value) => value === name).length > 1) refuse();
             const cellArtifact = artifacts.find((row) => row.name === name);
             if (!cellArtifact) {
-              if (input.rejectionProof) refuse();
-              continue; // Missing evidence never establishes non-submission.
+              // Missing evidence never establishes non-submission. In the
+              // historical revalidation path the record simply stays
+              // unquarantined; failing the entire run here would deadlock the
+              // supervisor on any permanently unrecoverable historical
+              // artifact (expired, never uploaded, or otherwise lost). The
+              // safe default is preserved: no not-started claim is made
+              // without the artifact proof. Remove the prematurely added
+              // affected entry so the unprovable record is left untouched.
+              const affectedIndex = affected.findIndex(
+                (entry) => entry.reservation.id === cell.reservationId,
+              );
+              if (affectedIndex >= 0) affected.splice(affectedIndex, 1);
+              continue;
             }
             artifactIdentity(cellArtifact);
             const cellJobs = jobs.filter((job) =>

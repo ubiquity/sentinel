@@ -6684,6 +6684,85 @@ Deno.test("historical not started: real already-quarantined ambiguous state reco
   }
 });
 
+Deno.test("historical revalidation: missing cell artifact leaves its record quarantined without failing the run", async () => {
+  const f = await historicalMalformedRig(true, 2, true);
+  // Authenticated not-started revalidation is explicit, as in the recovery
+  // test above.
+  f.historicalMatrix.revalidateNotStarted = true;
+  try {
+    const seeded = await f.rig.state.readRepair();
+    assert(seeded.ok && seeded.value.status === "found");
+    // Quarantine both records with the exact original quarantine class.
+    const quarantinedAt = f.clock.now();
+    const write = await f.rig.state.writeRepair({
+      ...seeded.value.snapshot,
+      stateHead: seeded.value.head,
+      sequence: seeded.value.snapshot.sequence + 1,
+      updatedAt: quarantinedAt,
+      work: seeded.value.snapshot.work.map((row) => {
+        const index = f.records.findIndex((record) => record.id === row.id);
+        return index >= 0 && index < 2
+          ? {
+            ...row,
+            nextStep: "blocked" as const,
+            blocker: {
+              kind: "other" as const,
+              message: HISTORICAL_MATRIX_QUARANTINE,
+              since: row.updatedAt,
+            },
+            wait: null,
+          }
+          : row;
+      }),
+      reservations: seeded.value.snapshot.reservations.map((row) => {
+        const index = f.charges.findIndex((charge) => charge.id === row.id);
+        return index >= 0 && index < 2
+          ? {
+            ...row,
+            outcome: "ambiguous" as const,
+            settledAt: row.createdAt + 1_000,
+            proofRef: null,
+          }
+          : row;
+      }),
+    }, seeded.value.head);
+    assert(write.ok && write.value.status === "applied", JSON.stringify(write));
+    // Simulate permanent loss of the first cell's artifact (expired, never
+    // uploaded, or otherwise unrecoverable). The plan still passes its
+    // pre-filter via the second cell's artifact.
+    const missingName = `sentinel-matrix-cell-71-2-${f.cells[0].cellId}`;
+    const artifactIndex = f.artifacts.findIndex((artifact) =>
+      (artifact as { name: string }).name === missingName
+    );
+    assert(artifactIndex >= 0, "expected the cell artifact to exist");
+    f.artifacts.splice(artifactIndex, 1);
+    // The run must NOT throw: the unprovable record stays quarantined (the
+    // safe default) instead of deadlocking the supervisor.
+    const result = await f.run();
+    assert(
+      result.actions.includes("historical-matrix:quarantined:1"),
+      `expected one revalidation, got ${JSON.stringify(result.actions)}`,
+    );
+    const after = await f.rig.state.readRepair();
+    assert(after.ok && after.value.status === "found");
+    // The record whose artifact is missing stays blocked: no not-started
+    // claim is made without the artifact proof.
+    const unprovable: WorkRecordV1 = after.value.snapshot.work.find((row) =>
+      row.id === f.records[0].id
+    )!;
+    assert.equal(unprovable.nextStep, "blocked");
+    assert.equal(unprovable.blocker?.message, HISTORICAL_MATRIX_QUARANTINE);
+    // The record whose artifact exists is revalidated normally.
+    const provable: WorkRecordV1 = after.value.snapshot.work.find((row) =>
+      row.id === f.records[1].id
+    )!;
+    assert.equal(provable.nextStep, "work", "provable record rejoins");
+    assert.equal(provable.blocker, null);
+  } finally {
+    await Deno.remove(f.rig.tmp, { recursive: true });
+  }
+});
+
 Deno.test("historical not started: another blocker never recovers and mutates nothing", async () => {
   const f = await historicalMalformedRig();
   // The capability is ACTIVE here: an unrelated blocker must still never be
