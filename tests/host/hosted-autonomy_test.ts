@@ -5207,7 +5207,9 @@ async function historicalMalformedRig(
     job(499, "repair", "Run selected Sentinel runtime", true),
   ];
   logs.set(499, `${iso(T0 + 30_000)} child exited before terminal\n`);
-  async function refreshPlan() {
+  async function refreshPlan(
+    cellStatus: "not_started" | "completed" = "not_started",
+  ) {
     artifacts.splice(0, artifacts.length);
     await archived(501, "sentinel-matrix-plan-71-2", plan);
     logs.set(
@@ -5238,10 +5240,29 @@ async function historicalMalformedRig(
         reservationId: cell.reservationId,
         intentKey: cell.intentKey,
         requestDigest: cell.requestDigest,
-        status: "not_started",
-        receipt: null,
+        status: cellStatus,
+        receipt: cellStatus === "completed"
+          ? {
+            invocationId: `invocation-${cell.cellId}`,
+            outcome: "failed",
+            actual: {
+              evidenceKind: "request-runtime",
+              provider: "uos",
+              threadId: `thread-${cell.cellId}`,
+              turnId: `turn-${cell.cellId}`,
+              terminalOrigin: "runtime",
+              observedTerminalStatus: "failed",
+              observedModel: "gpt-reserve",
+              observedReasoning: "max",
+              durationMs: 1,
+              outputChars: 1,
+            },
+            candidate: null,
+            error: "runtime_error",
+          }
+          : null,
         bundle: null,
-        detail: "sanitized no start",
+        detail: cellStatus === "completed" ? null : "sanitized no start",
         completedAt: T0 + 29_000,
       };
       await archived(
@@ -5261,7 +5282,7 @@ async function historicalMalformedRig(
             reservationId: cell.reservationId,
             resultDigest: await matrixDigestV1(result),
             bundleDigest: null,
-            status: "not_started",
+            status: cellStatus,
           })
         }\n`,
       );
@@ -5823,6 +5844,25 @@ Deno.test("historical malformed wave: missing archive and malformed parser never
     } finally {
       await Deno.remove(f.rig.tmp, { recursive: true });
     }
+  }
+});
+
+Deno.test("historical malformed wave: executed non-malformed plan skips rejection instead of refusing", async () => {
+  const f = await historicalMalformedRig();
+  try {
+    const before = await f.rig.state.readRepair();
+    // A healthy prior run whose cells legitimately executed (completed with a
+    // failed-outcome receipt) while its records remain in work for retry: the
+    // plan is non-malformed, so the historical rejection must skip it before
+    // verifying cell results. Refusing on the completed cells would deadlock
+    // every subsequent maintenance on a plan the rejection skips anyway.
+    f.plan.plannedAt = T0 + 1000;
+    await f.refreshPlan("completed");
+    assert.equal(await f.runMain(), 0);
+    await f.run();
+    assert.deepEqual(await f.rig.state.readRepair(), before);
+  } finally {
+    await Deno.remove(f.rig.tmp, { recursive: true });
   }
 });
 
