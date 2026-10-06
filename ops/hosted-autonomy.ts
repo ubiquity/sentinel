@@ -94,6 +94,7 @@ import type {
 } from "../src/contracts/ports.ts";
 import {
   CLOSED_C_WAVE,
+  type ClosedCWaveBindingV1,
   closedCWaveNeedsRecovery,
   type ClosedCWaveRecoveryDepsV1,
   ingestClosedCWave,
@@ -2406,11 +2407,12 @@ async function recoverHostedHistoricalC63(
 
 async function recoverHostedCurrentMatrix(
   deps: HostedAutonomyDepsV1,
+  binding: ClosedCWaveBindingV1,
 ): Promise<HostedAutonomyResultV1 | null> {
   if (!deps.closedMatrix) return null;
   const deadlineAt = deps.clock.now() + 60_000;
   const dedicated = new Set<string>([
-    ...CLOSED_C_WAVE.cells.map((row) => row.reservationId),
+    ...binding.cells.map((row) => row.reservationId),
     ...(deps.historicalMatrix
       ? HISTORICAL_C63.rows.map((row) => row.reservation)
       : []),
@@ -2471,11 +2473,11 @@ async function recoverHostedCurrentMatrix(
         saved.outcome !== "not_started" &&
         saved.execution.purpose === "ordinary"
       ) {
-        const deferred = (saved.execution.runId === CLOSED_C_WAVE.run.runId &&
-          saved.execution.runAttempt === CLOSED_C_WAVE.run.runAttempt &&
-          saved.execution.launcherSha === CLOSED_C_WAVE.run.launcherSha &&
-          saved.execution.revision === CLOSED_C_WAVE.runtimeSha &&
-          saved.execution.generation === CLOSED_C_WAVE.generation) ||
+        const deferred = (saved.execution.runId === binding.run.runId &&
+          saved.execution.runAttempt === binding.run.runAttempt &&
+          saved.execution.launcherSha === binding.run.launcherSha &&
+          saved.execution.revision === binding.runtimeSha &&
+          saved.execution.generation === binding.generation) ||
           saved.execution.id === HISTORICAL_C63.executionId ||
           deps.historicalMatrix?.historicalReleaseWitnesses?.some((row) =>
             row.executionId === saved.execution.id
@@ -2828,6 +2830,7 @@ export async function runHostedAutonomy(
   deps: HostedAutonomyDepsV1,
 ): Promise<HostedAutonomyResultV1> {
   const actions: string[] = [];
+  let closedBinding: ClosedCWaveBindingV1 = CLOSED_C_WAVE;
   if (deps.closedMatrix) {
     const read = await deps.state.readRepair();
     if (!read.ok) {
@@ -2836,6 +2839,7 @@ export async function runHostedAutonomy(
     const closed = read.value.status === "found"
       ? await deps.closedMatrix()
       : undefined;
+    closedBinding = closed?.binding ?? CLOSED_C_WAVE;
     if (
       read.value.status === "found" && closed !== undefined &&
       closedCWaveNeedsRecovery(read.value.snapshot, closed.binding)
@@ -2859,7 +2863,7 @@ export async function runHostedAutonomy(
       };
     }
   }
-  const currentMatrix = await recoverHostedCurrentMatrix(deps);
+  const currentMatrix = await recoverHostedCurrentMatrix(deps, closedBinding);
   if (currentMatrix?.status === "applied") return currentMatrix;
   if (deps.historicalMatrix) {
     let count: number;

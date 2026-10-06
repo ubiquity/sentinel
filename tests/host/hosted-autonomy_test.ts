@@ -6625,6 +6625,10 @@ async function historicalC63Scenario(
     true,
     !firstPass,
   );
+  if (firstPass) {
+    f.plan.plannedAt = f.charges[2].createdAt;
+    await f.refreshPlan();
+  }
   // C63-only read-through of the real repair store: every cached read still
   // proves the current local remote head, and every real write invalidates it.
   const realReadRepair = f.rig.state.readRepair;
