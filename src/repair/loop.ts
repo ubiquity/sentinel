@@ -5699,11 +5699,13 @@ export function decideCiGate(
 ): "proceed" | "wait" | { blocked: string } {
   if (checks.length === 0) return "wait";
   // Dedupe: GitHub returns historical observations; only the latest per name
-  // counts. An old pending/failed must not override a newer pass.
+  // counts. Recency is by startedAt (when the run began): a newer in-progress
+  // rerun must override an older completed run, otherwise we'd merge while
+  // CI is still running.
   const latest = new Map<string, GitHubCheckV1>();
   for (const check of checks) {
     const prev = latest.get(check.name);
-    const time = (c: GitHubCheckV1) => c.completedAt ?? c.startedAt ?? -1;
+    const time = (c: GitHubCheckV1) => c.startedAt ?? c.completedAt ?? -1;
     if (prev === undefined || time(check) > time(prev)) {
       latest.set(check.name, check);
     }

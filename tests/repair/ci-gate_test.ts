@@ -82,17 +82,18 @@ Deno.test("decideCiGate: timed_out/cancelled/action_required block", () => {
 Deno.test("decideCiGate: dedupes by name, latest wins", () => {
   // Old failed run must not override a newer pass.
   const checks = [
-    check("ci", "completed", "failure", 1),
-    check("ci", "completed", "success", 2),
+    { ...check("ci", "completed", "failure", 1), startedAt: 0 },
+    { ...check("ci", "completed", "success", 2), startedAt: 1 },
   ];
   assert.equal(decideCiGate(checks), "proceed");
 });
 
-Deno.test("decideCiGate: dedupes by name, latest pending waits", () => {
-  // Newer pending run overrides an older pass.
+Deno.test("decideCiGate: newer in-progress rerun overrides older success", () => {
+  // Old run completed successfully, but a newer rerun is still in progress.
+  // Recency by startedAt: the pending rerun wins → wait.
   const checks = [
-    { ...check("ci", "completed", "success", 1), startedAt: 0 },
-    { ...check("ci", "in_progress", null, null), startedAt: 2 },
+    { ...check("ci", "completed", "success", 3000), startedAt: 1000 },
+    { ...check("ci", "in_progress", null, null), startedAt: 2000 },
   ];
   assert.equal(decideCiGate(checks), "wait");
 });
