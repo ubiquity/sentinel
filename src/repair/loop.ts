@@ -5625,7 +5625,6 @@ async function executeDeliveryStep(
   context: LoopContextV1,
   record: WorkRecordV1,
 ): Promise<StepResultV1> {
-  const now = deps.clock.now();
   if (record.target.pr === null || record.target.head === null) {
     return {
       kind: "state_error",
@@ -5677,13 +5676,6 @@ async function executeDeliveryStep(
     const refresh = await ensureBaseRefreshIntent(deps, context, record);
     if (refresh !== null) return refresh;
   }
-  // CI gate (async, non-blocking): the merge requires green checks on the
-  // exact candidate head. Still-running checks park the record in a bounded
-  // `ci_pending` wait and the turn completes; the next turn re-observes.
-  // Failed checks terminally block (never merge broken code). This matches
-  // the `review_pending` turn-based pattern: no blocking wait inside a turn.
-  const ciGate = await gateDeliveryOnChecks(deps, context, record, now);
-  if (ciGate !== null) return ciGate;
   return executeMerge(deps, context, record);
 }
 
@@ -6440,6 +6432,13 @@ async function executeMerge(
     // reviewer). Never resubmit or merge: surface the state contradiction.
     return { kind: "state_error", detail: MERGE_WITHOUT_REVIEW_DETAIL };
   }
+  // CI gate (async, non-blocking): after review authorization, verify all
+  // checks on the exact candidate head are green. Still-running checks park
+  // the record in a bounded `ci_pending` wait and the turn completes; the
+  // next turn re-observes. Failed checks terminally block. This matches the
+  // `review_pending` turn-based pattern: no blocking wait inside a turn.
+  const ciGate = await gateDeliveryOnChecks(deps, context, record, now);
+  if (ciGate !== null) return ciGate;
   let mergeRequest;
   try {
     mergeRequest = parseMergeRequestV1({
