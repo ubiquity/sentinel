@@ -158,7 +158,10 @@ Deno.test(
           result.error.detail,
           `gateway producer is unavailable (HTTP ${status})`,
         );
-        assert.equal(requests, 1, `HTTP ${status}`);
+        // The read-only observer retries transient 5xx within a bounded
+        // shared budget (default 3): 1 initial attempt + 3 retries, then the
+        // original fault surfaces unchanged.
+        assert.equal(requests, 4, `HTTP ${status}`);
         const diagnostic = JSON.stringify(result.error);
         assert.equal(diagnostic.includes(marker), false, `HTTP ${status}`);
         assert.equal(

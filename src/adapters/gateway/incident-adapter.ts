@@ -92,6 +92,16 @@ const ARTIFACT_CONTENT_TYPE = "application/octet-stream";
 const INDEX_LIMIT_MIN = 1;
 const INDEX_LIMIT_MAX = 100;
 
+export interface GatewayRetryPolicyV1 {
+  /**
+   * Total additional attempts shared across the adapter instance (one run).
+   * 0 disables retry; bounded so a full producer outage still fails fast.
+   */
+  budget: number;
+  /** Linear backoff base in milliseconds: the delay before retry n is baseDelayMs * n. */
+  baseDelayMs: number;
+}
+
 export interface GatewayIncidentAdapterOptionsV1 {
   /** Trusted parsed repository configuration (never an untrusted wire value). */
   config: RepositoryConfigV1;
@@ -100,6 +110,32 @@ export interface GatewayIncidentAdapterOptionsV1 {
   clock: Clock;
   /** Bounded restricted local evidence store (deterministic ingestion). */
   store: ArtifactStoreV1;
+  /**
+   * Opt-in bounded retry for transient gateway producer faults (HTTP 5xx,
+   * transport rejection). Absent or budget 0 preserves the exact
+   * fail-closed single-attempt behavior.
+   */
+  retry?: GatewayRetryPolicyV1;
+}
+
+/** Retry-policy validation bounds (constructor rejects outside these). */
+const RETRY_BUDGET_MAX = 10;
+const RETRY_DELAY_MAX_MS = 10_000;
+
+/** Details that mark a gateway fault as transient and safe to retry (read-only GETs only). */
+const TRANSIENT_TRANSPORT_DETAIL = "gateway transport is unavailable";
+const TRANSIENT_STATUS_PATTERN = /HTTP 5\d\d/;
+
+function isTransientGatewayFault(
+  error: { kind: string; detail: string },
+): boolean {
+  if (error.kind !== "unavailable") return false;
+  return error.detail === TRANSIENT_TRANSPORT_DETAIL ||
+    TRANSIENT_STATUS_PATTERN.test(error.detail);
+}
+
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export class GatewayIncidentAdapter implements IncidentAdapter {
@@ -109,9 +145,11 @@ export class GatewayIncidentAdapter implements IncidentAdapter {
   private readonly auth: GatewayAuthProviderV1;
   private readonly clock: Clock;
   private readonly store: ArtifactStoreV1;
+  private readonly retryBaseDelayMs: number;
+  private retryBudget: number;
 
   constructor(options: GatewayIncidentAdapterOptionsV1) {
-    const { config, transport, auth, clock, store } = options;
+    const { config, transport, auth, clock, store, retry } = options;
     if (config.adapter.kind !== "gateway") {
       throw new Error(
         "GatewayIncidentAdapter requires a gateway adapter config",
@@ -123,12 +161,36 @@ export class GatewayIncidentAdapter implements IncidentAdapter {
     if (typeof baseUrl !== "string" || baseUrl.length === 0) {
       throw new Error("GatewayIncidentAdapter requires a configured base URL");
     }
+    let retryBudget = 0;
+    let retryBaseDelayMs = 0;
+    if (retry !== undefined) {
+      if (
+        !Number.isSafeInteger(retry.budget) || retry.budget < 0 ||
+        retry.budget > RETRY_BUDGET_MAX
+      ) {
+        throw new Error(
+          "GatewayIncidentAdapter requires a retry budget in 0..10",
+        );
+      }
+      if (
+        !Number.isSafeInteger(retry.baseDelayMs) || retry.baseDelayMs < 0 ||
+        retry.baseDelayMs > RETRY_DELAY_MAX_MS
+      ) {
+        throw new Error(
+          "GatewayIncidentAdapter requires a retry base delay in 0..10000ms",
+        );
+      }
+      retryBudget = retry.budget;
+      retryBaseDelayMs = retry.baseDelayMs;
+    }
     this.config = config;
     this.baseUrl = baseUrl;
     this.transport = transport;
     this.auth = auth;
     this.clock = clock;
     this.store = store;
+    this.retryBudget = retryBudget;
+    this.retryBaseDelayMs = retryBaseDelayMs;
   }
 
   async listUnresolvedIncidents(
@@ -318,21 +380,37 @@ export class GatewayIncidentAdapter implements IncidentAdapter {
     return { ok: true, value: now };
   }
 
-  private requestJson(
+  private async requestJson(
     path: string,
     query: URLSearchParams,
     byteCap: number,
   ): Promise<PortResultV1<{ status: number; body: unknown }>> {
-    return gatewayRead(
-      {
-        baseUrl: this.baseUrl,
-        path,
-        query,
-        responseByteCap: byteCap,
-      },
-      this.transport,
-      this.auth,
-    );
+    // Bounded transient retry: read-only GETs are idempotent, so a 5xx or a
+    // rejected transport may be retried. The budget is shared across the
+    // adapter instance (one run), so a full producer outage still fails fast
+    // instead of multiplying the per-request time bound across pages.
+    let attempt = 0;
+    for (;;) {
+      const result = await gatewayRead(
+        {
+          baseUrl: this.baseUrl,
+          path,
+          query,
+          responseByteCap: byteCap,
+        },
+        this.transport,
+        this.auth,
+      );
+      if (
+        result.ok || this.retryBudget <= 0 ||
+        !isTransientGatewayFault(result.error)
+      ) {
+        return result;
+      }
+      this.retryBudget -= 1;
+      attempt += 1;
+      await sleepMs(this.retryBaseDelayMs * attempt);
+    }
   }
 
   private async scanIndexForIncident(
