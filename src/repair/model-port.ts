@@ -2223,6 +2223,11 @@ function buildPrompt(
       }`,
     );
   }
+  if (request.scopeNote !== undefined) {
+    // Decomposed sub-task: bound the model's ambition to one serial part so
+    // the part fits the cell timeout. Earlier parts are already merged.
+    parts.push(`Task scope for this run:\n${request.scopeNote}`);
+  }
   if (
     request.reviewFindings !== undefined && request.reviewFindings.length > 0
   ) {

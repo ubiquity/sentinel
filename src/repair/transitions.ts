@@ -13,6 +13,7 @@ import type { GitSha } from "../contracts/brands.ts";
 import type { IncidentSummaryV1 } from "../contracts/incident.ts";
 import { parseRepairStateSnapshotV1 } from "../contracts/state-snapshots.ts";
 import type { RepairStateSnapshotV1 } from "../contracts/state-snapshots.ts";
+import { MATRIX_DECOMPOSE_MAX_PARTS } from "../contracts/matrix.ts";
 import type { EvidenceRefV1 } from "../contracts/shared.ts";
 import { parseWorkRecordV1 } from "../contracts/work-record.ts";
 import type {
@@ -24,7 +25,9 @@ import type {
   WorkWaitV1,
 } from "../contracts/work-record.ts";
 import { workItemIdForIncident, workItemIdForIssue } from "./keys.ts";
+import { candidateBranch } from "./keys.ts";
 import type { RepositoryIdentityV1 } from "../contracts/shared.ts";
+import { asWorkItemId } from "../contracts/brands.ts";
 
 // ---------------------------------------------------------------------------
 // Intake
@@ -189,6 +192,63 @@ export function createIssueWork(
 }
 
 /**
+ * Split a repeatedly-timed-out issue into serial sub-task work records. Each
+ * child inherits the parent's repository, source, classification and urgency,
+ * chains on the previous child via `dependencies` (so parts land in order and
+ * each part's cell starts from the merged base of the one before), and gets
+ * its own candidate branch. The parent is left untouched; the planner skips
+ * parents that already have children. Child count grows with consecutive
+ * timeouts (bounded by MATRIX_DECOMPOSE_MAX_PARTS) so a stubborn issue keeps
+ * splitting until its parts fit the cell timeout.
+ */
+export function createDecompositionChildren(
+  parent: WorkRecordV1,
+  now: number,
+): WorkRecordV1[] {
+  const timeouts = parent.counters.timeouts ?? 0;
+  const total = Math.min(Math.max(timeouts, 2), MATRIX_DECOMPOSE_MAX_PARTS);
+  const children: WorkRecordV1[] = [];
+  for (let index = 1; index <= total; index++) {
+    const id = asWorkItemId(decompositionChildId(parent.id, index, total));
+    const record = {
+      version: "v1" as const,
+      kind: "work" as const,
+      repository: parent.repository,
+      id,
+      source: parent.source,
+      related: parent.related,
+      fingerprint: parent.fingerprint,
+      failingRevision: parent.failingRevision,
+      sourceSnapshotDigest: parent.sourceSnapshotDigest,
+      classification: parent.classification,
+      urgency: parent.urgency,
+      dependencies: index === 1
+        ? []
+        : [asWorkItemId(decompositionChildId(parent.id, index - 1, total))],
+      controller: parent.controller,
+      target: {
+        base: parent.target.base,
+        branch: candidateBranch(id),
+        checkpoint: null,
+        head: null,
+        pr: null,
+      },
+      nextStep: "work" as const,
+      wait: null,
+      blocker: null,
+      counters: { attempts: 0, retries: 0, reviewRounds: 0 },
+      evidence: [],
+      intent: null,
+      firstSeenAt: parent.firstSeenAt,
+      createdAt: now,
+      updatedAt: now,
+    };
+    children.push(expectWork(record));
+  }
+  return children;
+}
+
+/**
  * Apply a refreshed incident summary to an existing work record. Frozen rules:
  * identity/fingerprint/firstSeenAt/failing revision are fixed, count and
  * lastSeenAt are nondecreasing; severity/evidence/coverage may update. The
@@ -299,6 +359,103 @@ export function setIntent(
 /** Clear an intent only after the external effect is reconciled. */
 export function clearIntent(record: WorkRecordV1, now: number): WorkRecordV1 {
   return expectWork({ ...record, intent: null, updatedAt: now });
+}
+
+/**
+ * Record one matrix-cell host timeout for this record: the runner was killed
+ * before the cell wrote its result artifact, so the model run's work was
+ * discarded. The consecutive-timeout counter drives decomposition (see
+ * MATRIX_DECOMPOSE_AFTER_TIMEOUTS). The stale implementation intent is cleared
+ * so the record becomes retry-eligible again — without this the record would
+ * deadlock, since matrix admission requires a null intent. The dead
+ * reservation itself stays charged; the next grant mints a fresh one.
+ */
+export function recordMatrixTimeout(
+  record: WorkRecordV1,
+  now: number,
+): WorkRecordV1 {
+  const timeouts = (record.counters.timeouts ?? 0) + 1;
+  return expectWork({
+    ...record,
+    intent: null,
+    counters: { ...record.counters, timeouts },
+    updatedAt: now,
+  });
+}
+
+/**
+ * Clear the consecutive-timeout counter after the record makes progress (any
+ * ingested non-missing cell result). A progressing record's bytes return to
+ * their original shape.
+ */
+export function clearMatrixTimeouts(
+  record: WorkRecordV1,
+  now: number,
+): WorkRecordV1 {
+  if (record.counters.timeouts === undefined) return record;
+  const { timeouts: _dropped, ...counters } = record.counters;
+  return expectWork({ ...record, counters, updatedAt: now });
+}
+
+// ---------------------------------------------------------------------------
+// Decomposition
+// ---------------------------------------------------------------------------
+
+/** Marker segment for decomposed sub-task work ids: `<parent>:part-<i>-of-<n>`. */
+const DECOMPOSITION_PART_MARKER = ":part-";
+
+/**
+ * Deterministic sub-task work id for one part of a decomposed issue. The id
+ * stays within the WorkItemId pattern and sorts lexicographically by part.
+ */
+export function decompositionChildId(
+  parentId: string,
+  index: number,
+  total: number,
+): string {
+  return `${parentId}:part-${index}-of-${total}`;
+}
+
+/** True when this work id names a decomposition sub-task, not a whole issue. */
+export function isDecompositionChildId(id: string): boolean {
+  return id.includes(DECOMPOSITION_PART_MARKER);
+}
+
+/**
+ * Parse a decomposition child id back into its part position. Returns null for
+ * whole-issue ids or malformed markers. Uses plain string splitting — no
+ * pattern matching — over the planner-controlled id format.
+ */
+export function decompositionPartOf(
+  id: string,
+): { index: number; total: number } | null {
+  const markerAt = id.lastIndexOf(DECOMPOSITION_PART_MARKER);
+  if (markerAt < 0) return null;
+  const rest = id.slice(markerAt + DECOMPOSITION_PART_MARKER.length);
+  const ofAt = rest.lastIndexOf("-of-");
+  if (ofAt < 0) return null;
+  const index = Number(rest.slice(0, ofAt));
+  const total = Number(rest.slice(ofAt + 4));
+  if (
+    !Number.isSafeInteger(index) || !Number.isSafeInteger(total) ||
+    index < 1 || total < 1 || index > total
+  ) return null;
+  return { index, total };
+}
+
+/**
+ * Deterministic scope note for one decomposed part. This is a fixed template,
+ * identical for every issue — it carries only the part position, never
+ * issue-specific heuristics. The model decides the coherent subset; the note
+ * only bounds the ambition so each part fits the cell timeout.
+ */
+export function decompositionScopeNote(index: number, total: number): string {
+  return `Decomposition: this is part ${index} of ${total} of the work for ` +
+    `this issue. Earlier parts (if any) are already merged. Implement only a ` +
+    `coherent, self-contained subset of the remaining fix that you can ` +
+    `complete and verify within your time bound. Do not attempt the entire ` +
+    `issue; leave the remainder for the following parts. Keep the change ` +
+    `minimal and independently mergeable.`;
 }
 
 /** One implementation attempt is about to be started (budget already admitted). */

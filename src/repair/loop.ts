@@ -118,6 +118,8 @@ import {
   countReviewRound,
   createIncidentWork,
   createIssueWork,
+  decompositionPartOf,
+  decompositionScopeNote,
   markBlocked,
   markDone,
   markTerminalBlocked,
@@ -3228,6 +3230,7 @@ export async function prepareImplementationStart(
 
   const rejectedHead = headRejectedByReview(context.snapshot, record);
   const findings = correctionFindings(context.snapshot, record);
+  const part = decompositionPartOf(record.id);
   const request: ModelRunRequestV1 = {
     taskId: record.id,
     repository: record.repository,
@@ -3238,6 +3241,9 @@ export async function prepareImplementationStart(
     issue,
     evidence: record.evidence,
     ...(findings === null ? {} : { reviewFindings: findings }),
+    ...(part === null
+      ? {}
+      : { scopeNote: decompositionScopeNote(part.index, part.total) }),
     model: implementationModelId(deps),
     reasoning: REASONING,
     maxDurationMs: bound.maxDurationMs,

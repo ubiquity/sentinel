@@ -50,6 +50,15 @@ export const MATRIX_PLAN_VERSION = "v1" as const;
 export const MATRIX_CELL_RESULT_VERSION = "v1" as const;
 /** Native GitHub Actions matrix ceiling; the planner never throttles below it. */
 export const MAX_MATRIX_CELLS = 256;
+/**
+ * Consecutive matrix-cell host timeouts after which the planner decomposes an
+ * issue into serial sub-tasks instead of granting the whole issue again. Each
+ * part is independently completable within the cell timeout, so a timeout
+ * discards at most one part's work instead of the whole issue's.
+ */
+export const MATRIX_DECOMPOSE_AFTER_TIMEOUTS = 2;
+/** Upper bound on sub-task parts for one decomposed issue. */
+export const MATRIX_DECOMPOSE_MAX_PARTS = 4;
 
 /**
  * Fixed launcher artifact paths, relative to the dispatched runner workspace:
@@ -88,7 +97,11 @@ const REQUEST_REQUIRED = [
   "maxDurationMs",
   "maxOutputChars",
 ] as const;
-const REQUEST_OPTIONAL = ["checkoutBase", "reviewFindings"] as const;
+const REQUEST_OPTIONAL = [
+  "checkoutBase",
+  "reviewFindings",
+  "scopeNote",
+] as const;
 const FINDING_KEYS = ["severity", "path", "message"] as const;
 const RUN_KEYS = ["runId", "runAttempt", "launcherSha"] as const;
 const CELL_KEYS = [
@@ -378,6 +391,9 @@ export function parseMatrixModelRequestV1(
   const checkoutBase = obj.checkoutBase === undefined
     ? undefined
     : expectGitSha(obj.checkoutBase, `${path}.checkoutBase`);
+  const scopeNote = obj.scopeNote === undefined
+    ? undefined
+    : expectNonEmptyString(obj.scopeNote, `${path}.scopeNote`, MAX_TEXT_CHARS);
   if (obj.reasoning !== "max") {
     fail(`${path}.reasoning`, "invalid_enum", "reasoning must be max");
   }
@@ -393,6 +409,7 @@ export function parseMatrixModelRequestV1(
     repository: parseRepositoryIdentity(obj.repository, `${path}.repository`),
     base: expectGitSha(obj.base, `${path}.base`),
     ...(checkoutBase === undefined ? {} : { checkoutBase }),
+    ...(scopeNote === undefined ? {} : { scopeNote }),
     issue,
     evidence,
     ...(reviewFindings === undefined ? {} : { reviewFindings }),
