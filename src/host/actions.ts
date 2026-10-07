@@ -797,6 +797,7 @@ export async function runActionsRepairHost(
     clock,
     route: modelRoute,
     modelId: modelRoute.model,
+    failoverModelId: modelRoute.failoverModel,
     localIteration: false,
     // Both capabilities resolve from the REQUESTED repository, not from the
     // sentinel self-identity: the checkout and the candidate import must use

@@ -778,6 +778,15 @@ export interface CodexImplementationPortOptionsV1 {
    */
   modelId?: string;
   /**
+   * Gateway failover model id (e.g. `gpt-6-luna`) the port retries with when
+   * the primary model is rate limited (HTTP 429). Same gateway endpoint,
+   * same credentials, frozen `max` reasoning — only the model id changes,
+   * and only on a 429. The retry is a fresh, self-consistent attempt: its
+   * request names the failover model and its receipt records exactly that.
+   * An invalid value (or one equal to the primary) disables the failover.
+   */
+  failoverModelId?: string;
+  /**
    * Optional trusted host-defined named permission profile. When present it
    * must match /^[A-Za-z][A-Za-z0-9_-]{0,63}$/ and is never a built-in
    * full-access id; an invalid value returns static unavailable before any
@@ -820,11 +829,23 @@ export class CodexImplementationPort implements ImplementationPort {
    * can ever match: the port then fails closed before any session opens.
    */
   readonly modelId: string;
+  /**
+   * Gateway failover model id for HTTP 429 retries. Empty when disabled: the
+   * port then never retries and behaves exactly as before.
+   */
+  readonly failoverModelId: string;
+  /** Receipt verifier bound to the failover model; null when disabled. */
+  private readonly failoverVerifier: ReceiptVerifierV1 | null;
 
   constructor(options: CodexImplementationPortOptionsV1) {
     this.options = options;
     const configuredModelId = options.modelId ?? DEFAULT_MODEL_ID;
     this.modelId = isValidModelId(configuredModelId) ? configuredModelId : "";
+    const configuredFailover = options.failoverModelId ?? "";
+    this.failoverModelId =
+      isValidModelId(configuredFailover) && configuredFailover !== this.modelId
+        ? configuredFailover
+        : "";
     // The concrete request/runtime receipt producer for the exact selected
     // provider and model is ALWAYS the core gate (an invalid/missing provider
     // or model returns unavailable before any session opens, so an invalid
@@ -834,6 +855,15 @@ export class CodexImplementationPort implements ImplementationPort {
       options.modelProvider ?? "",
       this.modelId,
     );
+    // The failover attempt is a separate self-consistent run: its own
+    // verifier binds the failover model id so its receipt records exactly
+    // the model that was actually requested on the retry.
+    this.failoverVerifier = this.failoverModelId === ""
+      ? null
+      : createRequestRuntimeReceiptVerifier(
+        options.modelProvider ?? "",
+        this.failoverModelId,
+      );
     this.customVerifier = options.receiptVerifier ?? null;
     this.graceMs = options.interruptSettlementGraceMs ??
       DEFAULT_INTERRUPT_SETTLEMENT_GRACE_MS;
@@ -852,6 +882,44 @@ export class CodexImplementationPort implements ImplementationPort {
       request.model !== this.modelId ||
       request.reasoning !== REQUIRED_REASONING_EFFORT
     ) {
+      return portError("unavailable", MODEL_POLICY_DETAIL);
+    }
+    const primary = await this.runAttempt(
+      request,
+      this.modelId,
+      this.coreVerifier,
+    );
+    // Gateway 429 failover: when the primary model is rate limited, retry
+    // ONCE with the failover model on the same endpoint and credentials.
+    // Every other failure returns as-is — the failover engages ONLY on 429.
+    if (this.failoverVerifier !== null && isRateLimitedResult(primary)) {
+      console.error(
+        `[sentinel] model ${this.modelId} rate limited (429); failing over ` +
+          `to ${this.failoverModelId} with max reasoning`,
+      );
+      return await this.runAttempt(
+        { ...request, model: this.failoverModelId },
+        this.failoverModelId,
+        this.failoverVerifier,
+      );
+    }
+    return primary;
+  }
+
+  /**
+   * One self-consistent model attempt: the request names exactly the model
+   * this attempt submits, and the receipt records exactly that model. The
+   * failover retry is a separate attempt with its own verifier, never a
+   * mid-run model swap.
+   */
+  private async runAttempt(
+    request: ModelRunRequestV1,
+    expectedModel: string,
+    verifier: ReceiptVerifierV1,
+  ): Promise<PortResultV1<ModelRunReceiptV1>> {
+    // The attempt's request must name exactly the model this attempt submits;
+    // the receipt then truthfully records the model that was requested.
+    if (request.model !== expectedModel) {
       return portError("unavailable", MODEL_POLICY_DETAIL);
     }
     // An explicit valid modelProvider is REQUIRED before ANY session opens,
@@ -928,6 +996,7 @@ export class CodexImplementationPort implements ImplementationPort {
         thread,
         turn.turnId,
         settled,
+        verifier,
       );
     } catch (error) {
       const failure = unavailableFor(error);
@@ -1759,6 +1828,7 @@ export class CodexImplementationPort implements ImplementationPort {
     },
     turnId: string,
     settled: AwaitedSettlementV1,
+    verifier: ReceiptVerifierV1,
   ): Promise<PortResultV1<ModelRunReceiptV1>> {
     // Sticky unavailable-evidence disposition FIRST: protocol/routing
     // uncertainty (malformed reroute/terminal identity, off-policy route,
@@ -1807,8 +1877,10 @@ export class CodexImplementationPort implements ImplementationPort {
     }
     // The concrete core request/runtime checks ALWAYS run first: correlation,
     // thread acknowledgment, routing and output evidence are port duties and
-    // cannot be bypassed by a permissive injected verifier.
-    const verified = this.coreVerifier(evidence);
+    // cannot be bypassed by a permissive injected verifier. The verifier is
+    // the one bound to this attempt's model, so a failover retry certifies
+    // exactly the model it requested.
+    const verified = verifier(evidence);
     if (verified === null) {
       return portError("unavailable", UNAVAILABLE_RECEIPT_DETAIL);
     }
@@ -2288,4 +2360,34 @@ function unavailableFor(
     ? error.detail
     : "codex session unavailable";
   return { kind: "unavailable", detail };
+}
+
+/**
+ * Whether a model attempt failed because the gateway rate limited the
+ * primary model (HTTP 429). Only a failed runtime receipt whose provider
+ * error message names rate limiting qualifies — transport, auth, policy,
+ * timeout and loop-stop outcomes never trigger the failover.
+ */
+function isRateLimitedResult(
+  result: PortResultV1<ModelRunReceiptV1>,
+): boolean {
+  if (!result.ok) return false;
+  const receipt = result.value;
+  if (receipt.outcome !== "failed") return false;
+  return isRateLimitMessage(receipt.error);
+}
+
+/**
+ * Whether a provider error message signals HTTP 429 rate limiting.
+ * Case-insensitive; matches the status code and common phrasings. Kept
+ * narrow on purpose: quota/billing wording is NOT a rate limit.
+ */
+function isRateLimitMessage(error: string | null): boolean {
+  if (error === null || error.length === 0) return false;
+  const lower = error.toLowerCase();
+  return lower.includes("429") ||
+    lower.includes("rate limit") ||
+    lower.includes("rate_limit") ||
+    lower.includes("ratelimit") ||
+    lower.includes("too many requests");
 }

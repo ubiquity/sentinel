@@ -17,7 +17,9 @@ import assert from "node:assert/strict";
 import { asGitSha, asWorkItemId } from "../../src/contracts/brands.ts";
 import type { ModelRunRequestV1 } from "../../src/contracts/ports.ts";
 import {
+  DEFAULT_FAILOVER_MODEL_ID,
   MODEL_ROUTE_INVALID,
+  resolveFailoverModelId,
   resolveModelRoute,
   resolveReviewModelId,
 } from "../../src/host/model-route.ts";
@@ -33,6 +35,7 @@ const GATEWAY = {
   model: "gpt-reserve",
   reasoning: "max",
   apiKeyEnv: null,
+  failoverModel: "gpt-6-luna",
 } as const;
 
 const DEEPSEEK_KEY = "SENTINEL_DEEPSEEK_API_KEY";
@@ -65,6 +68,7 @@ Deno.test("model route: the explicit owner override selects the endpoint", () =>
     model: "deepseek-flash",
     reasoning: "max",
     apiKeyEnv: DEEPSEEK_KEY,
+    failoverModel: "gpt-6-luna",
   });
   // A declared model id is used verbatim; no other id is ever requested.
   const declared = resolveModelRoute({
@@ -106,6 +110,7 @@ Deno.test("model route: the explicit fallback selects DeepSeek direct", () => {
     model: "deepseek-flash",
     reasoning: "max",
     apiKeyEnv: DEEPSEEK_KEY,
+    failoverModel: "gpt-6-luna",
   });
   // The fallback never keeps the gateway model id.
   assert.notEqual(route.model, GATEWAY.model);
@@ -446,4 +451,82 @@ Deno.test("model route: the port opens no session for an off-route model", async
   const fallback = await defaultPort.runModel(routeRequest(ROUTE_MODEL));
   assert.equal(fallback.ok, false);
   assert.equal(defaultOpened, 0, "the frozen default refuses the fallback id");
+});
+
+Deno.test("failover model: unset or blank yields the default Luna 6", () => {
+  assert.equal(DEFAULT_FAILOVER_MODEL_ID, "gpt-6-luna");
+  assert.equal(resolveFailoverModelId({}), "gpt-6-luna");
+  assert.equal(
+    resolveFailoverModelId({ SENTINEL_MODEL_FAILOVER_ID: "" }),
+    "gpt-6-luna",
+  );
+  assert.equal(
+    resolveFailoverModelId({ SENTINEL_MODEL_FAILOVER_ID: "   " }),
+    "gpt-6-luna",
+  );
+  // Unrelated environment changes nothing.
+  assert.equal(
+    resolveFailoverModelId({ PATH: "/usr/bin", UOS_AI_TOKEN: "gateway-token" }),
+    "gpt-6-luna",
+  );
+});
+
+Deno.test("failover model: a declared override is used verbatim", () => {
+  assert.equal(
+    resolveFailoverModelId({ SENTINEL_MODEL_FAILOVER_ID: "gpt-6-luna" }),
+    "gpt-6-luna",
+  );
+  assert.equal(
+    resolveFailoverModelId({ SENTINEL_MODEL_FAILOVER_ID: "gpt-6-astra" }),
+    "gpt-6-astra",
+  );
+});
+
+Deno.test("failover model: an invalid value yields the default, never empty", () => {
+  // Padded, over-long and control-character values cannot fabricate a route:
+  // they resolve to the known-good default instead of disabling the failover.
+  assert.equal(
+    resolveFailoverModelId({ SENTINEL_MODEL_FAILOVER_ID: "  gpt-6-luna  " }),
+    "gpt-6-luna",
+  );
+  assert.equal(
+    resolveFailoverModelId({ SENTINEL_MODEL_FAILOVER_ID: "x".repeat(300) }),
+    "gpt-6-luna",
+  );
+  assert.equal(
+    resolveFailoverModelId({ SENTINEL_MODEL_FAILOVER_ID: "gpt-6-luna\n" }),
+    "gpt-6-luna",
+  );
+});
+
+Deno.test("failover model: the resolved route always carries the failover model", () => {
+  // Gateway default.
+  assert.equal(resolveModelRoute({}).failoverModel, "gpt-6-luna");
+  // The override flows into the route.
+  assert.equal(
+    resolveModelRoute({ SENTINEL_MODEL_FAILOVER_ID: "gpt-6-astra" })
+      .failoverModel,
+    "gpt-6-astra",
+  );
+  // DeepSeek-direct routes carry it too (the port engages it on gateway 429s).
+  assert.equal(
+    resolveModelRoute({
+      SENTINEL_MODEL_FALLBACK: "deepseek",
+      SENTINEL_DEEPSEEK_API_KEY: "key",
+    }).failoverModel,
+    "gpt-6-luna",
+  );
+});
+
+Deno.test("failover model: a malformed mapping fails closed", () => {
+  for (const bad of [null, "env", ["SENTINEL_MODEL_FAILOVER_ID"]]) {
+    assert.throws(
+      () =>
+        resolveFailoverModelId(
+          bad as unknown as Record<string, string | undefined>,
+        ),
+      (error: unknown) =>
+        error instanceof Error && error.message === MODEL_ROUTE_INVALID,
+    );
+  }
 });
