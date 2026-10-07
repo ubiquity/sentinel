@@ -332,7 +332,7 @@ Deno.test(
 );
 
 Deno.test(
-  "issue relations: listOpenIssues skips the issue when one relation read fails",
+  "issue relations: listOpenIssues includes the issue without relations when one relation read fails",
   async () => {
     const { client, transport } = makeClient([
       httpRespond("GET", "/issues", 200, [
@@ -349,12 +349,16 @@ Deno.test(
     ], true);
 
     const result = await client.listOpenIssues();
-    // The issue with failed relations is skipped; the good issue is returned.
-    // Failing the whole listing on one bad issue starves intake.
+    // The issue with failed relations is included WITHOUT relations; the
+    // intake admits it and the cell's pre-start check does final verification.
+    // Dropping it here would starve intake when GraphQL is unavailable.
     assert.equal(result.ok, true, JSON.stringify(result));
     if (result.ok) {
-      assert.equal(result.value.length, 1);
+      assert.equal(result.value.length, 2);
       assert.equal(result.value[0].number, 7);
+      assert.equal(result.value[1].number, 8);
+      assert.notEqual(result.value[0].relations, undefined);
+      assert.equal(result.value[1].relations, undefined);
     }
     // Both relation reads were attempted (one per actual issue).
     assert.equal(
