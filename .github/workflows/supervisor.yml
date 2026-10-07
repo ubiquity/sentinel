@@ -327,7 +327,7 @@ jobs:
     needs: [prepare, matrix_plan]
     if: ${{ !cancelled() && needs.prepare.result == 'success' && github.ref == 'refs/heads/sentinel-supervisor' && needs.prepare.outputs.run == 'true' && needs.matrix_plan.result == 'success' && needs.matrix_plan.outputs.hasCells == 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 300
     environment:
       name: sentinel-supervisor
     permissions:
