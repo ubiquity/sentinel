@@ -809,6 +809,13 @@ export async function runActionsMatrixHost(
           generation: host.execution.generation,
           planDigest: result.planDigest,
           prepared: result.prepared,
+          attempted: result.attempted,
+          notReady: result.notReady,
+          deferred: result.deferred,
+          // Diagnostic breakdown when zero cells were prepared.
+          ...(result.diagnostic !== undefined
+            ? { diagnostic: result.diagnostic }
+            : {}),
         }));
         return cycles;
       }

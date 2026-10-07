@@ -224,6 +224,23 @@ export interface MatrixPlanReportV1 {
   notReady: number;
   /** Records whose preparation persisted a wait/refusal step instead. */
   deferred: number;
+  /**
+   * Diagnostic breakdown of why records were filtered. Present when the
+   * planner found zero eligible work; used to identify intake/planner bugs.
+   */
+  diagnostic?: MatrixPlanDiagnosticV1;
+}
+
+/** Why the planner filtered records, for debugging zero-cell runs. */
+export interface MatrixPlanDiagnosticV1 {
+  /** Total work records in the snapshot. */
+  totalRecords: number;
+  /** Records skipped by rankEligibleWork, grouped by skip reason. */
+  skippedByReason: Record<string, number>;
+  /** Records in ranked order that failed isMatrixImplementationReadyV1, grouped by specific filter. */
+  notReadyByReason: Record<string, number>;
+  /** Sample record IDs for each not-ready reason (max 3 per reason). */
+  notReadySamples: Record<string, string[]>;
 }
 
 /**
@@ -292,6 +309,78 @@ async function persistDecompositionChildren(
 }
 
 /**
+ * Explains why a record fails isMatrixImplementationReadyV1. Returns null if
+ * the record passes all checks (except the head review check, which needs
+ * snapshot context and is reported as "head-not-null" for further inspection).
+ * Mirrors the predicate logic exactly for diagnostic purposes.
+ */
+function explainMatrixNotReady(
+  record: WorkRecordV1,
+  config: RepositoryConfigV1,
+): string | null {
+  if (record.source.kind !== "issue") {
+    return `source.kind=${record.source.kind}`;
+  }
+  if (record.nextStep !== "work") {
+    return `nextStep=${record.nextStep}`;
+  }
+  if (record.intent !== null) {
+    return `intent=${record.intent.key}`;
+  }
+  const candidateState = record.target.candidateState;
+  if (candidateState !== undefined && candidateState.preserved === null) {
+    return "candidateState.preserved=null";
+  }
+  if (record.target.branch === null) {
+    return "target.branch=null";
+  }
+  if (config.sessionBound === null) {
+    return "config.sessionBound=null";
+  }
+  if (record.target.head !== null) {
+    return "target.head-not-null";
+  }
+  return null;
+}
+
+/**
+ * Builds a diagnostic breakdown of why the planner filtered records.
+ * `explainNotReady` returns the specific filter reason for a record in
+ * ranked order, or null if the record is ready.
+ */
+function buildPlanDiagnostic(
+  snapshot: { work: readonly WorkRecordV1[] },
+  ranked: { ordered: string[]; skipped: Record<string, string> },
+  explainNotReady: (record: WorkRecordV1) => string | null,
+): MatrixPlanDiagnosticV1 {
+  const skippedByReason: Record<string, number> = {};
+  for (const reason of Object.values(ranked.skipped)) {
+    skippedByReason[reason] = (skippedByReason[reason] ?? 0) + 1;
+  }
+  const notReadyByReason: Record<string, number> = {};
+  const notReadySamples: Record<string, string[]> = {};
+  const workById = new Map<string, WorkRecordV1>(
+    snapshot.work.map((w) => [w.id as string, w]),
+  );
+  for (const id of ranked.ordered) {
+    const record = workById.get(id);
+    if (record === undefined) continue;
+    const reason = explainNotReady(record);
+    if (reason === null) continue;
+    notReadyByReason[reason] = (notReadyByReason[reason] ?? 0) + 1;
+    const samples = notReadySamples[reason] ?? [];
+    if (samples.length < 3) samples.push(id);
+    notReadySamples[reason] = samples;
+  }
+  return {
+    totalRecords: snapshot.work.length,
+    skippedByReason,
+    notReadyByReason,
+    notReadySamples,
+  };
+}
+
+/**
  * Trusted planner. Only records whose NEXT step is a fresh implementation
  * start receive a grant (`isMatrixImplementationReadyV1`); review, delivery,
  * correction, preservation and already-intended records are left to the
@@ -334,6 +423,8 @@ export async function planMatrixWave(
   let attempted = 0;
   let deferred = 0;
   let notReady = 0;
+  // Diagnostic: captured from the last planner iteration for zero-cell runs.
+  let lastDiagnostic: MatrixPlanDiagnosticV1 | null = null;
 
   while (cells.length < limit) {
     const readAt = deps.clock.now();
@@ -350,6 +441,17 @@ export async function planMatrixWave(
     const now = deps.clock.now();
     if (now >= bounds.modelCutoff || now >= bounds.runDeadline) break;
     const ranked = rankEligibleWork(context.snapshot, deps.configs, now);
+    // Capture diagnostic on every iteration; the last one explains a zero-cell result.
+    lastDiagnostic = buildPlanDiagnostic(
+      context.snapshot,
+      ranked,
+      (record) => {
+        const config = configForRepository(deps, record.repository);
+        return config === null
+          ? "config=null"
+          : explainMatrixNotReady(record, config);
+      },
+    );
     const nextId = ranked.ordered.find((id) => {
       if (attemptedIds.has(id)) return false;
       const record = context.snapshot.work.find((work) => work.id === id);
@@ -464,6 +566,10 @@ export async function planMatrixWave(
     prepared: cells.length,
     notReady,
     deferred,
+    // Include the diagnostic when no cells were prepared; it explains why.
+    ...(cells.length === 0 && lastDiagnostic !== null
+      ? { diagnostic: lastDiagnostic }
+      : {}),
   };
 }
 
