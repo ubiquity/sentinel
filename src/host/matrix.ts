@@ -29,6 +29,7 @@ import type { GitSha } from "../contracts/brands.ts";
 import {
   MATRIX_CELL_PATH,
   MATRIX_CELL_RESULT_VERSION,
+  MATRIX_DECOMPOSE_AFTER_TIMEOUTS,
   MATRIX_PLAN_PATH,
   MATRIX_PLAN_VERSION,
   MATRIX_RESULT_PATH,
@@ -58,6 +59,7 @@ import type {
 } from "../contracts/ports.ts";
 import type { RepositoryConfigV1 } from "../contracts/repository-config.ts";
 import type { RepositoryIdentityV1 } from "../contracts/shared.ts";
+import type { WorkRecordV1 } from "../contracts/work-record.ts";
 import {
   candidateBranch,
   candidatePreservationRef,
@@ -75,6 +77,12 @@ import {
   settleFailedImplementation,
 } from "../repair/loop.ts";
 import { rankEligibleWork } from "../repair/selection.ts";
+import {
+  clearMatrixTimeouts,
+  createDecompositionChildren,
+  isDecompositionChildId,
+  recordMatrixTimeout,
+} from "../repair/transitions.ts";
 import type {
   MatrixBundleExporterV1,
   MatrixBundleImporterV1,
@@ -219,12 +227,83 @@ export interface MatrixPlanReportV1 {
 }
 
 /**
+ * Decomposition helpers: split a repeatedly-timed-out issue into serial
+ * sub-tasks so a host timeout discards at most one part's work.
+ */
+
+/** Work records already created for this parent's decomposition. */
+function decompositionChildrenOf(
+  snapshot: { work: readonly { id: string }[] },
+  parentId: string,
+): string[] {
+  const prefix = parentId + ":part-";
+  return snapshot.work
+    .map((w) => w.id)
+    .filter((id) => id.startsWith(prefix) && isDecompositionChildId(id));
+}
+
+/**
+ * True when the planner should decompose this record instead of granting the
+ * whole issue again: it is a whole issue (not itself a part), it has timed
+ * out at least MATRIX_DECOMPOSE_AFTER_TIMEOUTS times, and it has no children
+ * yet. Children never decompose further (no infinite recursion).
+ */
+function isDecompositionEligible(
+  record: {
+    id: string;
+    source: { kind: string };
+    counters: { timeouts?: number };
+  },
+  snapshot: { work: readonly { id: string }[] },
+): boolean {
+  if (record.source.kind !== "issue") return false;
+  if (isDecompositionChildId(record.id)) return false;
+  if ((record.counters.timeouts ?? 0) < MATRIX_DECOMPOSE_AFTER_TIMEOUTS) {
+    return false;
+  }
+  return decompositionChildrenOf(snapshot, record.id).length === 0;
+}
+
+/**
+ * Persist decomposition children for a timed-out parent. Idempotent: if any
+ * child already exists the write is skipped. Returns true when children are
+ * present afterwards (either pre-existing or newly persisted).
+ */
+async function persistDecompositionChildren(
+  deps: RepairCycleDepsV1,
+  parent: WorkRecordV1,
+  now: number,
+): Promise<boolean> {
+  const read = await deps.state.readRepair();
+  if (!read.ok || read.value.status !== "found") return false;
+  const snapshot = read.value.snapshot;
+  if (decompositionChildrenOf(snapshot, parent.id).length > 0) return true;
+  const freshParent = snapshot.work.find((w) => w.id === parent.id);
+  if (freshParent === undefined) return false;
+  const children = createDecompositionChildren(freshParent, now);
+  const next = {
+    ...snapshot,
+    work: [...snapshot.work, ...children],
+    sequence: snapshot.sequence + 1,
+    updatedAt: now,
+  };
+  const written = await deps.state.writeRepair(next, snapshot.stateHead);
+  return written.ok;
+}
+
+/**
  * Trusted planner. Only records whose NEXT step is a fresh implementation
  * start receive a grant (`isMatrixImplementationReadyV1`); review, delivery,
  * correction, preservation and already-intended records are left to the
  * ordinary serial lifecycle. Every admitted grant has a durable reservation, a
  * persisted implementation intent and the exact request the cell will run; the
  * planner re-reads authoritative state before each candidate.
+ *
+ * Decomposition: a whole issue that has timed out MATRIX_DECOMPOSE_AFTER_TIMEOUTS
+ * times is split into serial sub-tasks instead of being granted whole again.
+ * The parent is skipped while its children exist; children chain via
+ * dependencies so each part's cell starts from the previous part's merged
+ * base. A timeout then discards at most one part's work.
  */
 export async function planMatrixWave(
   deps: RepairCycleDepsV1,
@@ -275,6 +354,11 @@ export async function planMatrixWave(
       if (attemptedIds.has(id)) return false;
       const record = context.snapshot.work.find((work) => work.id === id);
       if (record === undefined) return false;
+      // A decomposed parent is superseded by its children; grant the parts,
+      // never the whole issue again.
+      if (decompositionChildrenOf(context.snapshot, record.id).length > 0) {
+        return false;
+      }
       const config = configForRepository(deps, record.repository);
       return config !== null &&
         isMatrixImplementationReadyV1(record, context.snapshot, config);
@@ -289,6 +373,14 @@ export async function planMatrixWave(
     if (!isMatrixImplementationReadyV1(record, context.snapshot, config)) {
       notReady++;
       continue;
+    }
+    // Decomposition: a repeatedly-timed-out issue is split into serial
+    // sub-tasks instead of being granted whole again. Skip the parent this
+    // wave; the children enter normal selection on the next wave.
+    if (isDecompositionEligible(record, context.snapshot)) {
+      const decomposed = await persistDecompositionChildren(deps, record, now);
+      if (decomposed) continue;
+      // Persist failed: fall through to a normal grant rather than stalling.
     }
     const outcome = await prepareImplementationStart(
       options.githubForRepository === undefined
@@ -697,14 +789,78 @@ function resultMatchesCell(
 }
 
 /**
+ * Record one host timeout for a cell's task: increment the consecutive-timeout
+ * counter and clear the stale intent so the record becomes retry-eligible.
+ * Returns the new timeout count, or null when state was unavailable.
+ */
+async function recordCellTimeout(
+  deps: RepairCycleDepsV1,
+  bounds: RunBoundsV1,
+  taskId: string,
+): Promise<number | null> {
+  const context = await loadRepairContext(deps, bounds);
+  if (context === null) return null;
+  const record = context.snapshot.work.find((work) => work.id === taskId);
+  if (record === undefined) return null;
+  const timedOut = recordMatrixTimeout(record, deps.clock.now());
+  const next = {
+    ...context.snapshot,
+    work: context.snapshot.work.map((work) =>
+      work.id === timedOut.id ? timedOut : work
+    ),
+    sequence: context.snapshot.sequence + 1,
+    updatedAt: deps.clock.now(),
+  };
+  const written = await deps.state.writeRepair(
+    next,
+    context.snapshot.stateHead,
+  );
+  if (!written.ok) return null;
+  return timedOut.counters.timeouts ?? 1;
+}
+
+/**
+ * Reset the consecutive-timeout counter after a cell's result was ingested
+ * (the model ran to completion, breaking the timeout streak). No-op when the
+ * record never timed out. Returns false only on state errors.
+ */
+async function resetCellTimeouts(
+  deps: RepairCycleDepsV1,
+  bounds: RunBoundsV1,
+  taskId: string,
+): Promise<boolean> {
+  const context = await loadRepairContext(deps, bounds);
+  if (context === null) return false;
+  const record = context.snapshot.work.find((work) => work.id === taskId);
+  if (record === undefined || record.counters.timeouts === undefined) {
+    return true;
+  }
+  const cleared = clearMatrixTimeouts(record, deps.clock.now());
+  const next = {
+    ...context.snapshot,
+    work: context.snapshot.work.map((work) =>
+      work.id === cleared.id ? cleared : work
+    ),
+    sequence: context.snapshot.sequence + 1,
+    updatedAt: deps.clock.now(),
+  };
+  const written = await deps.state.writeRepair(
+    next,
+    context.snapshot.stateHead,
+  );
+  return written.ok;
+}
+
+/**
  * Trusted, serialized, idempotent ingestion. Results are applied one cell at a
  * time against a FRESH authoritative context, so a successful sibling is never
  * rolled back and a restarted finalizer cannot double-apply. Conflicting
  * duplicate artifacts for one cell are rejected instead of picking the first;
- * identical reruns stay idempotent. A missing result changes nothing: the
- * durable reservation/intent stays charged and unreconciled. A completed
- * result whose receipt does not re-verify against the exact planned request
- * causes NO state update.
+ * identical reruns stay idempotent. A missing result records a host timeout
+ * (incrementing the consecutive-timeout counter and clearing the stale intent
+ * so the record becomes retry-eligible); repeated timeouts trigger
+ * decomposition. A completed result whose receipt does not re-verify against
+ * the exact planned request causes NO state update.
  */
 export async function ingestMatrixResults(
   deps: RepairCycleDepsV1,
@@ -764,10 +920,17 @@ export async function ingestMatrixResults(
     if (conflicted.has(cell.cellId)) continue;
     const result = chosen.get(cell.cellId);
     if (result === undefined) {
+      // Host timeout: the runner was killed before the cell wrote its result
+      // artifact, so the model run's work was discarded. Count the timeout
+      // and clear the stale implementation intent so the record becomes
+      // retry-eligible; repeated timeouts trigger decomposition.
+      const timeouts = await recordCellTimeout(deps, bounds, cell.taskId);
       entries.push({
         cellId: cell.cellId,
         disposition: "missing",
-        detail: "no result artifact; durable charge stays unreconciled",
+        detail: timeouts === null
+          ? "no result artifact; timeout count unavailable"
+          : `no result artifact; host timeout #${timeouts} recorded`,
       });
       continue;
     }
@@ -1018,6 +1181,9 @@ export async function ingestMatrixResults(
       detail: null,
     });
     ingested++;
+    // The model ran to completion: break any consecutive-timeout streak so a
+    // later isolated timeout does not trigger decomposition on stale history.
+    await resetCellTimeouts(deps, bounds, cell.taskId);
   }
 
   return { waveId: plan.waveId, entries, ingested };

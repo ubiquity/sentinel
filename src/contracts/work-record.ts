@@ -231,6 +231,16 @@ export interface WorkCountersV1 {
    * records that did advance, inside its own plan bucket.
    */
   stalled?: number;
+  /**
+   * Consecutive matrix-cell host timeouts (the runner was killed before the
+   * cell wrote its result artifact, so the model run's work was discarded).
+   * ABSENT means zero — the exact shape of every row written before this
+   * counter existed — and a default is never injected, so legacy bytes
+   * round-trip exactly. When this reaches MATRIX_DECOMPOSE_AFTER_TIMEOUTS the
+   * planner decomposes the issue into serial sub-tasks instead of granting
+   * the whole issue again, so a timeout discards at most one part's work.
+   */
+  timeouts?: number;
 }
 
 export interface WorkRecordV1 {
@@ -339,7 +349,7 @@ const WAIT_KEYS = ["reason", "since", "until"] as const;
 const BLOCKER_KEYS = ["kind", "message", "since"] as const;
 const COUNTERS_KEYS = ["attempts", "retries", "reviewRounds"] as const;
 /** Additive counter keys absent from rows written before they existed. */
-const COUNTERS_OPTIONAL_KEYS = ["stalled"] as const;
+const COUNTERS_OPTIONAL_KEYS = ["stalled", "timeouts"] as const;
 const INTENT_KEYS = [
   "kind",
   "key",
@@ -836,6 +846,9 @@ function parseCounters(input: unknown, path: string): WorkCountersV1 {
     ...(obj.stalled === undefined
       ? {}
       : { stalled: expectCount(obj.stalled, `${path}.stalled`) }),
+    ...(obj.timeouts === undefined
+      ? {}
+      : { timeouts: expectCount(obj.timeouts, `${path}.timeouts`) }),
   };
 }
 

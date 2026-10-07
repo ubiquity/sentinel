@@ -717,6 +717,14 @@ export interface ModelRunRequestV1 {
   reasoning: ReasoningEffortV1;
   maxDurationMs: number;
   maxOutputChars: number;
+  /**
+   * Optional sub-task scope note for decomposed work. When an issue times out
+   * repeatedly the planner splits it into serial parts; each part's cell
+   * carries this note telling the model which slice of the issue to implement
+   * (e.g. "part 2 of 3: ..."). Absent for whole-issue runs. Part of the
+   * request digest, so a grant cannot be rebound to a different scope.
+   */
+  scopeNote?: string;
 }
 
 export interface CandidateOutcomeV1 {
