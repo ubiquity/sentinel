@@ -330,13 +330,17 @@ export class GitHubApiClient {
           continue;
         }
         // Trusted enrichment of an actual REST issue record. If relations
-        // cannot be fetched for an issue, skip that issue (do not admit it
-        // without verified relations) but continue with the rest of the
-        // listing. Failing the whole listing on one bad issue starves intake.
+        // cannot be fetched for an issue, include it WITHOUT relations —
+        // the intake admits it and the matrix cell's pre-start verification
+        // does the final blocker check. Skipping the issue here would starve
+        // intake when GraphQL is unavailable.
         const relations = await this.readIssueRelations(
           parsed.value.issue.number,
         );
-        if (!relations.ok) continue;
+        if (!relations.ok) {
+          issues.push(parsed.value.issue);
+          continue;
+        }
         issues.push({ ...parsed.value.issue, relations: relations.value });
       }
     }

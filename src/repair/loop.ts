@@ -1896,21 +1896,19 @@ async function pollIntake(
           );
           if (existing !== undefined) continue;
 
-          // Issue-only (github adapter) intake gates on NATIVE dependency
-          // relations before any work record exists. Absent relations are
-          // unknown, never empty: the row is skipped and the run reports a
-          // source error instead of admitting an unverified issue. An issue
-          // that is itself a parent (has sub-issues) or has open native
-          // blockers is skipped without an error; it is re-listed on the next
-          // poll once those dependencies close.
+          // Issue-only (github adapter) intake checks NATIVE dependency
+          // relations when available. An issue that is itself a parent (has
+          // sub-issues) or has open native blockers is skipped without an
+          // error; it is re-listed on the next poll once those dependencies
+          // close. If relations are unavailable (GraphQL failure), the issue
+          // is admitted anyway — the matrix cell's pre-start verification
+          // re-reads the issue and refuses if blockers are present. This
+          // prevents a GraphQL outage from starving the entire intake.
           if (issueOnlyIntake) {
             const relations = issue.relations;
-            if (relations === undefined) {
-              error = `issue relations unavailable for #${issue.number}`;
-              continue;
-            }
             if (
-              relations.subIssueCount > 0 || relations.openBlockers.length > 0
+              relations !== undefined &&
+              (relations.subIssueCount > 0 || relations.openBlockers.length > 0)
             ) {
               continue;
             }
