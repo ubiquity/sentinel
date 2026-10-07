@@ -1930,6 +1930,11 @@ export interface LocalModelInputV1 {
    * (`gpt-reserve`) for callers that pass neither; the id is never rewritten.
    */
   modelId?: string;
+  /**
+   * Gateway failover model id for HTTP 429 retries. Defaults to the route's
+   * failover model; an invalid value disables the failover.
+   */
+  failoverModelId?: string;
   /** Provider endpoint used by the isolated implementation client. */
   modelBaseUrl?: string;
   /** Provider name used by the isolated implementation client config. */
@@ -2019,12 +2024,16 @@ export class LocalCheckoutModelPort implements ImplementationPort {
   readonly modelId: string;
   /** Exact route provider name the app-server session and config both name. */
   private readonly providerName: string;
+  /** Gateway failover model id for HTTP 429 retries; "" disables. */
+  private readonly failoverModelId: string;
 
   constructor(private readonly input: LocalModelInputV1) {
     this.modelId = input.modelId ?? input.route?.model ??
       DEFAULT_IMPLEMENTATION_MODEL;
     this.providerName = input.providerName ?? input.route?.provider ??
       DEFAULT_PROVIDER_NAME;
+    this.failoverModelId = input.failoverModelId ??
+      input.route?.failoverModel ?? "";
   }
 
   async runModel(
@@ -2169,6 +2178,7 @@ export class LocalCheckoutModelPort implements ImplementationPort {
       localIteration: this.input.localIteration === true,
       modelProvider: this.providerName,
       modelId: this.modelId,
+      failoverModelId: this.failoverModelId,
       permissionProfile: "sentinel-local",
       commitCandidate: committer,
     });

@@ -3140,6 +3140,7 @@ Deno.test(
       model: "deepseek-flash",
       reasoning: "max",
       apiKeyEnv: "SENTINEL_DEEPSEEK_API_KEY",
+      failoverModel: "gpt-6-luna",
     };
     const root = await Deno.realPath(
       await Deno.makeTempDir({ dir: ".", prefix: "sentinel-review-model-" }),
