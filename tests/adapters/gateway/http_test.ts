@@ -416,7 +416,11 @@ Deno.test("gateway http: status rejection releases the body with a typed status 
   const result = await gatewayRead(baseRequest(), transport, okAuth());
   assert.ok(!result.ok);
   if (!result.ok) {
-    assertStatic(result, "unavailable", "gateway producer is unavailable");
+    assertStatic(
+      result,
+      "unavailable",
+      "gateway producer is unavailable (HTTP 503)",
+    );
   }
   assert.equal(bodies[0]!.cancelled(), true, "rejected body must be cancelled");
 });

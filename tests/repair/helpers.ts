@@ -12,6 +12,7 @@ import type { FixtureDigest, GitSha } from "../../src/contracts/brands.ts";
 import type {
   CandidatePreservationRequestV1,
   Clock,
+  GitHubCheckV1,
   GitHubIssueV1,
   GitHubPort,
   GitHubPullRequestV1,
@@ -216,6 +217,8 @@ export interface FakeGithubOptionsV1 {
   closeFailNext?: boolean;
   /** One transient failure of the next issue-assignment call. */
   assignFailNext?: boolean;
+  /** Override the checks returned by readChecks. Defaults to one green check. */
+  checks?: GitHubCheckV1[];
 }
 
 /** Recording fake GitHubPort; product logic never lives here. */
@@ -398,7 +401,22 @@ export class FakeGithub implements GitHubPort {
   }
 
   readChecks(_head: GitSha) {
-    return Promise.resolve(portOk({ head: _head, checks: [] }));
+    if (this.options.checks !== undefined) {
+      return Promise.resolve(
+        portOk({ head: _head, checks: this.options.checks }),
+      );
+    }
+    // Default: one green check so the CI gate passes. Tests that need
+    // pending/failed/empty checks override via options.checks.
+    const green: GitHubCheckV1 = {
+      name: "ci",
+      status: "completed",
+      conclusion: "success",
+      head: _head,
+      startedAt: 1,
+      completedAt: 2,
+    };
+    return Promise.resolve(portOk({ head: _head, checks: [green] }));
   }
 
   readProtections(_baseBranch: string) {

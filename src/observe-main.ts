@@ -22,7 +22,10 @@ import {
   type RepositoryConfigV1,
 } from "./contracts/repository-config.ts";
 import type { GatewayTransportV1 } from "./adapters/gateway/http.ts";
-import { GatewayIncidentAdapter } from "./adapters/gateway/incident-adapter.ts";
+import {
+  GatewayIncidentAdapter,
+  type GatewayRetryPolicyV1,
+} from "./adapters/gateway/incident-adapter.ts";
 import {
   type ArtifactStoreLimitsV1,
   LocalArtifactStore,
@@ -55,6 +58,12 @@ export interface ObserveConfigV1 {
   limits?: ArtifactStoreLimitsV1;
   transport?: GatewayTransportV1;
   clock?: Clock;
+  /**
+   * Opt-in bounded retry for transient gateway producer faults (HTTP 5xx,
+   * transport rejection). Absent or budget 0 preserves the exact
+   * fail-closed single-attempt behavior.
+   */
+  retry?: GatewayRetryPolicyV1;
 }
 
 export interface ObserveResultV1 {
@@ -246,6 +255,10 @@ export async function runReadOnlyObservation(
     auth,
     clock,
     store,
+    // Observe runs are manually dispatched and must survive transient
+    // producer 5xx flake without an operator redispatch: a bounded retry
+    // budget keeps a full outage failing fast.
+    retry: input.retry ?? { budget: 3, baseDelayMs: 1000 },
   });
 
   let cursor: string | null = null;

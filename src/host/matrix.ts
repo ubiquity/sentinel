@@ -235,6 +235,9 @@ export async function planMatrixWave(
     runStartedAt: options.runStartedAt,
     modelStartsEnabled: options.modelStartsEnabled,
   });
+  // Grant publication precedes native scheduling and target preparation. Keep
+  // one existing operation margin for that handoff; cells retain full bounds.
+  bounds.runDeadline -= OPERATION_MARGIN_MS;
   const limit = Math.min(
     options.maxCells ?? MAX_MATRIX_CELLS,
     MAX_MATRIX_CELLS,
@@ -254,6 +257,15 @@ export async function planMatrixWave(
   let notReady = 0;
 
   while (cells.length < limit) {
+    const readAt = deps.clock.now();
+    if (
+      readAt >= bounds.modelCutoff ||
+      !deps.configs.some((config) =>
+        config.sessionBound !== null &&
+        readAt + config.sessionBound.maxDurationMs + OPERATION_MARGIN_MS <
+          bounds.runDeadline
+      )
+    ) break;
     const context = await loadRepairContext(deps, bounds);
     if (context === null) break;
     const now = deps.clock.now();

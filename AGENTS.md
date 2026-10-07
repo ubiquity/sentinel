@@ -8,7 +8,7 @@ identity and isolated worker lanes are invariants. Preserve unrelated work.
 - Owner update, 2026-10-02: implement isolated concurrent issue workers with one trusted state/integration coordinator, plus a separate deterministic Deno release controller with exclusive promotion ownership.
 - Use Deno and TypeScript. Define shared contracts before parallel implementation.
 - Owner update, 2026-10-02: artificial hourly/weekly model-start, unfinished-PR, review-concurrency and review-drain caps are lifted. Preserve durable reservations and settlement for implementation, review, retry and continuation starts. Provider and platform limits still apply; model routing is unchanged.
-- Sentinel runs as a cron-triggered GitHub Actions job.
+- Sentinel runs as a manually dispatched GitHub Actions job. The owner disabled scheduled cron triggers on 2026-10-05; dispatch and verify with the installed `sentinel` CLI (`ops/sentinel-cli.ts`).
 - Preserve runtime implementation model gpt-5.6-luna with max reasoning. Local
   DSH implementation follows the current global deepseek-harness.md playbook;
   it cannot change the runtime model policy.
@@ -26,6 +26,7 @@ identity and isolated worker lanes are invariants. Preserve unrelated work.
   Make the scoped change, test it immediately, then deliver it directly.
   This supersedes development acceptance-review and PR requirements below.
   Autonomous target repairs retain their existing PR, review and merge gates.
+- Owner update, 2026-10-05: Codex review requests apply only to runtime code changes. A change limited to tests, fixtures, boot scripts, dev tooling, documentation or other non-runtime files gets no Codex review request, locally or on a PR. When a hosted review is required, check the PR body for the thumbs-up review-passed reaction first (`gh pr view <N> --json isDraft,reactionGroups`) and post `@codex review` only when it is absent.
 
 - Never add branch protection rules or branch rulesets to this project.
   Do not recreate deleted protection rules.
