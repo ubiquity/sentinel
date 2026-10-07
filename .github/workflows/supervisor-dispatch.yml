@@ -17,7 +17,8 @@
 name: sentinel-supervisor-dispatch
 
 on:
-  # Owner decision 2026-10-05: scheduled cron triggers disabled; manual dispatch only.
+  schedule:
+    - cron: "*/5 * * * *"
   workflow_dispatch:
 
 permissions:
