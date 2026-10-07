@@ -332,7 +332,7 @@ Deno.test(
 );
 
 Deno.test(
-  "issue relations: listOpenIssues fails the whole list when one relation read fails",
+  "issue relations: listOpenIssues skips the issue when one relation read fails",
   async () => {
     const { client, transport } = makeClient([
       httpRespond("GET", "/issues", 200, [
@@ -349,10 +349,14 @@ Deno.test(
     ], true);
 
     const result = await client.listOpenIssues();
-    assert.equal(result.ok, false, JSON.stringify(result));
-    if (!result.ok) assert.equal(result.error.kind, "invalid");
-    // Both relation reads were attempted (one per actual issue); the partial
-    // list is never returned as a success.
+    // The issue with failed relations is skipped; the good issue is returned.
+    // Failing the whole listing on one bad issue starves intake.
+    assert.equal(result.ok, true, JSON.stringify(result));
+    if (result.ok) {
+      assert.equal(result.value.length, 1);
+      assert.equal(result.value[0].number, 7);
+    }
+    // Both relation reads were attempted (one per actual issue).
     assert.equal(
       transport.requests.filter((request) => request.method === "POST").length,
       2,

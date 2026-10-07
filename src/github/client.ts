@@ -329,13 +329,14 @@ export class GitHubApiClient {
           issues.push(parsed.value.issue);
           continue;
         }
-        // Trusted enrichment of an actual REST issue record. One relation
-        // read failure fails the WHOLE listing: a partially enriched list
-        // could otherwise present a blocked issue as unknown/absent.
+        // Trusted enrichment of an actual REST issue record. If relations
+        // cannot be fetched for an issue, skip that issue (do not admit it
+        // without verified relations) but continue with the rest of the
+        // listing. Failing the whole listing on one bad issue starves intake.
         const relations = await this.readIssueRelations(
           parsed.value.issue.number,
         );
-        if (!relations.ok) return relations;
+        if (!relations.ok) continue;
         issues.push({ ...parsed.value.issue, relations: relations.value });
       }
     }
