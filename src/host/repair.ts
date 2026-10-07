@@ -59,6 +59,7 @@ import type { RepairEntrypointDepsV1 } from "../main.ts";
 import type { RepairGitStateStore } from "../state/mod.ts";
 import {
   GatewayIncidentAdapter,
+  type GatewayRetryPolicyV1,
 } from "../adapters/gateway/incident-adapter.ts";
 import type {
   GatewayAuthProviderV1,
@@ -119,6 +120,11 @@ export interface RepairHostGatewayOptionsV1 {
   auth: GatewayAuthProviderV1;
   /** Bounded restricted evidence store (the same one both instances use). */
   store: ArtifactStoreV1;
+  /**
+   * Opt-in bounded retry for transient gateway producer faults. Absent or
+   * budget 0 preserves the exact fail-closed single-attempt behavior.
+   */
+  retry?: GatewayRetryPolicyV1;
   /** Existing 32-byte producer key capability for retained-capture decryption. */
   keyBytes: Uint8Array<ArrayBuffer>;
   /** Fixed trusted host sanitizer policy. */
@@ -266,6 +272,7 @@ export function composeRepairHost(
     auth: options.gateway.auth,
     clock: options.clock,
     store: options.gateway.store,
+    retry: options.gateway.retry,
   });
   const composition = new GatewayReplayComposition({
     adapter,

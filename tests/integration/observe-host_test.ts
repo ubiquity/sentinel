@@ -116,6 +116,66 @@ Deno.test(
   },
 );
 
+/**
+ * Hosted regression: an unmapped gateway edge status (502/503) failed closed,
+ * but the diagnostic erased the numeric HTTP status, so an edge rejection was
+ * indistinguishable from a generic producer outage. The typed failure must
+ * retain the status without echoing the response body or credentials.
+ */
+Deno.test(
+  "observe keeps unmapped gateway statuses unavailable without leaking bodies or credentials",
+  async () => {
+    const config = await loadObserveConfig();
+    const keyBytes = Uint8Array.from({ length: 32 }, (_, index) => index + 1);
+    const marker = "sensitive-gateway-body-marker";
+
+    for (const status of [503, 502]) {
+      const root = await Deno.makeTempDir({
+        prefix: "sentinel-observe-gateway-unavailable-test-",
+        dir: Deno.cwd(),
+      });
+      let requests = 0;
+      try {
+        const result = await runReadOnlyObservation({
+          config,
+          authHeaders: { authorization: "Bearer test" },
+          keyBytes,
+          storeRoot: root,
+          transport: () => {
+            requests++;
+            return Promise.resolve(
+              new Response(`{"error":"${marker}"}`, {
+                status,
+                headers: { "content-type": "application/json" },
+              }),
+            );
+          },
+        });
+        assert.equal(result.ok, false, `HTTP ${status}`);
+        if (result.ok) continue;
+        assert.equal(result.error.kind, "unavailable", `HTTP ${status}`);
+        assert.equal(
+          result.error.detail,
+          `gateway producer is unavailable (HTTP ${status})`,
+        );
+        // The read-only observer retries transient 5xx within a bounded
+        // shared budget (default 3): 1 initial attempt + 3 retries, then the
+        // original fault surfaces unchanged.
+        assert.equal(requests, 4, `HTTP ${status}`);
+        const diagnostic = JSON.stringify(result.error);
+        assert.equal(diagnostic.includes(marker), false, `HTTP ${status}`);
+        assert.equal(
+          diagnostic.includes("Bearer test"),
+          false,
+          `HTTP ${status}`,
+        );
+      } finally {
+        await Deno.remove(root, { recursive: true });
+      }
+    }
+  },
+);
+
 Deno.test("read-only observation retains no plaintext for an empty index", async () => {
   const config = await loadObserveConfig();
   const root = await Deno.makeTempDir({
