@@ -38,6 +38,7 @@ import {
   HOSTED_RUNTIME_CHILD_ENTRYPOINT,
   HOSTED_RUNTIME_CHILD_ENV_KEYS,
   HOSTED_RUNTIME_DEADLINE_MS,
+  HOSTED_RUNTIME_FAILED_DETAIL,
   HOSTED_RUNTIME_MAX_OUTPUT_BYTES,
   HOSTED_RUNTIME_STATIC_IDENTITY,
   HOSTED_RUNTIME_WORKFLOW_REF,
@@ -1399,6 +1400,7 @@ Deno.test("hosted runtime: early child failure diagnostic is sanitized, bounded 
       "loop.ts:9:3",
     ]);
     assert.equal(early.reasonCode, null);
+    assert.equal(result.detail, HOSTED_RUNTIME_FAILED_DETAIL);
     const serialized = JSON.stringify(result);
     for (const marker of forbidden) {
       assert.equal(serialized.includes(marker), false, marker);

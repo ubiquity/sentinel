@@ -121,65 +121,6 @@ export const HOSTED_RUNTIME_HEALTHY_DETAIL = "hosted runtime settled healthy";
 export const HOSTED_RUNTIME_FAILED_DETAIL = "hosted runtime settled failed";
 export const HOSTED_RUNTIME_UNAVAILABLE_DETAIL =
   "hosted runtime result is unavailable";
-/**
- * Maximum characters of child stderr to include in the early-failure advisory.
- * Bounded so a verbose crash cannot flood the workflow log.
- */
-export const HOSTED_RUNTIME_EARLY_FAILURE_STDERR_CHARS = 500;
-/**
- * Secret-bearing substrings to redact from the stderr tail. Matched with
- * plain string inclusion (no regex) to avoid overfitting the redaction.
- */
-const STDERR_SECRET_MARKERS: readonly string[] = [
-  "GITHUB_TOKEN",
-  "SENTINEL_SUPERVISOR_TOKEN",
-  "UOS_AI_TOKEN",
-  "SENTINEL_DEEPSEEK_API_KEY",
-  "SENTINEL_APP_INSTALLATION_ID",
-  "ghp_",
-  "gho_",
-  "github_pat_",
-  "xoxb-",
-  "xoxp-",
-];
-
-/**
- * Decode child stderr and return a bounded, secret-redacted tail for the
- * early-failure advisory. Lines containing secret markers are replaced with
- * a redaction notice; the result is truncated to
- * HOSTED_RUNTIME_EARLY_FAILURE_STDERR_CHARS characters. This is advisory
- * only and never affects settlement or health.
- */
-export function sanitizeChildStderrTail(stderr: Uint8Array): string {
-  if (stderr.length === 0) return "";
-  let text: string;
-  try {
-    text = new TextDecoder().decode(stderr);
-  } catch {
-    return "[stderr undecodable]";
-  }
-  const lines = text.split("\n");
-  const kept: string[] = [];
-  for (const line of lines) {
-    let redacted = false;
-    for (const marker of STDERR_SECRET_MARKERS) {
-      if (line.includes(marker)) {
-        redacted = true;
-        break;
-      }
-    }
-    kept.push(redacted ? "[redacted: possible secret]" : line);
-    if (kept.join("\n").length >= HOSTED_RUNTIME_EARLY_FAILURE_STDERR_CHARS) {
-      break;
-    }
-  }
-  let out = kept.join("\n");
-  if (out.length > HOSTED_RUNTIME_EARLY_FAILURE_STDERR_CHARS) {
-    out = out.slice(0, HOSTED_RUNTIME_EARLY_FAILURE_STDERR_CHARS);
-  }
-  return out.trim();
-}
-
 const ACTIONS_LOGIN = "github-actions[bot]";
 const APP_LOGIN = "ubiquity-sentinel[bot]";
 /**
@@ -596,23 +537,13 @@ function failedResult(
 ): HostedRuntimeLauncherResultV1 {
   // An early no-child failure has no observed metadata; an actual child record
   // keeps its own observed startup flag and valid base SHA.
-  // For early failures (no attestable child result), attach a bounded,
-  // secret-redacted stderr tail so the next failed run reveals the abort
-  // line. This is advisory only and never affects settlement or health.
-  let detailOverride: string | undefined;
-  if (child === null) {
-    const stderrTail = sanitizeChildStderrTail(input.run.stderr);
-    if (stderrTail.length > 0) {
-      detailOverride =
-        `${HOSTED_RUNTIME_FAILED_DETAIL} | early-failure stderr (advisory, first ${HOSTED_RUNTIME_EARLY_FAILURE_STDERR_CHARS} chars, secrets redacted):\n${stderrTail}`;
-    }
-  }
+  // Raw stderr never enters detail. The separate advisory projects only
+  // closed categories, known reason codes and allow-listed frame locations.
   return terminalResult(
     input,
     "failed",
     child?.startupReady ?? false,
     child?.baseSha ?? null,
-    detailOverride,
   );
 }
 
@@ -621,7 +552,6 @@ function terminalResult(
   outcome: "healthy" | "failed",
   startupReady: boolean,
   baseSha: GitSha | null,
-  detailOverride?: string,
 ): HostedRuntimeLauncherResultV1 {
   const parsed = tryParse(parseHostedRuntimeTerminalV1, {
     version: "v1",
@@ -639,10 +569,9 @@ function terminalResult(
   return {
     status: outcome,
     terminal: parsed.value,
-    detail: detailOverride ??
-      (outcome === "healthy"
-        ? HOSTED_RUNTIME_HEALTHY_DETAIL
-        : HOSTED_RUNTIME_FAILED_DETAIL),
+    detail: outcome === "healthy"
+      ? HOSTED_RUNTIME_HEALTHY_DETAIL
+      : HOSTED_RUNTIME_FAILED_DETAIL,
     diagnostics: [],
   };
 }

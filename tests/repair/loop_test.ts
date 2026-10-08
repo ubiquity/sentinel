@@ -3143,17 +3143,50 @@ Deno.test(
     assert.equal(state.reservations.length, 0);
     assert.equal(blockedRig.model.requests.length, 0);
 
-    // Absent relations are UNKNOWN, never empty: the run reports a source
-    // error and admits nothing.
+    // Unknown listing relations may stage a durable row for later inspection,
+    // but the fresh admission read must never treat UNKNOWN as known-empty.
     const missing = new RelationsFakeGithub({ baseSha: SHA1 });
-    missing.listed = [issueRecord(13, { title: "unknown dependencies" })];
+    const unknownIssue = issueRecord(13, { title: "unknown dependencies" });
+    missing.listed = [unknownIssue];
+    missing.latest.set(13, unknownIssue);
     const missingRig = makeMemoryRig(missing);
     const missingRun = await missingRig.run(1);
-    assert.equal(missingRun.status, "source_error", JSON.stringify(missingRun));
+    assert.equal(missingRun.status, "step_limit", JSON.stringify(missingRun));
     state = await missingRig.snapshot();
-    assert.equal(state.work.length, 0);
+    assert.equal(state.work.length, 1);
+    const stagedId = state.work[0].id;
     assert.equal(state.reservations.length, 0);
     assert.equal(missingRig.model.requests.length, 0);
+
+    await missingRig.run(6);
+    state = await missingRig.snapshot();
+    assert.equal(state.work.length, 1);
+    assert.equal(state.work[0].id, stagedId);
+    assert.equal(state.work[0].intent, null);
+    assert.equal(state.work[0].counters.attempts, 0);
+    assert.equal(state.reservations.length, 0);
+    assert.equal(missingRig.model.requests.length, 0);
+    assert.equal(state.work[0].wait?.reason, "unavailable");
+    assert.equal(state.work[0].wait?.until, T0 + 60 * 60_000);
+    assert.ok(missing.calls.includes("readIssue:13"));
+
+    // The same queued row can recover after a later authoritative read shows
+    // known-empty relations; the retry neither duplicates it nor pre-charges.
+    const recoveredIssue = {
+      ...unknownIssue,
+      relations: { openBlockers: [], subIssueCount: 0 },
+    };
+    missing.listed = [recoveredIssue];
+    missing.latest.set(13, recoveredIssue);
+    missingRig.clock.advance(60 * 60_000);
+    await missingRig.run(6);
+    state = await missingRig.snapshot();
+    assert.equal(state.work.length, 1);
+    assert.equal(state.work[0].id, stagedId);
+    assert.equal(state.work[0].counters.attempts, 1);
+    assert.equal(state.reservations.length, 1);
+    assert.equal(state.reservations[0].outcome, "submitted");
+    assert.equal(missingRig.model.requests.length, 1);
 
     // A known-unblocked leaf is admitted and the implementation start is
     // charged exactly once against the same latest read.
