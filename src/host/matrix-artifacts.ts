@@ -51,7 +51,7 @@ import type {
   MatrixRejectedCellEvidenceV1,
   MatrixRejectedWaveV1,
 } from "./matrix-artifact-port.ts";
-import { HISTORICAL_MATRIX_QUARANTINE } from "./matrix-actions.ts";
+import { HISTORICAL_MATRIX_QUARANTINE } from "./matrix-artifact-port.ts";
 
 const API = `https://api.github.com/repos/${REPOSITORY}/actions`;
 const MAX_ITEMS = 10_000;

@@ -62,8 +62,8 @@ import {
   ingestClosedCWave,
 } from "./modern-matrix-recovery.ts";
 
-export const HISTORICAL_MATRIX_QUARANTINE =
-  "authenticated historical matrix manifest rejected: reservation_after_manifest; model outcome uncertain";
+import { HISTORICAL_MATRIX_QUARANTINE } from "./matrix-artifact-port.ts";
+export { HISTORICAL_MATRIX_QUARANTINE } from "./matrix-artifact-port.ts";
 
 /**
  * The exact truthful disposition of one legacy manifest rejection whose

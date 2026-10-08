@@ -14,6 +14,10 @@ import type { WorkRecordV1 } from "../contracts/work-record.ts";
 import type { BudgetReservationV1 } from "../contracts/budget-reservation.ts";
 import type { ModelRunRequestV1 } from "../contracts/ports.ts";
 
+/** Shared wire value: artifact readers must not import their executable caller. */
+export const HISTORICAL_MATRIX_QUARANTINE =
+  "authenticated historical matrix manifest rejected: reservation_after_manifest; model outcome uncertain";
+
 /**
  * Authenticated per-cell evidence for one legacy manifest rejection. Every
  * field was re-read from the exact authenticated cell artifact and its job
