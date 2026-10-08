@@ -6071,6 +6071,7 @@ Deno.test("historical malformed wave: successor bootstrap overwrites proof and a
         }\n`,
       ],
     ]);
+    let successorPlanReads = 0;
     const currentHttp: HttpTransportV1 = (request) => {
       const url = new URL(request.url);
       const response = (value: unknown) =>
@@ -6107,6 +6108,7 @@ Deno.test("historical malformed wave: successor bootstrap overwrites proof and a
       }
       const archive = url.pathname.match(/\/artifacts\/(150[12])\/zip$/);
       const log = url.pathname.match(/\/jobs\/(1401|1402|1499)\/logs$/);
+      if (archive?.[1] === "1501") successorPlanReads += 1;
       if (archive || log) {
         return Promise.resolve({
           status: 302,
@@ -6185,6 +6187,11 @@ Deno.test("historical malformed wave: successor bootstrap overwrites proof and a
         { planDigest: await matrixDigestV1(plan) },
       );
       assert.deepEqual(aggregate.failed, []);
+      assert.equal(
+        successorPlanReads,
+        1,
+        "the initial authenticated scan must run inside the remaining run budget even after the polling margin",
+      );
     } finally {
       Deno.chdir(prior);
     }

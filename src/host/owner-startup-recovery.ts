@@ -11,7 +11,7 @@ import { tryParse } from "../contracts/validation.ts";
 import type { OwnerDevelopmentInstallPlanV1 } from "./owner-development-install.ts";
 
 export const OWNER_STARTUP_RECOVERY_CANDIDATE =
-  "08c6d23a9965ee0aeca3c924a6dcc4581e9ef2d7" as GitSha;
+  "d77d3169fdd268c955dda24ae2bae7b35c5e2295" as GitSha;
 export const OWNER_STARTUP_RECOVERY_FAILED =
   "e4cef46332cf124a8c283d798a963cf5f66e45c2" as GitSha;
 export const OWNER_STARTUP_RECOVERY_WITNESS =
