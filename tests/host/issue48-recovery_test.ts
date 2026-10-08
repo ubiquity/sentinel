@@ -9,6 +9,51 @@
  * callback. The workflow test inspects the bounded YAML source directly.
  */
 import assert from "node:assert/strict";
+import { assertSupervisorMaintenanceContract } from "./workflow-contract.ts";
+
+Deno.test("workflow maintenance contract: rejects mixed recovery and ordinary admission", async () => {
+  const text = await Deno.readTextFile(
+    ROOT + "/.github/workflows/supervisor.yml",
+  );
+  const skippedIf = "    if: $" + "{{ false }}";
+  const protectedIf = "    if: github.ref == 'refs/heads/sentinel-supervisor'";
+  const ordinary = text
+    .replace(skippedIf, protectedIf)
+    .replace(
+      "needs.maintenance.result == 'skipped'",
+      "needs.maintenance.result == 'success'",
+    )
+    .replaceAll(" --startup-recovery", "")
+    .replaceAll(" --owner-startup-recovery-only", "");
+  const recovery = ordinary
+    .replace(protectedIf, skippedIf)
+    .replace(
+      "needs.maintenance.result == 'success'",
+      "needs.maintenance.result == 'skipped'",
+    )
+    .replace(
+      "src/host/owner-development-install.ts\n",
+      "src/host/owner-development-install.ts --startup-recovery\n",
+    )
+    .replaceAll(
+      "run: deno task supervisor:run\n",
+      "run: deno task supervisor:run --owner-startup-recovery-only\n",
+    );
+  assert.equal(assertSupervisorMaintenanceContract(ordinary), "ordinary");
+  assert.equal(assertSupervisorMaintenanceContract(recovery), "recovery");
+  for (
+    const malformed of [
+      recovery.replace(skippedIf, protectedIf),
+      recovery.replace(
+        "needs.maintenance.result == 'skipped'",
+        "needs.maintenance.result == 'success'",
+      ),
+      recovery.replace(" --owner-startup-recovery-only", ""),
+      recovery.replace(" --startup-recovery", ""),
+      ordinary.replace(" && needs.maintenance.result == 'success'", ""),
+    ]
+  ) assert.throws(() => assertSupervisorMaintenanceContract(malformed));
+});
 
 import type { GitSha, WorkItemId } from "../../src/contracts/brands.ts";
 import { canonicalStringify } from "../../src/contracts/canonical.ts";
@@ -1034,6 +1079,7 @@ Deno.test("issue48 recovery: supervisor workflow dependency and locking contract
   const text = await Deno.readTextFile(
     `${ROOT}/.github/workflows/supervisor.yml`,
   );
+  const mode = assertSupervisorMaintenanceContract(text);
   assert.ok(text.includes("name: sentinel-supervisor"));
   assert.ok(text.includes("workflow_dispatch:"));
   assert.ok(!text.includes("schedule:"));
@@ -1050,7 +1096,11 @@ Deno.test("issue48 recovery: supervisor workflow dependency and locking contract
   );
   const maintenance = text.slice(maintenanceAt, prepareAt);
   assert.ok(
-    maintenance.includes("if: github.ref == 'refs/heads/sentinel-supervisor'"),
+    maintenance.includes(
+      mode === "ordinary"
+        ? "if: github.ref == 'refs/heads/sentinel-supervisor'"
+        : "if: ${{ false }}",
+    ),
   );
   assert.ok(maintenance.includes("runs-on: ubuntu-latest"));
   assert.ok(maintenance.includes("timeout-minutes: 15"));
@@ -1160,13 +1210,16 @@ Deno.test("issue48 recovery: supervisor workflow dependency and locking contract
     "the maintenance job mounts the protected environment",
   );
 
-  // Prepare requires successful maintenance so unresolved historical custody
-  // cannot be overwritten; repair still requires prepare success explicitly.
+  // Ordinary prepare requires successful maintenance. The pinned recovery-only
+  // controller may skip it only with the complete mutually exclusive contract.
+  // Repair still requires prepare success explicitly.
   const prepare = text.slice(prepareAt, repairAt);
   assert.ok(prepare.includes("needs: maintenance"));
   assert.ok(
     prepare.includes(
-      "if: always() && needs.maintenance.result == 'success' && github.ref == 'refs/heads/sentinel-supervisor'",
+      `if: always() && needs.maintenance.result == '${
+        mode === "ordinary" ? "success" : "skipped"
+      }' && github.ref == 'refs/heads/sentinel-supervisor'`,
     ),
   );
   const repair = text.slice(repairAt, finalizeAt);

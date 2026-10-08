@@ -10,6 +10,7 @@
  * committed or read.
  */
 import assert from "node:assert/strict";
+import { assertSupervisorMaintenanceContract } from "./workflow-contract.ts";
 import { Uint8ArrayReader, Uint8ArrayWriter, ZipWriter } from "@zip.js/zip.js";
 import { canonicalStringify } from "../../src/contracts/canonical.ts";
 import {
@@ -5670,10 +5671,7 @@ Deno.test("historical malformed wave: actual maintenance entrypoint blocks prepa
     const workflow = await Deno.readTextFile(
       new URL("../../.github/workflows/supervisor.yml", import.meta.url),
     );
-    assert.match(
-      workflow,
-      /prepare:\s*\n\s*needs: maintenance\s*\n\s*if: always\(\) && needs\.maintenance\.result == 'success'/,
-    );
+    assertSupervisorMaintenanceContract(workflow);
     assert.equal(
       isHardAutonomyFailure("historical_quarantine_incomplete"),
       true,
@@ -5837,10 +5835,7 @@ Deno.test("historical malformed wave: missing archive and malformed parser never
       const workflow = await Deno.readTextFile(
         new URL("../../.github/workflows/supervisor.yml", import.meta.url),
       );
-      assert.match(
-        workflow,
-        /prepare:\s*\n\s*needs: maintenance\s*\n\s*if: always\(\) && needs\.maintenance\.result == 'success'/,
-      );
+      assertSupervisorMaintenanceContract(workflow);
     } finally {
       await Deno.remove(f.rig.tmp, { recursive: true });
     }
