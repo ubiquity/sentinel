@@ -61,6 +61,16 @@ import {
   closedCWaveChargeReadbackVerified,
 } from "./modern-matrix-recovery.ts";
 
+import {
+  isOwnerStartupRecoveryHealthyProof,
+  isOwnerStartupRecoveryTuple,
+  OWNER_STARTUP_RECOVERY_CANDIDATE,
+  OWNER_STARTUP_RECOVERY_WITNESS,
+  type OwnerStartupRecoveryAuthorityV1,
+  planOwnerStartupRecovery,
+} from "./owner-startup-recovery.ts";
+import { parseHostedExecutionIntentV1 } from "../contracts/hosted-supervisor.ts";
+
 /** The only repository this operation may touch; fixed, never configurable. */
 export const OWNER_DEVELOPMENT_INSTALL_REPOSITORY =
   HOSTED_SUPERVISOR_REPOSITORY;
@@ -612,6 +622,7 @@ export function planOwnerDevelopmentInstall(
   snapshot: ReleaseStateSnapshotV1,
   now: number,
   recovery?: OwnerMatrixRecoveryEvidenceV1,
+  startup?: OwnerStartupRecoveryAuthorityV1,
 ): OwnerDevelopmentInstallPlanV1 {
   const parsed = tryParse(parseReleaseStateSnapshotV1, snapshot);
   if (!parsed.ok) {
@@ -642,6 +653,13 @@ export function planOwnerDevelopmentInstall(
     )
   ) {
     return waiting("a github cooldown is active");
+  }
+
+  if (startup !== undefined) {
+    if (recovery !== undefined) {
+      return waiting("conflicting owner recovery modes");
+    }
+    return planOwnerStartupRecovery(runtime, startup);
   }
 
   const revision = runtime.activeRevision;
@@ -3004,6 +3022,7 @@ export function buildOwnerDevelopmentInstallSnapshot(
   move: OwnerDevelopmentInstallMoveV1,
   now: number,
   recovery?: OwnerMatrixRecoveryEvidenceV1,
+  startup?: OwnerStartupRecoveryAuthorityV1,
 ): ReleaseStateSnapshotV1 {
   const parsed = tryParse(parseReleaseStateSnapshotV1, snapshot);
   if (!parsed.ok || !isGitSha(head)) throw new Error(STATIC_PLAN);
@@ -3036,8 +3055,28 @@ export function buildOwnerDevelopmentInstallSnapshot(
   ) {
     throw new Error(STATIC_PLAN);
   }
+  if (startup !== undefined) {
+    const intended = planOwnerDevelopmentInstall(state, now, recovery, startup);
+    if (
+      startup.releaseHead !== head ||
+      (intended.status !== "install" && intended.status !== "rollback") ||
+      canonicalStringify(intended.move) !== canonicalStringify(move)
+    ) throw new Error(STATIC_PLAN);
+  }
+  const execution = startup === undefined
+    ? runtime.execution
+    : parseHostedExecutionIntentV1({
+      id: `${startup.run.runId}:${startup.run.runAttempt}:repair`,
+      ...startup.run,
+      purpose: "bootstrap",
+      revision: move.nextRevision,
+      generation: move.nextGeneration,
+      releaseId: null,
+      createdAt: now,
+    });
   const nextRuntime = tryParse(parseHostedRuntimeRecordV1, {
     ...runtime,
+    execution,
     activeRevision: move.nextRevision,
     generation: move.nextGeneration,
     updatedAt: now,
@@ -3198,6 +3237,10 @@ export async function runOwnerDevelopmentInstallMain(input?: {
   /** Trusted in-process fixture seam; the workflow always uses the source pin. */
   matrixRecoveryRevision?: GitSha;
   matrixRecoveryBinding?: ClosedCWaveBindingV1;
+  /** Only the temporary reviewed workflow supplies this fixed mode. */
+  startupRecovery?: boolean;
+  /** Immutable-history fixture seam; production always uses the source pin. */
+  startupWitness?: GitSha;
 }): Promise<number> {
   const repository = Deno.env.get("GITHUB_REPOSITORY");
   const ref = Deno.env.get("GITHUB_REF");
@@ -3213,6 +3256,28 @@ export async function runOwnerDevelopmentInstallMain(input?: {
     sha !== workflowSha
   ) {
     return report(failedResult("identity_rejected"), 1);
+  }
+  let startupRun: OwnerStartupRecoveryAuthorityV1["run"] | undefined;
+  if (input?.startupRecovery === true) {
+    const runId = Number(Deno.env.get("GITHUB_RUN_ID"));
+    const runAttempt = Number(Deno.env.get("GITHUB_RUN_ATTEMPT"));
+    if (
+      !Number.isSafeInteger(runId) || runId < 1 ||
+      !Number.isSafeInteger(runAttempt) || runAttempt < 1 ||
+      Deno.env.get("GITHUB_WORKFLOW_REF") !==
+        "ubiquity/sentinel/.github/workflows/supervisor.yml@refs/heads/sentinel-supervisor"
+    ) {
+      return report(failedResult("startup_identity_rejected"), 1);
+    }
+    try {
+      const source = await ownerStartupSourceHead();
+      if (source !== sha) {
+        return report(failedResult("startup_source_rejected"), 1);
+      }
+    } catch {
+      return report(failedResult("startup_source_rejected"), 1);
+    }
+    startupRun = { runId, runAttempt, launcherSha: sha };
   }
   const nativeToken = Deno.env.get("GITHUB_TOKEN");
   const appToken = Deno.env.get("SENTINEL_SUPERVISOR_TOKEN");
@@ -3239,6 +3304,63 @@ export async function runOwnerDevelopmentInstallMain(input?: {
         null,
       ),
     );
+  }
+
+  let startup: OwnerStartupRecoveryAuthorityV1 | undefined;
+  if (startupRun !== undefined) {
+    const pointer = current.snapshot.hostedRuntimes[0];
+    if (
+      pointer === undefined ||
+      !isOwnerStartupRecoveryTuple(
+        pointer.activeRevision,
+        pointer.generation,
+        true,
+      )
+    ) {
+      return report({
+        ...waitingResult(
+          "pointer is outside pinned startup recovery",
+          current.snapshot,
+          current.head,
+        ),
+        status: "no_change",
+      });
+    }
+    if (
+      pointer.generation === 65 || (pointer.generation === 64 &&
+        pointer.lastHealthyProof?.execution.revision ===
+          pointer.activeRevision &&
+        pointer.lastHealthyProof.execution.generation === 64)
+    ) {
+      return report({
+        ...waitingResult(
+          "pinned startup recovery is terminal",
+          current.snapshot,
+          current.head,
+        ),
+        status: "no_change",
+      });
+    }
+    try {
+      startup = await readOwnerStartupRecoveryAuthority(
+        state,
+        nativeToken,
+        current,
+        startupRun,
+        input?.startupWitness ?? OWNER_STARTUP_RECOVERY_WITNESS,
+      );
+    } catch {
+      startup = undefined;
+    }
+    if (startup === undefined) {
+      return report(
+        waitingResult(
+          "pinned startup recovery custody is unavailable",
+          current.snapshot,
+          current.head,
+        ),
+      );
+    }
   }
 
   const recoveryRevision = input?.matrixRecoveryRevision ??
@@ -3289,7 +3411,12 @@ export async function runOwnerDevelopmentInstallMain(input?: {
       );
     }
   }
-  const plan = planOwnerDevelopmentInstall(current.snapshot, now, recovery);
+  const plan = planOwnerDevelopmentInstall(
+    current.snapshot,
+    now,
+    recovery,
+    startup,
+  );
   if (plan.status === "waiting" || plan.status === "no_change") {
     return report({
       ...waitingResult(plan.detail, current.snapshot, current.head),
@@ -3302,10 +3429,30 @@ export async function runOwnerDevelopmentInstallMain(input?: {
     const verified = await verifyOwnerDevelopmentInstallRevision(
       nativeToken,
       move.nextRevision,
+      startup?.run.launcherSha,
     );
     if (!verified.verified) {
       return report(
         waitingResult(verified.detail, current.snapshot, current.head),
+      );
+    }
+  }
+  if (startup !== undefined) {
+    const controller = await ownerDevelopmentInstallApi(
+      nativeToken,
+      "GET",
+      `/repos/${OWNER_DEVELOPMENT_INSTALL_REPOSITORY}/commits/${startup.run.launcherSha}/check-runs?per_page=100`,
+    );
+    if (
+      !controller.ok || controller.value.status !== 200 ||
+      !testLocalCheckSucceeded(controller.value.value, startup.run.launcherSha)
+    ) {
+      return report(
+        waitingResult(
+          "startup controller CI is unavailable",
+          current.snapshot,
+          current.head,
+        ),
       );
     }
   }
@@ -3338,6 +3485,7 @@ export async function runOwnerDevelopmentInstallMain(input?: {
       move,
       now,
       recovery,
+      startup,
     );
     files = await ownerDevelopmentInstallFiles(planned, current.head);
     message = ownerDevelopmentInstallCommitMessage({
@@ -3365,6 +3513,11 @@ export async function runOwnerDevelopmentInstallMain(input?: {
     planned,
     files,
     message,
+    startup === undefined
+      ? undefined
+      : async () =>
+        await ownerStartupRepairUnchanged(state, startup!) &&
+        await ownerStartupNativeQuiescent(nativeToken, startup!.run),
   );
   if (written.status !== "confirmed") {
     return report({
@@ -3393,6 +3546,190 @@ export async function runOwnerDevelopmentInstallMain(input?: {
       ? "owner development install applied; runtime health is not yet proven"
       : "owner development rollback applied; runtime health is not yet proven",
   });
+}
+
+/** Fixed credential-free source checks retain the existing git-only run grant. */
+async function ownerStartupSourceHead(): Promise<GitSha | null> {
+  const outputs: string[] = [];
+  for (
+    const args of [["rev-parse", "HEAD"], [
+      "status",
+      "--porcelain",
+      "--untracked-files=all",
+    ]]
+  ) {
+    const result = await new Deno.Command("git", {
+      args: ["-c", "core.hooksPath=/dev/null", ...args],
+      cwd: Deno.cwd(),
+      clearEnv: true,
+      env: {
+        PATH: Deno.env.get("PATH") ?? "/usr/bin:/bin",
+        HOME: Deno.cwd(),
+        GIT_CONFIG_GLOBAL: "/dev/null",
+        GIT_CONFIG_SYSTEM: "/dev/null",
+        GIT_TERMINAL_PROMPT: "0",
+      },
+      stdout: "piped",
+      stderr: "null",
+      signal: AbortSignal.timeout(10_000),
+    }).output();
+    if (!result.success || result.stdout.length > 65_536) return null;
+    outputs.push(new TextDecoder().decode(result.stdout).trim());
+  }
+  return isGitSha(outputs[0]) && outputs[1] === "" ? outputs[0] : null;
+}
+
+async function ownerStartupRepairUnchanged(
+  state: StateReadView,
+  authority: OwnerStartupRecoveryAuthorityV1,
+): Promise<boolean> {
+  const read = await state.readRepair();
+  return read.ok && read.value.status === "found" &&
+    read.value.head === authority.repairHead &&
+    !read.value.snapshot.githubCooldowns.some((row) =>
+      row.retryNotBefore === null || Date.now() < row.retryNotBefore
+    );
+}
+
+/** Exact historical custody plus native completion; no proof is synthesized. */
+async function readOwnerStartupRecoveryAuthority(
+  state: StateReadView,
+  token: string,
+  current: Extract<OwnerDevelopmentInstallStateReadV1, { status: "found" }>,
+  run: OwnerStartupRecoveryAuthorityV1["run"],
+  witnessHead: GitSha,
+): Promise<OwnerStartupRecoveryAuthorityV1 | undefined> {
+  if (!state.readReleaseAt) return undefined;
+  const witness = await state.readReleaseAt({
+    commit: witnessHead,
+    expectedHead: current.head,
+  });
+  const repair = await state.readRepair();
+  if (
+    !witness.ok || witness.value.status !== "found" ||
+    !repair.ok || repair.value.status !== "found"
+  ) return undefined;
+  const prior = witness.value.snapshot.hostedRuntimes[0]?.lastHealthyProof;
+  const pointer = current.snapshot.hostedRuntimes.length === 1
+    ? current.snapshot.hostedRuntimes[0]
+    : undefined;
+  const failed = tryParse(parseHostedRunProofV1, pointer?.lastExecutionProof);
+  if (
+    !pointer || pointer.execution !== null ||
+    !isOwnerStartupRecoveryHealthyProof(prior) ||
+    !failed.ok || failed.value.outcome !== "failed" ||
+    !await ownerStartupNativeProof(token, prior) ||
+    !await ownerStartupNativeProof(token, failed.value) ||
+    !await ownerStartupNativeQuiescent(token, run)
+  ) return undefined;
+  const authority: OwnerStartupRecoveryAuthorityV1 = {
+    releaseHead: current.head,
+    repairHead: repair.value.head,
+    witnessHead,
+    healthyProof: prior,
+    nativeQuiescent: true,
+    nativeProofsVerified: true,
+    run,
+  };
+  return await ownerStartupRepairUnchanged(state, authority)
+    ? authority
+    : undefined;
+}
+
+async function ownerStartupNativeProof(
+  token: string,
+  proof: HostedRunProofV1,
+): Promise<boolean> {
+  const root =
+    `/repos/${OWNER_DEVELOPMENT_INSTALL_REPOSITORY}/actions/runs/${proof.execution.runId}/attempts/${proof.execution.runAttempt}`;
+  const response = await ownerDevelopmentInstallApi(token, "GET", root);
+  if (
+    !response.ok || response.value.status !== 200 ||
+    !isRecord(response.value.value)
+  ) return false;
+  const run = response.value.value;
+  if (
+    run.id !== proof.execution.runId ||
+    run.run_attempt !== proof.execution.runAttempt ||
+    run.head_sha !== proof.execution.launcherSha ||
+    run.workflow_id !== proof.workflowId ||
+    run.head_branch !== "sentinel-supervisor" || run.status !== "completed"
+  ) return false;
+  const jobs = await ownerMatrixMetadataList(token, `${root}/jobs`, "jobs");
+  const job = jobs?.find((row) => row.id === proof.jobId);
+  return jobs !== null && jobs.length > 0 &&
+    jobs.every((row) => row.status === "completed") &&
+    job?.name === "repair" && job.head_sha === proof.execution.launcherSha &&
+    (proof.outcome === "healthy"
+      ? job.conclusion === "success"
+      : job.conclusion === "failure" || job.conclusion === "timed_out");
+}
+
+/** Fail closed on any competing protected execution or stale controller ref. */
+async function ownerStartupNativeQuiescent(
+  token: string,
+  expected: OwnerStartupRecoveryAuthorityV1["run"],
+): Promise<boolean> {
+  const root = `/repos/${OWNER_DEVELOPMENT_INSTALL_REPOSITORY}`;
+  const ref = await ownerDevelopmentInstallApi(
+    token,
+    "GET",
+    `${root}/git/ref/heads/sentinel-supervisor`,
+  );
+  if (
+    !ref.ok || ref.value.status !== 200 ||
+    readNestedSha(ref.value.value, "object") !== expected.launcherSha
+  ) return false;
+  const response = await ownerDevelopmentInstallApi(
+    token,
+    "GET",
+    `${root}/actions/runs/${expected.runId}/attempts/${expected.runAttempt}`,
+  );
+  if (
+    !response.ok || response.value.status !== 200 ||
+    !isRecord(response.value.value)
+  ) return false;
+  const run = response.value.value;
+  if (
+    run.id !== expected.runId || run.run_attempt !== expected.runAttempt ||
+    run.head_sha !== expected.launcherSha ||
+    run.head_branch !== "sentinel-supervisor" ||
+    run.workflow_id !== 357012162 || run.status !== "in_progress"
+  ) return false;
+  const jobs = await ownerMatrixMetadataList(
+    token,
+    `${root}/actions/runs/${expected.runId}/attempts/${expected.runAttempt}/jobs`,
+    "jobs",
+  );
+  if (
+    !jobs ||
+    jobs.filter((job) =>
+        job.name === "prepare" && job.status === "in_progress" &&
+        job.head_sha === expected.launcherSha
+      ).length !== 1 ||
+    jobs.some((job) =>
+      job.status !== "completed" &&
+      !(job.name === "prepare" && job.status === "in_progress") &&
+      !(job.status === "queued" && job.started_at === null &&
+        (job.runner_id === 0 || job.runner_id === null))
+    )
+  ) return false;
+  for (const workflow of ["supervisor.yml", "repair.yml", "release.yml"]) {
+    const runs = await ownerMatrixMetadataList(
+      token,
+      `${root}/actions/workflows/${workflow}/runs?status=in_progress`,
+      "workflow_runs",
+    );
+    if (
+      !runs || runs.some((row) =>
+        row.status !== "in_progress" ||
+        workflow !== "supervisor.yml" || row.id !== expected.runId ||
+        row.run_attempt !== expected.runAttempt ||
+        row.head_sha !== expected.launcherSha
+      )
+    ) return false;
+  }
+  return true;
 }
 
 async function createOwnerDevelopmentInstallState(
@@ -3564,7 +3901,7 @@ async function ownerMatrixNativeCustody(
 async function ownerMatrixMetadataList(
   token: string,
   path: string,
-  key: "jobs" | "artifacts",
+  key: "jobs" | "artifacts" | "workflow_runs",
 ): Promise<Record<string, unknown>[] | null> {
   const rows: Record<string, unknown>[] = [];
   let total: number | null = null;
@@ -3572,7 +3909,7 @@ async function ownerMatrixMetadataList(
     const response = await ownerDevelopmentInstallApi(
       token,
       "GET",
-      `${path}?per_page=100&page=${page}`,
+      `${path}${path.includes("?") ? "&" : "?"}per_page=100&page=${page}`,
     );
     if (
       !response.ok || response.value.status !== 200 ||
@@ -3632,11 +3969,23 @@ async function readOwnerDevelopmentInstallState(
 async function verifyOwnerDevelopmentInstallRevision(
   token: string,
   revision: GitSha,
+  startupLauncher?: GitSha,
 ): Promise<{ verified: boolean; detail: string }> {
+  if (
+    startupLauncher !== undefined &&
+    revision !== OWNER_STARTUP_RECOVERY_CANDIDATE
+  ) {
+    return {
+      verified: false,
+      detail: "startup candidate is not the exact approved pin",
+    };
+  }
   const compare = await ownerDevelopmentInstallApi(
     token,
     "GET",
-    `/repos/${OWNER_DEVELOPMENT_INSTALL_REPOSITORY}/compare/${revision}...${OWNER_DEVELOPMENT_INSTALL_DEVELOPMENT_BRANCH}`,
+    `/repos/${OWNER_DEVELOPMENT_INSTALL_REPOSITORY}/compare/${revision}...${
+      startupLauncher ?? OWNER_DEVELOPMENT_INSTALL_DEVELOPMENT_BRANCH
+    }`,
   );
   if (!compare.ok) {
     return { verified: false, detail: "revision ancestry is unavailable" };
@@ -3645,7 +3994,11 @@ async function verifyOwnerDevelopmentInstallRevision(
   if (!compared.ok) {
     return { verified: false, detail: "revision ancestry is unavailable" };
   }
-  if (!compareConfirmsAncestor(compared.value, revision)) {
+  if (
+    !compareConfirmsAncestor(compared.value, revision) ||
+    (startupLauncher !== undefined &&
+      readNestedSha(compared.value, "head_commit") !== startupLauncher)
+  ) {
     return {
       verified: false,
       detail: "revision is not an ancestor of development",
@@ -3687,6 +4040,7 @@ async function writeOwnerDevelopmentInstallCommit(
   planned: ReleaseStateSnapshotV1,
   files: OwnerDevelopmentInstallFilesV1,
   message: string,
+  beforePublish?: () => Promise<boolean>,
 ): Promise<OwnerDevelopmentInstallWriteV1> {
   const baseTree = await readOwnerDevelopmentInstallCommitTree(
     appToken,
@@ -3735,6 +4089,12 @@ async function writeOwnerDevelopmentInstallCommit(
     return notConfirmed(
       commit.value,
       "release ref moved before the installation commit was published",
+    );
+  }
+  if (beforePublish !== undefined && !await beforePublish()) {
+    return notConfirmed(
+      commit.value,
+      "startup repair custody or native quiescence changed before publication",
     );
   }
   const patch = await patchOwnerDevelopmentInstallRef(appToken, commit.value);
@@ -4142,5 +4502,14 @@ function report(result: OwnerDevelopmentInstallResultV1, exitCode = 0): number {
 }
 
 if (import.meta.main) {
-  Deno.exitCode = await runOwnerDevelopmentInstallMain();
+  if (
+    Deno.args.length > 1 ||
+    (Deno.args.length === 1 && Deno.args[0] !== "--startup-recovery")
+  ) {
+    Deno.exitCode = report(failedResult("arguments_rejected"), 1);
+  } else {
+    Deno.exitCode = await runOwnerDevelopmentInstallMain({
+      startupRecovery: Deno.args[0] === "--startup-recovery",
+    });
+  }
 }

@@ -72,6 +72,8 @@ import {
 import type { HostedRuntimeJobV1 } from "./hosted-runtime.ts";
 import { ensurePrivateDir, githubGitAuthEnv, joinPath } from "./local.ts";
 
+import { isOwnerStartupRecoveryTuple } from "./owner-startup-recovery.ts";
+
 const REMOTE_URL = "https://github.com/ubiquity/sentinel.git";
 const SUPERVISOR_TOKEN_ENV = "SENTINEL_SUPERVISOR_TOKEN";
 const STATIC_TOKEN = "hosted supervisor credentials are unavailable";
@@ -262,6 +264,8 @@ export interface HostedSupervisorInputV1 {
   state: StateReadView & ReleaseStateWriter;
   run: HostedSupervisorRunIdentityV1;
   evidence: HostedSupervisorEvidencePortV1;
+  /** Temporary explicit owner recovery: resume only its genuine saved bootstrap. */
+  ownerStartupRecoveryOnly?: boolean;
 }
 
 export type HostedSupervisorOutcomeV1 =
@@ -1083,6 +1087,39 @@ export async function runHostedSupervisorPrepare(
     const releases = cursor.snapshot?.hostedReleases ?? [];
     const execution = runtime?.execution ?? null;
 
+    if (input.ownerStartupRecoveryOnly === true) {
+      if (
+        cursor.snapshot?.hostedRuntimes.length !== 1 || runtime === null ||
+        !isOwnerStartupRecoveryTuple(
+          runtime.activeRevision,
+          runtime.generation,
+          true,
+        )
+      ) {
+        return pending("owner startup recovery refuses an unrelated pointer");
+      }
+      if (execution === null) {
+        return idle(
+          "owner startup recovery admits no ordinary or release work",
+        );
+      }
+      if (
+        execution.purpose !== "bootstrap" || execution.releaseId !== null ||
+        !isOwnerStartupRecoveryTuple(
+          execution.revision,
+          execution.generation,
+          true,
+        ) ||
+        (execution.id === executionIdOfRun(input.run) &&
+          !isOwnerStartupRecoveryTuple(
+            execution.revision,
+            execution.generation,
+          ))
+      ) {
+        return pending("owner startup recovery refuses an unrelated execution");
+      }
+    }
+
     if (runtime !== null && execution !== null) {
       if (
         execution.id === executionIdOfRun(input.run) &&
@@ -1389,6 +1426,7 @@ export interface HostedSupervisorHostInputV1 {
   state: StateReadView & ReleaseStateWriter;
   process: ReplayRuntimeV1;
   /** Existing read-only transport seam; production constructs its native adapter. */
+  ownerStartupRecoveryOnly?: boolean;
   matrixArtifacts?: Pick<
     MatrixArtifactTransportV1,
     "confirmCompletedExecution"
@@ -1516,6 +1554,7 @@ export async function runHostedSupervisorHost(
       launcherSha: identity.launcherSha,
     },
     evidence,
+    ownerStartupRecoveryOnly: input.ownerStartupRecoveryOnly,
   };
   const outcome = job === "prepare"
     ? await runHostedSupervisorPrepare(core)
@@ -1589,6 +1628,12 @@ export async function runHostedSupervisorHost(
  * gate. No model token, no environment dump and no App private key.
  */
 async function main(): Promise<void> {
+  if (
+    Deno.args.length > 1 ||
+    (Deno.args.length === 1 && Deno.args[0] !== "--owner-startup-recovery-only")
+  ) {
+    throw new Error("hosted supervisor arguments are invalid");
+  }
   const env: Record<string, string | undefined> = {
     ...readHostedIdentityEnv(),
     [PATH_ENV]: Deno.env.get(PATH_ENV),
@@ -1649,6 +1694,7 @@ async function main(): Promise<void> {
     state,
     process,
     writeOutput,
+    ownerStartupRecoveryOnly: Deno.args[0] === "--owner-startup-recovery-only",
   });
   // Bounded trusted result only; no raw error or credential is ever logged.
   console.log(JSON.stringify({

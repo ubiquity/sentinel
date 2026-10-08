@@ -7,6 +7,402 @@
  */
 import assert from "node:assert/strict";
 
+Deno.test("owner startup recovery: fixed identity proof and safety refusals preserve the old chain", () => {
+  const base = releaseSnapshot({ runtime: STARTUP_RUNTIME });
+  const authority = startupAuthority();
+  const plan = (state: ReleaseStateSnapshotV1, auth: unknown = authority) =>
+    Reflect.apply(planOwnerDevelopmentInstall, undefined, [
+      state,
+      STARTUP_NOW,
+      undefined,
+      auth,
+    ]) as ReturnType<typeof planOwnerDevelopmentInstall>;
+  const unsafe: ReleaseStateSnapshotV1[] = [
+    {
+      ...base,
+      hostedRuntimes: [{ ...STARTUP_RUNTIME, activeRevision: UNRELATED }],
+    },
+    { ...base, hostedRuntimes: [{ ...STARTUP_RUNTIME, generation: 62 }] },
+    {
+      ...base,
+      hostedRuntimes: [{ ...STARTUP_RUNTIME, lastHealthyProof: null }],
+    },
+    {
+      ...base,
+      hostedRuntimes: [{
+        ...STARTUP_RUNTIME,
+        lastHealthyProof: {
+          ...STARTUP_RUNTIME.lastHealthyProof!,
+          execution: {
+            ...STARTUP_RUNTIME.lastHealthyProof!.execution,
+            revision: STARTUP_FAILED,
+          },
+        },
+      }],
+    },
+    {
+      ...base,
+      hostedRuntimes: [{
+        ...STARTUP_RUNTIME,
+        lastHealthyProof: {
+          ...STARTUP_RUNTIME.lastHealthyProof!,
+          logDigest: "0".repeat(64),
+        },
+      }],
+    },
+    {
+      ...base,
+      hostedRuntimes: [{ ...STARTUP_RUNTIME, lastExecutionProof: null }],
+    },
+    {
+      ...base,
+      hostedRuntimes: [{
+        ...STARTUP_RUNTIME,
+        lastExecutionProof: notStartedProof(STARTUP_FAILED, 63),
+      }],
+    },
+    {
+      ...base,
+      hostedRuntimes: [{
+        ...STARTUP_RUNTIME,
+        execution: {
+          ...STARTUP_RUNTIME.lastExecutionProof!.execution,
+          runId: 777,
+          id: "777:1:repair",
+        },
+      }],
+    },
+    { ...base, hostedReleases: [requestedRelease()] },
+    { ...base, githubCooldowns: [cooldown(STARTUP_NOW + 60_000)] },
+  ];
+  for (const state of unsafe) {
+    const result = plan(state);
+    assert.ok(
+      result.status === "waiting" || result.status === "no_change",
+      JSON.stringify(result),
+    );
+  }
+  for (
+    const auth of [
+      { ...authority, nativeQuiescent: false },
+      { ...authority, nativeProofsVerified: false },
+      { ...authority, healthyProof: { ...authority.healthyProof, jobId: 1 } },
+      { ...authority, run: { ...authority.run, runId: 0 } },
+    ]
+  ) assert.equal(plan(base, auth).status, "waiting");
+
+  const healthy = parseHostedRunProofV1({
+    ...STARTUP_RUNTIME.lastHealthyProof!,
+    execution: {
+      ...STARTUP_RUNTIME.lastHealthyProof!.execution,
+      id: "999:1:repair",
+      runId: 999,
+      revision: STARTUP_CANDIDATE,
+      generation: 64,
+      purpose: "bootstrap",
+    },
+  });
+  const accepted = {
+    ...base,
+    hostedRuntimes: [{
+      ...STARTUP_RUNTIME,
+      activeRevision: STARTUP_CANDIDATE,
+      generation: 64,
+      lastHealthyProof: healthy,
+    }],
+  };
+  assert.equal(
+    plan(accepted).status,
+    "no_change",
+    "accepted startup does not reopen on later unrelated failure",
+  );
+  const restored = {
+    ...base,
+    hostedRuntimes: [{
+      ...STARTUP_RUNTIME,
+      activeRevision: STARTUP_PRIOR,
+      generation: 65,
+    }],
+  };
+  assert.equal(
+    plan(restored).status,
+    "no_change",
+    "terminal rollback never reinstalls",
+  );
+  assert.equal(
+    planOwnerDevelopmentInstall(base, STARTUP_NOW).status,
+    "no_change",
+    "legacy invocation gains no authority",
+  );
+  const chosen = plan(base);
+  assert.equal(chosen.status, "install");
+  if (chosen.status !== "install") throw new Error("missing valid control");
+  assert.throws(() =>
+    Reflect.apply(buildOwnerDevelopmentInstallSnapshot, undefined, [
+      base,
+      STATE_HEAD,
+      { ...chosen.move, nextRevision: UNRELATED },
+      STARTUP_NOW,
+      undefined,
+      authority,
+    ])
+  );
+});
+
+Deno.test("owner startup recovery: real consumer refuses source CI native custody and CAS faults", async (test) => {
+  for (
+    const fault of [
+      "ancestry",
+      "ci",
+      "parent",
+      "readback",
+      "source",
+      "controller_ci",
+      "native",
+      "proof",
+    ] as const
+  ) {
+    await test.step(fault, async () => {
+      const standard =
+        fault === "ancestry" || fault === "ci" || fault === "parent" ||
+          fault === "readback"
+          ? fault
+          : undefined;
+      const special = standard === undefined
+        ? fault as "source" | "controller_ci" | "native" | "proof"
+        : undefined;
+      const fixture = await concurrencyInstallerFixture(
+        releaseSnapshot({ runtime: STARTUP_RUNTIME }),
+        standard,
+        STARTUP_CANDIDATE,
+        undefined,
+        { refusal: special },
+      );
+      try {
+        await fixture.run();
+        assert.notEqual(fixture.reports.at(-1)?.status, "installed", fault);
+        assert.equal(fixture.patches(), fault === "readback" ? 1 : 0, fault);
+        if (fault === "source") {
+          assert.equal(
+            fixture.requests.length,
+            0,
+            "dirty source reads no token-backed API",
+          );
+        }
+      } finally {
+        await fixture.close();
+      }
+    });
+  }
+});
+
+Deno.test("owner startup recovery: workflow suppresses maintenance and retains the existing verification path", async () => {
+  const text = await Deno.readTextFile(
+    new URL("../../.github/workflows/supervisor.yml", import.meta.url),
+  );
+  const maintenance = text.slice(
+    text.indexOf("  maintenance:"),
+    text.indexOf("  prepare:"),
+  );
+  assert.match(maintenance, /if: \$\{\{ false \}\}/);
+  assert.match(text, /needs\.maintenance\.result == 'skipped'/);
+  assert.match(text, /owner-development-install\.ts --startup-recovery/);
+  assert.equal(
+    (text.match(/deno task supervisor:run --owner-startup-recovery-only/g) ??
+      []).length,
+    2,
+  );
+  assert.match(text, /--allow-run=git/);
+  assert.doesNotMatch(text, /--allow-env=[^\n]*OWNER_STARTUP_RECOVERY/);
+});
+
+Deno.test("owner startup recovery: real installer bootstrap failure rollback and terminal verification preserve custody", async () => {
+  const fixture = await concurrencyInstallerFixture(
+    releaseSnapshot({ runtime: STARTUP_RUNTIME }),
+    undefined,
+    STARTUP_CANDIDATE,
+    undefined,
+    {},
+  );
+  try {
+    const beforeRepair = await fixture.readRepair();
+    assert.equal(await fixture.run(), 0, JSON.stringify(fixture.reports));
+    assert.equal(
+      fixture.reports.at(-1)?.status,
+      "installed",
+      JSON.stringify(fixture.reports),
+    );
+    assert.equal(fixture.patches(), 1);
+    let read = await fixture.read();
+    assert.ok(read.ok && read.value.status === "found");
+    let runtime = read.value.snapshot.hostedRuntimes[0];
+    assert.equal(runtime.activeRevision, STARTUP_CANDIDATE);
+    assert.equal(runtime.generation, 64);
+    assert.deepEqual(
+      runtime.lastHealthyProof,
+      STARTUP_RUNTIME.lastHealthyProof,
+    );
+    assert.equal(await fixture.run(), 0);
+    assert.equal(
+      fixture.patches(),
+      1,
+      "duplicate invocation cannot move an in-flight pointer",
+    );
+    let time = STARTUP_NOW;
+    let observed: HostedRunProofV1 | null = null;
+    const core = () => ({
+      clock: { now: () => time },
+      state: fixture.releaseStore,
+      run: fixture.runIdentity(),
+      ownerStartupRecoveryOnly: true,
+      evidence: {
+        readExecution: () => Promise.resolve(portOk(observed)),
+        verifyRevision: () => Promise.resolve(portOk(true)),
+        verifyRequest: () => {
+          throw new Error("recovery must not select a release");
+        },
+        verifyMatrixOrdinaryRevision: () => {
+          throw new Error("recovery must not admit a matrix");
+        },
+      },
+    });
+    const outputs = new Map<string, string>();
+    const host = () => {
+      const identity = fixture.runIdentity();
+      return runHostedSupervisorHost({
+        sourceDir: Deno.cwd(),
+        clock: { now: () => time },
+        state: fixture.releaseStore,
+        ownerStartupRecoveryOnly: true,
+        http: () => {
+          throw new Error(
+            "recovery composition must not query task/release or ordinary capability",
+          );
+        },
+        process: {
+          run: (input) =>
+            Promise.resolve({
+              outcome: "exited",
+              exitCode: 0,
+              signal: null,
+              stdout: new TextEncoder().encode(
+                input.args.includes("rev-parse")
+                  ? `${identity.launcherSha}\n`
+                  : "",
+              ),
+              stderr: new Uint8Array(),
+              truncated: false,
+              settled: true,
+              durationMs: 0,
+              detail: "offline source identity",
+            }),
+        },
+        env: {
+          GITHUB_REPOSITORY: "ubiquity/sentinel",
+          GITHUB_REF: "refs/heads/sentinel-supervisor",
+          GITHUB_JOB: "prepare",
+          GITHUB_RUN_ID: String(identity.runId),
+          GITHUB_RUN_ATTEMPT: "1",
+          GITHUB_SHA: identity.launcherSha,
+          GITHUB_WORKFLOW_SHA: identity.launcherSha,
+          GITHUB_WORKFLOW_REF:
+            "ubiquity/sentinel/.github/workflows/supervisor.yml@refs/heads/sentinel-supervisor",
+          GITHUB_TOKEN: "offline-native-token-value",
+        },
+        writeOutput: (name, value) => {
+          outputs.set(name, value);
+          return Promise.resolve();
+        },
+      });
+    };
+    assert.equal((await host()).execution?.purpose, "bootstrap");
+    assert.equal(outputs.get("modelStartsEnabled"), "false");
+    let prepared = await runHostedSupervisorPrepare(core());
+    assert.equal(prepared.status, "run");
+    if (prepared.status !== "run") throw new Error("expected saved bootstrap");
+    assert.equal(prepared.execution.purpose, "bootstrap");
+    assert.equal(prepared.execution.releaseId, null);
+    observed = parseHostedRunProofV1({
+      execution: prepared.execution,
+      workflowId: 357012162,
+      workflowPath: ".github/workflows/supervisor.yml",
+      repository: "ubiquity/sentinel",
+      ref: "refs/heads/sentinel-supervisor",
+      jobId: 999001,
+      startedAt: time + 100,
+      finishedAt: time + 200,
+      observedAt: time + 300,
+      outcome: "failed",
+      startupReady: false,
+      settled: true,
+      baseSha: null,
+      terminalAt: time + 150,
+      logDigest: "1".repeat(64),
+    });
+    time += 400;
+    fixture.setNow(time);
+    assert.equal((await runHostedSupervisorFinalize(core())).status, "idle");
+    fixture.setRun(1000000);
+    assert.equal(await fixture.run(), 0);
+    assert.equal(
+      fixture.reports.at(-1)?.status,
+      "rolled_back",
+      JSON.stringify(fixture.reports),
+    );
+    assert.equal(fixture.patches(), 2);
+    read = await fixture.read();
+    assert.ok(read.ok && read.value.status === "found");
+    runtime = read.value.snapshot.hostedRuntimes[0];
+    assert.equal(runtime.activeRevision, STARTUP_PRIOR);
+    assert.equal(runtime.generation, 65);
+    assert.deepEqual(
+      runtime.lastHealthyProof,
+      STARTUP_RUNTIME.lastHealthyProof,
+    );
+    prepared = await runHostedSupervisorPrepare(core());
+    assert.equal(prepared.status, "run");
+    if (prepared.status !== "run") {
+      throw new Error("expected rollback verification");
+    }
+    assert.equal(prepared.execution.purpose, "bootstrap");
+    observed = parseHostedRunProofV1({
+      execution: prepared.execution,
+      workflowId: 357012162,
+      workflowPath: ".github/workflows/supervisor.yml",
+      repository: "ubiquity/sentinel",
+      ref: "refs/heads/sentinel-supervisor",
+      jobId: 999002,
+      startedAt: time + 100,
+      finishedAt: time + 200,
+      observedAt: time + 300,
+      outcome: "healthy",
+      startupReady: true,
+      settled: true,
+      baseSha: STARTUP_RUNTIME.lastHealthyProof!.baseSha,
+      terminalAt: time + 150,
+      logDigest: "2".repeat(64),
+    });
+    time += 400;
+    fixture.setNow(time);
+    assert.equal((await runHostedSupervisorFinalize(core())).status, "idle");
+    fixture.setRun(1000001);
+    assert.equal(await fixture.run(), 0);
+    assert.equal(fixture.reports.at(-1)?.status, "no_change");
+    assert.equal(fixture.patches(), 2, "rollback can never reinstall");
+    assert.equal((await runHostedSupervisorPrepare(core())).status, "idle");
+    outputs.clear();
+    assert.equal((await host()).status, "idle");
+    assert.equal(outputs.get("run"), "false");
+    assert.deepEqual(
+      await fixture.readRepair(),
+      beforeRepair,
+      "foreign work and all charges stay byte-identical",
+    );
+  } finally {
+    await fixture.close();
+  }
+});
+
 import type { GitSha, WorkItemId } from "../../src/contracts/brands.ts";
 import { canonicalStringify } from "../../src/contracts/canonical.ts";
 import { parseGitHubCooldownV1 } from "../../src/contracts/github-cooldown.ts";
@@ -40,6 +436,7 @@ import {
 import { runHistoricalMatrixQuarantine } from "../../src/host/matrix-actions.ts";
 import {
   runHostedSupervisorFinalize,
+  runHostedSupervisorHost,
   runHostedSupervisorPrepare,
 } from "../../src/host/actions-supervisor.ts";
 import { reservation, workRecord } from "../state/helpers.ts";
@@ -758,6 +1155,15 @@ async function concurrencyInstallerFixture(
     /** Omit only the candidate override; keep the real-Git fixture binding. */
     useSourcePin?: boolean;
   },
+  startupRecovery?: {
+    refusal?:
+      | "native"
+      | "controller_ci"
+      | "source"
+      | "proof"
+      | "repair"
+      | "ambiguous";
+  },
 ) {
   const directory = await Deno.makeTempDir({
     prefix: "sentinel-owner57-",
@@ -768,7 +1174,7 @@ async function concurrencyInstallerFixture(
   const originalFetch = globalThis.fetch;
   const originalLog = console.log;
   const originalNow = Date.now;
-  let fixtureNow = NOW;
+  let fixtureNow = startupRecovery === undefined ? NOW : STARTUP_NOW;
   let archivesUnavailable = false;
   const originalCwd = Deno.cwd();
   const originalEnvironmentGet = Deno.env.get;
@@ -780,6 +1186,12 @@ async function concurrencyInstallerFixture(
     GITHUB_WORKFLOW_SHA: LAUNCHER,
     GITHUB_TOKEN: "offline-native-token",
     SENTINEL_SUPERVISOR_TOKEN: "offline-app-token-value",
+    ...(startupRecovery === undefined ? {} : {
+      GITHUB_RUN_ID: "999999",
+      GITHUB_RUN_ATTEMPT: "1",
+      GITHUB_WORKFLOW_REF:
+        "ubiquity/sentinel/.github/workflows/supervisor.yml@refs/heads/sentinel-supervisor",
+    }),
   };
   const gitEnvironment = {
     PATH: Deno.env.get("PATH") ?? "/usr/bin:/bin",
@@ -933,6 +1345,66 @@ async function concurrencyInstallerFixture(
         releaseCommit: initialHead,
       };
     }
+    if (startupRecovery !== undefined) {
+      await git([
+        ...gitArgs,
+        "update-ref",
+        "-d",
+        "refs/heads/sentinel-state/repair",
+        initialHead,
+      ]);
+      const repairStore = createRepairStateStore({
+        remoteUrl: remote,
+        scratchDir: `${directory}/startup-repair`,
+        runner: new DenoGitRunner(`${directory}/startup-home`),
+      });
+      const seeded = await repairStore.writeRepair(
+        parseRepairStateSnapshotV1({
+          version: "v1",
+          kind: "repair_state_snapshot",
+          sequence: 1,
+          stateHead: null,
+          updatedAt: STARTUP_NOW,
+          incidents: [],
+          evidence: [],
+          work: [
+            workRecord("retained-foreign", {
+              nextStep: "blocked",
+              blocker: {
+                kind: "other",
+                since: T0,
+                message: "merge_not_observed",
+              },
+            }),
+          ],
+          reservations: [reservation("retained-charge")],
+          reviews: [],
+          replays: [],
+          releaseRequests: [],
+          githubCooldowns: [],
+        }),
+        null,
+      );
+      assert.ok(
+        seeded.ok && seeded.value.status === "applied",
+        JSON.stringify(seeded),
+      );
+      expectedRepairHead = seeded.value.head;
+      await git(["init", directory]);
+      await Deno.writeTextFile(`${directory}/.gitignore`, "*\n");
+      await Deno.writeTextFile(
+        `${directory}/controller.txt`,
+        "fixed offline controller\n",
+      );
+      await git(["add", "-f", ".gitignore", "controller.txt"]);
+      await git(["commit", "-m", "offline controller"]);
+      const controller = await git(["rev-parse", "HEAD"]);
+      environment.GITHUB_SHA = controller;
+      environment.GITHUB_WORKFLOW_SHA = controller;
+      if (startupRecovery.refusal === "source") {
+        await Deno.writeTextFile(`${directory}/controller.txt`, "dirty\n");
+      }
+    }
     if (refusal === "artifact") {
       const blob = await git(
         [...gitArgs, "hash-object", "-w", "--stdin"],
@@ -1002,6 +1474,7 @@ async function concurrencyInstallerFixture(
     let blobCount = 0;
     let treeCount = 0;
     let parentMoved = false;
+    let repairMoved = false;
     let createdCommit: string | null = null;
     const response = (value: unknown, status = 200) =>
       new Response(JSON.stringify(value), { status });
@@ -1029,6 +1502,101 @@ async function concurrencyInstallerFixture(
       const method = init?.method ?? "GET";
       const body = init?.body ? JSON.parse(String(init.body)) : {};
       requests.push({ method, path: url.pathname, body });
+      if (startupRecovery !== undefined) {
+        const currentRunId = Number(environment.GITHUB_RUN_ID);
+        const controller = environment.GITHUB_SHA;
+        if (url.pathname.endsWith("/git/ref/heads/sentinel-supervisor")) {
+          return response({ object: { sha: controller } });
+        }
+        if (url.pathname.includes("/actions/workflows/")) {
+          const supervisor = url.pathname.includes("/supervisor.yml/");
+          const runs = supervisor
+            ? [{
+              id: currentRunId,
+              run_attempt: 1,
+              head_sha: controller,
+              status: "in_progress",
+            }]
+            : [];
+          if (startupRecovery.refusal === "native") {
+            runs.push({
+              id: currentRunId + 7,
+              run_attempt: 1,
+              head_sha: controller,
+              status: "in_progress",
+            });
+          }
+          return response({ total_count: runs.length, workflow_runs: runs });
+        }
+        if (url.pathname.includes("/actions/runs/")) {
+          const current = url.pathname.includes(`/runs/${currentRunId}/`);
+          const latest = await store.readRelease();
+          assert.ok(latest.ok && latest.value.status === "found");
+          const saved = latest.value.snapshot.hostedRuntimes[0]
+            .lastExecutionProof! as HostedRunProofV1;
+          const proof = url.pathname.includes("/runs/37704666277/")
+            ? STARTUP_RUNTIME.lastHealthyProof!
+            : saved;
+          if (url.pathname.endsWith("/jobs")) {
+            return response({
+              total_count: 1,
+              jobs: [{
+                id: current ? 999 : proof.jobId,
+                name: current ? "prepare" : "repair",
+                status: current ? "in_progress" : "completed",
+                head_sha: current ? controller : proof.execution.launcherSha,
+                conclusion: current
+                  ? null
+                  : startupRecovery.refusal === "proof"
+                  ? "cancelled"
+                  : proof.outcome === "healthy"
+                  ? "success"
+                  : "failure",
+              }],
+            });
+          }
+          return response({
+            id: current ? currentRunId : proof.execution.runId,
+            run_attempt: current ? 1 : proof.execution.runAttempt,
+            head_sha: current ? controller : proof.execution.launcherSha,
+            workflow_id: 357012162,
+            head_branch: "sentinel-supervisor",
+            status: current ? "in_progress" : "completed",
+          });
+        }
+        if (url.pathname.includes("/compare/")) {
+          assert.ok(
+            url.pathname.endsWith(`${candidateRevision}...${controller}`),
+          );
+          return response({
+            status: refusal === "ancestry" ? "diverged" : "ahead",
+            base_commit: { sha: candidateRevision },
+            merge_base_commit: { sha: candidateRevision },
+            head_commit: { sha: controller },
+            ahead_by: 1,
+            behind_by: 0,
+            total_commits: 1,
+          });
+        }
+        if (url.pathname.includes("/check-runs")) {
+          const head = url.pathname.includes(controller)
+            ? controller
+            : candidateRevision;
+          return response({
+            total_count: 1,
+            check_runs: [{
+              name: "test-local",
+              status: "completed",
+              conclusion: refusal === "ci" ||
+                  (head === controller &&
+                    startupRecovery.refusal === "controller_ci")
+                ? "failure"
+                : "success",
+              head_sha: head,
+            }],
+          });
+        }
+      }
       if (
         matrixRecovery !== undefined && url.pathname.includes("/actions/runs/")
       ) {
@@ -1170,6 +1738,30 @@ async function concurrencyInstallerFixture(
         return response({ sha: createdCommit }, 201);
       }
       if (method === "GET" && url.pathname.includes("/git/ref/")) {
+        if (
+          startupRecovery?.refusal === "repair" && createdCommit !== null &&
+          !repairMoved
+        ) {
+          repairMoved = true;
+          const updater = createRepairStateStore({
+            remoteUrl: remote,
+            scratchDir: `${directory}/competing-repair`,
+            runner: new DenoGitRunner(`${directory}/competing-home`),
+          });
+          const prior = await updater.readRepair();
+          assert.ok(prior.ok && prior.value.status === "found");
+          const changed = await updater.writeRepair(
+            parseRepairStateSnapshotV1({
+              ...prior.value.snapshot,
+              stateHead: prior.value.head,
+              sequence: prior.value.snapshot.sequence + 1,
+              updatedAt: fixtureNow + 1,
+            }),
+            prior.value.head,
+          );
+          assert.ok(changed.ok && changed.value.status === "applied");
+          expectedRepairHead = changed.value.head;
+        }
         if (refusal === "parent" && !parentMoved) {
           parentMoved = true;
           const tree = await git([
@@ -1206,6 +1798,7 @@ async function concurrencyInstallerFixture(
           `${createdCommit}^`,
         ]);
         await git([...gitArgs, "update-ref", ref, body.sha, expected]);
+        if (startupRecovery?.refusal === "ambiguous") return response({}, 503);
         return response({ object: { sha: body.sha } });
       }
       throw new Error(`unexpected offline request: ${method} ${url.pathname}`);
@@ -1225,12 +1818,16 @@ async function concurrencyInstallerFixture(
       reports,
       run: () =>
         runOwnerDevelopmentInstallMain(
-          recoveryBinding === undefined ? undefined : {
-            ...(matrixRecovery?.useSourcePin
-              ? {}
-              : { matrixRecoveryRevision: candidateRevision }),
-            matrixRecoveryBinding: recoveryBinding,
-          },
+          startupRecovery !== undefined
+            ? { startupRecovery: true, startupWitness: initialHead }
+            : recoveryBinding === undefined
+            ? undefined
+            : {
+              ...(matrixRecovery?.useSourcePin
+                ? {}
+                : { matrixRecoveryRevision: candidateRevision }),
+              matrixRecoveryBinding: recoveryBinding,
+            },
         ),
       patches: () => patches,
       head: () => git([...gitArgs, "rev-parse", ref]),
@@ -1240,6 +1837,14 @@ async function concurrencyInstallerFixture(
       setNow: (value: number) => {
         fixtureNow = value;
       },
+      setRun: (runId: number) => {
+        environment.GITHUB_RUN_ID = String(runId);
+      },
+      runIdentity: () => ({
+        runId: Number(environment.GITHUB_RUN_ID),
+        runAttempt: 1,
+        launcherSha: environment.GITHUB_SHA as GitSha,
+      }),
       expireArchives: () => {
         archivesUnavailable = true;
       },
@@ -7796,3 +8401,162 @@ Deno.test(
     }
   },
 );
+
+// Exact public recovery identities; these never stand in for native execution proof.
+const STARTUP_CANDIDATE = "ebd779621ab3849cd206e2f3c74c63cf2f832880" as GitSha;
+const STARTUP_FAILED = "2266a52ae1db749548d9f30031c6425894307849" as GitSha;
+const STARTUP_PRIOR = "e4cef46332cf124a8c283d798a963cf5f66e45c2" as GitSha;
+const STARTUP_RUNTIME = parseHostedRuntimeRecordV1({
+  "activeRevision": "2266a52ae1db749548d9f30031c6425894307849",
+  "createdAt": 1789358128122,
+  "execution": null,
+  "generation": 63,
+  "id": "ubiquity/sentinel:0:production",
+  "kind": "hosted_runtime",
+  "lastExecutionProof": {
+    "baseSha": null,
+    "execution": {
+      "createdAt": 1791487441671,
+      "generation": 63,
+      "id": "37831224181:1:repair",
+      "launcherSha": "2266a52ae1db749548d9f30031c6425894307849",
+      "purpose": "bootstrap",
+      "releaseId": null,
+      "revision": "2266a52ae1db749548d9f30031c6425894307849",
+      "runAttempt": 1,
+      "runId": 37831224181,
+    },
+    "finishedAt": 1791487490000,
+    "jobId": 113498293005,
+    "logDigest":
+      "6b7f0f21079cd3aed342fe3141b0bcdd271a54c99b339bc60a62eb79c0e266dd",
+    "observedAt": 1791487506327,
+    "outcome": "failed",
+    "ref": "refs/heads/sentinel-supervisor",
+    "repository": "ubiquity/sentinel",
+    "settled": true,
+    "startedAt": 1791487454000,
+    "startupReady": false,
+    "terminalAt": 1791487487139,
+    "workflowId": 357012162,
+    "workflowPath": ".github/workflows/supervisor.yml",
+  },
+  "lastHealthyProof": {
+    "baseSha": "f79a890d1020be13b5b650968430e80b51fc35e1",
+    "execution": {
+      "createdAt": 1791417309456,
+      "generation": 63,
+      "id": "37704666277:1:repair",
+      "launcherSha": "44031db6fd9cbc91755a9d4501e1481b9cd09b89",
+      "purpose": "ordinary",
+      "releaseId": null,
+      "revision": "e4cef46332cf124a8c283d798a963cf5f66e45c2",
+      "runAttempt": 1,
+      "runId": 37704666277,
+    },
+    "finishedAt": 1791419897000,
+    "jobId": 113081997296,
+    "logDigest":
+      "aad29414cf59ddbc3916fe2566c1749dd2ac12c6e2ab9a1c9bce659f0b1fd90f",
+    "observedAt": 1791419943131,
+    "outcome": "healthy",
+    "ref": "refs/heads/sentinel-supervisor",
+    "repository": "ubiquity/sentinel",
+    "settled": true,
+    "startedAt": 1791418334000,
+    "startupReady": true,
+    "terminalAt": 1791419892505,
+    "workflowId": 357012162,
+    "workflowPath": ".github/workflows/supervisor.yml",
+  },
+  "nextOrdinaryAt": 1791420119774,
+  "updatedAt": 1791487507323,
+  "version": "v1",
+});
+const STARTUP_NOW = 1791487517323;
+function startupAuthority(head = STATE_HEAD) {
+  return {
+    releaseHead: head,
+    repairHead: PRIOR_STATE_HEAD,
+    witnessHead: "bfd8d4304a04696a7692ab21e0a06d05bad41641" as GitSha,
+    healthyProof: STARTUP_RUNTIME.lastHealthyProof!,
+    nativeQuiescent: true as const,
+    nativeProofsVerified: true as const,
+    run: { runId: 999999, runAttempt: 1, launcherSha: LAUNCHER },
+  };
+}
+Deno.test("owner startup recovery: exact failed63 installs only pinned64 and records bootstrap intent", () => {
+  const state = releaseSnapshot({ runtime: STARTUP_RUNTIME });
+  const authority = startupAuthority();
+  const plan = Reflect.apply(planOwnerDevelopmentInstall, undefined, [
+    state,
+    STARTUP_NOW,
+    undefined,
+    authority,
+  ]) as ReturnType<typeof planOwnerDevelopmentInstall>;
+  assert.equal(plan.status, "install");
+  if (plan.status !== "install") {
+    throw new Error("expected pinned startup installation");
+  }
+  assert.equal(plan.move.priorRevision, STARTUP_FAILED);
+  assert.equal(plan.move.nextRevision, STARTUP_CANDIDATE);
+  assert.equal(plan.move.nextGeneration, 64);
+  assert.deepEqual(
+    plan.move.priorHealthyProof,
+    STARTUP_RUNTIME.lastHealthyProof,
+  );
+  const next = Reflect.apply(buildOwnerDevelopmentInstallSnapshot, undefined, [
+    state,
+    STATE_HEAD,
+    plan.move,
+    STARTUP_NOW,
+    undefined,
+    authority,
+  ]) as ReleaseStateSnapshotV1;
+  assert.deepEqual(next.hostedRuntimes[0].execution, {
+    id: "999999:1:repair",
+    runId: 999999,
+    runAttempt: 1,
+    launcherSha: LAUNCHER,
+    purpose: "bootstrap",
+    revision: STARTUP_CANDIDATE,
+    generation: 64,
+    releaseId: null,
+    createdAt: STARTUP_NOW,
+  });
+  assert.deepEqual(
+    next.hostedRuntimes[0].lastHealthyProof,
+    STARTUP_RUNTIME.lastHealthyProof,
+  );
+});
+
+Deno.test("owner startup recovery: changed repair custody refuses while an ambiguous applied CAS reconciles once", async () => {
+  for (const fault of ["repair", "ambiguous"] as const) {
+    const fixture = await concurrencyInstallerFixture(
+      releaseSnapshot({ runtime: STARTUP_RUNTIME }),
+      undefined,
+      STARTUP_CANDIDATE,
+      undefined,
+      { refusal: fault },
+    );
+    try {
+      assert.equal(await fixture.run(), 0);
+      assert.equal(
+        fixture.reports.at(-1)?.status,
+        fault === "repair" ? "failed" : "installed",
+        JSON.stringify(fixture.reports),
+      );
+      assert.equal(fixture.patches(), fault === "repair" ? 0 : 1);
+      if (fault === "ambiguous") {
+        assert.equal(await fixture.run(), 0);
+        assert.equal(
+          fixture.patches(),
+          1,
+          "an ambiguous but confirmed write is never repeated",
+        );
+      }
+    } finally {
+      await fixture.close();
+    }
+  }
+});
