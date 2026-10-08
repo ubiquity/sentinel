@@ -16,6 +16,7 @@ The internal reviewer was written before the Codex client was reverse-engineered
 
 - Vendored copy used by the reviewer: `src/github/codex-review-rubric.ts`.
 - Pristine upstream text: <https://github.com/openai/codex/blob/rust-v0.162.0/codex-rs/prompts/templates/review/rubric.md>.
+- Readable reference copy in this repository: `docs/codex-review-rubric.md` (the vendored constant remains authoritative).
 
 ## How to verify on a post-`4e59d2f1b` candidate
 
