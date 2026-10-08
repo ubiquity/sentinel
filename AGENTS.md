@@ -26,7 +26,8 @@ identity and isolated worker lanes are invariants. Preserve unrelated work.
   Make the scoped change, test it immediately, then deliver it directly.
   This supersedes development acceptance-review and PR requirements below.
   Autonomous target repairs retain their existing PR, review and merge gates.
-- Owner update, 2026-10-05: Codex review requests apply only to runtime code changes. A change limited to tests, fixtures, boot scripts, dev tooling, documentation or other non-runtime files gets no Codex review request, locally or on a PR. When a hosted review is required, check the PR body for the thumbs-up review-passed reaction first (`gh pr view <N> --json isDraft,reactionGroups`) and post `@codex review` only when it is absent.
+- Owner update, 2026-10-08: external `@codex review` requests are retired; never post `@codex review` or otherwise invoke the hosted Codex GitHub app for any PR. The internal structured reviewer (gateway `codex-auto-review` via the runtime review service) is the only review path for runtime target PRs. Development changes continue to require no review. This supersedes the 2026-10-05 instruction.
+- Owner update, 2026-10-08: the internal structured reviewer's base instructions now carry the vendored upstream Codex review rubric (`src/github/codex-review-rubric.ts`); do not edit the vendored constant, and the harness output schema attached to the review turn overrides the rubric's own output-format section. See `docs/codex-review-rubric-alignment-2026-10-08.md`.
 
 - Never add branch protection rules or branch rulesets to this project.
   Do not recreate deleted protection rules.
