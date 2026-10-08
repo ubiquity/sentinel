@@ -604,12 +604,14 @@ export function createActionsMatrixArtifactTransport(options: {
             !bytes || bytes.length !== artifact.size_in_bytes ||
             `sha256:${await bytesDigest(bytes)}` !== artifact.digest
           ) refuse();
-          // Dynamic import: @zip.js/zip.js is only loaded when actually
-          // reading a ZIP artifact, never at module load time. This avoids
-          // forcing Deno to download the npm package during bootstrap.
-          const { Uint8ArrayReader, ZipReader } = await import(
-            "@zip.js/zip.js"
-          );
+          // NOTE: the npm specifier MUST stay non-literal. Deno prefetches
+          // every statically-discoverable import at startup (including
+          // literal dynamic imports), so a literal specifier here
+          // re-introduces the bootstrap npm fetch hang. The computed string
+          // keeps zip.js truly lazy: it loads only when an artifact zip is
+          // actually read.
+          const zipSpec = ["npm:@zip.js/zip.js", "2.8.34"].join("@");
+          const { Uint8ArrayReader, ZipReader } = await import(zipSpec);
           const reader = new ZipReader(new Uint8ArrayReader(bytes), {
             useWebWorkers: false,
             strictness: "strict",
