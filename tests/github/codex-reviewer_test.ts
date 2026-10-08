@@ -3093,3 +3093,50 @@ Deno.test(
     contains(guidance, "lineEnd at most candidateLines");
   },
 );
+
+// ---------------------------------------------------------------------------
+// Structured review rubric: the authentic upstream Codex review rubric is
+// vendored into the session's base instructions; only the read-only boundary
+// and the harness output-schema override are added on top of it.
+// ---------------------------------------------------------------------------
+
+/** Distinctive phrases carried verbatim by the vendored upstream rubric. */
+const RUBRIC_PHRASES = [
+  "You are acting as a reviewer for a proposed code change made by another engineer.",
+  "[P0] – Drop everything to fix",
+  "It is not enough to speculate that a change may disrupt another part of the codebase",
+] as const;
+
+Deno.test(
+  "structured review contract: the submitted guidance carries the vendored upstream Codex review rubric",
+  async () => {
+    const session = new ScriptedCodexSession();
+    session.plan = (scripted) => {
+      scripted.emit(
+        "item/completed",
+        agentMessage(scripted.turnId, "item-1", JSON.stringify(CLEAN_RESULT)),
+      );
+      scripted.emit("turn/completed", turnCompleted(scripted.turnId));
+    };
+    const outcome = await startReview(session, await snapshotFixture());
+    assert.equal(outcome.status, "clean");
+    const guidance = submittedGuidance(session);
+    for (const phrase of RUBRIC_PHRASES) {
+      contains(
+        guidance,
+        phrase,
+        "the submitted guidance must carry the authentic upstream rubric text",
+      );
+    }
+    contains(
+      guidance,
+      "The rubric's output-format section is superseded by the harness output schema",
+      "the base instructions must state the harness output-schema override",
+    );
+    contains(
+      guidance,
+      "the harness output schema attached to this turn supersedes the rubric's output-format section",
+      "the developer instructions must state the harness output-schema override",
+    );
+  },
+);

@@ -18,6 +18,10 @@ The owner directed that Sentinel's GitHub Actions schedules are disabled and eve
 
 Read before changing Sentinel runtime or delivery. These are scoped user exceptions; they do not broadly override higher authority.
 
+## External Codex review requests retired - 2026-10-08
+
+The owner retired external `@codex review` requests: never post `@codex review` or otherwise invoke the hosted Codex GitHub app for any PR. The internal structured reviewer (gateway `codex-auto-review` via the runtime review service) is the only review path for runtime target PRs, and development changes continue to require no review. This supersedes the 2026-10-05 hosted-review instruction kept below as history. The rationale is the redundant hosted review-quota spend the external request added while the internal reviewer now carries the vendored upstream Codex review rubric (rust-v0.162.0 `codex-rs/prompts/templates/review/rubric.md`, exact SHA-256) with Sentinel's read-only boundary and harness output-schema overlays.
+
 ## Gateway failure diagnostics - 2026-10-05
 
 Retain the numeric HTTP response status in the existing unavailable diagnostic for unmapped gateway responses. Keep the error kind and fail-closed observation behavior unchanged, and do not include response bodies, URLs, authentication headers or credential values. Hosted run `37275381981` discarded this status, preventing the integration owner from distinguishing the producer response from an edge response. This diagnostic change does not establish the cause of that run or restore gateway availability.
