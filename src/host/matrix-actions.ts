@@ -63,6 +63,7 @@ import {
 } from "./modern-matrix-recovery.ts";
 
 import { HISTORICAL_MATRIX_QUARANTINE } from "./matrix-artifact-port.ts";
+import { recoverWithHistoricalIsolation } from "./matrix-historical-isolation.ts";
 export { HISTORICAL_MATRIX_QUARANTINE } from "./matrix-artifact-port.ts";
 
 /**
@@ -1133,10 +1134,17 @@ export async function runActionsMatrixAggregateCycles(
     const unresolved = new Set(
       requests.map((request) => request.reservationId),
     );
-    const waves = await transport.recover({
+    const waves = await recoverWithHistoricalIsolation(input, transport, {
       requests,
       runtimeSha: input.controllerSha,
       launcherSha: host.run.launcherSha,
+      consumerRun: host.run,
+      // Zero wait still permits one bounded logical scan. Isolation retries
+      // share its transport budget; other scans also stop at the wait window.
+      deadline: Math.min(
+        input.deadline,
+        options.maxWaitMs === 0 ? input.deadline : consumerUntil,
+      ),
       ...(carrier === undefined ? {} : { currentRun: host.run }),
     });
     let progressed = false;

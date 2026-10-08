@@ -51,7 +51,11 @@ import type {
   MatrixRejectedCellEvidenceV1,
   MatrixRejectedWaveV1,
 } from "./matrix-artifact-port.ts";
-import { HISTORICAL_MATRIX_QUARANTINE } from "./matrix-artifact-port.ts";
+import {
+  HISTORICAL_MATRIX_QUARANTINE,
+  MATRIX_ARTIFACT_RECOVERY_MAX_MS,
+  MatrixHistoricalRuntimeMismatch,
+} from "./matrix-artifact-port.ts";
 
 const API = `https://api.github.com/repos/${REPOSITORY}/actions`;
 const MAX_ITEMS = 10_000;
@@ -235,7 +239,16 @@ export function createActionsMatrixArtifactTransport(options: {
       ) {
         return { recovered: [], rejected: [] };
       }
-      const deadline = createDeadline(120_000);
+      if (
+        input.deadline !== undefined && !Number.isSafeInteger(input.deadline)
+      ) refuse();
+      const startedAt = options.clock.now();
+      const until = Math.min(
+        startedAt + MATRIX_ARTIFACT_RECOVERY_MAX_MS,
+        input.deadline ?? Number.POSITIVE_INFINITY,
+      );
+      if (until <= startedAt) return { recovered: [], rejected: [] };
+      const deadline = createDeadline(until - startedAt);
       const controller = new AbortController();
       let staging: string | null = null;
       try {
@@ -420,10 +433,13 @@ export function createActionsMatrixArtifactTransport(options: {
           binary = false,
           storage = false,
         ): Promise<HttpResponseV1> => {
+          const remaining = until - options.clock.now();
+          if (remaining <= 0 || deadline.fired()) refuse();
           const response = await deadline.race(
             options.http({
               method: "GET",
               url: path,
+              deadlineMs: remaining,
               headers: storage
                 ? new Map()
                 : new Map([["authorization", `Bearer ${options.token}`], [
@@ -669,6 +685,7 @@ export function createActionsMatrixArtifactTransport(options: {
           stepName: string,
           kind: keyof typeof MARKER_KEYS,
           run: MatrixRunIdentityV1,
+          expectedRuntime: string | null = input.runtimeSha,
         ): Promise<Json> => {
           if (
             job.run_id !== run.runId || job.run_attempt !== run.runAttempt ||
@@ -716,7 +733,8 @@ export function createActionsMatrixArtifactTransport(options: {
             ) refuse();
             if (
               !sameRun(run, record(value.run)) ||
-              value.runtimeSha !== input.runtimeSha
+              !isGitSha(value.runtimeSha) ||
+              (expectedRuntime !== null && value.runtimeSha !== expectedRuntime)
             ) refuse();
             positive(value.generation);
             found.push(value);
@@ -857,12 +875,22 @@ export function createActionsMatrixArtifactTransport(options: {
           if (planners.length !== 1 || planners[0].conclusion !== "success") {
             refuse();
           }
+          // Only the aggregate's separate trusted consumer identity can enable
+          // rejection-only historical inspection. Current-run discovery and
+          // every other caller retain their strict runtime match.
+          const historical = input.currentRun === undefined &&
+            input.consumerRun !== undefined &&
+            (run.runId !== input.consumerRun.runId ||
+              run.runAttempt !== input.consumerRun.runAttempt);
           const planner = await marker(
             planners[0],
             "Plan isolated issue matrix",
             "sentinel_matrix_plan",
             run,
+            historical ? null : input.runtimeSha,
           );
+          const waveRuntime = planner.runtimeSha as typeof input.runtimeSha;
+          const runtimeMismatch = waveRuntime !== input.runtimeSha;
           const waveId = `${run.runId}:${run.runAttempt}:repair`;
           if (
             planner.waveId !== waveId ||
@@ -877,7 +905,7 @@ export function createActionsMatrixArtifactTransport(options: {
           ) {
             if (
               !sameRun(run, execution) || execution.id !== waveId ||
-              execution.revision !== input.runtimeSha ||
+              execution.revision !== waveRuntime ||
               execution.generation !== planner.generation
             ) refuse();
           }
@@ -901,7 +929,7 @@ export function createActionsMatrixArtifactTransport(options: {
               ids.has(cell.cellId) ||
               cell.cellId !==
                 await matrixCellIdV1(waveId, cell.taskId, cell.reservationId) ||
-              cell.runtimeSha !== input.runtimeSha ||
+              cell.runtimeSha !== waveRuntime ||
               cell.generation !== planner.generation ||
               await matrixDigestV1(cell.request) !== cell.requestDigest ||
               cell.request.taskId !== cell.taskId ||
@@ -998,6 +1026,7 @@ export function createActionsMatrixArtifactTransport(options: {
             if (names.filter((value) => value === name).length > 1) refuse();
             const cellArtifact = artifacts.find((row) => row.name === name);
             if (!cellArtifact) {
+              if (runtimeMismatch) refuse();
               // Missing evidence never establishes non-submission. In the
               // historical revalidation path the record simply stays
               // unquarantined; failing the entire run here would deadlock the
@@ -1022,6 +1051,7 @@ export function createActionsMatrixArtifactTransport(options: {
               "Run isolated issue cell",
               "sentinel_matrix_cell",
               run,
+              waveRuntime,
             );
             if (
               cellMarker.cellId !== cell.cellId ||
@@ -1142,6 +1172,34 @@ export function createActionsMatrixArtifactTransport(options: {
             });
             continue;
           }
+          if (runtimeMismatch) {
+            if (
+              !historical || !input.consumerRun ||
+              evidence.length !== selected.length
+            ) refuse();
+            throw new MatrixHistoricalRuntimeMismatch({
+              consumerRun: input.consumerRun,
+              expectedRuntimeSha: input.runtimeSha,
+              run,
+              runtimeSha: waveRuntime,
+              generation: positive(planner.generation),
+              repairHead: repair.value.head,
+              planDigest,
+              planArtifactId: positive(artifact.id),
+              planArchiveDigest: String(artifact.digest),
+              plannerJobId: positive(planners[0].id),
+              affected: evidence.map((cell) => ({
+                work: snapshot.work.find((row) =>
+                  row.id === cell.taskId &&
+                  row.intent?.requestId === cell.reservationId
+                )!,
+                reservation: snapshot.reservations.find((row) =>
+                  row.id === cell.reservationId
+                )!,
+                cell,
+              })),
+            });
+          }
           recovered.push({
             plan,
             planDigest,
@@ -1164,6 +1222,7 @@ export function createActionsMatrixArtifactTransport(options: {
         if (staging) {
           await Deno.remove(staging, { recursive: true }).catch(() => {});
         }
+        if (error instanceof MatrixHistoricalRuntimeMismatch) throw error;
         try {
           console.error(JSON.stringify({
             kind: "sentinel_matrix_artifact_error",

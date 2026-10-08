@@ -2,6 +2,7 @@
 import assert from "node:assert/strict";
 import { Uint8ArrayReader, Uint8ArrayWriter, ZipWriter } from "@zip.js/zip.js";
 import { createActionsMatrixArtifactHttpTransport } from "../../src/host/matrix-artifacts.ts";
+import { MatrixHistoricalRuntimeMismatch } from "../../src/host/matrix-artifact-port.ts";
 import type { GitSha, WorkItemId } from "../../src/contracts/brands.ts";
 import type { WorkRecordV1 } from "../../src/contracts/work-record.ts";
 import {
@@ -27,6 +28,7 @@ import {
 } from "../../src/contracts/ports.ts";
 import type { MatrixCellResultV1 } from "../../src/contracts/matrix.ts";
 import {
+  matrixCellIdV1,
   matrixDigestV1,
   MAX_MATRIX_ARTIFACT_BYTES,
 } from "../../src/contracts/matrix.ts";
@@ -1995,6 +1997,7 @@ async function freshMatrixArtifacts(
   noStart17 = false,
   nativeScopedOnly = false,
   progressive: "none" | "settle" | "missing" | "single" = "none",
+  historicalRuntimeIsolation = false,
 ) {
   const r = await rig(true, "ordinary", noStart17);
   try {
@@ -2174,6 +2177,7 @@ async function freshMatrixArtifacts(
     assert.ok(before.ok && before.value.status === "found");
     // Bind the narrowed found snapshot once: TypeScript does not retain the
     // assertion narrowing inside the poll callback below.
+    const beforeHead = before.value.head;
     const beforeWork: ReturnType<typeof workRecord>[] = before.value
       .snapshot.work;
     assert.equal(
@@ -2307,6 +2311,146 @@ async function freshMatrixArtifacts(
           }) + "\n",
       );
     }
+    // Minimal sanitized replay of ai#908's captured boundary: its admission
+    // predates the manifest, native planner/cell agree on an older runtime,
+    // and a later consumer must isolate that wave without importing its result.
+    if (historicalRuntimeIsolation) {
+      const oldRuntime = "e".repeat(40) as GitSha;
+      const oldRun = { ...planner.plan.run, runId: 69 };
+      const oldWave = "69:1:repair";
+      const oldCell = structuredClone(
+        planner.plan.cells.find((cell) =>
+          cell.repository.name === "ai.ubq.fi"
+        )!,
+      );
+      const originalCellId = oldCell.cellId;
+      oldCell.cellId = await matrixCellIdV1(
+        oldWave,
+        oldCell.taskId,
+        oldCell.reservationId,
+      );
+      oldCell.runtimeSha = oldRuntime;
+      const oldResult = structuredClone(
+        results.find((cell) => cell.cellId === originalCellId)!,
+      );
+      const oldBundle = await Deno.readFile(
+        archive + "/" + oldResult.bundle!.file,
+      );
+      Object.assign(oldResult, {
+        run: oldRun,
+        waveId: oldWave,
+        cellId: oldCell.cellId,
+        runtimeSha: oldRuntime,
+      });
+      oldResult.bundle!.file = oldCell.cellId + ".bundle";
+      const oldPlan = {
+        ...planner.plan,
+        run: oldRun,
+        waveId: oldWave,
+        cells: [oldCell],
+      };
+      const currentPlan = {
+        ...planner.plan,
+        cells: planner.plan.cells.filter((cell) =>
+          cell.repository.name === "sentinel"
+        ),
+      };
+      artifactRows.length = 0;
+      archives.clear();
+      await archiveRow(
+        501,
+        "sentinel-matrix-plan-71-1",
+        await zip([{ name: "plan.json", content: encode(currentPlan) }]),
+      );
+      const currentResult = results.find((cell) =>
+        cell.repository.name === "sentinel"
+      )!;
+      await archiveRow(
+        502,
+        "sentinel-matrix-cell-71-1-" + currentResult.cellId,
+        await zip([
+          { name: "result.json", content: encode(currentResult) },
+          {
+            name: currentResult.bundle!.file,
+            content: await Deno.readFile(
+              archive + "/" + currentResult.bundle!.file,
+            ),
+          },
+        ]),
+      );
+      await archiveRow(
+        503,
+        "sentinel-matrix-plan-69-1",
+        await zip([{ name: "plan.json", content: encode(oldPlan) }]),
+      );
+      await archiveRow(
+        504,
+        "sentinel-matrix-cell-69-1-" + oldCell.cellId,
+        await zip([
+          { name: "result.json", content: encode(oldResult) },
+          { name: oldResult.bundle!.file, content: oldBundle },
+        ]),
+      );
+      for (const row of artifactRows.filter((row) => Number(row.id) >= 503)) {
+        row.workflow_run = { ...provenance, id: 69 };
+      }
+      // Put the rejected wave first: later valid artifacts must still advance.
+      artifactRows.unshift(...artifactRows.splice(2));
+      logs.set(
+        401,
+        iso + " " +
+          JSON.stringify({
+            ...plannerMarker,
+            prepared: 1,
+            planDigest: await matrixDigestV1(currentPlan),
+          }) + "\n",
+      );
+      const currentJob = jobs.find((row) =>
+        row.name === "matrix_cell (" + currentResult.cellId + ")"
+      )!;
+      const currentLog = logs.get(currentJob.id)!;
+      jobs.splice(1, jobs.length - 1, currentJob);
+      logs.set(currentJob.id, currentLog);
+      const oldPlannerJob = {
+        ...job(405, "matrix_plan", "Plan isolated issue matrix"),
+        run_id: 69,
+      };
+      const oldCellJob = {
+        ...job(
+          406,
+          "matrix_cell (" + oldCell.cellId + ")",
+          "Run isolated issue cell",
+        ),
+        run_id: 69,
+      };
+      jobs.push(oldPlannerJob, oldCellJob);
+      logs.set(
+        405,
+        iso + " " +
+          JSON.stringify({
+            ...plannerMarker,
+            run: oldRun,
+            waveId: oldWave,
+            runtimeSha: oldRuntime,
+            prepared: 1,
+            planDigest: await matrixDigestV1(oldPlan),
+          }) + "\n",
+      );
+      logs.set(
+        406,
+        iso + " " + JSON.stringify({
+          kind: "sentinel_matrix_cell",
+          run: oldRun,
+          runtimeSha: oldRuntime,
+          generation: 1,
+          cellId: oldCell.cellId,
+          reservationId: oldCell.reservationId,
+          resultDigest: await matrixDigestV1(oldResult),
+          bundleDigest: oldResult.bundle!.digest,
+          status: oldResult.status,
+        }) + "\n",
+      );
+    }
     const artifactHttp = function (
       available: () => boolean,
       allow: (row: Record<string, unknown>) => boolean = () => true,
@@ -2373,7 +2517,12 @@ async function freshMatrixArtifacts(
           return reply({ total_count: rows.length, artifacts: rows });
         }
         if (parsed.pathname.endsWith("/jobs")) {
-          return reply({ total_count: jobs.length, jobs });
+          const runId = Number(parsed.pathname.match(/\/runs\/(\d+)\//)![1]);
+          const selectedJobs = jobs.filter((row) => row.run_id === runId);
+          return reply({
+            total_count: selectedJobs.length,
+            jobs: selectedJobs,
+          });
         }
         const selected = parsed.pathname.match(/\/artifacts\/(\d+)\/zip$/) ??
           parsed.pathname.match(/\/jobs\/(\d+)\/logs$/);
@@ -2402,6 +2551,7 @@ async function freshMatrixArtifacts(
           portError("unavailable", "injected preservation outage"),
         );
     }
+    let isolationWriteFailure: "conflict" | "ambiguous" | null = null;
     const aggregate = async function (
       name: string,
       available: boolean | (() => boolean),
@@ -2455,7 +2605,24 @@ async function freshMatrixArtifacts(
           },
           runTargetCycles: (input) =>
             runActionsMatrixAggregateCycles(
-              { ...input, modelStartsEnabled: false },
+              {
+                ...input,
+                modelStartsEnabled: false,
+                ...(isolationWriteFailure === null ? {} : {
+                  state: {
+                    ...input.state,
+                    readRepair: () => input.state.readRepair(),
+                    readRelease: () => input.state.readRelease(),
+                    writeRepair: () =>
+                      Promise.resolve(
+                        portOk({
+                          status: isolationWriteFailure!,
+                          currentHead: beforeHead,
+                        }),
+                      ),
+                  },
+                }),
+              },
               undefined,
               carrier,
               options,
@@ -2466,6 +2633,115 @@ async function freshMatrixArtifacts(
       }
       return result;
     };
+    if (historicalRuntimeIsolation) {
+      const custody = structuredClone(before.value.snapshot);
+      const oldWork = custody.work.find((row) =>
+        row.repository.name === "ai.ubq.fi"
+      )!;
+      const oldCharge = custody.reservations.find((row) =>
+        row.id === oldWork.intent!.requestId
+      )!;
+      assert.ok(oldCharge.createdAt <= planner.plan.plannedAt);
+      const originalArchives = [...archives].map((
+        [id, value],
+      ) => [id, value.slice()]);
+      [...r.github.values()].forEach((port, index) => {
+        port.preserveCandidate = originalPreservers[index]!;
+      });
+      for (const failure of ["conflict", "ambiguous"] as const) {
+        isolationWriteFailure = failure;
+        await assert.rejects(
+          aggregate("isolation-" + failure, true),
+          /isolation CAS incomplete/,
+        );
+        assert.deepEqual(
+          await r.store.readRepair(),
+          before,
+          "CAS failure cannot change either wave's custody or publish a sibling",
+        );
+      }
+      isolationWriteFailure = null;
+      const oldArtifact = artifactRows.find((row) => row.id === 504)!;
+      const provenance = oldArtifact.workflow_run;
+      oldArtifact.workflow_run = { id: 999 };
+      await assert.rejects(
+        aggregate("isolation-forged-native", true),
+        /provenance unavailable or conflicting/,
+      );
+      assert.deepEqual(await r.store.readRepair(), before);
+      oldArtifact.workflow_run = provenance;
+      // The parser permits a blocked historical row to retain a stale request
+      // ID. It is not the admitted work and its blocker must stay untouched.
+      const unrelated = markBlocked(
+        {
+          ...structuredClone(oldWork),
+          id: "unrelated-foreign-blocked" as WorkItemId,
+          source: { ...oldWork.source, id: "999" },
+          related: { ...oldWork.related, issueNumber: 999 },
+        },
+        "other",
+        "merge_not_observed",
+        r.clock.now(),
+      );
+      const seeded = await r.store.writeRepair(
+        parseRepairStateSnapshotV1({
+          ...before.value.snapshot,
+          stateHead: beforeHead,
+          sequence: before.value.snapshot.sequence + 1,
+          work: [...before.value.snapshot.work, unrelated],
+        }),
+        beforeHead,
+      );
+      assert.ok(seeded.ok && seeded.value.status === "applied");
+      await aggregate("historical-runtime-isolation", true);
+      const after = await r.store.readRepair();
+      assert.ok(after.ok && after.value.status === "found");
+      const isolated = after.value.snapshot.work.find((row) =>
+        row.id === oldWork.id
+      )!;
+      assert.deepEqual(
+        after.value.snapshot.work.find((row) => row.id === unrelated.id),
+        unrelated,
+        "an unrelated blocked row sharing the stale request ID is byte-identical",
+      );
+      assert.equal(isolated.nextStep, "blocked");
+      assert.match(isolated.blocker!.message, /historical.*runtime mismatch/);
+      assert.deepEqual(isolated.intent, oldWork.intent);
+      assert.deepEqual(isolated.target, oldWork.target);
+      assert.deepEqual(isolated.evidence, oldWork.evidence);
+      assert.deepEqual(isolated.counters, oldWork.counters);
+      assert.deepEqual(
+        after.value.snapshot.reservations.find((row) =>
+          row.id === oldCharge.id
+        ),
+        oldCharge,
+      );
+      const sibling = after.value.snapshot.work.find((row) =>
+        row.repository.name === "sentinel"
+      )!;
+      assert.ok(
+        sibling.target.head !== null && sibling.target.pr !== null,
+        "unrelated authenticated wave publishes through the real aggregate lifecycle",
+      );
+      assert.ok(
+        r.github.get("ubiquity/sentinel")!.calls.some((call) =>
+          call.startsWith("push:")
+        ),
+      );
+      assert.ok(
+        !r.github.get("ubiquity/ai.ubq.fi")!.calls.some((call) =>
+          call.startsWith("push:")
+        ),
+        "rejected result must never be imported or published",
+      );
+      assert.deepEqual(
+        [...archives],
+        originalArchives,
+        "original forensic archives remain unchanged",
+      );
+      assert.equal(modelCalls, 2, "isolation adds no model start or refund");
+      return;
+    }
     if (progressive !== "none") {
       const fast = results[0]!;
       const slow = results[1]!;
@@ -3647,3 +3923,147 @@ Deno.test("matrix actions: manifest byte budget leaves overflow issues unreserve
     await r.cleanup();
   }
 });
+
+Deno.test("matrix actions: authenticated historical runtime mismatch isolates one wave and advances unrelated work", () =>
+  freshMatrixArtifacts(false, false, "none", true));
+
+for (
+  const scenario of [
+    "scan expiry",
+    "consumer expiry",
+    "run expiry",
+    "shortened retry",
+  ] as const
+) {
+  Deno.test(
+    "matrix actions: historical isolation deadline " + scenario,
+    async () => {
+      const r = await rig();
+      try {
+        const planned = await runActionsMatrixHost({
+          ...await r.job("deadline-plan", "matrix_plan"),
+          model: {
+            modelId: "gpt-reserve",
+            runModel: () => Promise.reject(new Error("planner cannot infer")),
+          },
+        });
+        assert.ok("plan" in planned);
+        const captured = await r.store.readRepair();
+        assert.ok(captured.ok && captured.value.status === "found");
+        const capturedHead = captured.value.head;
+        const original = captured.value.snapshot;
+        const cell = planned.plan.cells.find((row) =>
+          row.repository.name === "ai.ubq.fi"
+        )!;
+        const work = original.work.find((row) => row.id === cell.taskId)!;
+        const reservation = original.reservations.find((row) =>
+          row.id === cell.reservationId
+        )!;
+        const startedAt = r.clock.now();
+        const elapsed = scenario === "shortened retry"
+          ? 40_000
+          : scenario === "scan expiry"
+          ? 120_001
+          : 5_001;
+        const calls: { at: number; deadline?: number }[] = [];
+        const running = runActionsRepairHost({
+          ...await r.job("deadline-aggregate", "repair"),
+          model: {
+            modelId: "gpt-reserve",
+            runModel: () => Promise.reject(new Error("aggregate cannot infer")),
+          },
+          runTargetCycles: (input) =>
+            runActionsMatrixAggregateCycles(
+              {
+                ...input,
+                modelStartsEnabled: false,
+                ...(scenario === "run expiry"
+                  ? { deadline: startedAt + 5_000 }
+                  : {}),
+              },
+              {
+                recover(request) {
+                  calls.push({
+                    at: r.clock.now(),
+                    deadline: (request as { deadline?: number }).deadline,
+                  });
+                  if (calls.length > 1) return Promise.resolve([]);
+                  r.clock.advance(elapsed);
+                  return Promise.reject(
+                    new MatrixHistoricalRuntimeMismatch({
+                      consumerRun: input.host!.run,
+                      expectedRuntimeSha: input.controllerSha,
+                      run: { ...input.host!.run, runId: 69 },
+                      runtimeSha: "e".repeat(40) as GitSha,
+                      generation: 1,
+                      repairHead: capturedHead,
+                      planDigest: planned.planDigest,
+                      planArtifactId: 503,
+                      planArchiveDigest: "sha256:" + "a".repeat(64),
+                      plannerJobId: 405,
+                      affected: [{
+                        work,
+                        reservation,
+                        cell: {
+                          cellId: cell.cellId,
+                          taskId: cell.taskId,
+                          reservationId: cell.reservationId,
+                          status: "completed",
+                          receiptNull: false,
+                          bundleNull: false,
+                          completedAt: startedAt,
+                          resultDigest: "b".repeat(64),
+                        },
+                      }],
+                    }),
+                  );
+                },
+              },
+              undefined,
+              {
+                maxWaitMs: scenario === "consumer expiry" ? 5_000 : 0,
+                pollWait: () =>
+                  Promise.reject(new Error("deadline test must never sleep")),
+              },
+            ),
+        });
+        if (scenario === "run expiry") {
+          await assert.rejects(running, /reached its run deadline/);
+        } else {
+          assert.equal((await running).status, "ran");
+        }
+        assert.equal(
+          calls.length,
+          scenario === "shortened retry" ? 2 : 1,
+          "a rejected wave must not renew recovery after the shared scan, consumer or run budget expires",
+        );
+        if (scenario === "shortened retry") {
+          assert.equal(calls[0].deadline, startedAt + 120_000);
+          assert.equal(calls[1].deadline, calls[0].deadline);
+          assert.equal(calls[1].deadline! - calls[1].at, 80_000);
+        }
+        const after = await r.store.readRepair();
+        assert.ok(after.ok && after.value.status === "found");
+        assert.deepEqual(
+          after.value.snapshot.reservations,
+          original.reservations,
+        );
+        const sibling = original.work.find((row) =>
+          row.repository.name === "sentinel"
+        )!;
+        assert.deepEqual(
+          after.value.snapshot.work.find((row) => row.id === sibling.id),
+          sibling,
+          "unconsumed sibling remains unresolved with its exact admission",
+        );
+        assert.ok(
+          [...r.github.values()].every((port) =>
+            !port.calls.some((call) => call.startsWith("push:"))
+          ),
+        );
+      } finally {
+        await r.cleanup();
+      }
+    },
+  );
+}

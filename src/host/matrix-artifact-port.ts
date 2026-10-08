@@ -14,6 +14,8 @@ import type { WorkRecordV1 } from "../contracts/work-record.ts";
 import type { BudgetReservationV1 } from "../contracts/budget-reservation.ts";
 import type { ModelRunRequestV1 } from "../contracts/ports.ts";
 
+export const MATRIX_ARTIFACT_RECOVERY_MAX_MS = 120_000;
+
 /** Shared wire value: artifact readers must not import their executable caller. */
 export const HISTORICAL_MATRIX_QUARANTINE =
   "authenticated historical matrix manifest rejected: reservation_after_manifest; model outcome uncertain";
@@ -80,6 +82,31 @@ export interface MatrixAuthenticatedWaveV1 {
     cellJobIds: readonly number[];
   };
 }
+/** Rejection-only evidence. No historical result or bundle crosses this boundary. */
+export class MatrixHistoricalRuntimeMismatch extends Error {
+  constructor(
+    readonly evidence: {
+      consumerRun: MatrixRunIdentityV1;
+      expectedRuntimeSha: GitSha;
+      run: MatrixRunIdentityV1;
+      runtimeSha: GitSha;
+      generation: number;
+      repairHead: GitSha;
+      planDigest: string;
+      planArtifactId: number;
+      planArchiveDigest: string;
+      plannerJobId: number;
+      affected: readonly {
+        work: WorkRecordV1;
+        reservation: BudgetReservationV1;
+        cell: MatrixRejectedCellEvidenceV1;
+      }[];
+    },
+  ) {
+    super("authenticated historical matrix runtime mismatch");
+  }
+}
+
 export interface MatrixArtifactTransportV1 {
   /** Exact current attempt and exhaustive native jobs must all be completed. */
   confirmCompletedExecution?(
@@ -101,5 +128,9 @@ export interface MatrixArtifactTransportV1 {
     launcherSha: GitSha;
     /** Exact native execution when known; omitted for reservation-based recovery. */
     currentRun?: MatrixRunIdentityV1;
+    /** Consumer identity only; never narrows historical artifact discovery. */
+    consumerRun?: MatrixRunIdentityV1;
+    /** Absolute shortening-only deadline shared by one logical recovery scan. */
+    deadline?: number;
   }): Promise<readonly MatrixAuthenticatedWaveV1[]>;
 }
