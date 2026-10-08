@@ -1,5 +1,9 @@
 /** Read-only authenticated Actions transport for exact admitted matrix waves. */
-import { Uint8ArrayReader, ZipReader } from "@zip.js/zip.js";
+// NOTE: @zip.js/zip.js is imported dynamically inside the function that needs
+// it (see below). A static import would force Deno to download the npm package
+// at module load time, which hangs the bootstrap in environments where the
+// npm registry is slow or blocked. The ZIP functionality is only needed when
+// actually reading matrix artifacts, never at startup.
 import { isAbsolute, resolve, sep } from "node:path";
 import {
   HOSTED_ACTIONS_CLOCK_TOLERANCE_MS as TOLERANCE,
@@ -512,6 +516,12 @@ export function createActionsMatrixArtifactTransport(options: {
             !bytes || bytes.length !== artifact.size_in_bytes ||
             `sha256:${await bytesDigest(bytes)}` !== artifact.digest
           ) refuse();
+          // Dynamic import: @zip.js/zip.js is only loaded when actually
+          // reading a ZIP artifact, never at module load time. This avoids
+          // forcing Deno to download the npm package during bootstrap.
+          const { Uint8ArrayReader, ZipReader } = await import(
+            "@zip.js/zip.js"
+          );
           const reader = new ZipReader(new Uint8ArrayReader(bytes), {
             useWebWorkers: false,
             strictness: "strict",
