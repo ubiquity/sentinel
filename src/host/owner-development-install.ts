@@ -3962,9 +3962,10 @@ async function readOwnerDevelopmentInstallState(
 
 /**
  * Read-only verification of one installed revision: the exact SHA must be an
- * ancestor of the current development ref (GitHub compare) and must carry a
- * completed successful `test-local` check. Both reads use the repository
- * token only; a negative or unavailable answer is a normal waiting outcome.
+ * ancestor of the current development ref, or of the exact verified startup
+ * controller for the single pinned recovery, and must carry a completed
+ * successful `test-local` check. Both reads use the repository token only;
+ * a negative or unavailable answer is a normal waiting outcome.
  */
 async function verifyOwnerDevelopmentInstallRevision(
   token: string,
@@ -3994,14 +3995,15 @@ async function verifyOwnerDevelopmentInstallRevision(
   if (!compared.ok) {
     return { verified: false, detail: "revision ancestry is unavailable" };
   }
-  if (
-    !compareConfirmsAncestor(compared.value, revision) ||
-    (startupLauncher !== undefined &&
-      readNestedSha(compared.value, "head_commit") !== startupLauncher)
-  ) {
+  // GitHub compare has no head_commit field. The exact immutable request URL
+  // above binds the verified startup controller; base/merge-base and counters
+  // must still prove that the pinned candidate is its ancestor.
+  if (!compareConfirmsAncestor(compared.value, revision)) {
     return {
       verified: false,
-      detail: "revision is not an ancestor of development",
+      detail: startupLauncher === undefined
+        ? "revision is not an ancestor of development"
+        : "revision is not an ancestor of the startup controller",
     };
   }
   const checks = await ownerDevelopmentInstallApi(

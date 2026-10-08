@@ -1,0 +1,20 @@
+{
+  "base_commit": {
+    "sha": "ebd779621ab3849cd206e2f3c74c63cf2f832880"
+  },
+  "merge_base_commit": {
+    "sha": "ebd779621ab3849cd206e2f3c74c63cf2f832880"
+  },
+  "status": "ahead",
+  "ahead_by": 2,
+  "behind_by": 0,
+  "total_commits": 2,
+  "commits": [
+    {
+      "sha": "2e2429ec635b7079720407808ba17bd739d44b5a"
+    },
+    {
+      "sha": "94580d4ee73bb203c4a321fb1233e9e2a35829c3"
+    }
+  ]
+}
