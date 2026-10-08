@@ -1128,7 +1128,8 @@ export async function runActionsMatrixAggregateCycles(
     const live = charged.filter((request) =>
       reservedNow.has(request.reservationId)
     );
-    const requests = firstScan ? charged : live;
+    const initialScan = firstScan;
+    const requests = initialScan ? charged : live;
     firstScan = false;
     if (requests.length === 0) break;
     const unresolved = new Set(
@@ -1139,11 +1140,14 @@ export async function runActionsMatrixAggregateCycles(
       runtimeSha: input.controllerSha,
       launcherSha: host.run.launcherSha,
       consumerRun: host.run,
-      // Zero wait still permits one bounded logical scan. Isolation retries
-      // share its transport budget; other scans also stop at the wait window.
+      // The initial scan still runs when there is no polling window left,
+      // bounded by the actual run deadline and one shared transport budget.
+      // Subsequent scans and retries never renew that polling window.
       deadline: Math.min(
         input.deadline,
-        options.maxWaitMs === 0 ? input.deadline : consumerUntil,
+        initialScan && consumerUntil <= input.clock.now()
+          ? input.deadline
+          : consumerUntil,
       ),
       ...(carrier === undefined ? {} : { currentRun: host.run }),
     });
