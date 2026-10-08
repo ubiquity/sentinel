@@ -3932,6 +3932,7 @@ for (
     "scan expiry",
     "consumer expiry",
     "run expiry",
+    "run already expired",
     "shortened retry",
   ] as const
 ) {
@@ -3977,7 +3978,9 @@ for (
               {
                 ...input,
                 modelStartsEnabled: false,
-                ...(scenario === "run expiry"
+                ...(scenario === "run already expired"
+                  ? { deadline: startedAt }
+                  : scenario === "run expiry"
                   ? { deadline: startedAt + 5_000 }
                   : {}),
               },
@@ -4027,14 +4030,18 @@ for (
               },
             ),
         });
-        if (scenario === "run expiry") {
+        if (scenario === "run expiry" || scenario === "run already expired") {
           await assert.rejects(running, /reached its run deadline/);
         } else {
           assert.equal((await running).status, "ran");
         }
         assert.equal(
           calls.length,
-          scenario === "shortened retry" ? 2 : 1,
+          scenario === "run already expired"
+            ? 0
+            : scenario === "shortened retry"
+            ? 2
+            : 1,
           "a rejected wave must not renew recovery after the shared scan, consumer or run budget expires",
         );
         if (scenario === "shortened retry") {
@@ -4048,6 +4055,13 @@ for (
           after.value.snapshot.reservations,
           original.reservations,
         );
+        if (scenario === "run already expired") {
+          assert.deepEqual(
+            after.value.snapshot,
+            original,
+            "an expired run cannot inspect or isolate any artifact wave",
+          );
+        }
         const sibling = original.work.find((row) =>
           row.repository.name === "sentinel"
         )!;
