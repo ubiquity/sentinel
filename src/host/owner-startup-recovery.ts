@@ -11,10 +11,8 @@ import { tryParse } from "../contracts/validation.ts";
 import type { OwnerDevelopmentInstallPlanV1 } from "./owner-development-install.ts";
 
 export const OWNER_STARTUP_RECOVERY_CANDIDATE =
-  "ebd779621ab3849cd206e2f3c74c63cf2f832880" as GitSha;
+  "08c6d23a9965ee0aeca3c924a6dcc4581e9ef2d7" as GitSha;
 export const OWNER_STARTUP_RECOVERY_FAILED =
-  "2266a52ae1db749548d9f30031c6425894307849" as GitSha;
-export const OWNER_STARTUP_RECOVERY_PRIOR =
   "e4cef46332cf124a8c283d798a963cf5f66e45c2" as GitSha;
 export const OWNER_STARTUP_RECOVERY_WITNESS =
   "bfd8d4304a04696a7692ab21e0a06d05bad41641" as GitSha;
@@ -45,10 +43,9 @@ export function isOwnerStartupRecoveryTuple(
   generation: number,
   includeFailed = false,
 ): boolean {
-  return (revision === OWNER_STARTUP_RECOVERY_CANDIDATE && generation === 64) ||
-    (revision === OWNER_STARTUP_RECOVERY_PRIOR && generation === 65) ||
+  return (revision === OWNER_STARTUP_RECOVERY_CANDIDATE && generation === 66) ||
     (includeFailed && revision === OWNER_STARTUP_RECOVERY_FAILED &&
-      generation === 63);
+      generation === 65);
 }
 
 export function planOwnerStartupRecovery(
@@ -77,16 +74,14 @@ export function planOwnerStartupRecovery(
   if (!isOwnerStartupRecoveryTuple(revision, generation, true)) {
     return unchanged("pointer is outside the pinned startup recovery");
   }
-  if (generation === 65) {
-    return unchanged("pinned startup rollback is terminal; never reinstall");
+  if (generation === 66) {
+    return unchanged(
+      "pinned startup recovery is terminal; never reinstall or roll back",
+    );
   }
   const healthy = runtime.lastHealthyProof;
-  if (
-    generation === 64 && healthy?.execution.revision === revision &&
-    healthy.execution.generation === generation
-  ) return unchanged("pinned startup recovery has its own health");
   if (!isOwnerStartupRecoveryHealthyProof(healthy)) {
-    return wait("the genuine pinned rollback proof is unavailable");
+    return wait("the genuine pinned historical health proof is unavailable");
   }
   const parsed = tryParse(parseHostedRunProofV1, runtime.lastExecutionProof);
   if (
@@ -96,26 +91,20 @@ export function planOwnerStartupRecovery(
     parsed.value.execution.purpose !== "bootstrap" ||
     parsed.value.execution.releaseId !== null ||
     parsed.value.startedAt < authority.healthyProof.finishedAt ||
-    (generation === 63 &&
-      (parsed.value.startupReady || parsed.value.baseSha !== null))
+    parsed.value.startupReady || parsed.value.baseSha !== null
   ) {
     return wait("the exact failed startup execution is unavailable");
   }
-  const action = generation === 63 ? "install" as const : "rollback" as const;
   return {
-    status: action,
+    status: "install",
     move: {
-      action,
+      action: "install",
       priorRevision: revision,
       priorGeneration: generation,
-      nextRevision: generation === 63
-        ? OWNER_STARTUP_RECOVERY_CANDIDATE
-        : OWNER_STARTUP_RECOVERY_PRIOR,
+      nextRevision: OWNER_STARTUP_RECOVERY_CANDIDATE,
       nextGeneration: generation + 1,
       priorHealthyProof: authority.healthyProof,
     },
-    detail: generation === 63
-      ? "install the exact approved startup correction"
-      : "restore the genuine prior after failed startup verification",
+    detail: "install the exact approved startup correction",
   };
 }

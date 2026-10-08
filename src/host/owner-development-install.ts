@@ -3326,12 +3326,7 @@ export async function runOwnerDevelopmentInstallMain(input?: {
         status: "no_change",
       });
     }
-    if (
-      pointer.generation === 65 || (pointer.generation === 64 &&
-        pointer.lastHealthyProof?.execution.revision ===
-          pointer.activeRevision &&
-        pointer.lastHealthyProof.execution.generation === 64)
-    ) {
+    if (pointer.generation === 66) {
       return report({
         ...waitingResult(
           "pinned startup recovery is terminal",
