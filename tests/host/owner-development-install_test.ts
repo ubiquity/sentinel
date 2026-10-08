@@ -6,6 +6,9 @@
  * network, Git write, model, credential or paid call is touched.
  */
 import assert from "node:assert/strict";
+import startupCompareResponse from "../fixtures/startup-recovery-compare.json" with {
+  type: "json",
+};
 
 Deno.test("owner startup recovery: fixed identity proof and safety refusals preserve the old chain", () => {
   const base = releaseSnapshot({ runtime: STARTUP_RUNTIME });
@@ -193,6 +196,43 @@ Deno.test("owner startup recovery: real consumer refuses source CI native custod
         await fixture.close();
       }
     });
+  }
+});
+
+Deno.test("owner startup recovery: actual GitHub compare shape binds exact candidate and refuses malformed ancestry", async () => {
+  assert.equal(Object.hasOwn(startupCompareResponse, "head_commit"), false);
+  for (
+    const compareFault of [
+      undefined,
+      "base",
+      "merge_base",
+      "counter",
+      "missing",
+    ] as const
+  ) {
+    const fixture = await concurrencyInstallerFixture(
+      releaseSnapshot({ runtime: STARTUP_RUNTIME }),
+      undefined,
+      STARTUP_CANDIDATE,
+      undefined,
+      { compareFault },
+    );
+    try {
+      assert.equal(await fixture.run(), 0);
+      assert.equal(
+        fixture.reports.at(-1)?.status,
+        compareFault === undefined ? "installed" : "waiting",
+        JSON.stringify(fixture.reports),
+      );
+      assert.equal(fixture.patches(), compareFault === undefined ? 1 : 0);
+      assert.deepEqual(
+        fixture.requests.filter((request) => request.path.includes("/compare/"))
+          .map((request) => request.path),
+        [`/repos/ubiquity/sentinel/compare/${STARTUP_CANDIDATE}...${fixture.runIdentity().launcherSha}`],
+      );
+    } finally {
+      await fixture.close();
+    }
   }
 });
 
@@ -1158,6 +1198,7 @@ async function concurrencyInstallerFixture(
     useSourcePin?: boolean;
   },
   startupRecovery?: {
+    compareFault?: "base" | "merge_base" | "counter" | "missing";
     refusal?:
       | "native"
       | "controller_ci"
@@ -1570,15 +1611,31 @@ async function concurrencyInstallerFixture(
           assert.ok(
             url.pathname.endsWith(`${candidateRevision}...${controller}`),
           );
-          return response({
+          // Sanitized real GitHub compare shape. The API does not return
+          // head_commit; the requested immutable URL binds the controller.
+          const compared: Record<string, unknown> = {
+            ...startupCompareResponse,
             status: refusal === "ancestry" ? "diverged" : "ahead",
-            base_commit: { sha: candidateRevision },
-            merge_base_commit: { sha: candidateRevision },
-            head_commit: { sha: controller },
-            ahead_by: 1,
-            behind_by: 0,
-            total_commits: 1,
-          });
+            base_commit: {
+              sha: startupRecovery.compareFault === "base"
+                ? UNRELATED
+                : startupCompareResponse.base_commit.sha,
+            },
+            merge_base_commit: {
+              sha: startupRecovery.compareFault === "merge_base"
+                ? UNRELATED
+                : startupCompareResponse.merge_base_commit.sha,
+            },
+            behind_by: startupRecovery.compareFault === "counter" ? 1 : 0,
+            commits: [
+              startupCompareResponse.commits[0],
+              { sha: controller },
+            ],
+          };
+          if (startupRecovery.compareFault === "missing") {
+            delete compared.merge_base_commit;
+          }
+          return response(compared);
         }
         if (url.pathname.includes("/check-runs")) {
           const head = url.pathname.includes(controller)
