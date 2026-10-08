@@ -296,7 +296,7 @@ Deno.test("owner startup recovery: actual GitHub compare shape binds exact candi
   }
 });
 
-Deno.test("owner startup recovery: workflow suppresses maintenance and retains the existing verification path", async () => {
+Deno.test("owner startup recovery: restored workflow resumes normal admission with recovery dormant", async () => {
   const text = await Deno.readTextFile(
     new URL("../../.github/workflows/supervisor.yml", import.meta.url),
   );
@@ -304,12 +304,14 @@ Deno.test("owner startup recovery: workflow suppresses maintenance and retains t
     text.indexOf("  maintenance:"),
     text.indexOf("  prepare:"),
   );
-  assert.match(maintenance, /if: \$\{\{ false \}\}/);
-  assert.match(text, /needs\.maintenance\.result == 'skipped'/);
-  assert.match(text, /owner-development-install\.ts --startup-recovery/);
+  assert.match(
+    maintenance,
+    /if: github\.ref == 'refs\/heads\/sentinel-supervisor'/,
+  );
+  assert.match(text, /needs\.maintenance\.result == 'success'/);
+  assert.doesNotMatch(text, /--startup-recovery|--owner-startup-recovery-only/);
   assert.equal(
-    (text.match(/deno task supervisor:run --owner-startup-recovery-only/g) ??
-      []).length,
+    (text.match(/run: deno task supervisor:run\n/g) ?? []).length,
     2,
   );
   assert.match(text, /--allow-run=git/);

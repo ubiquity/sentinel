@@ -34,10 +34,7 @@ jobs:
   # prepare under the protected ref, so no scheduled legacy run can race it; it
   # never installs or starts a model and uses only the repository github.token.
   maintenance:
-    # Temporary owner-approved startup recovery: skip this maintenance writer.
-    # Runtime verification keeps its existing deterministic bookkeeping contract.
-    # Restore this job's original protected-ref condition after scoped verification.
-    if: ${{ false }}
+    if: github.ref == 'refs/heads/sentinel-supervisor'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     # `issues: write` is what the autonomy pass needs to close an issue once its
@@ -126,7 +123,7 @@ jobs:
 
   prepare:
     needs: maintenance
-    if: always() && needs.maintenance.result == 'skipped' && github.ref == 'refs/heads/sentinel-supervisor'
+    if: always() && needs.maintenance.result == 'success' && github.ref == 'refs/heads/sentinel-supervisor'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     # The one-shot owner installation reads the fixed runtime revision's
@@ -191,14 +188,14 @@ jobs:
           --allow-write
           --allow-run=git
           --allow-net=api.github.com
-          --allow-env=HOME,PATH,GITHUB_TOKEN,SENTINEL_SUPERVISOR_TOKEN,SENTINEL_COOLDOWN_MODE,GITHUB_REPOSITORY,GITHUB_REF,GITHUB_SHA,GITHUB_WORKFLOW_SHA,GITHUB_WORKFLOW_REF,GITHUB_JOB,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT
-          src/host/owner-development-install.ts --startup-recovery
+          --allow-env=HOME,PATH,GITHUB_TOKEN,SENTINEL_SUPERVISOR_TOKEN,SENTINEL_COOLDOWN_MODE,GITHUB_REPOSITORY,GITHUB_REF,GITHUB_SHA,GITHUB_WORKFLOW_SHA,GITHUB_JOB
+          src/host/owner-development-install.ts
       - name: Prepare hosted supervisor run
         id: prepare
         env:
           GITHUB_TOKEN: ${{ github.token }}
           SENTINEL_SUPERVISOR_TOKEN: ${{ steps.app-token.outputs.token }}
-        run: deno task supervisor:run --owner-startup-recovery-only
+        run: deno task supervisor:run
 
   matrix_plan:
     name: matrix_plan
@@ -629,4 +626,4 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           SENTINEL_SUPERVISOR_TOKEN: ${{ steps.app-token.outputs.token }}
-        run: deno task supervisor:run --owner-startup-recovery-only
+        run: deno task supervisor:run
