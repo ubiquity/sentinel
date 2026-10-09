@@ -90,6 +90,12 @@ import {
   applyHostedRetries,
   planHostedRetries,
 } from "../../ops/hosted-autonomy.ts";
+import {
+  attemptFingerprintV1,
+  attemptMemoryIdV1,
+  parseAttemptMemoryRecordV1,
+} from "../../src/contracts/attempt-memory.ts";
+import { ATTEMPT_DETAIL_INCOMPLETE } from "../../src/repair/attempt-policy.ts";
 
 const WAVE = "wave-test-1";
 const LAUNCHER = "1".repeat(40) as GitSha;
@@ -233,6 +239,19 @@ Deno.test("matrix runtime: authenticated interrupted output overage stays charge
       "authenticated terminal noncandidate failure must reach existing failure accounting",
     );
     const after = await snapshot(rig);
+    // Durable attempt memory carries the trusted stage/class diagnostics for
+    // the same settlement: the run was invoked (stage model) and the failure
+    // is infrastructure-shaped, so it consumes the transient allowance.
+    const memory = after.attemptMemory.find((row) =>
+      row.taskId === cell.taskId
+    )!;
+    const memoryEntry = memory.entries.find((row) =>
+      row.detail ===
+        "model run did not complete with a trusted candidate: interrupted output bound exceeded"
+    )!;
+    assert.equal(memoryEntry.stage, "model");
+    assert.equal(memoryEntry.failureClass, "transient_infrastructure");
+    assert.equal(memoryEntry.count, 1);
     const charge = after.reservations.find((row) =>
       row.id === cell.reservationId
     )!;
@@ -460,6 +479,8 @@ function seedSnapshot(work: WorkRecordV1[]): RepairStateSnapshotV1 {
     replays: [],
     releaseRequests: [],
     githubCooldowns: [],
+    attemptMemory: [],
+    lessons: [],
   });
 }
 
@@ -1407,3 +1428,96 @@ Deno.test("matrix runtime: private model error stays out of exported JSON logs a
     await rig.cleanup();
   }
 });
+
+Deno.test(
+  "matrix runtime: durable attempt memory refuses an equivalent planner admission until evidence changes",
+  async () => {
+    const rig = await makeRig([754], 1);
+    try {
+      const seeded = seedSnapshot([freshIssue(754, rig.base)]);
+      const record = seeded.work[0];
+      // Two recorded semantic no-progress outcomes at this exact base and
+      // runtime revision, built with the production identity derivation.
+      const id = await attemptMemoryIdV1({
+        repository: record.repository,
+        taskId: record.id,
+        base: record.target.base,
+        purpose: "implementation",
+      });
+      const fingerprint = await attemptFingerprintV1({
+        taskId: record.id,
+        base: record.target.base,
+        purpose: "implementation",
+        controllerSha: record.controller.sha,
+        detail: ATTEMPT_DETAIL_INCOMPLETE,
+      });
+      const memory = parseAttemptMemoryRecordV1({
+        version: "v1",
+        kind: "attempt_memory",
+        id,
+        repository: record.repository,
+        taskId: record.id,
+        base: record.target.base,
+        purpose: "implementation",
+        entries: [
+          {
+            fingerprint,
+            stage: "model",
+            failureClass: "semantic_no_progress",
+            detail: ATTEMPT_DETAIL_INCOMPLETE,
+            controllerSha: record.controller.sha,
+            count: 2,
+            firstAtMs: T0,
+            lastAtMs: T0 + 1000,
+          },
+        ],
+      });
+      const written = await rig.store.writeRepair(
+        parseRepairStateSnapshotV1({ ...seeded, attemptMemory: [memory] }),
+        null,
+      );
+      assert.ok(written.ok && written.value.status === "applied");
+
+      // Equivalent attempt at the same base and revision: refused, nothing
+      // charged, and the refusal is visible in the report.
+      const refused = await planMatrixWave(rig.deps, rig.planOptions());
+      assert.equal(refused.memoryRefused, 1);
+      assert.equal(refused.plan.cells.length, 0);
+      assert.equal(refused.attempted, 1);
+
+      // Changed evidence: the repository's default branch genuinely moves,
+      // so the record's target base follows it. The durable memory stays
+      // bound to the OLD base (append-only) and no longer applies, so this
+      // admission proceeds.
+      const otherBase = "0123456789abcdef0123456789abcdef01234567" as GitSha;
+      (rig.github as unknown as { options: { baseSha?: GitSha } }).options
+        .baseSha = otherBase;
+      const movedRecord = {
+        ...record,
+        target: { ...record.target, base: otherBase },
+        updatedAt: T0,
+      };
+      const rewritten = await rig.store.writeRepair(
+        parseRepairStateSnapshotV1({
+          ...seeded,
+          stateHead: written.value.status === "applied"
+            ? written.value.head
+            : null,
+          sequence: seeded.sequence + 1,
+          updatedAt: T0,
+          work: [movedRecord],
+          attemptMemory: [memory],
+          lessons: [],
+        }),
+        written.value.status === "applied" ? written.value.head : null,
+      );
+      assert.ok(rewritten.ok && rewritten.value.status === "applied");
+      const admitted = await planMatrixWave(rig.deps, rig.planOptions());
+      assert.equal(admitted.memoryRefused, 0);
+      assert.equal(admitted.plan.cells.length, 1);
+      assert.equal(admitted.plan.cells[0].taskId, record.id);
+    } finally {
+      await Deno.remove(rig.tmp, { recursive: true }).catch(() => {});
+    }
+  },
+);

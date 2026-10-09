@@ -74,6 +74,14 @@ import {
   type RunBoundsV1,
   settleFailedImplementation,
 } from "../repair/loop.ts";
+import {
+  ATTEMPT_DETAIL_INTERRUPTED_BOUND,
+  attemptEquivalenceRefusalForRecordV1,
+} from "../repair/attempt-policy.ts";
+import type {
+  AttemptFailureClassV1,
+  AttemptStageV1,
+} from "../contracts/attempt-memory.ts";
 import { rankEligibleWork } from "../repair/selection.ts";
 import type {
   MatrixBundleExporterV1,
@@ -216,6 +224,15 @@ export interface MatrixPlanReportV1 {
   notReady: number;
   /** Records whose preparation persisted a wait/refusal step instead. */
   deferred: number;
+  /**
+   * Ready records whose admission was refused by durable attempt memory
+   * because the attempt would replay failures already recorded at this base
+   * and runtime revision. Nothing is charged and the record stays untouched;
+   * changed evidence (a moved base, a new runtime revision, the transient
+   * decay window) or the transient allowance re-opens admission on a later
+   * plan.
+   */
+  memoryRefused: number;
 }
 
 /**
@@ -255,6 +272,7 @@ export async function planMatrixWave(
   let attempted = 0;
   let deferred = 0;
   let notReady = 0;
+  let memoryRefused = 0;
 
   while (cells.length < limit) {
     const readAt = deps.clock.now();
@@ -288,6 +306,20 @@ export async function planMatrixWave(
     attempted++;
     if (!isMatrixImplementationReadyV1(record, context.snapshot, config)) {
       notReady++;
+      continue;
+    }
+    // Durable attempt memory gate: a ready record whose next attempt would be
+    // equivalent to failures already recorded at this base and runtime
+    // revision is skipped for this wave. Nothing is charged or written; the
+    // refusal is counted in the report so the loop breaker is observable.
+    if (
+      attemptEquivalenceRefusalForRecordV1({
+        record,
+        snapshot: context.snapshot,
+        now,
+      }).refuse
+    ) {
+      memoryRefused++;
       continue;
     }
     const outcome = await prepareImplementationStart(
@@ -372,6 +404,7 @@ export async function planMatrixWave(
     prepared: cells.length,
     notReady,
     deferred,
+    memoryRefused,
   };
 }
 
@@ -697,6 +730,32 @@ function resultMatchesCell(
 }
 
 /**
+ * Trusted stage/class classification for one non-completed cell result. The
+ * ingester knows structured facts the detail string does not spell out:
+ * `not_started` and the pre-start binding refusals prove the model never ran
+ * (that is an infrastructure fact, never a tested code strategy), a `model run
+ * failed (...)` result proves the run was invoked, and a `candidate bundle`
+ * refusal proves a candidate existed but could not be carried. The detail
+ * string itself is stored verbatim for diagnostics.
+ */
+function settlementClassification(
+  status: "failed" | "not_started",
+  detail: string,
+): { stage: AttemptStageV1; failureClass: AttemptFailureClassV1 } {
+  if (status === "failed") {
+    if (detail.startsWith("model run failed (")) {
+      return { stage: "model", failureClass: "transient_infrastructure" };
+    }
+    if (detail.startsWith("candidate bundle ")) {
+      return { stage: "candidate", failureClass: "transient_infrastructure" };
+    }
+  }
+  // Pre-inference refusal (never started, or refused at a pre-start binding
+  // check): only admission is proven, and the failure is infrastructure.
+  return { stage: "reservation", failureClass: "transient_infrastructure" };
+}
+
+/**
  * Trusted, serialized, idempotent ingestion. Results are applied one cell at a
  * time against a FRESH authoritative context, so a successful sibling is never
  * rolled back and a restarted finalizer cannot double-apply. Conflicting
@@ -922,7 +981,8 @@ export async function ingestMatrixResults(
         context,
         record,
         cell.reservationId,
-        "model run did not complete with a trusted candidate: interrupted output bound exceeded",
+        ATTEMPT_DETAIL_INTERRUPTED_BOUND,
+        { stage: "model", failureClass: "transient_infrastructure" },
       );
       if (step.kind === "state_error") {
         entries.push({
@@ -996,12 +1056,18 @@ export async function ingestMatrixResults(
         continue;
       }
     } else {
+      const failureDetail = result.detail ??
+        "matrix cell produced no trusted receipt";
       const step = await settleFailedImplementation(
         deps,
         context,
         record,
         cell.reservationId,
-        result.detail ?? "matrix cell produced no trusted receipt",
+        failureDetail,
+        settlementClassification(
+          result.status === "completed" ? "failed" : result.status,
+          failureDetail,
+        ),
       );
       if (step.kind === "state_error") {
         entries.push({

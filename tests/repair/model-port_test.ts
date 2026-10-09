@@ -462,6 +462,68 @@ Deno.test(
 );
 
 Deno.test(
+  "runtime prompt: verified prior attempts are rendered as an already-tried section",
+  async () => {
+    const session = new FakeCodexSession();
+    const port = new CodexImplementationPort({
+      openSession: () => Promise.resolve(session),
+      checkoutDir: CHECKOUT,
+      checkout: {
+        resolve: () =>
+          Promise.resolve({
+            head: SHA3,
+            checkpointSha: null,
+            changedPaths: ["src/github/text.ts"],
+          }),
+      },
+      modelProvider: "sentinel-host",
+    });
+    const result = await port.runModel({
+      taskId: asWorkItemId("issue-1"),
+      repository: { ...REPO },
+      base: SHA1,
+      issue: { number: 48, title: "title", body: "body" },
+      evidence: [],
+      priorAttempts: [
+        {
+          detail: "model run did not complete with a trusted candidate",
+          stage: "model",
+          failureClass: "semantic_no_progress",
+          count: 2,
+          lastAtMs: 1786000001000,
+        },
+        {
+          detail: "failed_command_loop",
+          stage: "model",
+          failureClass: "semantic_no_progress",
+          count: 1,
+          lastAtMs: 1786000002000,
+        },
+      ],
+      model: "gpt-reserve",
+      reasoning: "max",
+      maxDurationMs: 5_000,
+      maxOutputChars: 12_345,
+    });
+    assert.ok(result.ok, JSON.stringify(result));
+    const threadStart = session.sent.find(
+      (frame) => frame.method === "thread/start",
+    );
+    const prompt = JSON.stringify(threadStart?.params ?? {});
+    assert.ok(
+      prompt.includes("ALREADY TRIED"),
+      "the prior-attempt section is rendered",
+    );
+    assert.ok(
+      prompt.includes("model run did not complete with a trusted candidate"),
+    );
+    assert.ok(prompt.includes("2 recorded outcomes"));
+    assert.ok(prompt.includes("failed_command_loop"));
+    assert.ok(prompt.includes("1 recorded outcome)"));
+  },
+);
+
+Deno.test(
   "runtime prompt: an implementation without findings carries no rejection text",
   async () => {
     const session = new FakeCodexSession();

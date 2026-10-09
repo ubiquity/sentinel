@@ -15,6 +15,8 @@ import type { GitSha } from "../../src/contracts/brands.ts";
 import { asFindingFingerprint } from "../../src/contracts/brands.ts";
 import { canonicalStringify } from "../../src/contracts/canonical.ts";
 import { parseGitHubCooldownV1 } from "../../src/contracts/github-cooldown.ts";
+import { parseAttemptMemoryRecordV1 } from "../../src/contracts/attempt-memory.ts";
+import { buildMemoryLessonsV1 } from "../../src/repair/memory-lessons.ts";
 import type {
   ReleaseStateSnapshotV1,
   RepairStateSnapshotV1,
@@ -40,6 +42,7 @@ import {
   pushRawTree,
   releaseRecord,
   releaseRequest,
+  REPO,
   reservation,
   reviewReceipt,
   SHA1,
@@ -86,6 +89,8 @@ function repairSnapshot(
     replays: [],
     releaseRequests: [],
     githubCooldowns: [],
+    attemptMemory: [],
+    lessons: [],
     ...overrides,
   };
 }
@@ -2716,6 +2721,109 @@ Deno.test("state: mixed legacy and candidate-state work survive an unrelated wri
       true,
       "the new-format blob preserves its candidateState group",
     );
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+/** Deterministic lessons view for the same family record. */
+async function memoryLessonsFixture(memory: ReturnType<typeof attemptMemory>) {
+  const snapshot = repairSnapshot({ attemptMemory: [memory] });
+  const built = await buildMemoryLessonsV1(snapshot, T0 + 5000);
+  return built[0];
+}
+
+/** Minimal valid attempt-memory record for the state round-trip suite. */
+function attemptMemory(count = 2) {
+  return parseAttemptMemoryRecordV1({
+    version: "v1",
+    kind: "attempt_memory",
+    id: "a".repeat(64),
+    repository: REPO,
+    taskId: "issue-ubiquity-sentinel-48",
+    base: SHA1,
+    purpose: "implementation",
+    entries: [
+      {
+        fingerprint: "b".repeat(64),
+        stage: "model",
+        failureClass: "semantic_no_progress",
+        detail: "model run did not complete with a trusted candidate",
+        controllerSha: SHA2,
+        count,
+        firstAtMs: T0,
+        lastAtMs: T0 + 1000,
+      },
+    ],
+  });
+}
+
+Deno.test("attempt memory: durable round-trip and append-only transition guards", async () => {
+  const ctx = await makeCtx("attempt-memory");
+  try {
+    const writer = storeAt(ctx, "attempt-memory", "repair");
+    const memory = attemptMemory();
+    const lessons = await memoryLessonsFixture(memory);
+    const head = appliedHead(
+      await writer.writeRepair(
+        repairSnapshot({ attemptMemory: [memory], lessons: [lessons] }),
+        null,
+      ),
+    );
+    const reader = storeAt(ctx, "attempt-memory-reader", "repair");
+    const read = await reader.readRepair();
+    assert(read.ok && read.value.status === "found");
+    assert.deepEqual(read.value.snapshot.attemptMemory, [memory]);
+    assert.deepEqual(read.value.snapshot.lessons, [lessons]);
+
+    // Counts are append/merge-only: a decreasing fingerprint count is refused
+    // and leaves the durable ref untouched.
+    const decreased = await writer.writeRepair(
+      repairSnapshot({
+        stateHead: head,
+        sequence: 2,
+        updatedAt: T0 + 2000,
+        attemptMemory: [attemptMemory(1)],
+        lessons: [],
+      }),
+      head,
+    );
+    assert.equal(decreased.ok, false);
+    if (!decreased.ok) {
+      assert.equal(decreased.error.kind, "invalid");
+      assert.match(decreased.error.detail, /counts? cannot decrease/);
+    }
+    assert.equal(await remoteHead(ctx, REPAIR_STATE_REF), head);
+
+    // A record can never be dropped.
+    const dropped = await writer.writeRepair(
+      repairSnapshot({
+        stateHead: head,
+        sequence: 2,
+        updatedAt: T0 + 2000,
+        attemptMemory: [],
+        lessons: [],
+      }),
+      head,
+    );
+    assert.equal(dropped.ok, false);
+    if (!dropped.ok) {
+      assert.match(dropped.error.detail, /cannot be dropped/);
+    }
+    assert.equal(await remoteHead(ctx, REPAIR_STATE_REF), head);
+
+    // Extending the count is the normal append path.
+    const grown = await writer.writeRepair(
+      repairSnapshot({
+        stateHead: head,
+        sequence: 2,
+        updatedAt: T0 + 3000,
+        attemptMemory: [attemptMemory(3)],
+        lessons: [],
+      }),
+      head,
+    );
+    assert.equal(grown.ok && grown.value.status, "applied");
   } finally {
     await ctx.cleanup();
   }

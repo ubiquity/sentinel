@@ -32,6 +32,10 @@ import type {
 } from "./state-snapshots.ts";
 import type { CandidatePreservationV1 } from "./work-record.ts";
 import type {
+  AttemptFailureClassV1,
+  AttemptStageV1,
+} from "./attempt-memory.ts";
+import type {
   DeploymentIdentityV1,
   EvidenceRefV1,
   IncidentCoverageV1,
@@ -689,6 +693,22 @@ export interface ReplayPort {
 export type ModelIdV1 = string;
 export type ReasoningEffortV1 = "max";
 
+/**
+ * One bounded, VERIFIED prior-attempt fact from durable attempt memory for the
+ * same work item at the same base and runtime revision. It is evidence for the
+ * implementer, never permission: it cannot change budgets, credentials, review
+ * policy, runtime promotion or the authorized model. `count` is the number of
+ * equivalent outcomes recorded for this exact failure detail.
+ */
+export interface PriorAttemptFactV1 {
+  /** Closed settlement detail constant (sanitized by construction). */
+  detail: string;
+  stage: AttemptStageV1;
+  failureClass: AttemptFailureClassV1;
+  count: number;
+  lastAtMs: number;
+}
+
 export interface ModelRunRequestV1 {
   taskId: WorkItemId;
   repository: RepositoryIdentityV1;
@@ -713,6 +733,14 @@ export interface ModelRunRequestV1 {
     path: string | null;
     message: string;
   }[];
+  /**
+   * Bounded verified prior-attempt facts from durable attempt memory, present
+   * only when equivalent failures were recorded for the current base and
+   * runtime revision. The model port renders them as an "already tried"
+   * section so a fresh session does not repeat a refused approach. Never
+   * permission to change budgets, credentials, review or model policy.
+   */
+  priorAttempts?: readonly PriorAttemptFactV1[];
   model: ModelIdV1;
   reasoning: ReasoningEffortV1;
   maxDurationMs: number;

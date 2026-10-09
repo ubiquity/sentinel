@@ -1091,6 +1091,8 @@ async function ensureRepairStateSeed(
     replays: [],
     releaseRequests: [],
     githubCooldowns: [],
+    attemptMemory: [],
+    lessons: [],
   });
   const written = await state.writeRepair(seed, null);
   if (written.ok && written.value.status === "applied") return;

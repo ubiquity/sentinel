@@ -200,6 +200,8 @@ async function fixture(paginated = false) {
     replays: [],
     releaseRequests: [],
     githubCooldowns: [],
+    attemptMemory: [],
+    lessons: [],
   });
   // A later execution has replaced the old execution/proofs; old intent survives.
   const release = parseReleaseStateSnapshotV1({

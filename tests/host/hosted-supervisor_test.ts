@@ -459,6 +459,8 @@ async function makeRig(): Promise<RigV1> {
         replays: existing?.replays ?? [],
         releaseRequests: mergeById(existing?.releaseRequests ?? [], requests),
         githubCooldowns: existing?.githubCooldowns ?? [],
+        attemptMemory: [],
+        lessons: [],
       });
       const written = await repair.writeRepair(seed, head);
       if (!written.ok) {
@@ -594,6 +596,8 @@ async function recoveryRig(overrides: Record<string, unknown> = {}) {
       replays: [],
       releaseRequests: [],
       githubCooldowns: [],
+      attemptMemory: [],
+      lessons: [],
     }),
     null,
   );

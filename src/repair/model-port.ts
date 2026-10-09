@@ -2240,6 +2240,26 @@ function buildPrompt(
           .join("\n"),
     );
   }
+  if (request.priorAttempts !== undefined && request.priorAttempts.length > 0) {
+    // Bounded VERIFIED facts from durable attempt memory. An unchanged replay
+    // of any listed approach has already been refused upstream by the trusted
+    // loop breaker; this is evidence, never permission to change budgets,
+    // credentials, review or model policy. The expected observation is the
+    // one the listed failures did not produce.
+    parts.push(
+      "ALREADY TRIED — VERIFIED FACTS for this task at the same base and " +
+        "runtime revision (unchanged replays have been refused by the trusted " +
+        "loop breaker; do not repeat these, and make the change that produces " +
+        "new evidence the listed failures did not):\n" +
+        request.priorAttempts
+          .map((fact) =>
+            `- ${fact.detail} (stage ${fact.stage}, ${fact.failureClass}, ${fact.count} recorded outcome${
+              fact.count === 1 ? "" : "s"
+            })`
+          )
+          .join("\n"),
+    );
+  }
   parts.push(
     "Runtime implementer role: you are the bounded runtime implementer for " +
       "this task. Edit only the current provided checkout, and only the files " +

@@ -297,6 +297,8 @@ Deno.test("StateStore: branch creation applies, stale expected head conflicts", 
     replays: [],
     releaseRequests: [],
     githubCooldowns: [],
+    attemptMemory: [],
+    lessons: [],
   };
   const created = await store.writeRepair(snapshotA, null);
   assert.equal(created.ok, true);
@@ -331,6 +333,8 @@ Deno.test("StateStore: ambiguous network outcome is distinct from conflict", asy
     replays: [],
     releaseRequests: [],
     githubCooldowns: [],
+    attemptMemory: [],
+    lessons: [],
   };
   store.ambiguousRepairNext = true;
   const ambiguous = await store.writeRepair(snapshot, null);
@@ -361,6 +365,8 @@ Deno.test("StateStore: repair and release branches are strictly separate", async
     replays: [],
     releaseRequests: [],
     githubCooldowns: [],
+    attemptMemory: [],
+    lessons: [],
   };
   const releaseSnapshot: ReleaseStateSnapshotV1 = {
     version: "v1",
@@ -781,6 +787,8 @@ Deno.test(
       replays: [],
       releaseRequests: [],
       githubCooldowns: [],
+      attemptMemory: [],
+      lessons: [],
     };
     await store.writeRepair(repairSnapshot, null);
     const releaseSnapshot: ReleaseStateSnapshotV1 = {
@@ -884,6 +892,8 @@ Deno.test(
       replays: [],
       releaseRequests: [],
       githubCooldowns: [],
+      attemptMemory: [],
+      lessons: [],
     }, null);
     await store.writeRelease({
       version: "v1",
