@@ -98,6 +98,7 @@ function seedSnapshot(work: WorkRecordV1[]): RepairStateSnapshotV1 {
     releaseRequests: [],
     githubCooldowns: [],
     attemptMemory: [],
+    lessons: [],
   });
 }
 

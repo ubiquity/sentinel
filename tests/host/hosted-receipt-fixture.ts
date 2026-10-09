@@ -153,6 +153,7 @@ function fixtureState(
     releaseRequests: [input.request],
     githubCooldowns: [],
     attemptMemory: [],
+    lessons: [],
   });
   return {
     readRepair: () =>

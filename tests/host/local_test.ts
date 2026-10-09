@@ -240,6 +240,7 @@ function emptySnapshot(): RepairStateSnapshotV1 {
     releaseRequests: [],
     githubCooldowns: [],
     attemptMemory: [],
+    lessons: [],
   });
 }
 

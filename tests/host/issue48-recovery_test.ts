@@ -190,6 +190,7 @@ function repairFixture(
     releaseRequests: [],
     githubCooldowns: [],
     attemptMemory: [],
+    lessons: [],
     ...overrides,
   });
 }
@@ -245,6 +246,7 @@ function intendedSnapshot(
     releaseRequests: prior.releaseRequests,
     githubCooldowns: prior.githubCooldowns,
     attemptMemory: [],
+    lessons: [],
   });
 }
 

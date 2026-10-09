@@ -160,6 +160,7 @@ function seededSnapshot(
     releaseRequests: [],
     githubCooldowns: [],
     attemptMemory: [],
+    lessons: [],
     ...extra,
   });
 }

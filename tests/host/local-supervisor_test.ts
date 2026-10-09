@@ -289,6 +289,7 @@ async function buildFixture(
     releaseRequests: [request],
     githubCooldowns: [],
     attemptMemory: [],
+    lessons: [],
   };
   const written = await store.writeRepair(snapshot, null);
   assert.ok(written.ok && written.value.status === "applied");

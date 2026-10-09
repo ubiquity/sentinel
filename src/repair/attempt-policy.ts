@@ -99,12 +99,42 @@ const DETAIL_CLASSIFICATION: readonly (readonly [
   ],
 ];
 
+/**
+ * Closed FAMILY table for trusted producer formats whose details carry a
+ * variable suffix (a port error kind, a bundle step). Matching is a strict
+ * prefix check against the exact producer wording — never a heuristic — and
+ * the stored detail stays verbatim for diagnostics. A pre-inference refusal
+ * and a transfer failure are infrastructure facts, not tested code strategies,
+ * so they consume the bounded transient allowance instead of the no-progress
+ * allowance.
+ */
+const DETAIL_FAMILIES: readonly (readonly [
+  string,
+  AttemptDetailClassification,
+])[] = [
+  [
+    "model run failed (",
+    { stage: "model", failureClass: "transient_infrastructure" },
+  ],
+  [
+    "candidate bundle ",
+    { stage: "candidate", failureClass: "transient_infrastructure" },
+  ],
+  [
+    "matrix cell produced no trusted receipt",
+    { stage: "model", failureClass: "transient_infrastructure" },
+  ],
+];
+
 export function classifyAttemptDetailV1(detail: string): {
   stage: AttemptStageV1;
   failureClass: AttemptFailureClassV1;
 } {
   for (const [known, classification] of DETAIL_CLASSIFICATION) {
     if (known === detail) return classification;
+  }
+  for (const [family, classification] of DETAIL_FAMILIES) {
+    if (detail.startsWith(family)) return classification;
   }
   return { stage: "reservation", failureClass: "unknown" };
 }
@@ -303,11 +333,22 @@ export async function attemptMemorySettlementMutationV1(input: {
   record: WorkRecordV1;
   detail: string;
   now: number;
+  /**
+   * Trusted call-site classification (stage/failure class) when the caller has
+   * structured knowledge the detail string does not carry — e.g. the matrix
+   * ingester, which knows whether the cell refused before the model ran. Omit
+   * to derive from the closed detail table.
+   */
+  classification?: {
+    stage: AttemptStageV1;
+    failureClass: AttemptFailureClassV1;
+  };
 }): Promise<(draft: RepairStateSnapshotV1) => void> {
   const purpose: AttemptPurposeV1 = "implementation";
   const base = input.record.target.base;
   const controllerSha = input.record.controller.sha;
-  const classification = classifyAttemptDetailV1(input.detail);
+  const classification = input.classification ??
+    classifyAttemptDetailV1(input.detail);
   const id = await attemptMemoryIdV1({
     repository: input.record.repository,
     taskId: input.record.id,

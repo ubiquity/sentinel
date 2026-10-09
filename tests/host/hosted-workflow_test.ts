@@ -180,6 +180,7 @@ function emptyRepairSnapshot() {
     releaseRequests: [],
     githubCooldowns: [],
     attemptMemory: [],
+    lessons: [],
   });
 }
 

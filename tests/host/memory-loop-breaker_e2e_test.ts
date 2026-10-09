@@ -144,6 +144,7 @@ Deno.test(
         releaseRequests: [],
         githubCooldowns: [],
         attemptMemory: [],
+        lessons: [],
       });
       const seeded = await storeA.writeRepair(seed, null);
       assert.ok(seeded.ok && seeded.value.status === "applied");
@@ -235,6 +236,23 @@ Deno.test(
           row.outcome === "ambiguous"
         ).length,
         4,
+      );
+
+      // The stored lesson digest (the curated-memory analog) summarizes the
+      // same state deterministically: one record for the repository, with the
+      // exhausted family flagged as refused.
+      assert.equal(fresh.value.snapshot.lessons.length, 1);
+      const lessonRecord = fresh.value.snapshot.lessons[0];
+      assert.equal(lessonRecord.repository.name, REPO.name);
+      const lesson = lessonRecord.entries.find((entry) =>
+        entry.taskId === taskId
+      )!;
+      assert.equal(lesson.kind, "equivalent_failures_recorded");
+      assert.equal(lesson.count, 4);
+      assert.equal(lesson.refused, true);
+      assert.equal(
+        lesson.detail,
+        ATTEMPT_DETAIL_NO_TRUSTED_RECEIPT,
       );
 
       // The unchanged replay is refused and REPORTED; planning is pure, so the

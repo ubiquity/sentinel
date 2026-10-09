@@ -44,6 +44,7 @@ import {
   type ReviewTaskStatementV1,
 } from "../contracts/review-receipt.ts";
 import { generatedArtifactOnly } from "../github/review-snapshot.ts";
+import { buildMemoryLessonsV1 } from "./memory-lessons.ts";
 import {
   ATTEMPT_DETAIL_INCOMPLETE,
   ATTEMPT_DETAIL_LOOP_STOP,
@@ -52,6 +53,10 @@ import {
   attemptMemorySettlementMutationV1,
   priorAttemptFactsForRecordV1,
 } from "./attempt-policy.ts";
+import type {
+  AttemptFailureClassV1,
+  AttemptStageV1,
+} from "../contracts/attempt-memory.ts";
 import { parseReleaseRequestV1 } from "../contracts/release.ts";
 import type { ReleaseRequestV1 } from "../contracts/release.ts";
 import {
@@ -1202,6 +1207,7 @@ async function seedSnapshot(
     releaseRequests: [],
     githubCooldowns: [],
     attemptMemory: [],
+    lessons: [],
   });
   const written = await deps.state.writeRepair(seed, null);
   if (!written.ok || written.value.status !== "applied") return null;
@@ -1262,8 +1268,13 @@ async function persistTransition(
     // never shares (or mutates) the gate's persisted array.
     githubCooldowns: [...base.githubCooldowns],
     attemptMemory: [...base.attemptMemory],
+    lessons: [...base.lessons],
   };
   mutate(draft);
+  // The lesson digest is a deterministic view of authoritative attempt memory:
+  // every trusted transition recomputes it here, so a reader never sees a view
+  // that disagrees with the records it summarizes.
+  draft.lessons = await buildMemoryLessonsV1(draft, deps.clock.now());
   let parsed: RepairStateSnapshotV1;
   try {
     parsed = parseRepairStateSnapshotV1(draft);
@@ -3497,6 +3508,10 @@ export async function settleFailedImplementation(
   record: WorkRecordV1,
   reservationId: string,
   detail: string,
+  classification?: {
+    stage: AttemptStageV1;
+    failureClass: AttemptFailureClassV1;
+  },
 ): Promise<StepResultV1> {
   const now = deps.clock.now();
   const blocked = await settleAndBlock(
@@ -3513,6 +3528,7 @@ export async function settleFailedImplementation(
     record,
     detail,
     now,
+    ...(classification === undefined ? {} : { classification }),
   });
   return persistAfterSettlement(deps, context.bounds, (draft) => {
     replaceWorkMutation(blocked)(draft);

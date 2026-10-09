@@ -239,6 +239,19 @@ Deno.test("matrix runtime: authenticated interrupted output overage stays charge
       "authenticated terminal noncandidate failure must reach existing failure accounting",
     );
     const after = await snapshot(rig);
+    // Durable attempt memory carries the trusted stage/class diagnostics for
+    // the same settlement: the run was invoked (stage model) and the failure
+    // is infrastructure-shaped, so it consumes the transient allowance.
+    const memory = after.attemptMemory.find((row) =>
+      row.taskId === cell.taskId
+    )!;
+    const memoryEntry = memory.entries.find((row) =>
+      row.detail ===
+        "model run did not complete with a trusted candidate: interrupted output bound exceeded"
+    )!;
+    assert.equal(memoryEntry.stage, "model");
+    assert.equal(memoryEntry.failureClass, "transient_infrastructure");
+    assert.equal(memoryEntry.count, 1);
     const charge = after.reservations.find((row) =>
       row.id === cell.reservationId
     )!;
@@ -467,6 +480,7 @@ function seedSnapshot(work: WorkRecordV1[]): RepairStateSnapshotV1 {
     releaseRequests: [],
     githubCooldowns: [],
     attemptMemory: [],
+    lessons: [],
   });
 }
 
@@ -1493,6 +1507,7 @@ Deno.test(
           updatedAt: T0,
           work: [movedRecord],
           attemptMemory: [memory],
+          lessons: [],
         }),
         written.value.status === "applied" ? written.value.head : null,
       );

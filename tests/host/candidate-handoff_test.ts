@@ -451,6 +451,7 @@ Deno.test(
         releaseRequests: [],
         githubCooldowns: [],
         attemptMemory: [],
+        lessons: [],
       });
       const seededWrite = await state.writeRepair(seeded, null);
       assert.ok(
@@ -1312,6 +1313,7 @@ async function setupCandidateFaultFixture(
     releaseRequests: [],
     githubCooldowns: [],
     attemptMemory: [],
+    lessons: [],
   });
   const seededWrite = await state.writeRepair(seeded, null);
   assert.ok(

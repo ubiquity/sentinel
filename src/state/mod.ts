@@ -33,6 +33,8 @@
 
 import { parseAttemptMemoryRecordV1 } from "../contracts/attempt-memory.ts";
 import type { AttemptMemoryRecordV1 } from "../contracts/attempt-memory.ts";
+import { parseMemoryLessonsRecordV1 } from "../contracts/memory-lessons.ts";
+import type { MemoryLessonsRecordV1 } from "../contracts/memory-lessons.ts";
 import { parseBudgetReservationV1 } from "../contracts/budget-reservation.ts";
 import type { BudgetReservationV1 } from "../contracts/budget-reservation.ts";
 import { canonicalStringify } from "../contracts/canonical.ts";
@@ -297,6 +299,12 @@ const RECORD_COLLECTIONS: Record<StateKind, RecordCollection[]> = {
       directory: "attemptMemory",
       kind: "attempt_memory",
       parse: parseAttemptMemoryRecordV1,
+      rows: [],
+    },
+    {
+      directory: "lessons",
+      kind: "memory_lessons",
+      parse: parseMemoryLessonsRecordV1,
       rows: [],
     },
   ],
@@ -950,6 +958,7 @@ export class GitStateStore implements StateStore {
       // collection mapping here, never inferred from the record content.
       add("github_cooldown", repair.githubCooldowns);
       add("attempt_memory", repair.attemptMemory);
+      add("memory_lessons", repair.lessons);
     } else {
       const release = next as ReleaseStateSnapshotV1;
       const add = (recordKind: string, rows: readonly unknown[]) => {
@@ -1193,6 +1202,9 @@ export class GitStateStore implements StateStore {
           attemptMemory: orderRecords(
             records.attemptMemory,
           ) as AttemptMemoryRecordV1[],
+          lessons: orderRecords(
+            records.lessons,
+          ) as MemoryLessonsRecordV1[],
         };
         snapshot = parseRepairStateSnapshotV1(repair);
       } else {

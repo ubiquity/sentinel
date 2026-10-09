@@ -78,6 +78,10 @@ import {
   ATTEMPT_DETAIL_INTERRUPTED_BOUND,
   attemptEquivalenceRefusalForRecordV1,
 } from "../repair/attempt-policy.ts";
+import type {
+  AttemptFailureClassV1,
+  AttemptStageV1,
+} from "../contracts/attempt-memory.ts";
 import { rankEligibleWork } from "../repair/selection.ts";
 import type {
   MatrixBundleExporterV1,
@@ -726,6 +730,32 @@ function resultMatchesCell(
 }
 
 /**
+ * Trusted stage/class classification for one non-completed cell result. The
+ * ingester knows structured facts the detail string does not spell out:
+ * `not_started` and the pre-start binding refusals prove the model never ran
+ * (that is an infrastructure fact, never a tested code strategy), a `model run
+ * failed (...)` result proves the run was invoked, and a `candidate bundle`
+ * refusal proves a candidate existed but could not be carried. The detail
+ * string itself is stored verbatim for diagnostics.
+ */
+function settlementClassification(
+  status: "failed" | "not_started",
+  detail: string,
+): { stage: AttemptStageV1; failureClass: AttemptFailureClassV1 } {
+  if (status === "failed") {
+    if (detail.startsWith("model run failed (")) {
+      return { stage: "model", failureClass: "transient_infrastructure" };
+    }
+    if (detail.startsWith("candidate bundle ")) {
+      return { stage: "candidate", failureClass: "transient_infrastructure" };
+    }
+  }
+  // Pre-inference refusal (never started, or refused at a pre-start binding
+  // check): only admission is proven, and the failure is infrastructure.
+  return { stage: "reservation", failureClass: "transient_infrastructure" };
+}
+
+/**
  * Trusted, serialized, idempotent ingestion. Results are applied one cell at a
  * time against a FRESH authoritative context, so a successful sibling is never
  * rolled back and a restarted finalizer cannot double-apply. Conflicting
@@ -952,6 +982,7 @@ export async function ingestMatrixResults(
         record,
         cell.reservationId,
         ATTEMPT_DETAIL_INTERRUPTED_BOUND,
+        { stage: "model", failureClass: "transient_infrastructure" },
       );
       if (step.kind === "state_error") {
         entries.push({
@@ -1025,12 +1056,18 @@ export async function ingestMatrixResults(
         continue;
       }
     } else {
+      const failureDetail = result.detail ??
+        "matrix cell produced no trusted receipt";
       const step = await settleFailedImplementation(
         deps,
         context,
         record,
         cell.reservationId,
-        result.detail ?? "matrix cell produced no trusted receipt",
+        failureDetail,
+        settlementClassification(
+          result.status === "completed" ? "failed" : result.status,
+          failureDetail,
+        ),
       );
       if (step.kind === "state_error") {
         entries.push({

@@ -556,6 +556,7 @@ export function updateSnapshot(
     replays: [...snapshot.replays],
     releaseRequests: [...snapshot.releaseRequests],
     attemptMemory: [...snapshot.attemptMemory],
+    lessons: [...snapshot.lessons],
   };
   mutate(draft);
   return parseRepairStateSnapshotV1(draft);

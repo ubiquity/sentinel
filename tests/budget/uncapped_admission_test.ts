@@ -142,6 +142,7 @@ Deno.test(
       releaseRequests: [],
       githubCooldowns: [],
       attemptMemory: [],
+      lessons: [],
     });
 
     const budget = new RollingStartBudget({

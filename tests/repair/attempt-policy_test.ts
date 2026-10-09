@@ -98,6 +98,7 @@ function snapshotWith(
     releaseRequests: [],
     githubCooldowns: [],
     attemptMemory: memory,
+    lessons: [],
   });
 }
 
@@ -130,6 +131,58 @@ Deno.test("attempt policy: closed details classify exactly, unknown fails closed
     stage: "reservation",
     failureClass: "unknown",
   });
+  // Trusted producer families with variable suffixes: the port error kind or
+  // the bundle step never changes the closed classification.
+  assert.deepEqual(classifyAttemptDetailV1("model run failed (unavailable)"), {
+    stage: "model",
+    failureClass: "transient_infrastructure",
+  });
+  assert.deepEqual(
+    classifyAttemptDetailV1("candidate bundle could not be created"),
+    {
+      stage: "candidate",
+      failureClass: "transient_infrastructure",
+    },
+  );
+  assert.deepEqual(
+    classifyAttemptDetailV1("matrix cell produced no trusted receipt"),
+    {
+      stage: "model",
+      failureClass: "transient_infrastructure",
+    },
+  );
+});
+
+Deno.test("attempt policy: a trusted call-site classification overrides the derived one", async () => {
+  const record = workRecord(TASK, {
+    nextStep: "blocked",
+    blocker: { kind: "other", message: DETAIL, since: T0 + 1000 },
+    counters: { attempts: 1, retries: 0, reviewRounds: 0 },
+  });
+  const mutation = await attemptMemorySettlementMutationV1({
+    record,
+    detail: "planned base is no longer current",
+    now: T0 + 3000,
+    classification: {
+      stage: "reservation",
+      failureClass: "transient_infrastructure",
+    },
+  });
+  const fresh = snapshotWith([], record);
+  const applied = parseRepairStateSnapshotV1((() => {
+    const draft: RepairStateSnapshotV1 = {
+      ...fresh,
+      attemptMemory: [...fresh.attemptMemory],
+      lessons: [...fresh.lessons],
+      work: [...fresh.work],
+    };
+    mutation(draft);
+    return draft;
+  })());
+  const entry = applied.attemptMemory[0].entries[0];
+  assert.equal(entry.detail, "planned base is no longer current");
+  assert.equal(entry.stage, "reservation");
+  assert.equal(entry.failureClass, "transient_infrastructure");
 });
 
 Deno.test("attempt policy: equivalent outcomes are tolerated per class, then refused", async () => {
@@ -289,6 +342,7 @@ Deno.test("attempt policy: the settlement mutation merges into the draft it is a
     const draft: RepairStateSnapshotV1 = {
       ...fresh,
       attemptMemory: [...fresh.attemptMemory],
+      lessons: [...fresh.lessons],
       work: [...fresh.work],
     };
     mutation(draft);
@@ -305,6 +359,7 @@ Deno.test("attempt policy: the settlement mutation merges into the draft it is a
     const draft: RepairStateSnapshotV1 = {
       ...applied,
       attemptMemory: [...applied.attemptMemory],
+      lessons: [...applied.lessons],
       work: [...applied.work],
     };
     mutation(draft);
@@ -329,6 +384,7 @@ Deno.test("attempt policy: the settlement mutation merges into the draft it is a
     const draft: RepairStateSnapshotV1 = {
       ...second,
       attemptMemory: [...second.attemptMemory],
+      lessons: [...second.lessons],
       work: [...second.work],
     };
     revisionMutation(draft);

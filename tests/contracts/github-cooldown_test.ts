@@ -74,6 +74,7 @@ function repairSnapshot(
     releaseRequests: [],
     githubCooldowns,
     attemptMemory: [],
+    lessons: [],
   };
 }
 

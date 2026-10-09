@@ -16,6 +16,7 @@ import { asFindingFingerprint } from "../../src/contracts/brands.ts";
 import { canonicalStringify } from "../../src/contracts/canonical.ts";
 import { parseGitHubCooldownV1 } from "../../src/contracts/github-cooldown.ts";
 import { parseAttemptMemoryRecordV1 } from "../../src/contracts/attempt-memory.ts";
+import { buildMemoryLessonsV1 } from "../../src/repair/memory-lessons.ts";
 import type {
   ReleaseStateSnapshotV1,
   RepairStateSnapshotV1,
@@ -89,6 +90,7 @@ function repairSnapshot(
     releaseRequests: [],
     githubCooldowns: [],
     attemptMemory: [],
+    lessons: [],
     ...overrides,
   };
 }
@@ -2724,6 +2726,13 @@ Deno.test("state: mixed legacy and candidate-state work survive an unrelated wri
   }
 });
 
+/** Deterministic lessons view for the same family record. */
+async function memoryLessonsFixture(memory: ReturnType<typeof attemptMemory>) {
+  const snapshot = repairSnapshot({ attemptMemory: [memory] });
+  const built = await buildMemoryLessonsV1(snapshot, T0 + 5000);
+  return built[0];
+}
+
 /** Minimal valid attempt-memory record for the state round-trip suite. */
 function attemptMemory(count = 2) {
   return parseAttemptMemoryRecordV1({
@@ -2754,9 +2763,10 @@ Deno.test("attempt memory: durable round-trip and append-only transition guards"
   try {
     const writer = storeAt(ctx, "attempt-memory", "repair");
     const memory = attemptMemory();
+    const lessons = await memoryLessonsFixture(memory);
     const head = appliedHead(
       await writer.writeRepair(
-        repairSnapshot({ attemptMemory: [memory] }),
+        repairSnapshot({ attemptMemory: [memory], lessons: [lessons] }),
         null,
       ),
     );
@@ -2764,6 +2774,7 @@ Deno.test("attempt memory: durable round-trip and append-only transition guards"
     const read = await reader.readRepair();
     assert(read.ok && read.value.status === "found");
     assert.deepEqual(read.value.snapshot.attemptMemory, [memory]);
+    assert.deepEqual(read.value.snapshot.lessons, [lessons]);
 
     // Counts are append/merge-only: a decreasing fingerprint count is refused
     // and leaves the durable ref untouched.
@@ -2773,6 +2784,7 @@ Deno.test("attempt memory: durable round-trip and append-only transition guards"
         sequence: 2,
         updatedAt: T0 + 2000,
         attemptMemory: [attemptMemory(1)],
+        lessons: [],
       }),
       head,
     );
@@ -2790,6 +2802,7 @@ Deno.test("attempt memory: durable round-trip and append-only transition guards"
         sequence: 2,
         updatedAt: T0 + 2000,
         attemptMemory: [],
+        lessons: [],
       }),
       head,
     );
@@ -2806,6 +2819,7 @@ Deno.test("attempt memory: durable round-trip and append-only transition guards"
         sequence: 2,
         updatedAt: T0 + 3000,
         attemptMemory: [attemptMemory(3)],
+        lessons: [],
       }),
       head,
     );

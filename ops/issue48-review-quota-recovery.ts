@@ -384,6 +384,7 @@ export function buildNextQuotaSnapshot(
     releaseRequests: prior.releaseRequests,
     githubCooldowns: prior.githubCooldowns,
     attemptMemory: prior.attemptMemory,
+    lessons: prior.lessons,
   };
 }
 

@@ -617,6 +617,7 @@ export class RollingStartBudget implements BudgetControllerV1 {
       releaseRequests: [],
       githubCooldowns: [],
       attemptMemory: [],
+      lessons: [],
     };
     return {
       ...base,
