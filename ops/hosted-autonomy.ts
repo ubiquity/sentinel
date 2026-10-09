@@ -2216,10 +2216,12 @@ async function recoverHostedHistoricalC63(
     )
   ) throw new Error("historical matrix saved custody unavailable");
   if (runtime.execution !== null) {
+    // An unsettled current execution defers recovery; the pass must never
+    // fail because another run is still writing.
     if (
       !deps.transport.confirmCompletedExecution ||
       !await deps.transport.confirmCompletedExecution(runtime.execution)
-    ) throw new Error("historical matrix current native writers unsettled");
+    ) return 0;
     const observed = await deps.readExecution(runtime.execution);
     if (
       !observed.ok || observed.value === null ||
@@ -2732,7 +2734,9 @@ async function recoverHostedMatrixProducer(
     !transport.confirmCompletedExecution ||
     !await transport.confirmCompletedExecution(saved.execution)
   ) {
-    throw new Error("current matrix native writers unsettled");
+    // A producer whose own native run is still in flight is not recoverable
+    // yet; skip it instead of failing the whole pass.
+    return null;
   }
   checkDeadline();
   const native = await ports.readExecution(saved.execution);
