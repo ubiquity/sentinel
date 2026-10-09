@@ -557,6 +557,22 @@ export const OWNER_DEVELOPMENT_INSTALL_CONCURRENCY_PLANNER_GENERATION = 60;
 export const OWNER_DEVELOPMENT_INSTALL_MATRIX_RECOVERY_REVISION: GitSha | null =
   "ac98dc80ff9c3eca5f36aca91493168e9ff74596" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_MATRIX_RECOVERY_GENERATION = 61;
+/**
+ * Durable memory / self-healing loop breaker. The exact reviewed runtime
+ * revision merging the live supervisor lineage with the memory lane on
+ * development; installed only after the current generation 67 healthy proof.
+ * A failed generation 68 candidate restores the recorded generation 67
+ * revision once at monotonic generation 69; that post-rollback pointer is
+ * terminal. It makes the runtime record failed attempts (fingerprints, stage
+ * diagnostics, failure classes) durably at settlement and refuse unchanged
+ * replays in the planner, the retry pass and the implementer prompt.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_MEMORY_PRIOR_REVISION =
+  "ee5e6518a4333c20d8bc6a4c3c577a2536ec6b9b" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_MEMORY_PRIOR_GENERATION = 67;
+export const OWNER_DEVELOPMENT_INSTALL_MEMORY_REVISION =
+  "101acb9654a3f0299285b9739a9f48333bf3d9fc" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_MEMORY_GENERATION = 68;
 export interface OwnerMatrixRecoveryEvidenceV1 {
   candidate: GitSha;
   repairHead: GitSha;
@@ -2942,6 +2958,57 @@ export function planOwnerDevelopmentInstall(
     }
     return waiting(
       "the planner successor generation 60 healthy proof is not recorded",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_MEMORY_PRIOR_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_MEMORY_PRIOR_GENERATION
+  ) {
+    if (healthy === null) {
+      return waiting(
+        "the recorded generation 67 healthy proof is not recorded",
+      );
+    }
+    return movePlan(
+      "install",
+      runtime,
+      OWNER_DEVELOPMENT_INSTALL_MEMORY_REVISION,
+      OWNER_DEVELOPMENT_INSTALL_MEMORY_GENERATION,
+      healthy,
+      "install the durable-memory runtime after its generation 67 healthy proof",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_MEMORY_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_MEMORY_GENERATION
+  ) {
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_MEMORY_PRIOR_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_MEMORY_PRIOR_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded generation 67 healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_MEMORY_PRIOR_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed durable-memory runtime to its recorded proven predecessor",
+      );
+    }
+    if (healthy !== null) {
+      return noChange("the owner development installation is complete");
+    }
+    return waiting(
+      "the durable-memory generation 68 healthy proof is not recorded",
     );
   }
 
