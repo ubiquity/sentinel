@@ -1,6 +1,6 @@
 # Third-party source adaptations
 
-Update owner: Sentinel maintainers. Updates require a reviewed diff against the pinned source and current acceptance evidence. Never pull upstream main automatically. Required license text is distributed in THIRD_PARTY_NOTICES.md. No upstream workflows, hooks, telemetry or runtime packages are imported.
+Update owner: Sentinel maintainers. Updates require comparison against the pinned source and current acceptance evidence under the applicable development/runtime gates. Never pull upstream main automatically. Required license text is distributed in THIRD_PARTY_NOTICES.md. No upstream workflows, hooks, telemetry or runtime packages are imported.
 
 ## OpenHands failed-command loop guard
 

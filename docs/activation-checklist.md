@@ -1,172 +1,44 @@
 # Sentinel activation checklist
 
-Current authority, 2026-09-14: hosted Sentinel has one accepted autonomous
-delivery, PR #30 / issue #18, at runtime `989af8a`; the separate gateway phase
-remains unaccepted. The authoritative task states, exact evidence, owners and
-next actions are in [build-status.md](build-status.md#active-task-register--astra-owned);
-only Astra may change that register. This document supplies activation details,
-not another task list. It is subordinate to
-[MASTER-PLAN.md](../MASTER-PLAN.md) and records the boundary between local
-proof and external activation.
+This runbook preserves activation requirements; it is not another task/status ledger or permission to run a hosted attempt. Current ownership, exact revisions, evidence and unresolved tasks belong in [build-status.md](build-status.md). Follow [AGENTS.md](../AGENTS.md), [the master plan](../MASTER-PLAN.md) and [current decisions](DECISIONS.md).
 
-## Current gateway contract boundary
+## Hosted Sentinel
 
-The gateway repository's current instructions retire Deno hosting and require
-the existing VPS deployment path. The Deno-specific activation steps below are
-historical; they are not commands to execute against the current target. This
-continuation does not authorize a new target owner, secret interface, isolated
-service, or stability threshold.
+- Reconcile the exact protected launcher, installed runtime pointer/generation, active execution, reservations and latest authenticated settlement/health proof. Do not select a revision by moving branch, time or list order.
+- Verify current source, trusted installation gates and clean candidate identity before installation. Preserve the saved healthy prior, exact intent, expected-head state write and one controlled rollback path.
+- Keep credentials/state/promotion capabilities in trusted stages; model cells receive neither. Current-head review and CI remain autonomous target merge gates.
+- Obtain explicit user approval for each development-triggered hosted attempt after local checks, with workflow, target, candidate SHA, expected duration and remaining hosted-only assertion identified.
+- Dispatch and inspect the identified attempt with the installed `sentinel` CLI. Missing settlement, startup proof or exact revision identity is pending, never healthy. Bootstrap success does not establish issue delivery.
 
-Read-only target inventory at 2026-09-14 09:12 UTC bound the local gateway source
-and `.data/current/.uos-release.json` to
-`4a65e8f9fc8d9d955b211f9cdc42b9d0d198c1b3`, archive digest
-`72fb81eae9e94fafebed893f8017bd027b95e4bcbfa7964b5946855e939b0dd7`.
-GitHub development was `e6501a44646c29d099ad901fb343e95960536576`.
-These are inventory snapshots, not a deployment lease or HTTP acceptance.
+## Gateway VPS release boundary
 
-The current target contract must preserve:
+The gateway's current deployment instructions use its existing trusted VPS path. Deno-specific target receipts cannot establish VPS delivery. Reconcile the current target instructions and live owner before implementation or activation; this checklist grants no new service, secret, endpoint, threshold or ownership.
 
-- The existing trusted `deploy:vps` path, exclusive `.data/deploy.lock`, immutable
-  `.data/releases/<full-sha>` directories and the `current` symlink.
-- Exact source and archive identity, the configured service, persistent KV and
-  `.env`, and the existing separation between trusted deployment and model work.
-- The target's health SHA and `vps-<sha>` body/header identity checks, plus its
-  required authenticated direct Mac-to-VPS inference acceptance.
-- One repair writer and one trusted promotion owner, with current ownership and
-  any active work reconciled before transfer.
+Preserve the existing `deploy:vps` path, exclusive `.data/deploy.lock`, immutable `.data/releases/<full-sha>` directories, `current` symlink, configured service, persistent KV and `.env`. Trusted deployment remains separate from model work. Verify exact source/archive identity, health SHA, `vps-<sha>` body/header identity and the target's required authenticated direct Mac-to-VPS inference acceptance.
 
-The proposed replacement for the obsolete Deno release phase must save an exact
-healthy prior identity and promotion intent before switching, verify the exact
-candidate, and record interrupted monitoring and exact rollback. It must refuse
-to overwrite a newer unrelated revision. The existing VPS deployment command
-alone does not provide those Sentinel release receipts.
+A Sentinel VPS release/receipt integration needs an approved exact contract beyond merely calling the deployment command: record the healthy prior and promotion intent before switching, verify the exact candidate, preserve interrupted monitoring and exact rollback proof, and refuse to overwrite a newer unrelated revision. Reconcile promotion ownership and any active target work before transfer.
 
-Owner decisions still needed for that separate phase:
+## Required target decisions and proof
 
-- The disposable isolated VPS target: endpoint, service, storage and rollback
-  boundary, including which existing trusted operator owns its promotion.
-- Approval of the exact VPS release/receipt and ownership contract before
-  implementing or activating its replacement for Deno promotion.
-- Finite evidence retention and storage limits with an existing scoped key
-  source, adequate for the approved admission wait and evidence lifetime.
-- Objective telemetry: metrics, denominator, baseline, minimum samples and
-  failure thresholds. Preserve the required 30-minute continuous acceptance
-  with 30-second samples; missing coverage cannot pass.
+| Boundary | Required decision or evidence |
+| --- | --- |
+| Credential scope | Existing approved App/target-admin/deployment capabilities and exact repository scope; no credential exposure to workers |
+| Isolated release environment | Approved disposable target, endpoint/service/storage, promotion owner and rollback boundary |
+| VPS release receipts | Approved exact candidate/prior identity, intent, acceptance and restoration contract |
+| Evidence lifetime | Finite encrypted retention/storage bounds, existing scoped key source, explicit expiry/coverage sufficient for expected waits |
+| Stability policy | Metrics, denominators, baseline/window, minimum samples and owner-approved failure thresholds |
+| Target ownership | Reconciled repair and promotion owners, active jobs/leases and explicit handover; no competing owner for the same surface |
+| Review/build identity | Completed current-head internal review where applicable, current CI and exact merged/build/deployment identity |
 
-No qualifying final six-hour observation window is established. It can begin
-only after the required target activation and receipt gates. At least six
-observed hours remain after that point; hosted Actions history is separate
-evidence and cannot fill gateway sampling gaps.
+Preserve continuous 30-minute acceptance with 30-second samples; a monitor gap restarts coverage. Missing telemetry or an HTTP 200 identity mismatch cannot pass. For the Deno adapter, an identified Cloudflare 403 is a warning only after managed-origin identity passes; do not silently substitute this for the target's VPS policy.
 
-## Historical evidence before the current task register
+## Activation sequence
 
-The entries in this section are older snapshots. In particular, old statements
-about unpublished workflows, absent PRs and remote heads are superseded by the
-active register. Read each receipt at its recorded revision; do not reassign
-completed work from this history.
+1. Reconcile live target ownership, current source/leases, credential scope and existing promotion path; record the exact approved handover.
+2. Complete locally reviewable source and directly affected checks, then confirm the required contract/capabilities and any hosted-attempt approval.
+3. Prove the isolated promotion/continuous acceptance/exact rollback path before transferring production promotion ownership.
+4. Verify the exact installed runtime and target candidate through authenticated receipts and the real target acceptance surface.
+5. Observe two distinct previously undelivered eligible tasks in order, including a captured-request permanent regression, then continued eligible selection. Do not hand-implement tasks to manufacture autonomy.
+6. Start the original gateway six-hour observation window only after activation and receipt gates pass; Actions history cannot fill gateway sampling gaps.
 
-- Canonical lane: `/Users/nv/repos/ubiquity/sentinel/.codex-worktrees/master-plan-gfa795549e5`
-  on `codex/master-plan-gfa795549e5`.
-- Canonical tracked HEAD before the observer change: `4907920665d07e1da5e88346cc4081a8fe2e0a1f`; the
-  last implementation candidate is `dde125febf4ef31f31764804f01f2934a4a15d00`.
-- Local receipt: `deno task test:local` passed 683 tests across 68 steps at the
-  implementation candidate, with formatting, lint and type checks passing.
-  This is the earlier implementation-only receipt; the observer candidate is
-  covered by the fresh receipt recorded below.
-- Earlier observer candidate receipt: the task-owned run
-  `cc48556d9d6816f2605c36c352452867e2de5be694f7aa26c8a9330e9268c576/857ecd94-e002-46e8-9a23-8e90b4771dab`
-  executed `deno task test:local` at tracked revision
-  `2f46e1889166c2f9c4a2a92b312cd6e28acb81a1` with the uncommitted observer
-  files present. It failed after 686 passing tests across 68 steps in 19m46s;
-  `tests/repair/loop-guard-runtime_test.ts` ended with a pending promise.
-  This historical failure is superseded by the fresh green receipt recorded
-  below.
-- Earlier published CI receipt: run `34298852376` (`sentinel-ci`) at exact head
-  `2f46e1889166c2f9c4a2a92b312cd6e28acb81a1` failed its `test-local` job after
-  682 passing tests. `tests/replay/runtime_test.ts:167` expected 128 bytes but
-  received 1 byte in the output-cap test. The remote deterministic CI gate is
-  unresolved at that old head; the portable fixture correction and fresh green
-  receipt below supersede this result.
-- Fresh observer candidate receipt: the task-owned run
-  `cc48556d9d6816f2605c36c352452867e2de5be694f7aa26c8a9330e9268c576/618a6c5b-ecfe-4852-bc8d-98029c1b998f`
-  executed `deno task test:local` at source revision
-  `4907920665d07e1da5e88346cc4081a8fe2e0a1f` with the observer slice and
-  portable replay output-cap fixture present. It passed `687` tests across
-  `68` steps in `23m26s`; formatting, lint and type checks also passed.
-  The receipt is local evidence for the candidate and does not activate any
-  external capability.
-- Target producer/consumer receipt: m06 target lane
-  `a702d4ddb6a8bcbf549653cc75596b3d74715102` passed the fresh cross-repository
-  probe recorded in `docs/build-status.md`.
-- Target repository: `ubiquity/ai.ubq.fi` is public. PR #258 merged at
-  `2026-09-09T01:05:39Z` from exact target base
-  `0a1336945116cb47e2f1c62147d5d8514dd4994b` and m06 head
-  `a702d4ddb6a8bcbf549653cc75596b3d74715102` to target `development` merge
-  SHA `7b93b579eecf5392730453f1407a66a552fd7c48`.
-- Existing target Deno Deploy run `34297770624` (attempt 1) succeeded at that
-  merge SHA and uploaded an exact-build receipt for project `ai-ubq-fi`,
-  revision `h73heqdd4js7`. A read-only probe at
-  `2026-09-09T01:30:12Z` returned HTTP 200 from both the managed and custom
-  health routes, with body and headers matching that SHA and revision.
-- The target's embedded `provider-sentinel.yml` workflow is absent. Its
-  existing `deno-deploy.yml` workflow still owns deployment and promotion;
-  standalone release ownership has not been handed over.
-- Scheduled workflows remain fail-closed. They call the direct tasks, which
-  reject execution without an injected trusted host. No standalone external
-  capability, model, release, target write or activation is active; the target
-  deployment and Sentinel repository publication are recorded as external
-  evidence above.
-- The observation slice in the canonical worktree contains:
-  `src/observe-main.ts`, `tests/integration/observe-host_test.ts`, and task
-  wiring in `deno.json`/`test-local.ts`, plus `.github/workflows/observe.yml`.
-  Its fresh local receipt is recorded above. It remains a read-only proposal
-  until the branch is delivered and the protected secrets are supplied; it
-  introduces no repair, release, model, state or deployment capability.
-- The public repository `ubiquity/sentinel` now exists. Its canonical branch is
-  published at `2f46e1889166c2f9c4a2a92b312cd6e28acb81a1`, while remote
-  `development` remains at `9da7f77b0082bd9c0453204215cf65323b2884a6` with no
-  aggregate Sentinel PR or merge.
-- The `sentinel-observe` workflow is still local and unpublished. It proposes
-  authenticated read-only `ai.ubq.fi` evidence intake and one-day
-  encrypted-artifact upload; it cannot run until the workflow is delivered and
-  both protected secrets are configured.
-
-## Owner decisions required before activation
-
-| Decision | Required value or evidence | Current state |
-| --- | --- | --- |
-| Sentinel publication | Repository name, visibility and publication authority | Public `ubiquity/sentinel` exists; PR #2 merged at `0d85c3a`, observed remote development `22ac3887`; further changes follow integrated delivery |
-| GitHub access | Existing GitHub App installation and target-admin scope, with a trusted host source | Unresolved; do not create a new secret or environment variable |
-| Deno access | Existing Deno Deploy project and promotion-token scope | Target workflow access is evidenced by run `34297770624`; standalone trusted-host scope remains unresolved; do not copy a token into a worktree or model session |
-| Model admission | Global rolling-hour and rolling-seven-day start caps, session bounds and receipt policy | Unresolved; runtime policy remains gpt-5.6-luna with max reasoning |
-| Evidence retention | Owner-approved retention duration, storage bound and key capability | The observer candidate uses a bounded one-day encrypted upload and protected 32-byte `SENTINEL_REPLAY_KEY_B64`; durable retention remains unresolved because the target's current 48-hour capture TTL is insufficient for weekly waits |
-| Stability policy | Metrics, denominator, baseline/window, minimum samples and thresholds | Unresolved; the local controller requires 30-minute acceptance with 30-second samples |
-| Target ownership | Drain and handover of the embedded Sentinel writer and Deno promotion writer | Embedded workflow is removed and capture/export/build seams are owner-approved; existing Deno promotion writer and stale PR ownership still require explicit handover; do not run two writers against the target |
-| Review and build receipts | Machine-verifiable completed review output and exact build receipt contract | Exact build receipt exists for run `34297770624`; PR #258 still has overall `CHANGES_REQUESTED` from CodeRabbit and its Codex result is `COMMENTED`, so a clean current-head acceptance receipt remains unresolved |
-| Isolated release environment | Disposable target and rollback endpoint for the pre-live promotion drill | Unresolved |
-
-## Activation sequence after decisions
-
-1. Reconcile the target owner, current leases, remote heads and existing
-   promotion workflow. Record target base `0a133694…`, merge `7b93b579…`, the
-   removed embedded workflow, stale PRs #251/#233, and the proposed Deno
-   promotion handover; do not transfer production promotion yet.
-2. Supply the already-approved capabilities to one trusted host composition and
-   replace the inert workflow invocation only after the capability checks pass.
-3. Publish the integrated Sentinel candidate, obtain a clean current-head
-   review, and bind the merged m06 regression and build receipt to exact
-   commits.
-4. Run the isolated Deno promotion, continuous acceptance and exact rollback
-   drill. Preserve the prior revision identity and prove restoration before
-   the authorized production promotion ownership transfer.
-5. Verify the authorized drain and exclusive production ownership, then enable
-   target repairs, starting with read-only discovery and retained
-   evidence. Record the first and second distinct eligible deliveries in order.
-6. Start the six-hour observation window only after the live receipts are
-   verified, then record continued eligible selection and any rollback result.
-
-Until those values and receipts are supplied, keep the direct workflow tasks
-fail-closed. Do not guess limits, retention, thresholds, credentials, revision
-selection or ownership, and do not treat local fixtures or injected transports
-as live delivery proof. The published observer still needs its protected
-authentication/key capabilities; it cannot start repair or release work.
+Keep local, merged, installed and live evidence separate. Do not guess retention, thresholds, credential scope, revision selection or current readiness; record an exact blocker and next action in the sole ledger.
