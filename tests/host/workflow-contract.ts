@@ -16,23 +16,22 @@ export function assertSupervisorMaintenanceContract(
   const prepare = text.slice(prepareAt, matrixAt);
   const finalize = text.slice(finalizeAt);
   assert.match(prepare, /prepare:\s*\n\s*needs: maintenance\s*\n/);
-  const recovery =
-    /^\s+src\/host\/owner-development-install\.ts --startup-recovery\s*$/m.test(
-      prepare,
-    );
+  // Scoped owner recovery suppresses the maintenance writer; the removed
+  // --startup-recovery markers no longer appear in the workflow, so detect
+  // the mode from the suppression itself.
+  const recovery = /^ {4}if: \$\{\{ false \}\}$/m.test(maintenance);
   if (recovery) {
-    assert.match(maintenance, /^ {4}if: \$\{\{ false \}\}$/m);
     assert.match(
       prepare,
       /^ {4}if: always\(\) && needs\.maintenance\.result == 'skipped' && github\.ref == 'refs\/heads\/sentinel-supervisor'$/m,
     );
     for (const job of [prepare, finalize]) {
-      assert.match(
-        job,
-        /^ {8}run: deno task supervisor:run --owner-startup-recovery-only$/m,
-      );
-      assert.doesNotMatch(job, /^ {8}run: deno task supervisor:run$/m);
+      assert.match(job, /^ {8}run: deno task supervisor:run$/m);
     }
+    assert.doesNotMatch(
+      text,
+      /--startup-recovery|--owner-startup-recovery-only/,
+    );
     return "recovery";
   }
   assert.doesNotMatch(text, /--startup-recovery|--owner-startup-recovery-only/);
