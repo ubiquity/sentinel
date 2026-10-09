@@ -155,6 +155,7 @@ export interface HistoricalMatrixQuarantineDepsV1 {
       proof: HostedRunProofV1,
       expectedHead: GitSha,
       revalidateNotStarted?: boolean,
+      deadline?: number,
     ): Promise<readonly MatrixRejectedWaveV1[]>;
   }[];
   readExecution(
@@ -635,10 +636,16 @@ export async function runHistoricalMatrixQuarantine(
   let waves: readonly MatrixRejectedWaveV1[];
   try {
     waves = historical
-      ? await witness!.reject(proof, historical.expectedHead, revalidate)
+      ? await witness!.reject(
+        proof,
+        historical.expectedHead,
+        revalidate,
+        deadlineAt,
+      )
       : await deps.transport.rejectHistorical({
         proof,
         revalidateNotStarted: revalidate,
+        deadline: deadlineAt,
       });
   } catch (error) {
     if (!(error instanceof MatrixMissingCellArtifactError)) throw error;
@@ -652,6 +659,9 @@ export async function runHistoricalMatrixQuarantine(
     return 1 + await runHistoricalMatrixQuarantine(deps, deadlineAt);
   }
   if (historical && waves.length === 0) {
+    // The shared pass deadline can shorten the witness scan to nothing; that
+    // is a bounded stop, not an unavailable witness.
+    if (deps.clock.now() >= deadlineAt) return 0;
     throw new Error("historical matrix selected witness rejection unavailable");
   }
   if (waves.length === 0) {

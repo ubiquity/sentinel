@@ -131,6 +131,8 @@ export interface MatrixArtifactTransportV1 {
   rejectHistorical?(input: {
     proof: HostedRunProofV1;
     revalidateNotStarted?: boolean;
+    /** Absolute shortening-only deadline shared by one logical recovery scan. */
+    deadline?: number;
   }): Promise<readonly MatrixRejectedWaveV1[]>;
   recover(input: {
     requests: readonly MatrixArtifactRequestV1[];

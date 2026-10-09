@@ -917,7 +917,7 @@ export function createHostedHistoricalMatrixQuarantine(input: {
     readExecution: (execution) => client.readHostedExecution(execution),
     historicalReleaseWitnesses: witnesses.map((witness) => ({
       ...witness,
-      reject: (proof, expectedHead) => {
+      reject: (proof, expectedHead, _revalidateNotStarted, deadline) => {
         const historicalState: StateReadView = {
           readRepair: () => input.state.readRepair(),
           readRelease: () =>
@@ -943,6 +943,7 @@ export function createHostedHistoricalMatrixQuarantine(input: {
         }).rejectHistorical!({
           proof,
           revalidateNotStarted: input.revalidateNotStarted === true,
+          ...(deadline === undefined ? {} : { deadline }),
         });
       },
     })),

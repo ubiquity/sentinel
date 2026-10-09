@@ -1278,7 +1278,7 @@ export function createActionsMatrixArtifactTransport(options: {
     async recover(input) {
       return (await recovery.run(input)).recovered;
     },
-    async rejectHistorical({ proof, revalidateNotStarted }) {
+    async rejectHistorical({ proof, revalidateNotStarted, deadline }) {
       return (await recovery.run({
         requests: [],
         runtimeSha: proof.execution.revision,
@@ -1290,6 +1290,7 @@ export function createActionsMatrixArtifactTransport(options: {
         },
         rejectionProof: proof,
         revalidateNotStarted: revalidateNotStarted === true,
+        ...(deadline === undefined ? {} : { deadline }),
       })).rejected;
     },
   };
