@@ -2832,7 +2832,13 @@ function parseHostedJobs(
       "a completed repair job requires its completion instant",
     );
   }
-  if (startedAt !== null && completedAt !== null && startedAt > completedAt) {
+  // A completed/skipped repair job carries provider bookkeeping timestamps
+  // that may invert by clock skew; it published no runtime, so no chronology
+  // is asserted from them. Every other lifecycle keeps the strict check.
+  if (
+    startedAt !== null && completedAt !== null && startedAt > completedAt &&
+    !(status === "completed" && conclusion === "skipped")
+  ) {
     fail(
       `${path}.completed_at`,
       "invalid_lifecycle",

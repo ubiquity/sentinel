@@ -622,6 +622,62 @@ Deno.test("hosted execution: failed job with a started cancelled runtime step se
   }
 });
 
+Deno.test("hosted execution: completed/skipped repair with inverted provider timestamps still settles not_started", async () => {
+  const rig = makeRig();
+  scriptAttemptAndJobs(
+    rig,
+    attemptBody(),
+    jobsBody([
+      jobBody({
+        conclusion: "skipped",
+        startedAt: JOB_FINISHED + 1000,
+        completedAt: JOB_FINISHED,
+        steps: [],
+      }),
+    ]),
+  );
+  const result = await rig.client.readHostedExecution(intent());
+  assert.ok(
+    result.ok && result.value?.outcome === "not_started",
+    JSON.stringify(result),
+  );
+  if (result.ok && result.value?.outcome === "not_started") {
+    assert.equal(result.value.jobId, JOB_ID);
+    assert.equal(result.value.finishedAt, JOB_FINISHED);
+    assert.equal(result.value.execution.id, intent().id);
+    assert.equal(result.value.evidenceDigest.length, 64);
+  }
+
+  const executedInverted = makeRig();
+  scriptAttemptAndJobs(
+    executedInverted,
+    attemptBody(),
+    jobsBody([
+      jobBody({
+        conclusion: "success",
+        startedAt: JOB_FINISHED + 1000,
+        completedAt: JOB_FINISHED,
+        steps: [],
+      }),
+    ]),
+  );
+  const refused = await executedInverted.client.readHostedExecution(intent());
+  assert.ok(!refused.ok, JSON.stringify(refused));
+  if (!refused.ok) assert.equal(refused.error.kind, "invalid");
+
+  const missingCompletion = makeRig();
+  scriptAttemptAndJobs(
+    missingCompletion,
+    attemptBody(),
+    jobsBody([{
+      ...jobBody({ conclusion: "skipped", steps: [] }),
+      completed_at: null,
+    }]),
+  );
+  const missing = await missingCompletion.client.readHostedExecution(intent());
+  assert.ok(!missing.ok, JSON.stringify(missing));
+});
+
 Deno.test("hosted execution: skipped, cancelled, timed-out or absent completed repair jobs are explicit not_started", async () => {
   const skipped = makeRig();
   scriptAttemptAndJobs(

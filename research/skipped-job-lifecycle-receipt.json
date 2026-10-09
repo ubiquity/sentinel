@@ -1,0 +1,43 @@
+{
+  "base_guard": {
+    "actual_head": "9dfe50da8e7f97482f071451140dad8f4ada5a61",
+    "branch": "detached HEAD at expected base (pushed to existing sentinel-supervisor; no new lane)",
+    "competing_writer": false,
+    "expected_base": "9dfe50da8e7f97482f071451140dad8f4ada5a61",
+    "status": "only owned files modified; pre-existing untracked scratch dirs untouched"
+  },
+  "change": {
+    "owned_files": [
+      "src/github/client.ts",
+      "tests/github/hosted-execution_test.ts"
+    ],
+    "summary": "parseHostedJobs no longer rejects a completed/skipped repair job whose provider timestamps invert (started_at after completed_at): the start-versus-completion inversion check is exempted only for completed+skipped repair jobs. Timestamp parsing, mandatory completion instant, identity/run/attempt/source/provenance/digest/pagination checks and every executed/non-skipped chronology check are unchanged. No timestamp normalization, no forged proof, skipped work is not marked healthy: the existing reader still returns the authenticated not_started settlement."
+  },
+  "evidence": {
+    "command": "deno test --allow-read=.,/usr,/bin,/home/hatch/.deno/bin --allow-run --allow-write --allow-env=PATH,NODE_V8_COVERAGE --filter \"hosted execution\" tests/github/hosted-execution_test.ts",
+    "executable": "/home/hatch/.deno/bin/deno",
+    "exit": 0,
+    "format": "deno fmt --check src/github/client.ts tests/github/hosted-execution_test.ts => clean (1 pass applied to test file)",
+    "full_suite": "18 passed (29 steps) | 0 failed | 3 filtered out",
+    "hashes": {
+      "src/github/client.ts": "ff5e15342b138655b831dfe645a3ee5f2d92e4a96c17d4c8ceaa1d31a5c817de",
+      "tests/github/hosted-execution_test.ts": "648f271bd345363fd7dec798e4fef6152af68b70e07eea32509151d7d1690ed1"
+    },
+    "host": "Muse VM 8c1c1ce8-7139-40db-b1e6-5db3dd3bfff1",
+    "new_regression": "hosted execution: completed/skipped repair with inverted provider timestamps still settles not_started ... ok",
+    "proven_by_test": [
+      "completed/skipped repair with 1000ms inverted timestamps (mirroring observed job 113747523087) => full production readHostedExecution returns authenticated not_started settlement (jobId, finishedAt, execution id, 64-hex evidenceDigest), not invalid/failed/healthy",
+      "non-skipped completed repair with inverted timestamps => refused with invalid kind (chronology check retained)",
+      "completed repair with missing completed_at => refused (mandatory completion retained)"
+    ],
+    "stderr_bounded": "",
+    "stdout_bounded": "ok | 18 passed (29 steps) | 0 failed | 3 filtered out",
+    "utc": "2026-10-09T10:46:01Z",
+    "workdir": "/home/hatch/workspace/sentinel-ralph/repo"
+  },
+  "instruction": "O1-skipped-job-lifecycle-20261009T104355Z",
+  "label": "synthetic",
+  "note": "Synthetic offline evidence only. Not hosted acceptance. Fixtures are sanitized; the observed provider record (run 37905961284/attempt1, repair job 113747523087, started 2026-10-09T09:00:03Z, completed 2026-10-09T09:00:02Z) is mirrored at 1000ms inversion. Installed test-evidence capture is absent; actual command, UTC, exit and bounded outputs retained above.",
+  "pending_gates": "operator recovery and hosted proving run owned by Codex",
+  "task": "O1-sentinel-autonomy"
+}
