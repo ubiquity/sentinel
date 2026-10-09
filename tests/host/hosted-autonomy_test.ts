@@ -28,6 +28,7 @@ import { RollingStartBudget } from "../../src/budget/mod.ts";
 import { HostedRepairCooldownGate } from "../../src/host/hosted-cooldown.ts";
 import {
   HISTORICAL_MATRIX_QUARANTINE,
+  HISTORICAL_MATRIX_QUARANTINE_UNPROVABLE,
   type HistoricalMatrixQuarantineDepsV1,
   runActionsMatrixAggregateCycles,
   runHistoricalMatrixQuarantine,
@@ -6741,7 +6742,7 @@ Deno.test("historical not started: real already-quarantined ambiguous state reco
   }
 });
 
-Deno.test("historical revalidation: missing cell artifact leaves its record quarantined without failing the run", async () => {
+Deno.test("historical revalidation: missing cell becomes unprovable while evidenced sibling recovers", async () => {
   const f = await historicalMalformedRig(true, 2, true);
   // Authenticated not-started revalidation is explicit, as in the recovery
   // test above.
@@ -6793,12 +6794,15 @@ Deno.test("historical revalidation: missing cell artifact leaves its record quar
     );
     assert(artifactIndex >= 0, "expected the cell artifact to exist");
     f.artifacts.splice(artifactIndex, 1);
-    // The run must NOT throw: the unprovable record stays quarantined (the
-    // safe default) instead of deadlocking the supervisor.
+    const before = await f.rig.state.readRepair();
+    const releaseBefore = await f.rig.state.readRelease();
+    assert(before.ok && before.value.status === "found");
+    // Missing evidence receives its own uncertainty disposition; the
+    // authenticated sibling alone can prove non-submission.
     const result = await f.run();
     assert(
-      result.actions.includes("historical-matrix:quarantined:1"),
-      `expected one revalidation, got ${JSON.stringify(result.actions)}`,
+      result.actions.includes("historical-matrix:quarantined:2"),
+      `expected two dispositions, got ${JSON.stringify(result.actions)}`,
     );
     const after = await f.rig.state.readRepair();
     assert(after.ok && after.value.status === "found");
@@ -6808,14 +6812,211 @@ Deno.test("historical revalidation: missing cell artifact leaves its record quar
       row.id === f.records[0].id
     )!;
     assert.equal(unprovable.nextStep, "blocked");
-    assert.equal(unprovable.blocker?.message, HISTORICAL_MATRIX_QUARANTINE);
+    assert.equal(
+      unprovable.blocker?.message,
+      HISTORICAL_MATRIX_QUARANTINE_UNPROVABLE,
+    );
+    const retained = before.value.snapshot.work.find((row) =>
+      row.id === unprovable.id
+    )!;
+    assert.deepEqual({
+      ...unprovable,
+      blocker: retained.blocker,
+      wait: retained.wait,
+      updatedAt: retained.updatedAt,
+    }, retained);
+    assert.deepEqual(
+      after.value.snapshot.reservations.find((row) =>
+        row.id === f.charges[0].id
+      ),
+      before.value.snapshot.reservations.find((row) =>
+        row.id === f.charges[0].id
+      ),
+    );
+    assert.deepEqual(
+      after.value.snapshot.reviews,
+      before.value.snapshot.reviews,
+    );
+    assert.deepEqual(
+      after.value.snapshot.releaseRequests,
+      before.value.snapshot.releaseRequests,
+    );
+    assert.deepEqual(await f.rig.state.readRelease(), releaseBefore);
     // The record whose artifact exists is revalidated normally.
     const provable: WorkRecordV1 = after.value.snapshot.work.find((row) =>
       row.id === f.records[1].id
     )!;
     assert.equal(provable.nextStep, "work", "provable record rejoins");
     assert.equal(provable.blocker, null);
+    const previousCwd = Deno.cwd();
+    Deno.chdir(f.checkout);
+    try {
+      assert.equal(await runHistoricalMatrixQuarantine(f.historicalMatrix), 0);
+    } finally {
+      Deno.chdir(previousCwd);
+    }
+    assert.deepEqual(await f.rig.state.readRepair(), after);
   } finally {
+    await Deno.remove(f.rig.tmp, { recursive: true });
+  }
+});
+
+Deno.test("historical missing-cell quarantine: strict leaf, retained ambiguous charge and idempotent maintenance", async () => {
+  const f = await historicalMalformedRig(true, 1, true, true);
+  const previousCwd = Deno.cwd();
+  Deno.chdir(f.checkout);
+  try {
+    f.artifacts.splice(f.artifacts.findIndex((row) => row.id === 502), 1);
+    const seed = await f.rig.state.readRepair();
+    assert(seed.ok && seed.value.status === "found");
+    const added = await f.rig.state.writeRepair({
+      ...seed.value.snapshot,
+      stateHead: seed.value.head,
+      sequence: seed.value.snapshot.sequence + 1,
+      updatedAt: f.clock.now(),
+      work: [
+        ...seed.value.snapshot.work,
+        blockedRecord({
+          target: { ...deliveryRecord().target, pr: null },
+        }),
+      ],
+    }, seed.value.head);
+    assert(added.ok && added.value.status === "applied");
+    const release = createReleaseStateStore({
+      scratchDir: `${f.rig.tmp}/missing-cell-witness`,
+      remoteUrl: `${f.rig.tmp}/remote.git`,
+    });
+    assert.equal(
+      (await runHostedSupervisorFinalize({
+        state: release,
+        clock: f.clock,
+        run: f.nativeRun,
+        evidence: {
+          readExecution: f.historicalMatrix.readExecution,
+          verifyRevision: () => Promise.resolve(portOk(true)),
+          verifyRequest: () => Promise.resolve(portOk(false)),
+        },
+      })).status,
+      "idle",
+    );
+    const saved = await release.readRelease();
+    assert(saved.ok && saved.value.status === "found");
+    const witnessProof = saved.value.snapshot.hostedRuntimes[0]
+      .lastExecutionProof!;
+    assert(witnessProof.outcome !== "not_started");
+    f.historicalMatrix.historicalReleaseWitnesses =
+      createHostedHistoricalMatrixQuarantine({
+        state: f.rig.state,
+        clock: f.clock,
+        token: "offline-native-token",
+        artifactRoot: `${f.rig.tmp}/witness-artifacts`,
+        http: f.http,
+        artifactHttp: f.http,
+        historicalReleaseWitnesses: [{
+          commit: saved.value.head,
+          executionId: witnessProof.execution.id,
+          logDigest: witnessProof.logDigest,
+          reservationIds: [f.charges[0].id],
+        }],
+      }).historicalReleaseWitnesses;
+    const before = await f.rig.state.readRepair();
+    const releaseBefore = await f.rig.state.readRelease();
+    assert(before.ok && before.value.status === "found");
+    const native = await f.historicalMatrix.readExecution(f.execution);
+    assert(native.ok && native.value && native.value.outcome !== "not_started");
+    const proof = native.value;
+    await assert.rejects(() =>
+      f.historicalMatrix.transport.rejectHistorical!({
+        proof,
+      }), /matrix artifact provenance unavailable or conflicting/);
+    assert.deepEqual(await f.rig.state.readRepair(), before);
+    const result = await f.run();
+    assert(result.actions.includes("historical-matrix:quarantined:1"));
+    assert(
+      result.actions.some((action) =>
+        action.startsWith(`retry:${TARGET}:grant=`)
+      ),
+      JSON.stringify(result.actions),
+    );
+    const after = await f.rig.state.readRepair();
+    assert(after.ok && after.value.status === "found");
+    assert.equal(
+      after.value.snapshot.work.find((row) => row.id === TARGET)?.nextStep,
+      "work",
+    );
+    const blocked = after.value.snapshot.work.find((row) =>
+      row.id === f.records[0].id
+    )!;
+    assert.equal(blocked.nextStep, "blocked");
+    assert.equal(
+      blocked.blocker?.message,
+      "authenticated historical matrix artifact missing under rejection proof; absence unproven; model outcome uncertain",
+    );
+    assert.deepEqual({
+      ...blocked,
+      nextStep: f.records[0].nextStep,
+      blocker: f.records[0].blocker,
+      wait: f.records[0].wait,
+      updatedAt: f.records[0].updatedAt,
+    }, f.records[0]);
+    // The missing-cell admission reaches a final ambiguous settlement:
+    // absence cannot prove non-submission, and the retained charge is never
+    // refunded or rewritten beyond the settlement transition. Every other
+    // reservation is preserved byte for byte.
+    const missingCharge = after.value.snapshot.reservations.find((row) =>
+      row.id === f.charges[0].id
+    )!;
+    const originalCharge = before.value.snapshot.reservations.find((row) =>
+      row.id === f.charges[0].id
+    )!;
+    assert.equal(missingCharge.outcome, "ambiguous");
+    assert.equal(missingCharge.proofRef, null);
+    assert(
+      missingCharge.settledAt !== null &&
+        Number.isSafeInteger(missingCharge.settledAt) &&
+        missingCharge.settledAt >= originalCharge.createdAt,
+    );
+    assert.deepEqual({
+      ...missingCharge,
+      outcome: originalCharge.outcome,
+      settledAt: originalCharge.settledAt,
+    }, originalCharge);
+    assert.deepEqual(
+      after.value.snapshot.reservations.filter((row) =>
+        row.id !== f.charges[0].id
+      ),
+      before.value.snapshot.reservations.filter((row) =>
+        row.id !== f.charges[0].id
+      ),
+    );
+    assert.deepEqual(
+      after.value.snapshot.work.find((row) => row.id === f.records[1].id),
+      f.records[1],
+    );
+    assert.deepEqual(
+      after.value.snapshot.reviews,
+      before.value.snapshot.reviews,
+    );
+    assert.deepEqual(
+      after.value.snapshot.releaseRequests,
+      before.value.snapshot.releaseRequests,
+    );
+    assert.deepEqual(await f.rig.state.readRelease(), releaseBefore);
+    assert.equal(await f.runMain(), 0);
+    assert.deepEqual(await f.rig.state.readRepair(), after);
+    f.historicalMatrix.revalidateNotStarted = true;
+    assert.equal(await runHistoricalMatrixQuarantine(f.historicalMatrix), 0);
+    assert.deepEqual(await f.rig.state.readRepair(), after);
+    f.historicalMatrix.transport.rejectHistorical = () =>
+      Promise.reject(new Error("unknown historical refusal"));
+    await assert.rejects(
+      () => runHistoricalMatrixQuarantine(f.historicalMatrix),
+      /unknown historical refusal/,
+    );
+    assert.equal(await f.runMain(), 1);
+    assert.deepEqual(await f.rig.state.readRepair(), after);
+  } finally {
+    Deno.chdir(previousCwd);
     await Deno.remove(f.rig.tmp, { recursive: true });
   }
 });

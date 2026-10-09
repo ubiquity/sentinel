@@ -55,6 +55,7 @@ import {
   HISTORICAL_MATRIX_QUARANTINE,
   MATRIX_ARTIFACT_RECOVERY_MAX_MS,
   MatrixHistoricalRuntimeMismatch,
+  MatrixMissingCellArtifactError,
 } from "./matrix-artifact-port.ts";
 
 const API = `https://api.github.com/repos/${REPOSITORY}/actions`;
@@ -1027,6 +1028,27 @@ export function createActionsMatrixArtifactTransport(options: {
             if (names.filter((value) => value === name).length > 1) refuse();
             const cellArtifact = artifacts.find((row) => row.name === name);
             if (!cellArtifact) {
+              if (input.rejectionProof) {
+                // Trusted historical rejection: a missing cell artifact is its
+                // own explicit uncertainty disposition. The trusted consumer
+                // quarantines this exact record with a truthful reason instead
+                // of re-selecting an endlessly unprovable historical wave.
+                const captured = affected.find((row) =>
+                  row.reservation.id === cell.reservationId
+                );
+                const started = Date.parse(String(planners[0].started_at));
+                const completed = Date.parse(String(planners[0].completed_at));
+                if (
+                  !captured || typeof planners[0].started_at !== "string" ||
+                  typeof planners[0].completed_at !== "string" ||
+                  !Number.isSafeInteger(started) ||
+                  !Number.isSafeInteger(completed) || completed < started
+                ) refuse();
+                throw new MatrixMissingCellArtifactError(
+                  input.rejectionProof,
+                  captured,
+                );
+              }
               // Missing evidence never establishes non-submission, and a wave
               // that cannot be fully authenticated cannot isolate its
               // records: the unprovable cells stay charged and untouched
@@ -1229,6 +1251,7 @@ export function createActionsMatrixArtifactTransport(options: {
           await Deno.remove(staging, { recursive: true }).catch(() => {});
         }
         if (error instanceof MatrixHistoricalRuntimeMismatch) throw error;
+        if (error instanceof MatrixMissingCellArtifactError) throw error;
         try {
           console.error(JSON.stringify({
             kind: "sentinel_matrix_artifact_error",
@@ -1256,7 +1279,7 @@ export function createActionsMatrixArtifactTransport(options: {
     async recover(input) {
       return (await recovery.run(input)).recovered;
     },
-    async rejectHistorical({ proof, revalidateNotStarted }) {
+    async rejectHistorical({ proof, revalidateNotStarted, deadline }) {
       return (await recovery.run({
         requests: [],
         runtimeSha: proof.execution.revision,
@@ -1268,6 +1291,7 @@ export function createActionsMatrixArtifactTransport(options: {
         },
         rejectionProof: proof,
         revalidateNotStarted: revalidateNotStarted === true,
+        ...(deadline === undefined ? {} : { deadline }),
       })).rejected;
     },
   };
