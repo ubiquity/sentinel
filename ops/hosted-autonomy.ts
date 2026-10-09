@@ -159,6 +159,7 @@ import {
   type SelfFailureV1,
 } from "./self-defects.ts";
 import { canonicalStringify } from "../src/contracts/canonical.ts";
+import { buildMemoryLessonsV1 } from "../src/repair/memory-lessons.ts";
 import {
   candidateBranch,
   candidatePreservationRef,
@@ -3646,6 +3647,35 @@ export function revisionIntegratedIntoBase(
 const GIT_SHA_PATTERN = /^[0-9a-f]{40}$/;
 
 /** Hosted entry point: identity first, then the two bounded passes. */
+/** Bounded read-only learning digest emitted by the live maintenance entry. */
+async function emitMemoryDigest(state: StateReadView): Promise<void> {
+  try {
+    const read = await state.readRepair();
+    if (!read.ok || read.value.status !== "found") return;
+    const snapshot = parseRepairStateSnapshotV1(read.value.snapshot);
+    const lessons = await buildMemoryLessonsV1(snapshot, Date.now());
+    let refused = 0;
+    let regressions = 0;
+    let resolved = 0;
+    for (const record of lessons) {
+      for (const entry of record.entries) {
+        if (entry.refused) refused++;
+        if (entry.regression) regressions++;
+        if (entry.resolved) resolved++;
+      }
+    }
+    console.log(JSON.stringify({
+      kind: "sentinel_memory_digest",
+      records: snapshot.attemptMemory.length,
+      refused,
+      regressions,
+      resolved,
+    }));
+  } catch {
+    // Advisory only; never blocks the pass.
+  }
+}
+
 export async function runHostedAutonomyMain(input?: {
   /** Trusted in-process test transport; native checkout identity remains mandatory. */
   env: Readonly<Record<string, string | undefined>>;
@@ -3695,6 +3725,11 @@ export async function runHostedAutonomyMain(input?: {
         remoteUrl: ISSUE48_QUOTA_REMOTE_URL,
         runner,
       });
+      // Live learning visibility: emit a bounded digest of durable memory
+      // before the pass, so operators can see what Sentinel has learned
+      // (refused replays, resolved families, versioned regressions). Advisory
+      // only: a digest failure never blocks the maintenance pass.
+      await emitMemoryDigest(state);
       // One surface per exact repository identity: the durable snapshot may
       // carry work for several repositories, and each record is delivered under
       // its OWN repository, never under the self repository.
