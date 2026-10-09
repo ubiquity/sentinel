@@ -8511,7 +8511,7 @@ Deno.test(
 );
 
 // Exact public recovery identities; these never stand in for native execution proof.
-const STARTUP_CANDIDATE = "d77d3169fdd268c955dda24ae2bae7b35c5e2295" as GitSha;
+const STARTUP_CANDIDATE = "ee5e6518a4333c20d8bc6a4c3c577a2536ec6b9b" as GitSha;
 const STARTUP_FAILED = "e4cef46332cf124a8c283d798a963cf5f66e45c2" as GitSha;
 const STARTUP_PRIOR = "e4cef46332cf124a8c283d798a963cf5f66e45c2" as GitSha;
 const STARTUP_RUNTIME = parseHostedRuntimeRecordV1({
