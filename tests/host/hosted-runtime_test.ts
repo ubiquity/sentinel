@@ -35,12 +35,14 @@ import {
   runActionsTargetCycles,
 } from "../../src/host/actions.ts";
 import {
+  emitHostedRuntimeCliResult,
   HOSTED_RUNTIME_CHILD_ENTRYPOINT,
   HOSTED_RUNTIME_CHILD_ENV_KEYS,
   HOSTED_RUNTIME_DEADLINE_MS,
   HOSTED_RUNTIME_FAILED_DETAIL,
   HOSTED_RUNTIME_MAX_OUTPUT_BYTES,
   HOSTED_RUNTIME_STATIC_IDENTITY,
+  HOSTED_RUNTIME_UNAVAILABLE_DETAIL,
   HOSTED_RUNTIME_WORKFLOW_REF,
   parseHostedEnvironment,
   readHostedRuntimeExecution,
@@ -2877,6 +2879,75 @@ Deno.test("hosted matrix launcher: rejection receipts distinguish collapsed fail
   } finally {
     await rig.cleanup();
   }
+});
+
+Deno.test("hosted matrix CLI: unavailable result emits rejection receipt before generic failure detail", () => {
+  const receipt = {
+    version: "v1" as const,
+    kind: "hosted_runtime_matrix_launcher_rejection" as const,
+    condition: "child_unsettled" as const,
+    outcome: "exited" as const,
+    exitCode: 1,
+    settled: false,
+    truncated: false,
+  };
+  const capture = (
+    result: HostedRuntimeLauncherResultV1,
+  ): { exit: 0 | 1; stdout: string[]; stderr: string[] } => {
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const realLog = console.log;
+    const realError = console.error;
+    console.log = (line: unknown) => stdout.push(String(line));
+    console.error = (line: unknown) => stderr.push(String(line));
+    let exit: 0 | 1 = 0;
+    try {
+      exit = emitHostedRuntimeCliResult(result);
+    } finally {
+      console.log = realLog;
+      console.error = realError;
+    }
+    return { exit, stdout, stderr };
+  };
+  const unavailable: HostedRuntimeLauncherResultV1 = {
+    status: "unavailable",
+    terminal: null,
+    detail: HOSTED_RUNTIME_UNAVAILABLE_DETAIL,
+    diagnostics: [],
+    launcherRejection: receipt,
+  };
+  const failed = capture(unavailable);
+  assert.equal(failed.exit, 1, "unavailable still exits nonzero");
+  assert.equal(failed.stdout.length, 1, JSON.stringify(failed));
+  const emitted = JSON.parse(failed.stdout[0]) as typeof receipt;
+  assert.equal(emitted.kind, "hosted_runtime_matrix_launcher_rejection");
+  assert.equal(emitted.condition, "child_unsettled");
+  assert.equal(emitted.outcome, "exited");
+  assert.equal(emitted.exitCode, 1);
+  assert.equal(emitted.settled, false);
+  assert.equal(emitted.truncated, false);
+  assert.ok(
+    failed.stderr.some((line) =>
+      line.includes(HOSTED_RUNTIME_UNAVAILABLE_DETAIL)
+    ),
+    "generic failure detail still reaches stderr after the receipt",
+  );
+  const plain = capture({
+    status: "unavailable",
+    terminal: null,
+    detail: HOSTED_RUNTIME_UNAVAILABLE_DETAIL,
+    diagnostics: [],
+  });
+  assert.equal(plain.exit, 1);
+  assert.equal(plain.stdout.length, 0, "no receipt, no extra stdout");
+  const healthy = capture({
+    status: "healthy",
+    terminal: null,
+    detail: "healthy",
+    diagnostics: [],
+  });
+  assert.equal(healthy.exit, 0);
+  assert.equal(healthy.stderr.length, 0);
 });
 
 Deno.test("hosted matrix identity: explicit native roles share read-only repair identity", async () => {

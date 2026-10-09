@@ -1,0 +1,46 @@
+{
+  "base_guard": {
+    "actual_head": "7765e1b4ad9c41800949d53e0bdd84f1a2beddcc",
+    "branch": "detached HEAD at expected base (pushed to existing sentinel-supervisor; no new lane)",
+    "competing_writer": false,
+    "expected_base": "7765e1b4ad9c41800949d53e0bdd84f1a2beddcc",
+    "status": "only owned files modified; pre-existing untracked scratch dir untouched"
+  },
+  "change": {
+    "owned_files": [
+      "src/host/hosted-runtime.ts",
+      "tests/host/hosted-runtime_test.ts"
+    ],
+    "summary": "Extracted the import.meta.main CLI emission seam into exported emitHostedRuntimeCliResult(result): 0|1. An unavailable matrix result now prints its existing sanitized typed launcherRejection receipt to stdout before the generic failure detail reaches stderr, then still exits nonzero. Carrier/terminal validation, status and exit semantics unchanged; no new flags, env, dependencies, comments or raw streams."
+  },
+  "evidence": {
+    "adjacent_regression": {
+      "command": "--filter \"matrix launcher\" tests/host/hosted-runtime_test.ts",
+      "exit": 0,
+      "result": "4 passed | 0 failed | 28 filtered out (carrier validation strictness unchanged)"
+    },
+    "command": "deno test --allow-read=.,/usr,/bin,<deno-bin-dir> --allow-run --allow-write --allow-env=PATH,NODE_V8_COVERAGE --filter \"CLI: unavailable\" tests/host/hosted-runtime_test.ts",
+    "exit": 0,
+    "format": "deno fmt --check src/host/hosted-runtime.ts tests/host/hosted-runtime_test.ts => clean (1 pass applied to test file import order)",
+    "hashes": {
+      "src/host/hosted-runtime.ts": "78e59917f24dfd74d0ece9e51f238e52694f6433eea13463daa1086d317dc785",
+      "tests/host/hosted-runtime_test.ts": "7813eedadc2d48609b0bf7467544d7d44a696a42d0cea221b42109b34c14063f"
+    },
+    "proven_by_test": [
+      "unavailable + launcherRejection => stdout carries exactly one line: the sanitized receipt JSON (kind hosted_runtime_matrix_launcher_rejection, condition child_unsettled, typed outcome/exitCode/settled/truncated, no raw fields)",
+      "generic failure detail still reaches stderr after the receipt",
+      "exit remains 1 (nonzero)",
+      "unavailable without receipt => stdout empty, exit 1 (semantics unchanged)",
+      "healthy => exit 0, no stderr"
+    ],
+    "result": "1 passed | 0 failed | 31 filtered out",
+    "stderr_bounded": "",
+    "stdout_bounded": "hosted matrix CLI: unavailable result emits rejection receipt before generic failure detail ... ok (978µs)",
+    "utc": "2026-10-09T08:26:56Z"
+  },
+  "instruction": "O1-matrix-cli-correction-20261009T082430Z",
+  "label": "synthetic",
+  "note": "Synthetic offline evidence only. Not hosted acceptance. Installed test-evidence capture is absent in this repository; actual command, UTC time, exit code and bounded safe outputs are retained below.",
+  "pending_gates": "hosted proving run owned by Codex; not dispatched from this turn",
+  "task": "O1-sentinel-autonomy"
+}

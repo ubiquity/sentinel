@@ -1651,24 +1651,29 @@ function logHostedDiagnostic(diagnostic: HostedModelDiagnosticV1): void {
   console.log(JSON.stringify(diagnostic));
 }
 
-if (import.meta.main) {
-  const result = await runHostedRuntimeMain();
-  // Each reconstructed advisory already reached the sanitized sink as its
-  // complete line was retained, so it is never printed a second time here.
-  // Only the trusted parsed terminal is printed; a failed or unavailable run
-  // prints no terminal record and exits nonzero.
+export function emitHostedRuntimeCliResult(
+  result: HostedRuntimeLauncherResultV1,
+): 0 | 1 {
   if (result.matrixCarrier !== undefined) {
     console.log(JSON.stringify(result.matrixCarrier));
   }
-  // Advisory only: a sanitized early-abort summary is printed before the
-  // generic failure detail so one authorized verification can identify the
-  // abort site without copying raw stderr or any credential value.
   if (result.earlyFailure !== undefined) {
     console.log(JSON.stringify(result.earlyFailure));
   }
   if (result.terminal !== null) console.log(JSON.stringify(result.terminal));
+  if (
+    result.status === "unavailable" && result.launcherRejection !== undefined
+  ) {
+    console.log(JSON.stringify(result.launcherRejection));
+  }
   if (result.status !== "healthy") {
     console.error(result.detail);
-    Deno.exit(1);
+    return 1;
   }
+  return 0;
+}
+
+if (import.meta.main) {
+  const result = await runHostedRuntimeMain();
+  Deno.exit(emitHostedRuntimeCliResult(result));
 }
