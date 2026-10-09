@@ -37,6 +37,7 @@ import {
   attemptFingerprintV1,
   attemptMemoryIdV1,
   mergeAttemptOutcomeV1,
+  recordAttemptSuccessV1,
 } from "../contracts/attempt-memory.ts";
 import type { RepairStateSnapshotV1 } from "../contracts/state-snapshots.ts";
 import type { PriorAttemptFactV1 } from "../contracts/ports.ts";
@@ -363,6 +364,51 @@ export function repositoryPriorFactsForRecordV1(
   return [...byDetail.values()]
     .sort((left, right) => right.lastAtMs - left.lastAtMs)
     .slice(0, maxFacts);
+}
+
+/**
+ * Mutation factory for one accepted candidate: records the success on the
+ * family record (creating it when the task never failed). Callers persist it
+ * in the same state commit as the candidate transition.
+ */
+export async function attemptMemorySuccessMutationV1(input: {
+  record: WorkRecordV1;
+  now: number;
+}): Promise<(draft: RepairStateSnapshotV1) => void> {
+  const purpose: AttemptPurposeV1 = "implementation";
+  const base = input.record.target.base;
+  const id = await attemptMemoryIdV1({
+    repository: input.record.repository,
+    taskId: input.record.id,
+    base,
+    purpose,
+  });
+  return (draft) => {
+    const index = draft.attemptMemory.findIndex((record) => record.id === id);
+    const existing: AttemptMemoryRecordV1 = index === -1
+      ? {
+        version: "v1",
+        kind: "attempt_memory",
+        id,
+        repository: input.record.repository,
+        taskId: input.record.id,
+        base,
+        purpose,
+        entries: [],
+      }
+      : draft.attemptMemory[index];
+    const next = recordAttemptSuccessV1(existing, input.now);
+    const sorted = [...draft.attemptMemory];
+    if (index === -1) {
+      sorted.push(next);
+    } else {
+      sorted[index] = next;
+    }
+    sorted.sort((left, right) =>
+      left.id < right.id ? -1 : left.id > right.id ? 1 : 0
+    );
+    draft.attemptMemory = sorted;
+  };
 }
 
 /**

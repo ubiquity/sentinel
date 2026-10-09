@@ -54,6 +54,7 @@ import {
   ATTEMPT_DETAIL_NO_TRUSTED_RECEIPT,
   ATTEMPT_DETAIL_UNCERTAIN,
   attemptMemorySettlementMutationV1,
+  attemptMemorySuccessMutationV1,
   priorAttemptFactsForRecordV1,
   repositoryPriorFactsForRecordV1,
 } from "./attempt-policy.ts";
@@ -3700,11 +3701,20 @@ export async function handleModelReceipt(
     );
     return r1;
   }
-  return persistTransition(
-    deps,
-    afterSettlement,
-    replaceWorkMutation(setIntent(withCandidate, preservationIntent, now)),
-  );
+  // An accepted candidate resolves the implementation attempt: record the
+  // family success in the SAME state commit as the candidate transition, so
+  // durable memory grows the full picture (failures and resolutions), not
+  // only the refusal side.
+  const successMemory = await attemptMemorySuccessMutationV1({
+    record,
+    now,
+  });
+  return persistTransition(deps, afterSettlement, (draft) => {
+    replaceWorkMutation(setIntent(withCandidate, preservationIntent, now))(
+      draft,
+    );
+    successMemory(draft);
+  });
 }
 
 /**

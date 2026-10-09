@@ -1500,6 +1500,16 @@ function validateRepairTransition(
     if (nextTotal < priorTotal) {
       return "attempt memory counts cannot decrease";
     }
+    if (
+      (priorRecord.successes ?? 0) > (nextRecord.successes ?? 0) ||
+      (priorRecord.lastSuccessAtMs !== null &&
+        priorRecord.lastSuccessAtMs !== undefined &&
+        nextRecord.lastSuccessAtMs !== null &&
+        nextRecord.lastSuccessAtMs !== undefined &&
+        nextRecord.lastSuccessAtMs < priorRecord.lastSuccessAtMs)
+    ) {
+      return "attempt memory success history cannot move backward";
+    }
     for (const priorEntry of priorRecord.entries) {
       const nextEntry = nextRecord.entries.find((entry) =>
         entry.fingerprint === priorEntry.fingerprint

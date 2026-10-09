@@ -9,6 +9,7 @@ import {
   attemptMemoryIdV1,
   mergeAttemptOutcomeV1,
   parseAttemptMemoryRecordV1,
+  recordAttemptSuccessV1,
 } from "../../src/contracts/attempt-memory.ts";
 import { asWorkItemId } from "../../src/contracts/brands.ts";
 import type { GitSha } from "../../src/contracts/brands.ts";
@@ -187,6 +188,32 @@ Deno.test("attempt memory: unknown keys, bad enums and unordered entries fail cl
   if (!duplicate.ok) {
     assert.equal(duplicate.issues[0].code, "invalid_value");
   }
+});
+
+Deno.test("attempt memory: optional success awareness round-trips and stays paired", () => {
+  const withSuccess = parseAttemptMemoryRecordV1(
+    validRecord({ successes: 2, lastSuccessAtMs: 1786000030000 }),
+  );
+  assert.equal(withSuccess.successes, 2);
+  assert.equal(withSuccess.lastSuccessAtMs, 1786000030000);
+  // Legacy shape (absent) still parses byte-for-byte.
+  const legacy = parseAttemptMemoryRecordV1(validRecord());
+  assert.equal(legacy.successes, undefined);
+  assert.equal(legacy.lastSuccessAtMs, undefined);
+  // A half-present pair fails closed.
+  const half = tryParse(
+    parseAttemptMemoryRecordV1,
+    validRecord({ successes: 1 }),
+  );
+  assert.equal(half.ok, false);
+  if (!half.ok) assert.equal(half.issues[0].code, "invalid_value");
+
+  const bumped = recordAttemptSuccessV1(legacy, 1786000040000);
+  assert.equal(bumped.successes, 1);
+  assert.equal(bumped.lastSuccessAtMs, 1786000040000);
+  const twice = recordAttemptSuccessV1(bumped, 1786000050000);
+  assert.equal(twice.successes, 2);
+  assert.equal(twice.lastSuccessAtMs, 1786000050000);
 });
 
 Deno.test("attempt memory: merge increments the matching entry and appends new evidence", () => {

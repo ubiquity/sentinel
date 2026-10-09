@@ -27,8 +27,10 @@ import {
   expectArray,
   expectEnum,
   expectExactKeys,
+  expectExactKeysWithOptional,
   expectGitSha,
   expectNonEmptyString,
+  expectNullable,
   expectPattern,
   expectPositiveInt,
   expectRecord,
@@ -105,6 +107,16 @@ export interface AttemptMemoryRecordV1 {
   purpose: AttemptPurposeV1;
   /** Bounded, append/merge-only entry list (oldest first). */
   entries: AttemptMemoryEntryV1[];
+  /**
+   * Optional success awareness: how many attempts in this family produced an
+   * accepted candidate ([`successes`]) and when the latest one did. ABSENT is
+   * the exact legacy shape and a default is never injected; when present both
+   * keys carry values together, counts never decrease and time never moves
+   * backward. A family resolved after its failures stops reading as refused
+   * in the lesson digest.
+   */
+  successes?: number;
+  lastSuccessAtMs?: number | null;
 }
 
 /**
@@ -175,6 +187,22 @@ export const ATTEMPT_FAILURE_CLASSES_V1: readonly AttemptFailureClassV1[] = [
   "unknown",
 ];
 
+/**
+ * Record one accepted candidate for the family and return the new record.
+ * Pure; the caller persists it in the same state commit as the candidate
+ * transition. Both success keys are written together from here on.
+ */
+export function recordAttemptSuccessV1(
+  record: AttemptMemoryRecordV1,
+  atMs: number,
+): AttemptMemoryRecordV1 {
+  return {
+    ...record,
+    successes: (record.successes ?? 0) + 1,
+    lastSuccessAtMs: atMs,
+  };
+}
+
 const STAGES = ATTEMPT_STAGES_V1;
 const FAILURE_CLASSES = ATTEMPT_FAILURE_CLASSES_V1;
 
@@ -188,6 +216,7 @@ const RECORD_KEYS = [
   "purpose",
   "entries",
 ] as const;
+const RECORD_OPTIONAL_KEYS = ["successes", "lastSuccessAtMs"] as const;
 
 const ENTRY_KEYS = [
   "fingerprint",
@@ -204,7 +233,7 @@ export function parseAttemptMemoryRecordV1(
   input: unknown,
 ): AttemptMemoryRecordV1 {
   const obj = expectRecord(input, "$");
-  expectExactKeys(obj, RECORD_KEYS, "$");
+  expectExactKeysWithOptional(obj, RECORD_KEYS, RECORD_OPTIONAL_KEYS, "$");
   expectVersion(obj.version, "$.version");
   expectEnum(obj.kind, ["attempt_memory"], "$.kind");
 
@@ -240,6 +269,25 @@ export function parseAttemptMemoryRecordV1(
     }
     previousLastAtMs = entry.lastAtMs;
   }
+  const hasSuccesses = obj.successes !== undefined;
+  const hasLastSuccess = obj.lastSuccessAtMs !== undefined;
+  if (hasSuccesses !== hasLastSuccess) {
+    fail(
+      "$",
+      "invalid_value",
+      "successes and lastSuccessAtMs must be present together",
+    );
+  }
+  let successes: number | undefined;
+  let lastSuccessAtMs: number | null | undefined;
+  if (hasSuccesses) {
+    successes = expectPositiveInt(obj.successes, "$.successes");
+    lastSuccessAtMs = expectNullable(
+      obj.lastSuccessAtMs,
+      "$.lastSuccessAtMs",
+      expectTimestamp,
+    );
+  }
   return {
     version: "v1",
     kind: "attempt_memory",
@@ -249,6 +297,9 @@ export function parseAttemptMemoryRecordV1(
     base,
     purpose,
     entries,
+    ...(hasSuccesses && successes !== undefined
+      ? { successes, lastSuccessAtMs: lastSuccessAtMs ?? null }
+      : {}),
   };
 }
 

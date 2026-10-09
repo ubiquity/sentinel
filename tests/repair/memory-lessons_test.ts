@@ -109,6 +109,34 @@ Deno.test("memory lessons: the digest is deterministic and reproducible", async 
   assert.equal(record.entries[0].base, SHA1);
 });
 
+Deno.test("memory lessons: a recorded success resolves the lesson and clears the refusal", async () => {
+  const memory = await memoryRecord({ count: 2 });
+  const resolvedMemory = {
+    ...memory,
+    successes: 1,
+    lastSuccessAtMs: T0 + 8000,
+  };
+  const snapshot = snapshotWith([resolvedMemory]);
+  const built = await buildMemoryLessonsV1(snapshot, T0 + 9000);
+  const parsed = parseMemoryLessonsRecordV1(built[0]);
+  assert.equal(parsed.entries.length, 1);
+  assert.equal(parsed.entries[0].resolved, true);
+  assert.equal(parsed.entries[0].refused, false);
+
+  // A success BEFORE the last failure does not resolve it.
+  const staleSuccess = {
+    ...memory,
+    successes: 1,
+    lastSuccessAtMs: T0 - 5000,
+  };
+  const stale = await buildMemoryLessonsV1(
+    snapshotWith([staleSuccess]),
+    T0 + 9000,
+  );
+  assert.equal(stale[0].entries[0].resolved, false);
+  assert.equal(stale[0].entries[0].refused, true);
+});
+
 Deno.test("memory lessons: the source digest follows the source records", async () => {
   const one = snapshotWith([await memoryRecord({ count: 1 })]);
   const two = snapshotWith([await memoryRecord({ count: 2 })]);

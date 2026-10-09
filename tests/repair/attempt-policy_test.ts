@@ -22,6 +22,7 @@ import {
   ATTEMPT_TRANSIENT_DECAY_MS,
   attemptEquivalenceRefusalForRecordV1,
   attemptMemorySettlementMutationV1,
+  attemptMemorySuccessMutationV1,
   classifyAttemptDetailV1,
   decideEquivalentAttemptV1,
   priorAttemptFactsForRecordV1,
@@ -497,4 +498,45 @@ Deno.test("attempt policy: cross-task repository lessons are deduped, bounded an
     repositoryPriorFactsForRecordV1(snapshot, record, 1).length,
     1,
   );
+});
+
+Deno.test("attempt policy: an accepted candidate records success on the family", async () => {
+  const record = workRecord(TASK, {
+    nextStep: "work",
+    counters: { attempts: 2, retries: 1, reviewRounds: 0 },
+  });
+  const mutation = await attemptMemorySuccessMutationV1({
+    record,
+    now: T0 + 9000,
+  });
+  const fresh = snapshotWith([], record);
+  const applied = parseRepairStateSnapshotV1((() => {
+    const draft: RepairStateSnapshotV1 = {
+      ...fresh,
+      attemptMemory: [...fresh.attemptMemory],
+      lessons: [...fresh.lessons],
+      work: [...fresh.work],
+    };
+    mutation(draft);
+    return draft;
+  })());
+  assert.equal(applied.attemptMemory.length, 1);
+  assert.equal(applied.attemptMemory[0].successes, 1);
+  assert.equal(applied.attemptMemory[0].lastSuccessAtMs, T0 + 9000);
+  assert.equal(applied.attemptMemory[0].entries.length, 0);
+
+  // A second success increments; failures recorded afterwards keep their
+  // counts while the success history stays monotonic.
+  const second = parseRepairStateSnapshotV1((() => {
+    const draft: RepairStateSnapshotV1 = {
+      ...applied,
+      attemptMemory: [...applied.attemptMemory],
+      lessons: [...applied.lessons],
+      work: [...applied.work],
+    };
+    mutation(draft);
+    return draft;
+  })());
+  assert.equal(second.attemptMemory[0].successes, 2);
+  assert.equal(second.attemptMemory[0].lastSuccessAtMs, T0 + 9000);
 });

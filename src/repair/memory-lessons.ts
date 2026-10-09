@@ -87,6 +87,13 @@ export async function buildMemoryLessonsV1(
           break;
         }
       }
+      // A recorded success at or after this failure resolves it: the lesson
+      // becomes history (how a stubborn blocker was eventually cleared)
+      // instead of an open refusal.
+      const resolved = record.lastSuccessAtMs !== null &&
+        record.lastSuccessAtMs !== undefined &&
+        record.lastSuccessAtMs >= chosen.lastAtMs;
+      if (resolved) refused = false;
       entries.push({
         taskId: record.taskId,
         kind: "equivalent_failures_recorded",
@@ -97,6 +104,7 @@ export async function buildMemoryLessonsV1(
         base: record.base,
         lastAtMs: chosen.lastAtMs,
         refused,
+        resolved,
       });
     }
     // Refused lessons first, then most recent: the reader sees what currently

@@ -59,6 +59,13 @@ export interface MemoryLessonV1 {
    * replay of this exact failure: changed evidence is required.
    */
   refused: boolean;
+  /**
+   * True when the work item later produced an accepted candidate at this base
+   * (the family's recorded success is at or after this failure): the refusal
+   * no longer applies, and the lesson reads as a resolved learning instead of
+   * an open blocker.
+   */
+  resolved: boolean;
 }
 
 export interface MemoryLessonsRecordV1 {
@@ -114,6 +121,7 @@ const ENTRY_KEYS = [
   "base",
   "lastAtMs",
   "refused",
+  "resolved",
 ] as const;
 
 const LESSON_KINDS: readonly MemoryLessonKindV1[] = [
@@ -212,6 +220,10 @@ function parseMemoryLessonV1(input: unknown, path: string): MemoryLessonV1 {
   const base = expectGitSha(obj.base, `${path}.base`);
   const lastAtMs = expectTimestamp(obj.lastAtMs, `${path}.lastAtMs`);
   const refused = expectBoolean(obj.refused, `${path}.refused`);
+  const resolved = expectBoolean(obj.resolved, `${path}.resolved`);
+  if (refused && resolved) {
+    fail(`${path}.resolved`, "invalid_value", "refused and resolved conflict");
+  }
   return {
     taskId,
     kind,
@@ -222,5 +234,6 @@ function parseMemoryLessonV1(input: unknown, path: string): MemoryLessonV1 {
     base,
     lastAtMs,
     refused,
+    resolved,
   };
 }
