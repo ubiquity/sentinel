@@ -94,11 +94,18 @@ import type {
 } from "../src/contracts/ports.ts";
 import {
   CLOSED_C_WAVE,
+  type ClosedCWaveBindingV1,
   closedCWaveNeedsRecovery,
   type ClosedCWaveRecoveryDepsV1,
   ingestClosedCWave,
 } from "../src/host/modern-matrix-recovery.ts";
 import { createGitBundleImporter } from "../src/host/matrix-git.ts";
+import { ingestMatrixResults } from "../src/host/matrix.ts";
+import { matrixDigestV1 } from "../src/contracts/matrix.ts";
+import {
+  HOSTED_RUNTIME_ID,
+  parseHostedRunProofV1,
+} from "../src/contracts/hosted-supervisor.ts";
 import {
   createMatrixUncertaintyMaintenance,
   MATRIX_PRESERVATION_UNCERTAINTY_DETAIL,
@@ -161,6 +168,7 @@ import { canonicalStringify } from "../src/contracts/canonical.ts";
 import {
   candidateBranch,
   candidatePreservationRef,
+  implementationIntentKey,
   releaseRequestId,
   reviewOperationKey,
 } from "../src/repair/keys.ts";
@@ -567,7 +575,9 @@ export interface HostedAutonomyDepsV1 {
   clock: { now(): number };
   /** Present on protected maintenance; rejection-only, before retry/delivery. */
   historicalMatrix?: HistoricalMatrixQuarantineDepsV1;
-  closedMatrix?: () => Promise<ClosedCWaveRecoveryDepsV1>;
+  closedMatrix?: (
+    state?: StateReadView & RepairStateWriter,
+  ) => Promise<ClosedCWaveRecoveryDepsV1>;
   /** Charged uncertainty only; no producer, artifact, health or release authority. */
   uncertainMatrix?: () => ReturnType<typeof runMatrixUncertaintyMaintenance>;
 }
@@ -705,7 +715,75 @@ export async function createHostedClosedMatrixRecovery(input: {
 }
 
 /** Exact authenticated legacy wave identities; no runtime-selected history. */
+const HISTORICAL_C63 = {
+  executionId: "37354374590:1:repair",
+  runtimeSha: "e4cef46332cf124a8c283d798a963cf5f66e45c2" as GitSha,
+  generation: 63,
+  run: {
+    runId: 37354374590,
+    runAttempt: 1,
+    launcherSha: "b261c3672b29c29cfe6858fe96beb05687018c8f" as GitSha,
+  },
+  base: "3691fe4a36e4e4c6aae6f8c6aa04c12ed3ff6698",
+  repository: {
+    owner: "ubiquity",
+    name: "ai.ubq.fi",
+    installationId: 155687488,
+  },
+  rows: [
+    {
+      id: "issue-ubiquity-ai.ubq.fi-576",
+      issue: 576,
+      reservation:
+        "ffc3337e27e0e05a641908db08825ad63bc6d6868cfabcd5af667b2ede4d4677",
+      cellId:
+        "65dae22ecd6455374aa5d3a1873c52e0cd07f2a7b4abdb57a40b39e025a42b86",
+    },
+    {
+      id: "issue-ubiquity-ai.ubq.fi-616",
+      issue: 616,
+      reservation:
+        "7d9d1b7949b3d5dc3c9917cf24263324f23674ce891f9f269b73a9e787d8bad4",
+      cellId:
+        "f2a5c534305b6229e3214cf10f64f54c6d9fff81004c8a1a190f87528c2b124f",
+    },
+    {
+      id: "issue-ubiquity-ai.ubq.fi-618",
+      issue: 618,
+      reservation:
+        "2956b4efb0ba8181e3e0c15f6ce7bd024640706c293cdb34a7dfd322e3d4ae86",
+      cellId:
+        "389abc16ad5eda81f11b4eca7407b43912b8d43398edb516d830ff4212fa5cb4",
+    },
+  ],
+} as const;
+
 export const HOSTED_HISTORICAL_RELEASE_WITNESSES = [
+  {
+    commit: "fd976f84ba57e4090021a2f06aa9c8ff4acb3a06" as GitSha,
+    executionId: HISTORICAL_C63.executionId,
+    logDigest:
+      "efe0cf9e6434798bdc6e0ba9ee693f2c4839e95bfffafd1de307478cb2fb72b0",
+    reservationIds: [
+      ...HISTORICAL_C63.rows.map((row) => row.reservation),
+      "8da7cfad2230c22de6955d53a2b6923ce1734dd825a2440c43d6a74440c99a09",
+      "3cb86e0f76b76aadaaac176c172e43effb5c8533c7d1b3ca1339f548da534af5",
+      "fb79ebbb9552de0df004fdf8d19ec2bd2be7dc8ac36b94efb98dddce72d0804e",
+      "1bc96d7012496ae85316abdd6e68914fa9944288c71a5fade3f8005533d08ebc",
+      "d53181817d837b13f62ab7ee92fd7e540d576312c90239cebc4c0d7268a4e0d0",
+      "487ed315f82ff0bd132fbe8fa97b6fd736f1fdc2701497367cb981f8ced0161d",
+      "128b0db9b4f8c157f953b9ecfb18544ee04f019fb78eeec7ddf7e649a031d522",
+      "8f4f55cb4af1c3e543e36556da8890c1a9c11b913415d4cfb0c3e35c5118241a",
+      "63988226e9739da266ce14de1cce5746d662220e39a8ddcb99337ab40b405d69",
+      "0d8da09d774019c738f09dfdd6a249993a7bd49ffeb03b21b4629132e739cd44",
+      "53437275fa4adaa9788d2ca51b971cc0a3744611c5cf281d84b95c4d8d73fed7",
+      "73535d9286a092a3f7b2d96c22a8ef6a0f935b975d09006cd7e418fc867d91cd",
+      "c97ba108b7c9e9aaa01bc0ac765ed962292f20514b66ec99913320d42e26eb2d",
+      "99255d8f4e420dc7947a6bc5fc6acfb47d33e2acbb9b4234264bf2ac735d3437",
+      "6ca9fd2eb1ad7e38d7c5676fd15e1f80dfa0fa3339064a7711e60d53a9bd5fcc",
+      "097cf4dcf51d6b671e0014bda5db042fe0f61b7823d978fa71bddf7560c9baae",
+    ],
+  },
   {
     commit: "d3e5fe3afcdb22e91e5adbc8c9c842a2fb3b632b" as GitSha,
     "executionId": "37136320870:1:repair",
@@ -1129,6 +1207,19 @@ export function planHostedRetries(
   const plans: RetryPlanV1[] = [];
   for (const record of snapshot.work) {
     if (record.nextStep !== "blocked") continue;
+    // These original failed C63 admissions remain charged and closed; the
+    // historical recovery never grants a retry for their retained intent.
+    if (
+      HISTORICAL_C63.rows.some((row) =>
+        row.id === record.id && record.intent?.kind === "implementation" &&
+        record.intent.key === implementationIntentKey(row.reservation) &&
+        record.intent.requestId === row.reservation &&
+        snapshot.reservations.some((charge) =>
+          charge.id === row.reservation && charge.outcome === "ambiguous" &&
+          charge.settledAt !== null
+        )
+      )
+    ) continue;
     // A task whose source issue is closed or gone is not repairable: retrying
     // it can only spend a model session on work that no longer exists. The
     // identity is the pair (repository, issue number): a closed issue in
@@ -2006,10 +2097,740 @@ export async function runSelfObservationPass(input: {
   return actions;
 }
 
+/** Only these three authenticated failed cells may bypass legacy rejection. */
+async function recoverHostedHistoricalC63(
+  deps: HistoricalMatrixQuarantineDepsV1,
+): Promise<number> {
+  const repair = await deps.state.readRepair();
+  if (!repair.ok || repair.value.status !== "found") {
+    throw new Error("historical matrix state unavailable");
+  }
+  const before = repair.value;
+  if (
+    !HISTORICAL_C63.rows.some((binding) =>
+      before.snapshot.work.some((row) => row.id === binding.id) ||
+      before.snapshot.reservations.some((row) => row.id === binding.reservation)
+    )
+  ) return 0;
+  const captured = HISTORICAL_C63.rows.map((binding) => {
+    const record = before.snapshot.work.find((row) => row.id === binding.id);
+    const reservation = before.snapshot.reservations.find((row) =>
+      row.id === binding.reservation
+    );
+    if (
+      !record || !reservation ||
+      canonicalStringify(record.repository) !==
+        canonicalStringify(HISTORICAL_C63.repository) ||
+      canonicalStringify(reservation.repository) !==
+        canonicalStringify(record.repository) ||
+      record.source.kind !== "issue" ||
+      record.related.issueNumber !== binding.issue ||
+      record.counters.attempts !== 2 ||
+      record.target.base !== HISTORICAL_C63.base ||
+      record.target.head !== null || record.target.pr !== null ||
+      record.target.checkpoint !== null ||
+      record.target.candidateState !== undefined ||
+      record.intent?.kind !== "implementation" ||
+      record.intent.requestId !== binding.reservation ||
+      record.intent.key !== implementationIntentKey(binding.reservation) ||
+      record.intent.observedBase !== record.target.base ||
+      record.intent.expectedHead !== null || record.intent.resultId !== null ||
+      reservation.taskId !== record.id ||
+      reservation.head !== record.target.base || reservation.attempt !== 2 ||
+      reservation.purpose !== "retry" ||
+      !["reserved", "ambiguous"].includes(reservation.outcome) ||
+      (reservation.outcome === "reserved"
+        ? reservation.settledAt !== null
+        : reservation.settledAt === null) ||
+      (record.nextStep !== "work" &&
+        !(record.nextStep === "blocked" && reservation.outcome === "ambiguous"))
+    ) {
+      throw new Error(
+        "historical matrix selected reservation binding unavailable",
+      );
+    }
+    return { binding, record, reservation };
+  });
+  const release = await deps.state.readRelease();
+  if (!release.ok || release.value.status !== "found") {
+    throw new Error("historical matrix release unavailable");
+  }
+  const current = release.value;
+  const runtime = current.snapshot.hostedRuntimes.find((row) =>
+    row.id === HOSTED_RUNTIME_ID
+  );
+  if (
+    !runtime ||
+    current.snapshot.hostedReleases.some((row) =>
+      !["accepted", "rolled_back", "cancelled"].includes(row.phase)
+    )
+  ) throw new Error("historical matrix saved custody unavailable");
+  if (runtime.execution !== null) {
+    if (
+      !deps.transport.confirmCompletedExecution ||
+      !await deps.transport.confirmCompletedExecution(runtime.execution)
+    ) throw new Error("historical matrix current native writers unsettled");
+    const observed = await deps.readExecution(runtime.execution);
+    if (
+      !observed.ok || observed.value === null ||
+      canonicalStringify(observed.value.execution) !==
+        canonicalStringify(runtime.execution)
+    ) throw new Error("historical matrix current native binding changed");
+  }
+  const witness = deps.historicalReleaseWitnesses?.find((row) =>
+    row.executionId === HISTORICAL_C63.executionId &&
+    HISTORICAL_C63.rows.every((binding) =>
+      row.reservationIds.includes(binding.reservation)
+    )
+  );
+  const historical = witness
+    ? await deps.state.readReleaseAt?.({
+      commit: witness.commit,
+      expectedHead: current.head,
+    })
+    : null;
+  if (
+    witness &&
+    (!historical?.ok || historical.value.status !== "found" ||
+      historical.value.head !== witness.commit)
+  ) throw new Error("historical matrix release witness unavailable");
+  const saved = historical?.ok && historical.value.status === "found"
+    ? historical.value.snapshot.hostedRuntimes.find((row) =>
+      row.id === HOSTED_RUNTIME_ID
+    )?.lastExecutionProof
+    : runtime.lastExecutionProof;
+  const execution = saved?.execution.id === HISTORICAL_C63.executionId
+    ? saved.execution
+    : runtime.execution?.id === HISTORICAL_C63.executionId
+    ? runtime.execution
+    : null;
+  if (
+    !execution || execution.runId !== HISTORICAL_C63.run.runId ||
+    execution.runAttempt !== HISTORICAL_C63.run.runAttempt ||
+    execution.launcherSha !== HISTORICAL_C63.run.launcherSha ||
+    execution.revision !== HISTORICAL_C63.runtimeSha ||
+    execution.generation !== HISTORICAL_C63.generation ||
+    execution.purpose !== "ordinary" || execution.releaseId !== null ||
+    (witness &&
+      (!saved || saved.outcome !== "failed" ||
+        saved.logDigest !== witness.logDigest))
+  ) throw new Error("historical matrix release witness binding changed");
+  const custody = async () => {
+    const fresh = await deps.state.readRelease();
+    if (
+      !fresh.ok || fresh.value.status !== "found" ||
+      fresh.value.head !== current.head ||
+      canonicalStringify(fresh.value.snapshot) !==
+        canonicalStringify(current.snapshot)
+    ) throw new Error("historical matrix current custody changed");
+    if (witness) {
+      const prior = await deps.state.readReleaseAt?.({
+        commit: witness.commit,
+        expectedHead: current.head,
+      });
+      if (
+        !prior?.ok || prior.value.status !== "found" ||
+        prior.value.head !== witness.commit ||
+        canonicalStringify(prior.value.snapshot) !==
+          canonicalStringify(
+            historical?.ok && historical.value.status === "found"
+              ? historical.value.snapshot
+              : null,
+          )
+      ) throw new Error("historical matrix release witness binding changed");
+    }
+  };
+  await custody();
+  const pending = captured.filter((row) => row.record.nextStep === "work");
+  if (pending.length === 0) return 0;
+  const native = await deps.readExecution(execution);
+  if (
+    !native.ok || native.value === null || native.value.outcome !== "failed"
+  ) throw new Error("historical matrix native settlement unavailable");
+  const proof = parseHostedRunProofV1(native.value);
+  if (
+    canonicalStringify(proof.execution) !== canonicalStringify(execution) ||
+    (saved?.execution.id === execution.id &&
+      canonicalStringify({ ...proof, observedAt: 0 }) !==
+        canonicalStringify({ ...saved, observedAt: 0 }))
+  ) throw new Error("historical matrix native custody unavailable");
+  const requests = pending.map(({ record, binding }) => ({
+    taskId: record.id,
+    repository: record.repository,
+    reservationId: binding.reservation,
+    intentKey: record.intent!.key,
+    expectedBase: record.target.base,
+    attempt: record.counters.attempts,
+  }));
+  const waves = await deps.transport.recover({
+    requests,
+    runtimeSha: HISTORICAL_C63.runtimeSha,
+    launcherSha: HISTORICAL_C63.run.launcherSha,
+    currentRun: HISTORICAL_C63.run,
+  });
+  if (waves.length !== 1) {
+    throw new Error("historical matrix native custody unavailable");
+  }
+  const wave = waves[0];
+  if (
+    wave.plan.waveId !== HISTORICAL_C63.executionId ||
+    canonicalStringify(wave.plan.run) !==
+      canonicalStringify(HISTORICAL_C63.run) ||
+    canonicalStringify(wave.provenance.run) !==
+      canonicalStringify(HISTORICAL_C63.run) ||
+    wave.planDigest !== await matrixDigestV1(wave.plan) ||
+    wave.results.length !== pending.length ||
+    pending.some(({ binding }) =>
+      !wave.plan.cells.some((cell) =>
+        cell.cellId === binding.cellId && cell.taskId === binding.id &&
+        cell.reservationId === binding.reservation &&
+        cell.runtimeSha === HISTORICAL_C63.runtimeSha &&
+        cell.generation === HISTORICAL_C63.generation
+      ) || wave.results.filter((result) =>
+          result.cellId === binding.cellId && result.taskId === binding.id &&
+          result.reservationId === binding.reservation &&
+          result.status === "not_started" && result.receipt === null &&
+          result.bundle === null
+        ).length !== 1
+    )
+  ) throw new Error("historical matrix native custody unavailable");
+  await custody();
+  const freshRepair = await deps.state.readRepair();
+  if (
+    !freshRepair.ok || freshRepair.value.status !== "found" ||
+    freshRepair.value.head !== before.head ||
+    canonicalStringify(freshRepair.value.snapshot) !==
+      canonicalStringify(before.snapshot)
+  ) throw new Error("historical matrix captured identity changed");
+  const config = {
+    ...createLocalRepositoryConfig(),
+    repository: HISTORICAL_C63.repository,
+  };
+  // Both budget settlement and work persistence retain the same current and
+  // historical release custody gate before each real expected-head write.
+  const state: StateReadView & RepairStateWriter = {
+    readRepair: () => deps.state.readRepair(),
+    readRelease: () => deps.state.readRelease(),
+    writeRepair: async (next, expectedHead) => {
+      await custody();
+      return deps.state.writeRepair(next, expectedHead);
+    },
+  };
+  const gate = new HostedRepairCooldownGate({
+    state,
+    clock: deps.clock,
+  });
+  const refused = <T>(): T =>
+    new Proxy({}, {
+      get: () => () =>
+        Promise.reject(new Error("C63 maintenance capability refused")),
+    }) as T;
+  const selected = new Set<string>(
+    requests.map((request) => request.reservationId),
+  );
+  const report = await ingestMatrixResults(
+    {
+      state,
+      clock: deps.clock,
+      configs: [config],
+      controllerSha: HISTORICAL_C63.runtimeSha,
+      github: refused<GitHubPort>(),
+      githubCooldown: gate,
+      incidents: refused<IncidentAdapter>(),
+      replay: refused<ReplayPort>(),
+      model: {
+        runModel: () =>
+          Promise.reject(new Error("C63 maintenance model refused")),
+      },
+      budget: new RollingStartBudget({
+        state,
+        clock: deps.clock,
+        configs: [config],
+      }),
+      externalImplementations: true,
+    },
+    {
+      ...wave.plan,
+      cells: wave.plan.cells.filter((cell) => selected.has(cell.reservationId)),
+    },
+    wave.results,
+    { deadline: deps.clock.now() + 60_000, expectedProvider: "uos" },
+  );
+  if (report.ingested !== pending.length) {
+    throw new Error("historical matrix settlement incomplete");
+  }
+  await custody();
+  const readback = await deps.state.readRepair();
+  if (!readback.ok || readback.value.status !== "found") {
+    throw new Error("historical matrix block readback incomplete");
+  }
+  const after = readback.value.snapshot;
+  for (const { record, reservation } of pending) {
+    const changed = after.work.find((row) => row.id === record.id);
+    const charge = after.reservations.find((row) => row.id === reservation.id);
+    if (
+      !changed || !charge || changed.nextStep !== "blocked" ||
+      changed.blocker?.kind !== "other" || charge.outcome !== "ambiguous" ||
+      charge.settledAt === null ||
+      canonicalStringify({
+          ...changed,
+          nextStep: record.nextStep,
+          blocker: record.blocker,
+          wait: record.wait,
+          updatedAt: record.updatedAt,
+        }) !== canonicalStringify(record) ||
+      canonicalStringify({
+          ...charge,
+          outcome: reservation.outcome,
+          settledAt: reservation.settledAt,
+        }) !== canonicalStringify(reservation)
+    ) throw new Error("historical matrix block readback incomplete");
+  }
+  const normalized = {
+    ...after,
+    stateHead: before.snapshot.stateHead,
+    sequence: before.snapshot.sequence,
+    updatedAt: before.snapshot.updatedAt,
+    work: after.work.map((row) =>
+      pending.find((saved) => saved.record.id === row.id)?.record ?? row
+    ),
+    reservations: after.reservations.map((row) =>
+      pending.find((saved) => saved.reservation.id === row.id)?.reservation ??
+        row
+    ),
+  };
+  if (canonicalStringify(normalized) !== canonicalStringify(before.snapshot)) {
+    throw new Error("historical matrix block readback incomplete");
+  }
+  return report.ingested;
+}
+
+async function recoverHostedCurrentMatrix(
+  deps: HostedAutonomyDepsV1,
+  binding: ClosedCWaveBindingV1,
+): Promise<HostedAutonomyResultV1 | null> {
+  if (!deps.closedMatrix) return null;
+  const deadlineAt = deps.clock.now() + 60_000;
+  const dedicated = new Set<string>([
+    ...binding.cells.map((row) => row.reservationId),
+    ...(deps.historicalMatrix
+      ? HISTORICAL_C63.rows.map((row) => row.reservation)
+      : []),
+    ...(deps.historicalMatrix?.historicalReleaseWitnesses?.flatMap((row) =>
+      row.reservationIds
+    ) ?? []),
+  ]);
+  const [repair, release] = await Promise.all([
+    deps.state.readRepair(),
+    deps.state.readRelease(),
+  ]);
+  if (
+    !repair.ok || repair.value.status !== "found" || !release.ok ||
+    release.value.status !== "found"
+  ) throw new Error("current matrix custody unavailable");
+  if (
+    !repair.value.snapshot.work.some((row) =>
+      row.nextStep === "work" && row.intent &&
+      ["implementation", "candidate_preservation"].includes(row.intent.kind) &&
+      !dedicated.has(row.intent.requestId ?? "")
+    )
+  ) return null;
+  const current = release.value;
+  const runtime = current.snapshot.hostedRuntimes.find((row) =>
+    row.id === HOSTED_RUNTIME_ID
+  );
+  if (!runtime) return null;
+  if (
+    runtime.execution !== null ||
+    current.snapshot.hostedReleases.some((row) =>
+      !["accepted", "rolled_back", "cancelled"].includes(row.phase)
+    )
+  ) throw new Error("current matrix producer custody unavailable");
+  const snapshots = new Set<string>();
+  const proofs = new Map<string, string>();
+  const covered = new Set<string>();
+  const pending = repair.value.snapshot.work.filter((row) =>
+    row.nextStep === "work" && row.intent &&
+    ["implementation", "candidate_preservation"].includes(row.intent.kind) &&
+    !dedicated.has(row.intent.requestId ?? "")
+  );
+  const scan = async () => {
+    let producer = current;
+    while (true) {
+      if (deps.clock.now() >= deadlineAt) {
+        throw new Error("current matrix history deadline exhausted");
+      }
+      if (snapshots.has(producer.head)) {
+        throw new Error("current matrix history cycle");
+      }
+      snapshots.add(producer.head);
+      const producerRuntime = producer.snapshot.hostedRuntimes.find((row) =>
+        row.id === HOSTED_RUNTIME_ID
+      );
+      const saved = producerRuntime?.lastExecutionProof;
+      if (
+        producerRuntime?.execution === null && saved &&
+        saved.outcome !== "not_started" &&
+        saved.execution.purpose === "ordinary"
+      ) {
+        const deferred = (saved.execution.runId === binding.run.runId &&
+          saved.execution.runAttempt === binding.run.runAttempt &&
+          saved.execution.launcherSha === binding.run.launcherSha &&
+          saved.execution.revision === binding.runtimeSha &&
+          saved.execution.generation === binding.generation) ||
+          saved.execution.id === HISTORICAL_C63.executionId ||
+          deps.historicalMatrix?.historicalReleaseWitnesses?.some((row) =>
+            row.executionId === saved.execution.id
+          );
+        if (!deferred) {
+          const identity = canonicalStringify(saved.execution);
+          const proof = canonicalStringify({ ...saved, observedAt: 0 });
+          const prior = proofs.get(identity);
+          if (prior !== undefined && prior !== proof) {
+            throw new Error("current matrix historical proof conflicts");
+          }
+          if (prior === undefined) {
+            proofs.set(identity, proof);
+            const result = await recoverHostedMatrixProducer(
+              deps,
+              current,
+              producer,
+              deadlineAt,
+              covered,
+              dedicated,
+            );
+            if (result?.status === "applied") return result;
+            if (
+              pending.every((row) =>
+                row.intent?.requestId && covered.has(row.intent.requestId)
+              )
+            ) return null;
+          }
+        }
+      }
+      const parent = producer.snapshot.stateHead;
+      if (parent === null) {
+        if (producer.snapshot.sequence !== 1) {
+          throw new Error("current matrix history root unavailable");
+        }
+        return null;
+      }
+      if (snapshots.has(parent) || !deps.state.readReleaseAt) {
+        throw new Error("current matrix history unavailable");
+      }
+      const prior = await deps.state.readReleaseAt({
+        commit: parent,
+        expectedHead: current.head,
+      });
+      if (
+        !prior.ok || prior.value.status !== "found" ||
+        prior.value.head !== parent ||
+        prior.value.snapshot.sequence !== producer.snapshot.sequence - 1
+      ) throw new Error("current matrix history ancestry unavailable");
+      producer = prior.value;
+    }
+  };
+  return await scan();
+}
+
+async function recoverHostedMatrixProducer(
+  deps: HostedAutonomyDepsV1,
+  current: { head: GitSha; snapshot: ReleaseStateSnapshotV1 },
+  producer: { head: GitSha; snapshot: ReleaseStateSnapshotV1 },
+  deadlineAt: number,
+  covered: Set<string>,
+  dedicated: ReadonlySet<string>,
+): Promise<HostedAutonomyResultV1 | null> {
+  const checkDeadline = () => {
+    if (deps.clock.now() >= deadlineAt) {
+      throw new Error("current matrix history deadline exhausted");
+    }
+  };
+  checkDeadline();
+  const repair = await deps.state.readRepair();
+  checkDeadline();
+  if (!repair.ok || repair.value.status !== "found") {
+    throw new Error("current matrix custody unavailable");
+  }
+  const before = repair.value;
+  const runtime = producer.snapshot.hostedRuntimes.find((row) =>
+    row.id === HOSTED_RUNTIME_ID
+  );
+  const saved = runtime?.lastExecutionProof;
+  if (
+    !runtime || !saved || saved.outcome === "not_started" ||
+    saved.execution.purpose !== "ordinary"
+  ) return null;
+  if (
+    runtime.execution !== null || saved.execution.releaseId !== null ||
+    runtime.activeRevision !== saved.execution.revision ||
+    runtime.generation !== saved.execution.generation ||
+    current.snapshot.hostedReleases.some((row) =>
+      !["accepted", "rolled_back", "cancelled"].includes(row.phase)
+    )
+  ) throw new Error("current matrix producer custody unavailable");
+  const custody = async () => {
+    if (deps.clock.now() >= deadlineAt) {
+      throw new Error("current matrix history deadline exhausted");
+    }
+    const fresh = await deps.state.readRelease();
+    checkDeadline();
+    if (
+      !fresh.ok || fresh.value.status !== "found" ||
+      fresh.value.head !== current.head ||
+      canonicalStringify(fresh.value.snapshot) !==
+        canonicalStringify(current.snapshot)
+    ) {
+      throw new Error("current matrix release custody changed");
+    }
+    if (producer.head !== current.head) {
+      checkDeadline();
+      const prior = await deps.state.readReleaseAt?.({
+        commit: producer.head,
+        expectedHead: current.head,
+      });
+      checkDeadline();
+      if (
+        !prior?.ok || prior.value.status !== "found" ||
+        prior.value.head !== producer.head ||
+        canonicalStringify(prior.value.snapshot) !==
+          canonicalStringify(producer.snapshot)
+      ) throw new Error("current matrix producer ancestry changed");
+    }
+  };
+  const state: StateReadView & RepairStateWriter = {
+    readRepair: () => deps.state.readRepair(),
+    readRelease: () => deps.state.readRelease(),
+    writeRepair: async (next, expectedHead) => {
+      await custody();
+      checkDeadline();
+      return await deps.state.writeRepair(next, expectedHead);
+    },
+  };
+  // Native reads, cooldown, budget and consumer writes all use this SAME
+  // composed writer; changing only cycle.state would leave captured writers.
+  checkDeadline();
+  const ports = await deps.closedMatrix!(state);
+  checkDeadline();
+  const requests = before.snapshot.work.flatMap((record) => {
+    const intent = record.intent;
+    if (
+      record.nextStep !== "work" || !intent ||
+      !["implementation", "candidate_preservation"].includes(intent.kind) ||
+      dedicated.has(intent.requestId ?? "")
+    ) return [];
+    const charge = before.snapshot.reservations.find((row) =>
+      row.id === intent.requestId
+    );
+    if (
+      !charge || record.source.kind !== "issue" ||
+      canonicalStringify(charge.repository) !==
+        canonicalStringify(record.repository) ||
+      charge.taskId !== record.id || charge.head !== record.target.base ||
+      charge.attempt !== record.counters.attempts ||
+      !["implementation", "retry"].includes(charge.purpose) ||
+      charge.outcome === "confirmed_not_submitted" ||
+      intent.key !== implementationIntentKey(charge.id) ||
+      intent.observedBase !== record.target.base || intent.resultId !== null
+    ) {
+      throw new Error("current matrix request binding unavailable");
+    }
+    if (
+      !ports.configs.some((config) =>
+        canonicalStringify(config.repository) ===
+          canonicalStringify(record.repository)
+      )
+    ) return [];
+    return [{
+      taskId: record.id,
+      repository: record.repository,
+      reservationId: charge.id,
+      intentKey: intent.key,
+      expectedBase: record.target.base,
+      attempt: record.counters.attempts,
+    }];
+  });
+  if (requests.length === 0) return null;
+  const producerState: StateReadView & RepairStateWriter = {
+    ...state,
+    readRelease: () =>
+      producer.head === current.head
+        ? state.readRelease()
+        : deps.state.readReleaseAt!({
+          commit: producer.head,
+          expectedHead: current.head,
+        }),
+  };
+  checkDeadline();
+  const transport = await ports.transportFor(producerState);
+  checkDeadline();
+  if (
+    !transport.confirmCompletedExecution ||
+    !await transport.confirmCompletedExecution(saved.execution)
+  ) {
+    throw new Error("current matrix native writers unsettled");
+  }
+  checkDeadline();
+  const native = await ports.readExecution(saved.execution);
+  checkDeadline();
+  if (
+    !native.ok || native.value === null ||
+    native.value.outcome === "not_started"
+  ) {
+    throw new Error("current matrix native proof unavailable");
+  }
+  const proof = parseHostedRunProofV1(native.value);
+  if (
+    canonicalStringify({ ...proof, observedAt: 0 }) !==
+      canonicalStringify({ ...saved, observedAt: 0 })
+  ) {
+    throw new Error("current matrix native proof changed");
+  }
+  await custody();
+  const waves = await transport.recover({
+    requests,
+    runtimeSha: saved.execution.revision,
+    launcherSha: saved.execution.launcherSha,
+    currentRun: {
+      runId: saved.execution.runId,
+      runAttempt: saved.execution.runAttempt,
+      launcherSha: saved.execution.launcherSha,
+    },
+  });
+  checkDeadline();
+  if (waves.length !== 1) throw new Error("current matrix wave unavailable");
+  const wave = waves[0];
+  if (
+    wave.plan.waveId !== saved.execution.id ||
+    wave.plan.run.runId !== saved.execution.runId ||
+    wave.plan.run.runAttempt !== saved.execution.runAttempt ||
+    wave.plan.run.launcherSha !== saved.execution.launcherSha ||
+    canonicalStringify(wave.provenance.run) !==
+      canonicalStringify(wave.plan.run) ||
+    wave.planDigest !== await matrixDigestV1(wave.plan) ||
+    wave.plan.cells.some((cell) =>
+      cell.runtimeSha !== saved.execution.revision ||
+      cell.generation !== saved.execution.generation
+    )
+  ) {
+    throw new Error("current matrix wave binding changed");
+  }
+  const intersection = wave.plan.cells.filter((cell) =>
+    requests.some((request) => request.reservationId === cell.reservationId)
+  );
+  if (intersection.length === 0) {
+    await custody();
+    const fresh = await state.readRepair();
+    if (
+      !fresh.ok || fresh.value.status !== "found" ||
+      fresh.value.head !== before.head ||
+      canonicalStringify(fresh.value.snapshot) !==
+        canonicalStringify(before.snapshot)
+    ) {
+      throw new Error("current matrix repair custody changed");
+    }
+    return null;
+  }
+  const fresh = await state.readRepair();
+  if (
+    !fresh.ok || fresh.value.status !== "found" ||
+    fresh.value.head !== before.head ||
+    canonicalStringify(fresh.value.snapshot) !==
+      canonicalStringify(before.snapshot)
+  ) {
+    throw new Error("current matrix repair custody changed");
+  }
+  let ingested = 0;
+  const selected = new Set<string>();
+  const selectedTasks = new Set<string>();
+  for (const config of ports.configs) {
+    const cells = wave.plan.cells.filter((cell) =>
+      requests.some((request) =>
+        request.reservationId === cell.reservationId
+      ) &&
+      canonicalStringify(cell.repository) ===
+        canonicalStringify(config.repository)
+    );
+    if (cells.length === 0) continue;
+    for (const cell of cells) {
+      selected.add(cell.reservationId);
+      selectedTasks.add(cell.taskId);
+    }
+    await custody();
+    await ports.prepareTarget(config);
+    checkDeadline();
+    const report = await ingestMatrixResults(
+      {
+        ...ports.cycleFor(config),
+        state,
+        controllerSha: saved.execution.revision,
+        externalImplementations: true,
+      },
+      { ...wave.plan, cells },
+      wave.results.filter((result) =>
+        cells.some((cell) => cell.cellId === result.cellId)
+      ),
+      {
+        deadline: deadlineAt,
+        expectedProvider: "uos",
+        bundleImporter: ports.importerFor(config, wave.bundlesDir),
+      },
+    );
+    if (
+      report.entries.some((entry) =>
+        !["ingested", "duplicate"].includes(entry.disposition)
+      ) || report.entries.length !== cells.length
+    ) {
+      throw new Error("current matrix ingestion incomplete");
+    }
+    checkDeadline();
+    ingested += report.ingested;
+  }
+  if (selected.size === 0) {
+    throw new Error("current matrix selected evidence unavailable");
+  }
+  await custody();
+  const after = await state.readRepair();
+  if (
+    !after.ok || after.value.status !== "found" ||
+    canonicalStringify(after.value.snapshot.reviews) !==
+      canonicalStringify(before.snapshot.reviews) ||
+    canonicalStringify(after.value.snapshot.releaseRequests) !==
+      canonicalStringify(before.snapshot.releaseRequests) ||
+    canonicalStringify(
+        after.value.snapshot.work.filter((row) => !selectedTasks.has(row.id)),
+      ) !==
+      canonicalStringify(
+        before.snapshot.work.filter((row) => !selectedTasks.has(row.id)),
+      ) ||
+    canonicalStringify(
+        after.value.snapshot.reservations.filter((row) =>
+          !selected.has(row.id)
+        ),
+      ) !==
+      canonicalStringify(
+        before.snapshot.reservations.filter((row) => !selected.has(row.id)),
+      )
+  ) {
+    throw new Error("current matrix readback incomplete");
+  }
+  for (const id of selected) covered.add(id);
+  return {
+    kind: "hosted_autonomy",
+    status: after.value.head === before.head ? "skipped" : "applied",
+    reason: after.value.head === before.head ? "no_change" : "applied",
+    beforeHead: before.head,
+    appliedHead: after.value.head,
+    actions: [`current-matrix:ingested:${ingested}`],
+    revisions: [],
+  };
+}
+
 export async function runHostedAutonomy(
   deps: HostedAutonomyDepsV1,
 ): Promise<HostedAutonomyResultV1> {
   const actions: string[] = [];
+  let closedBinding: ClosedCWaveBindingV1 = CLOSED_C_WAVE;
   if (deps.closedMatrix) {
     const read = await deps.state.readRepair();
     if (!read.ok) {
@@ -2018,6 +2839,7 @@ export async function runHostedAutonomy(
     const closed = read.value.status === "found"
       ? await deps.closedMatrix()
       : undefined;
+    closedBinding = closed?.binding ?? CLOSED_C_WAVE;
     if (
       read.value.status === "found" && closed !== undefined &&
       closedCWaveNeedsRecovery(read.value.snapshot, closed.binding)
@@ -2041,9 +2863,13 @@ export async function runHostedAutonomy(
       };
     }
   }
+  const currentMatrix = await recoverHostedCurrentMatrix(deps, closedBinding);
+  if (currentMatrix?.status === "applied") return currentMatrix;
   if (deps.historicalMatrix) {
     let count: number;
     try {
+      const recovered = await recoverHostedHistoricalC63(deps.historicalMatrix);
+      if (recovered > 0) actions.push(`historical-c63:ingested:${recovered}`);
       count = await runHistoricalMatrixQuarantine(deps.historicalMatrix);
     } catch (error) {
       // Only fixed quarantine vocabulary reaches hosted logs, never transport text.
@@ -3683,9 +4509,9 @@ export async function runHostedAutonomyMain(input?: {
               token: stateToken,
               artifactRoot,
             })),
-          closedMatrix: () =>
+          closedMatrix: (guardedState = state) =>
             createHostedClosedMatrixRecovery({
-              state,
+              state: guardedState,
               clock: { now: () => Date.now() },
               token: stateToken,
               apiToken,

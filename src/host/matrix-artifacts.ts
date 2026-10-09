@@ -44,12 +44,13 @@ import {
   type HttpResponseV1,
   type HttpTransportV1,
 } from "../github/http.ts";
-import type {
-  MatrixArtifactRequestV1,
-  MatrixArtifactTransportV1,
-  MatrixAuthenticatedWaveV1,
-  MatrixRejectedCellEvidenceV1,
-  MatrixRejectedWaveV1,
+import {
+  type MatrixArtifactRequestV1,
+  type MatrixArtifactTransportV1,
+  type MatrixAuthenticatedWaveV1,
+  MatrixMissingCellArtifactError,
+  type MatrixRejectedCellEvidenceV1,
+  type MatrixRejectedWaveV1,
 } from "./matrix-artifact-port.ts";
 import {
   HISTORICAL_MATRIX_QUARANTINE,
@@ -822,6 +823,7 @@ export function createActionsMatrixArtifactTransport(options: {
           // Artifact contents only select relevant grants; native provenance below remains mandatory.
           if (
             !input.rejectionProof &&
+            input.currentRun === undefined &&
             !plan.cells.some((cell) => requested.has(cell.reservationId))
           ) {
             continue;
@@ -1015,7 +1017,10 @@ export function createActionsMatrixArtifactTransport(options: {
             // made, no record is touched.
             continue;
           }
-          if (selected.length === 0) continue;
+          if (
+            selected.length === 0 &&
+            (input.rejectionProof || input.currentRun === undefined)
+          ) continue;
           const bundlesDir = `${staging}/${run.runId}-${run.runAttempt}`;
           await Deno.mkdir(bundlesDir, { mode: 0o700 });
           const results = [], cellJobIds = [];
@@ -1027,6 +1032,27 @@ export function createActionsMatrixArtifactTransport(options: {
             if (names.filter((value) => value === name).length > 1) refuse();
             const cellArtifact = artifacts.find((row) => row.name === name);
             if (!cellArtifact) {
+              if (input.rejectionProof) {
+                // Trusted historical rejection: a missing cell artifact is its
+                // own explicit uncertainty disposition. The trusted consumer
+                // quarantines this exact record with a truthful reason instead
+                // of re-selecting an endlessly unprovable historical wave.
+                const captured = affected.find((row) =>
+                  row.reservation.id === cell.reservationId
+                );
+                const started = Date.parse(String(planners[0].started_at));
+                const completed = Date.parse(String(planners[0].completed_at));
+                if (
+                  !captured || typeof planners[0].started_at !== "string" ||
+                  typeof planners[0].completed_at !== "string" ||
+                  !Number.isSafeInteger(started) ||
+                  !Number.isSafeInteger(completed) || completed < started
+                ) refuse();
+                throw new MatrixMissingCellArtifactError(
+                  input.rejectionProof,
+                  captured,
+                );
+              }
               // Missing evidence never establishes non-submission, and a wave
               // that cannot be fully authenticated cannot isolate its
               // records: the unprovable cells stay charged and untouched
@@ -1139,11 +1165,6 @@ export function createActionsMatrixArtifactTransport(options: {
             });
           }
           if (input.rejectionProof) {
-            // A non-malformed plan is not a reservation-after-manifest case;
-            // skip it instead of refusing. This happens when cells were
-            // skipped due to missing artifacts (the record stays quarantined,
-            // the safe default) or when the plan simply isn't malformed.
-            // No claim is made, no record is touched.
             if (!malformed) continue;
             // The authenticated planner job interval is the only admission
             // window a legacy manifest rejection may use; a missing or
@@ -1237,6 +1258,7 @@ export function createActionsMatrixArtifactTransport(options: {
         } catch {
           refuse();
         }
+        if (error instanceof MatrixMissingCellArtifactError) throw error;
         refuse();
       } finally {
         controller.abort();

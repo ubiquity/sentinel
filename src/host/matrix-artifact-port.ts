@@ -63,6 +63,16 @@ export interface MatrixRejectedWaveV1 {
   cells: readonly MatrixRejectedCellEvidenceV1[];
 }
 
+/** Refusal remains fatal except for the trusted per-record quarantine consumer. */
+export class MatrixMissingCellArtifactError extends Error {
+  constructor(
+    readonly proof: HostedRunProofV1,
+    readonly captured: MatrixRejectedWaveV1["affected"][number],
+  ) {
+    super("matrix artifact provenance unavailable or conflicting");
+  }
+}
+
 export interface MatrixArtifactRequestV1 {
   taskId: WorkItemId;
   repository: RepositoryIdentityV1;
@@ -126,7 +136,12 @@ export interface MatrixArtifactTransportV1 {
     requests: readonly MatrixArtifactRequestV1[];
     runtimeSha: GitSha;
     launcherSha: GitSha;
-    /** Exact native execution when known; omitted for reservation-based recovery. */
+    /**
+     * Exact native execution when known; omitted for reservation-based recovery.
+     * Normal exact-current recovery retains the original authenticated full
+     * plan even with no requested membership; empty results do not invent
+     * evidence. An absent wave still means unavailable evidence.
+     */
     currentRun?: MatrixRunIdentityV1;
     /** Consumer identity only; never narrows historical artifact discovery. */
     consumerRun?: MatrixRunIdentityV1;
