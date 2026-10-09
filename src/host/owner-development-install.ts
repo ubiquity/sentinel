@@ -573,6 +573,19 @@ export const OWNER_DEVELOPMENT_INSTALL_MEMORY_PRIOR_GENERATION = 67;
 export const OWNER_DEVELOPMENT_INSTALL_MEMORY_REVISION =
   "335727744517fab37fa9939da49366c9b315207b" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_MEMORY_GENERATION = 68;
+/**
+ * Learning depth rung: success recording, cross-task repository lessons and
+ * versioned regression awareness on top of the generation 68 memory runtime.
+ * Installed only after the generation 68 healthy proof; a failed generation
+ * 69 candidate restores the recorded generation 68 revision once at
+ * monotonic generation 70, and that post-rollback pointer is terminal.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_LEARNING_PRIOR_REVISION =
+  "335727744517fab37fa9939da49366c9b315207b" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_LEARNING_PRIOR_GENERATION = 68;
+export const OWNER_DEVELOPMENT_INSTALL_LEARNING_REVISION =
+  "6db6166d23deddcf1894d493b25b4c1f4e616282" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_LEARNING_GENERATION = 69;
 export interface OwnerMatrixRecoveryEvidenceV1 {
   candidate: GitSha;
   repairHead: GitSha;
@@ -2958,6 +2971,57 @@ export function planOwnerDevelopmentInstall(
     }
     return waiting(
       "the planner successor generation 60 healthy proof is not recorded",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_LEARNING_PRIOR_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_LEARNING_PRIOR_GENERATION
+  ) {
+    if (healthy === null) {
+      return waiting(
+        "the recorded generation 68 healthy proof is not recorded",
+      );
+    }
+    return movePlan(
+      "install",
+      runtime,
+      OWNER_DEVELOPMENT_INSTALL_LEARNING_REVISION,
+      OWNER_DEVELOPMENT_INSTALL_LEARNING_GENERATION,
+      healthy,
+      "install the learning-depth runtime after its generation 68 healthy proof",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_LEARNING_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_LEARNING_GENERATION
+  ) {
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_LEARNING_PRIOR_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_LEARNING_PRIOR_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded generation 68 healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_LEARNING_PRIOR_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed learning-depth runtime to its recorded proven predecessor",
+      );
+    }
+    if (healthy !== null) {
+      return noChange("the owner development installation is complete");
+    }
+    return waiting(
+      "the learning-depth generation 69 healthy proof is not recorded",
     );
   }
 
