@@ -63,7 +63,10 @@ import {
   ingestClosedCWave,
 } from "./modern-matrix-recovery.ts";
 
-import { HISTORICAL_MATRIX_QUARANTINE } from "./matrix-artifact-port.ts";
+import {
+  HISTORICAL_MATRIX_QUARANTINE,
+  MATRIX_ARTIFACT_RECOVERY_MAX_MS,
+} from "./matrix-artifact-port.ts";
 import { recoverWithHistoricalIsolation } from "./matrix-historical-isolation.ts";
 export { HISTORICAL_MATRIX_QUARANTINE } from "./matrix-artifact-port.ts";
 
@@ -395,7 +398,16 @@ async function quarantineRow(
 /** Protected repair-owner checkpoint; no model, release-write or ingestion capability. */
 export async function runHistoricalMatrixQuarantine(
   deps: HistoricalMatrixQuarantineDepsV1,
+  deadlineAt: number = deps.clock.now() + MATRIX_ARTIFACT_RECOVERY_MAX_MS,
 ): Promise<number> {
+  // One shared, bounded window covers the whole pass: a wave with many
+  // missing-cell artifacts quarantines one record per recursion and each
+  // recursion must reuse this same deadline instead of minting a fresh
+  // transport window, so the pass cannot multiply its way past the
+  // maintenance budget.
+  if (!Number.isSafeInteger(deadlineAt) || deps.clock.now() >= deadlineAt) {
+    return 0;
+  }
   const repair = await deps.state.readRepair();
   if (!repair.ok || repair.value.status !== "found") {
     throw new Error("historical matrix state unavailable");
@@ -419,7 +431,7 @@ export async function runHistoricalMatrixQuarantine(
       return runHistoricalMatrixQuarantine({
         ...deps,
         historicalReleaseWitnesses: remainingWitnesses,
-      });
+      }, deadlineAt);
     }
     for (const work of selected) {
       const reservation = repair.value.snapshot.reservations.find((row) =>
@@ -636,7 +648,8 @@ export async function runHistoricalMatrixQuarantine(
         !witness.reservationIds.includes(error.captured.reservation.id))
     ) throw new Error("historical matrix missing-cell identity unavailable");
     await quarantineRow(deps, error, error.captured, current, historical);
-    return 1 + await runHistoricalMatrixQuarantine(deps);
+    if (deps.clock.now() >= deadlineAt) return 1;
+    return 1 + await runHistoricalMatrixQuarantine(deps, deadlineAt);
   }
   if (historical && waves.length === 0) {
     throw new Error("historical matrix selected witness rejection unavailable");
@@ -680,7 +693,7 @@ export async function runHistoricalMatrixQuarantine(
     count += await runHistoricalMatrixQuarantine({
       ...deps,
       historicalReleaseWitnesses: remainingWitnesses,
-    });
+    }, deadlineAt);
   }
   return count;
 }

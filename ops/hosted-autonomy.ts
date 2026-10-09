@@ -2783,9 +2783,12 @@ async function recoverHostedMatrixProducer(
         bundleImporter: ports.importerFor(config, wave.bundlesDir),
       },
     );
+    // A missing current artifact is a completed timeout disposition: the
+    // normal consumer records the host timeout, clears the intent and emits
+    // `missing`, so it must not fail the maintenance pass after that write.
     if (
       report.entries.some((entry) =>
-        !["ingested", "duplicate"].includes(entry.disposition)
+        !["ingested", "duplicate", "missing"].includes(entry.disposition)
       ) || report.entries.length !== cells.length
     ) {
       throw new Error("current matrix ingestion incomplete");
