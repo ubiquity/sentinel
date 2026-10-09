@@ -2795,6 +2795,90 @@ Deno.test("hosted matrix launcher: native cell stdin and carrier never settle ag
   }
 });
 
+Deno.test("hosted matrix launcher: rejection receipts distinguish collapsed failures", async () => {
+  const rig = await makeRig();
+  try {
+    await seedRelease(rig);
+    const cellId = "c".repeat(64);
+    const stdin = JSON.stringify({ planDigest: "d".repeat(64), cellId });
+    const input = Object.assign({
+      env: { ...rig.env, GITHUB_JOB: "matrix_cell" },
+    }, { stdin });
+    const carrier = {
+      kind: "sentinel_matrix_cell",
+      run: {
+        runId: RUN_ID,
+        runAttempt: RUN_ATTEMPT,
+        launcherSha: rig.identity.launcherSha,
+      },
+      runtimeSha: rig.execution.revision,
+      generation: rig.execution.generation,
+      cellId,
+      reservationId: "reservation-1",
+      resultDigest: "e".repeat(64),
+      bundleDigest: "f".repeat(64),
+      status: "completed",
+    };
+    const line = JSON.stringify(carrier) + "\n";
+    const rejected = async (child: ReplayCommandResultV1) => {
+      rig.process.child = child;
+      const result = await launch(rig, input);
+      assert.equal(result.status, "unavailable", JSON.stringify(result));
+      assert.equal(result.terminal, null);
+      assert.equal(result.matrixCarrier, undefined);
+      return result.launcherRejection;
+    };
+    // Unsettled child: typed outcome metadata surfaced, no carrier parse.
+    const unsettled = await rejected(exited(line, 0, { settled: false }));
+    assert.ok(unsettled);
+    assert.deepEqual({ ...unsettled }, {
+      version: "v1",
+      kind: "hosted_runtime_matrix_launcher_rejection",
+      condition: "child_unsettled",
+      outcome: "exited",
+      exitCode: 0,
+      settled: false,
+      truncated: false,
+    });
+    // Mismatched runtime binding stays fail-closed and names the field group.
+    const runtimeSha = await rejected(
+      exited(JSON.stringify({ ...carrier, runtimeSha: OTHER_REVISION }) + "\n"),
+    );
+    assert.equal(runtimeSha?.condition, "carrier_field");
+    assert.equal(runtimeSha?.field, "runtime_sha");
+    assert.equal(runtimeSha?.carrierCount, 0);
+    // Forged launcher identity stays fail-closed.
+    const identity = await rejected(
+      exited(
+        JSON.stringify({
+          ...carrier,
+          run: { ...carrier.run, runAttempt: RUN_ATTEMPT + 1 },
+        }) + "\n",
+      ),
+    );
+    assert.equal(identity?.condition, "carrier_field");
+    assert.equal(identity?.field, "identity");
+    // Zero and duplicate carriers report counts instead of silent collapse.
+    const zero = await rejected(exited(""));
+    assert.equal(zero?.condition, "carrier_count");
+    assert.equal(zero?.carrierCount, 0);
+    const two = await rejected(exited(line + line));
+    assert.equal(two?.condition, "carrier_count");
+    assert.equal(two?.carrierCount, 2);
+    // Receipt is absent on acceptance; carrier validation stays strict.
+    rig.process.child = exited(line + childLine(rig.execution));
+    const accepted = await launch(rig, input);
+    assert.equal(accepted.status, "healthy", JSON.stringify(accepted));
+    assert.equal(accepted.launcherRejection, undefined);
+    assert.deepEqual(
+      (accepted as unknown as { matrixCarrier: unknown }).matrixCarrier,
+      carrier,
+    );
+  } finally {
+    await rig.cleanup();
+  }
+});
+
 Deno.test("hosted matrix identity: explicit native roles share read-only repair identity", async () => {
   const rig = await makeRig();
   try {

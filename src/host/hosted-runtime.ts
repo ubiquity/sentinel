@@ -294,6 +294,45 @@ export interface HostedRuntimeLauncherResultV1 {
   earlyFailure?: HostedRuntimeEarlyFailureV1;
   /** Authenticated native matrix log carrier; never aggregate terminal proof. */
   matrixCarrier?: Record<string, unknown>;
+  /**
+   * Diagnostic-only receipt for a rejected matrix launcher result. Present
+   * only when status is "unavailable" from resolveMatrixLauncherResult; it
+   * can never change acceptance, mint a terminal or return a carrier.
+   */
+  launcherRejection?: HostedRuntimeMatrixLauncherRejectionV1;
+}
+
+/**
+ * Sanitized typed summary of why a matrix launcher result was rejected.
+ * Fail-closed acceptance is unchanged: no raw child streams, prompts or
+ * secret values are carried, only typed child outcome metadata, the closed
+ * rejection condition and a carrier count.
+ */
+export interface HostedRuntimeMatrixLauncherRejectionV1 {
+  version: "v1";
+  kind: "hosted_runtime_matrix_launcher_rejection";
+  /**
+   * Closed condition that fired. Distinguishes rejections that previously
+   * collapsed into the same unavailable result: an unsettled child process,
+   * a rejected carrier field binding, or a nonunique carrier count.
+   */
+  condition: "child_unsettled" | "carrier_field" | "carrier_count";
+  /**
+   * Rejected carrier field group; present only for carrier_field.
+   * Revision/generation binding is runtime_sha, launcher identity is
+   * identity, and the job-specific validated fields are plan or cell.
+   */
+  field?: "runtime_sha" | "identity" | "plan" | "cell";
+  /** Typed child outcome; the discriminating proof stderr lost. */
+  outcome: ReplayCommandResultV1["outcome"];
+  exitCode: number | null;
+  settled: boolean;
+  truncated: boolean;
+  /**
+   * Carriers parsed before rejection. Absent when the child never settled,
+   * since carriers are not parsed in that case.
+   */
+  carrierCount?: number;
 }
 
 /** Closed, non-sensitive category of one settled early child abort. */
@@ -1329,6 +1368,36 @@ function isDigest(value: unknown): value is string {
   return typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
 }
 
+/**
+ * Fail-closed matrix launcher rejection with a sanitized typed receipt.
+ * Status stays "unavailable", the terminal stays null and no matrixCarrier is
+ * returned; only the closed condition, the typed child outcome metadata, the
+ * rejected field group and the parsed carrier count are surfaced. Never raw
+ * child streams, prompts or secret values.
+ */
+function rejectedMatrixLauncherResult(
+  run: ReplayCommandResultV1,
+  partial: Pick<
+    HostedRuntimeMatrixLauncherRejectionV1,
+    "condition" | "field" | "carrierCount"
+  >,
+): HostedRuntimeLauncherResultV1 {
+  const receipt: HostedRuntimeMatrixLauncherRejectionV1 = {
+    version: "v1",
+    kind: "hosted_runtime_matrix_launcher_rejection",
+    condition: partial.condition,
+    ...(partial.field === undefined ? {} : { field: partial.field }),
+    outcome: run.outcome,
+    exitCode: run.exitCode,
+    settled: run.settled,
+    truncated: run.truncated,
+    ...(partial.carrierCount === undefined
+      ? {}
+      : { carrierCount: partial.carrierCount }),
+  };
+  return { ...unavailableResult(), launcherRejection: receipt };
+}
+
 function resolveMatrixLauncherResult(
   run: ReplayCommandResultV1,
   execution: HostedExecutionIntentV1,
@@ -1338,7 +1407,7 @@ function resolveMatrixLauncherResult(
   if (
     run.outcome !== "exited" || !run.settled || run.truncated ||
     run.exitCode === null
-  ) return unavailableResult();
+  ) return rejectedMatrixLauncherResult(run, { condition: "child_unsettled" });
   const kind = job === "matrix_plan"
     ? "sentinel_matrix_plan"
     : "sentinel_matrix_cell";
@@ -1380,25 +1449,49 @@ function resolveMatrixLauncherResult(
     if (
       !hasExactKeys(obj, keys) || obj.runtimeSha !== execution.revision ||
       obj.generation !== execution.generation
-    ) return unavailableResult();
+    ) {
+      return rejectedMatrixLauncherResult(run, {
+        condition: "carrier_field",
+        field: "runtime_sha",
+        carrierCount: found.length,
+      });
+    }
     const native = obj.run;
     if (
       typeof native !== "object" || native === null || Array.isArray(native)
-    ) return unavailableResult();
+    ) {
+      return rejectedMatrixLauncherResult(run, {
+        condition: "carrier_field",
+        field: "identity",
+        carrierCount: found.length,
+      });
+    }
     const identity = native as Record<string, unknown>;
     if (
       !hasExactKeys(identity, ["runId", "runAttempt", "launcherSha"]) ||
       identity.runId !== execution.runId ||
       identity.runAttempt !== execution.runAttempt ||
       identity.launcherSha !== execution.launcherSha
-    ) return unavailableResult();
+    ) {
+      return rejectedMatrixLauncherResult(run, {
+        condition: "carrier_field",
+        field: "identity",
+        carrierCount: found.length,
+      });
+    }
     if (job === "matrix_plan") {
       if (
         obj.waveId !== execution.id || !isDigest(obj.planDigest) ||
         typeof obj.prepared !== "number" ||
         !Number.isSafeInteger(obj.prepared) ||
         obj.prepared < 0 || obj.prepared > 256
-      ) return unavailableResult();
+      ) {
+        return rejectedMatrixLauncherResult(run, {
+          condition: "carrier_field",
+          field: "plan",
+          carrierCount: found.length,
+        });
+      }
     } else {
       const selection = JSON.parse(stdin ?? "{}") as Record<string, unknown>;
       if (
@@ -1410,11 +1503,22 @@ function resolveMatrixLauncherResult(
         !isDigest(obj.resultDigest) ||
         (obj.bundleDigest !== null && !isDigest(obj.bundleDigest)) ||
         !["completed", "failed", "not_started"].includes(String(obj.status))
-      ) return unavailableResult();
+      ) {
+        return rejectedMatrixLauncherResult(run, {
+          condition: "carrier_field",
+          field: "cell",
+          carrierCount: found.length,
+        });
+      }
     }
     found.push(obj);
   }
-  if (found.length !== 1) return unavailableResult();
+  if (found.length !== 1) {
+    return rejectedMatrixLauncherResult(run, {
+      condition: "carrier_count",
+      carrierCount: found.length,
+    });
+  }
   return {
     status: run.exitCode === 0 ? "healthy" : "failed",
     terminal: null,
