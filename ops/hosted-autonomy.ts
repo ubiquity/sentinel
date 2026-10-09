@@ -2442,12 +2442,16 @@ async function recoverHostedCurrentMatrix(
     row.id === HOSTED_RUNTIME_ID
   );
   if (!runtime) return null;
+  // An active execution or a nonterminal release defers current-matrix
+  // recovery; the existing maintenance guard owns that disposition and the
+  // pass must never fail here. Return no recovery so active promotion stays
+  // a deferred condition.
   if (
     runtime.execution !== null ||
     current.snapshot.hostedReleases.some((row) =>
       !["accepted", "rolled_back", "cancelled"].includes(row.phase)
     )
-  ) throw new Error("current matrix producer custody unavailable");
+  ) return null;
   const snapshots = new Set<string>();
   const proofs = new Map<string, string>();
   const covered = new Set<string>();
