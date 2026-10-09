@@ -151,3 +151,12 @@ The memory/loop-breaker is staged for the LIVE hosted runtime as generation 68 u
 - Launcher lane tip: `8bf6a0833` (`codex/memory-live-20261009`) pins generation 68 = that revision, with the standard rung: healthy generation 67 installs 68; a failed 68 restores generation 67 once at generation 69 (terminal).
 - Fast-forward gates verified: `origin/sentinel-supervisor` (`36458206a`) and `origin/development` (`5a84c15dc`) are both ancestors of the lane tip.
 - The publish+dispatch one-shot (push lane tip to `sentinel-supervisor` and `development`, then `sentinel run supervisor`) is blocked only on explicit owner approval; the platform's safety review rejects protected-ref publication without it. Once approved: installer verifies the pinned revision, installs generation 68, bootstrap-verifies, and memory becomes live for settlements, planner admission, prompts and the (re-enabled) maintenance retry guard.
+
+## LIVE — generation 68 deployed and healthy (2026-10-09 18:36 UTC)
+
+Owner approved the deployment ("Go"). Executed:
+
+- Published `9154ca03c` (lane tip) to `sentinel-supervisor` and `development`; the pinned revision is `335727744517fab37fa9939da49366c9b315207b` (CI `test-local` green).
+- Dispatched `sentinel run supervisor` (run `37969475526`): `prepare` installed generation 68 via the owner-development installer (`owner_development_install status=installed`, prior gen 67 `ee5e6518a` → candidate gen 68 `335727744`); the bootstrap execution completed SUCCESS and its healthy proof is recorded (`lastHealthyProof: healthy, revision 335727744, generation 68, runId 37969475526`).
+- The next scheduled ordinary run (`37973386031`) is already executing at generation 68 on the protected ref, i.e. the live matrix runtime now carries durable attempt memory (settlement capture, planner-admission refusal of unchanged replays, verified prior-attempt facts in the implementer prompt, deterministic lesson digest) and the maintenance-side refusal guard for when that pass is re-enabled.
+- First live learning records appear in `sentinel-state/repair` (`attemptMemory/`, `lessons/`) as implementation attempts settle; the runner script `/tmp/check-memory-live.sh` summarizes them.
