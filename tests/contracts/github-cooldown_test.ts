@@ -58,8 +58,6 @@ function cooldown(
 
 function repairSnapshot(
   githubCooldowns: GitHubCooldownV1[],
-  attemptMemory: [],
-  lessons: [],
 ): RepairStateSnapshotV1 {
   return {
     version: "v1",
