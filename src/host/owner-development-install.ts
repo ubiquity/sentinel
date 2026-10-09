@@ -65,6 +65,7 @@ import {
   isOwnerStartupRecoveryHealthyProof,
   isOwnerStartupRecoveryTuple,
   OWNER_STARTUP_RECOVERY_CANDIDATE,
+  OWNER_STARTUP_RECOVERY_GENERATION,
   OWNER_STARTUP_RECOVERY_WITNESS,
   type OwnerStartupRecoveryAuthorityV1,
   planOwnerStartupRecovery,
@@ -3326,7 +3327,7 @@ export async function runOwnerDevelopmentInstallMain(input?: {
         status: "no_change",
       });
     }
-    if (pointer.generation === 66) {
+    if (pointer.generation === OWNER_STARTUP_RECOVERY_GENERATION) {
       return report({
         ...waitingResult(
           "pinned startup recovery is terminal",

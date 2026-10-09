@@ -61,7 +61,7 @@ Deno.test("owner startup recovery: fixed identity proof refuses retired pointers
       ...base,
       hostedRuntimes: [{
         ...STARTUP_RUNTIME,
-        lastExecutionProof: notStartedProof(STARTUP_FAILED, 65),
+        lastExecutionProof: notStartedProof(STARTUP_FAILED, 66),
       }],
     },
     {
@@ -101,7 +101,7 @@ Deno.test("owner startup recovery: fixed identity proof refuses retired pointers
       id: "999:1:repair",
       runId: 999,
       revision: STARTUP_CANDIDATE,
-      generation: 66,
+      generation: 67,
       purpose: "bootstrap",
     },
   });
@@ -110,7 +110,7 @@ Deno.test("owner startup recovery: fixed identity proof refuses retired pointers
     hostedRuntimes: [{
       ...STARTUP_RUNTIME,
       activeRevision: STARTUP_CANDIDATE,
-      generation: 66,
+      generation: 67,
       lastHealthyProof: healthy,
     }],
   };
@@ -316,7 +316,7 @@ Deno.test("owner startup recovery: workflow suppresses maintenance and retains t
   assert.doesNotMatch(text, /--allow-env=[^\n]*OWNER_STARTUP_RECOVERY/);
 });
 
-Deno.test("owner startup recovery: real installer and supervisor verify generation66 then hold terminal without rollback", async (test) => {
+Deno.test("owner startup recovery: real installer and supervisor verify generation67 then hold terminal without rollback", async (test) => {
   for (const outcome of ["healthy", "failed"] as const) {
     await test.step(outcome, async () => {
       const fixture = await concurrencyInstallerFixture(
@@ -339,7 +339,7 @@ Deno.test("owner startup recovery: real installer and supervisor verify generati
         assert.ok(read.ok && read.value.status === "found");
         const runtime = read.value.snapshot.hostedRuntimes[0];
         assert.equal(runtime.activeRevision, STARTUP_CANDIDATE);
-        assert.equal(runtime.generation, 66);
+        assert.equal(runtime.generation, 67);
         assert.deepEqual(
           runtime.lastHealthyProof,
           STARTUP_RUNTIME.lastHealthyProof,
@@ -455,13 +455,13 @@ Deno.test("owner startup recovery: real installer and supervisor verify generati
         assert.ok(settled.ok && settled.value.status === "found");
         const terminal = settled.value.snapshot.hostedRuntimes[0];
         assert.equal(terminal.activeRevision, STARTUP_CANDIDATE);
-        assert.equal(terminal.generation, 66);
+        assert.equal(terminal.generation, 67);
         assert.equal(terminal.execution, null);
         assert.deepEqual(terminal.lastExecutionProof, observed);
         assert.deepEqual(
           terminal.lastHealthyProof,
           outcome === "healthy" ? observed : STARTUP_RUNTIME.lastHealthyProof,
-          "only fresh generation66 health replaces the historical generation63 proof",
+          "only fresh generation67 health replaces the historical generation63 proof",
         );
         fixture.setRun(1000000);
         for (let replay = 0; replay < 2; replay++) {
@@ -470,7 +470,7 @@ Deno.test("owner startup recovery: real installer and supervisor verify generati
           assert.equal(
             fixture.patches(),
             1,
-            "terminal generation66 never reinstalls or rolls back",
+            "terminal generation67 never reinstalls or rolls back",
           );
           assert.deepEqual(
             await fixture.read(),
@@ -8512,25 +8512,25 @@ Deno.test(
 
 // Exact public recovery identities; these never stand in for native execution proof.
 const STARTUP_CANDIDATE = "ee5e6518a4333c20d8bc6a4c3c577a2536ec6b9b" as GitSha;
-const STARTUP_FAILED = "e4cef46332cf124a8c283d798a963cf5f66e45c2" as GitSha;
+const STARTUP_FAILED = "d77d3169fdd268c955dda24ae2bae7b35c5e2295" as GitSha;
 const STARTUP_PRIOR = "e4cef46332cf124a8c283d798a963cf5f66e45c2" as GitSha;
 const STARTUP_RUNTIME = parseHostedRuntimeRecordV1({
-  "activeRevision": "e4cef46332cf124a8c283d798a963cf5f66e45c2",
+  "activeRevision": "d77d3169fdd268c955dda24ae2bae7b35c5e2295",
   "createdAt": 1789358128122,
   "execution": null,
-  "generation": 65,
+  "generation": 66,
   "id": "ubiquity/sentinel:0:production",
   "kind": "hosted_runtime",
   "lastExecutionProof": {
     "baseSha": null,
     "execution": {
       "createdAt": 1791498288192,
-      "generation": 65,
+      "generation": 66,
       "id": "37853282835:1:repair",
       "launcherSha": "bd8fd3121def476864f0da2cc389dbe27243ca7b",
       "purpose": "bootstrap",
       "releaseId": null,
-      "revision": "e4cef46332cf124a8c283d798a963cf5f66e45c2",
+      "revision": "d77d3169fdd268c955dda24ae2bae7b35c5e2295",
       "runAttempt": 1,
       "runId": 37853282835,
     },
@@ -8593,7 +8593,7 @@ function startupAuthority(head = STATE_HEAD) {
     run: { runId: 999999, runAttempt: 1, launcherSha: LAUNCHER },
   };
 }
-Deno.test("owner startup recovery: exact failed65 installs only pinned66 and records bootstrap intent", () => {
+Deno.test("owner startup recovery: exact failed66 installs only pinned67 and records bootstrap intent", () => {
   const state = releaseSnapshot({ runtime: STARTUP_RUNTIME });
   const authority = startupAuthority();
   const plan = Reflect.apply(planOwnerDevelopmentInstall, undefined, [
@@ -8608,7 +8608,7 @@ Deno.test("owner startup recovery: exact failed65 installs only pinned66 and rec
   }
   assert.equal(plan.move.priorRevision, STARTUP_FAILED);
   assert.equal(plan.move.nextRevision, STARTUP_CANDIDATE);
-  assert.equal(plan.move.nextGeneration, 66);
+  assert.equal(plan.move.nextGeneration, 67);
   assert.deepEqual(
     plan.move.priorHealthyProof,
     STARTUP_RUNTIME.lastHealthyProof,
@@ -8628,7 +8628,7 @@ Deno.test("owner startup recovery: exact failed65 installs only pinned66 and rec
     launcherSha: LAUNCHER,
     purpose: "bootstrap",
     revision: STARTUP_CANDIDATE,
-    generation: 66,
+    generation: 67,
     releaseId: null,
     createdAt: STARTUP_NOW,
   });

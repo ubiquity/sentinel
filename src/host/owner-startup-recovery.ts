@@ -13,9 +13,12 @@ import type { OwnerDevelopmentInstallPlanV1 } from "./owner-development-install.
 export const OWNER_STARTUP_RECOVERY_CANDIDATE =
   "ee5e6518a4333c20d8bc6a4c3c577a2536ec6b9b" as GitSha;
 export const OWNER_STARTUP_RECOVERY_FAILED =
-  "e4cef46332cf124a8c283d798a963cf5f66e45c2" as GitSha;
+  "d77d3169fdd268c955dda24ae2bae7b35c5e2295" as GitSha;
 export const OWNER_STARTUP_RECOVERY_WITNESS =
   "bfd8d4304a04696a7692ab21e0a06d05bad41641" as GitSha;
+/** Pinned rung generations: the target install generation and the generation it succeeds. */
+export const OWNER_STARTUP_RECOVERY_GENERATION = 67;
+export const OWNER_STARTUP_RECOVERY_FAILED_GENERATION = 66;
 /** Public immutable identity, compared to actual trusted historical state; never itself execution proof. */
 const HEALTHY_PROOF_CANONICAL =
   '{"baseSha":"f79a890d1020be13b5b650968430e80b51fc35e1","execution":{"createdAt":1791417309456,"generation":63,"id":"37704666277:1:repair","launcherSha":"44031db6fd9cbc91755a9d4501e1481b9cd09b89","purpose":"ordinary","releaseId":null,"revision":"e4cef46332cf124a8c283d798a963cf5f66e45c2","runAttempt":1,"runId":37704666277},"finishedAt":1791419897000,"jobId":113081997296,"logDigest":"aad29414cf59ddbc3916fe2566c1749dd2ac12c6e2ab9a1c9bce659f0b1fd90f","observedAt":1791419943131,"outcome":"healthy","ref":"refs/heads/sentinel-supervisor","repository":"ubiquity/sentinel","settled":true,"startedAt":1791418334000,"startupReady":true,"terminalAt":1791419892505,"workflowId":357012162,"workflowPath":".github/workflows/supervisor.yml"}';
@@ -43,9 +46,10 @@ export function isOwnerStartupRecoveryTuple(
   generation: number,
   includeFailed = false,
 ): boolean {
-  return (revision === OWNER_STARTUP_RECOVERY_CANDIDATE && generation === 66) ||
+  return (revision === OWNER_STARTUP_RECOVERY_CANDIDATE &&
+    generation === OWNER_STARTUP_RECOVERY_GENERATION) ||
     (includeFailed && revision === OWNER_STARTUP_RECOVERY_FAILED &&
-      generation === 65);
+      generation === OWNER_STARTUP_RECOVERY_FAILED_GENERATION);
 }
 
 export function planOwnerStartupRecovery(
@@ -74,7 +78,7 @@ export function planOwnerStartupRecovery(
   if (!isOwnerStartupRecoveryTuple(revision, generation, true)) {
     return unchanged("pointer is outside the pinned startup recovery");
   }
-  if (generation === 66) {
+  if (generation === OWNER_STARTUP_RECOVERY_GENERATION) {
     return unchanged(
       "pinned startup recovery is terminal; never reinstall or roll back",
     );
