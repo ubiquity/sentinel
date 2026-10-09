@@ -1,0 +1,46 @@
+{
+  "instruction": "O1-runtime-sha-carrier-20261009T1719Z",
+  "label": "synthetic",
+  "note": "Synthetic offline evidence only. Not hosted acceptance. Installed test-evidence capture is absent; actual commands, UTC, exits and bounded outputs retained below.",
+  "outstanding_step": {
+    "detail": "Promote the installed/selected runtime from ee5e6518a4333c20d8bc6a4c3c577a2536ec6b9b to 9dfe50da8e7f97482f071451140dad8f4ada5a61 or later and re-point the execution revision. Protected runtime installation is Codex-owned; no owner input required.",
+    "owner": "Codex (protected runtime installation)"
+  },
+  "pair_receipt": {
+    "consumer": "launcher resolveMatrixLauncherResult at 321e3ec04dad15ee0ef1430d03363ea037316f6e accepts exactly kind,waveId,run,runtimeSha,generation,planDigest,prepared",
+    "emitter": "matrixPlanCarrierOf at 9dfe50da8e7f97482f071451140dad8f4ada5a61 emits exactly those 7 keys; byte-identical at HEAD 321e3ec0",
+    "test": {
+      "command": "deno test --allow-read=.,/usr,/bin,/home/hatch/.deno/bin --allow-run --allow-write --allow-env=PATH,NODE_V8_COVERAGE --filter \"producer emits exact\" tests/host/hosted-runtime_test.ts",
+      "executable": "/home/hatch/.deno/bin/deno",
+      "exit": 0,
+      "result": "1 passed | 0 failed | 32 filtered out",
+      "stderr_bounded": "",
+      "stdout_bounded": "hosted matrix plan: producer emits exact consumer carrier schema ... ok (537ms)",
+      "utc": "2026-10-09T17:22:14Z",
+      "workdir": "/home/hatch/workspace/sentinel-ralph/repo"
+    }
+  },
+  "pinned_revision": {
+    "note": "9dfe50da is an ancestor of current sentinel-supervisor HEAD 321e3ec0; the strict emitter is live on the branch",
+    "revision": "9dfe50da8e7f97482f071451140dad8f4ada5a61"
+  },
+  "task": "O1-sentinel-autonomy",
+  "trace": {
+    "emission_point": "ee5e6518a4333c20d8bc6a4c3c577a2536ec6b9b:src/host/matrix-actions.ts console.log carrier block emits kind,waveId,run,runtimeSha,generation,planDigest,prepared PLUS attempted,notReady,deferred and optional diagnostic",
+    "failing_predicate": "hasExactKeys(obj,[kind,waveId,run,runtimeSha,generation,planDigest,prepared]) is false -> rejection grouped under field runtime_sha with carrierCount 0 (hosted-runtime.ts resolveMatrixLauncherResult)",
+    "launcher_checkout": "321e3ec04dad15ee0ef1430d03363ea037316f6e (strict consumer + diagnostic receipt)",
+    "observed_rejection": {
+      "carrierCount": 0,
+      "condition": "carrier_field",
+      "exitCode": 0,
+      "field": "runtime_sha",
+      "kind": "hosted_runtime_matrix_launcher_rejection",
+      "outcome": "exited",
+      "settled": true,
+      "truncated": false
+    },
+    "rejection_log_line": "job 113927498142 log line 509 @ 2026-10-09T17:07:34Z",
+    "run": "37961865977 plan job 113927498142 (current run 37963021348 repeats it)",
+    "runtime_checkout": "ee5e6518a4333c20d8bc6a4c3c577a2536ec6b9b (predates the carrier-schema fix)"
+  }
+}
