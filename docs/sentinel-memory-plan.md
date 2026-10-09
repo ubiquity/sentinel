@@ -79,6 +79,14 @@ Recorded per `agents/git-coordination.md`; derived after this file existed.
 | Base SHA | recorded in the lane-creation ledger entry at the plan commit |
 | Lane state / owner | created; primary (this goal) owns integration |
 
+## Progress checkpoint (update in this lane only)
+
+- 2026-10-09 09:03 UTC: lane `sentinel-memory-plan-g503a34141c` created from `eab05752da35f060790efb62573a59f67740a68e` (the docs commit carrying this plan).
+- Contracts: `src/contracts/attempt-memory.ts` written (AttemptMemoryRecordV1 + strict parser + canonical id/fingerprint helpers + bounded merge). `MaxItems.attemptEntries = 16` added to `src/contracts/validation.ts`.
+- State: `attemptMemory` collection added to `src/contracts/state-snapshots.ts`, `src/state/mod.ts` (collection map, record files, read assembly, append-only repair transition validation), `src/repair/transitions.ts` (draft clone), `src/budget/mod.ts` (empty-snapshot constructor). `deno task check` passes.
+- Pending: policy module (`src/repair/attempt-policy.ts`), capture wiring in `settleFailedImplementation`/`handleModelReceipt`/`handleImplementationUncertainty`, retry-pass refusal in `ops/hosted-autonomy.ts` (`planHostedRetries`), tests, prompt retrieval.
+- Open research: GPT Pro job `9f061de3-37c4-4983-ab73-2ede700cd4cb` (retrieval owner running, answer to /tmp/gpt-pro-sentinel-memory-answer.txt); fold its design into the policy/thresholds before freezing the contract.
+
 ## Constraints
 
 - No new secrets/env vars; runtime model policy unchanged; review/budget/promotion gates unchanged.
