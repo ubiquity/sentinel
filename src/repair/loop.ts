@@ -44,7 +44,10 @@ import {
   type ReviewTaskStatementV1,
 } from "../contracts/review-receipt.ts";
 import { generatedArtifactOnly } from "../github/review-snapshot.ts";
-import { buildMemoryLessonsV1 } from "./memory-lessons.ts";
+import {
+  buildMemoryLessonsV1,
+  memoryLessonsSourceDigestV1,
+} from "./memory-lessons.ts";
 import {
   ATTEMPT_DETAIL_INCOMPLETE,
   ATTEMPT_DETAIL_LOOP_STOP,
@@ -1273,10 +1276,22 @@ async function persistTransition(
     lessons: [...base.lessons],
   };
   mutate(draft);
-  // The lesson digest is a deterministic view of authoritative attempt memory:
-  // every trusted transition recomputes it here, so a reader never sees a view
-  // that disagrees with the records it summarizes.
-  draft.lessons = await buildMemoryLessonsV1(draft, deps.clock.now());
+  // Canonical array order: the state store's read path orders every collection
+  // by record id, so the in-memory snapshot keeps the same order to stay
+  // byte-equal with read-back state for every custody/equality consumer.
+  draft.attemptMemory = [...draft.attemptMemory].sort((left, right) =>
+    left.id < right.id ? -1 : left.id > right.id ? 1 : 0
+  );
+  // The lesson digest is a deterministic view of authoritative attempt memory.
+  // It is rebuilt ONLY when the source memory actually changed: a transition
+  // that leaves memory untouched keeps the existing view byte-for-byte, so
+  // "no change means no change" holds for every custody/equality consumer.
+  const memoryDigest = await memoryLessonsSourceDigestV1(draft);
+  const lessonsCurrent = base.lessons.length > 0 &&
+    base.lessons.every((record) => record.sourceDigest === memoryDigest);
+  if (!lessonsCurrent) {
+    draft.lessons = await buildMemoryLessonsV1(draft, deps.clock.now());
+  }
   let parsed: RepairStateSnapshotV1;
   try {
     parsed = parseRepairStateSnapshotV1(draft);

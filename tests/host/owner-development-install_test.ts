@@ -296,7 +296,10 @@ Deno.test("owner startup recovery: actual GitHub compare shape binds exact candi
   }
 });
 
-Deno.test("owner startup recovery: workflow suppresses maintenance and retains the existing verification path", async () => {
+Deno.test("owner startup recovery: the workflow is returned to the ordinary maintenance contract", async () => {
+  // The scoped startup recovery was exited ("resume ordinary work"): the
+  // workflow carries the ORIGINAL protected maintenance/prepare contract
+  // again, and no recovery-only flags remain anywhere in the file.
   const text = await Deno.readTextFile(
     new URL("../../.github/workflows/supervisor.yml", import.meta.url),
   );
@@ -304,14 +307,14 @@ Deno.test("owner startup recovery: workflow suppresses maintenance and retains t
     text.indexOf("  maintenance:"),
     text.indexOf("  prepare:"),
   );
-  assert.match(maintenance, /if: \$\{\{ false \}\}/);
-  assert.match(text, /needs\.maintenance\.result == 'skipped'/);
-  assert.match(text, /owner-development-install\.ts --startup-recovery/);
-  assert.equal(
-    (text.match(/deno task supervisor:run --owner-startup-recovery-only/g) ??
-      []).length,
-    2,
+  assert.match(
+    maintenance,
+    /if: github\.ref == 'refs\/heads\/sentinel-supervisor'/,
   );
+  assert.doesNotMatch(maintenance, /if: \$\{\{ false \}\}/);
+  assert.match(text, /needs\.maintenance\.result == 'success'/);
+  assert.doesNotMatch(text, /--startup-recovery/);
+  assert.doesNotMatch(text, /--owner-startup-recovery-only/);
   assert.match(text, /--allow-run=git/);
   assert.doesNotMatch(text, /--allow-env=[^\n]*OWNER_STARTUP_RECOVERY/);
 });

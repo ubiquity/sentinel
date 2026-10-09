@@ -2641,6 +2641,8 @@ Deno.test("state: mixed legacy and candidate-state work survive an unrelated wri
       reviews: [receipt],
       releaseRequests: [request],
       githubCooldowns: [githubCooldown(7)],
+      attemptMemory: [],
+      lessons: [],
     });
     const applied = await storeAt(ctx, "mixed-write-2", "repair").writeRepair(
       next,

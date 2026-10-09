@@ -512,6 +512,14 @@ export async function runMatrixUncertaintyMaintenance(
         reservations: before.reservations.map((charge) =>
           charge.id === activeId ? nextCharge : charge
         ),
+        // Durable attempt memory (and its derived lesson view) is written by
+        // the SAME settlement transition this wrapper authorizes: the active
+        // task's blocked settlement persists its attempt-memory entry in this
+        // commit. Only these two collections move outside the permitted
+        // work/reservation/sequence/head/time fields; everything else stays
+        // byte-identical to the held state.
+        attemptMemory: next.attemptMemory,
+        lessons: next.lessons,
       };
       if (!same(next, permitted)) refuse();
       const written = await deps.state.writeRepair(next, head);
