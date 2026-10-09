@@ -2262,11 +2262,13 @@ async function recoverHostedHistoricalC63(
     expectedBase: record.target.base,
     attempt: record.counters.attempts,
   }));
+  const deadlineAt = deps.clock.now() + 60_000;
   const waves = await deps.transport.recover({
     requests,
     runtimeSha: HISTORICAL_C63.runtimeSha,
     launcherSha: HISTORICAL_C63.run.launcherSha,
     currentRun: HISTORICAL_C63.run,
+    deadline: deadlineAt,
   });
   if (waves.length !== 1) {
     throw new Error("historical matrix native custody unavailable");
@@ -2354,7 +2356,7 @@ async function recoverHostedHistoricalC63(
       cells: wave.plan.cells.filter((cell) => selected.has(cell.reservationId)),
     },
     wave.results,
-    { deadline: deps.clock.now() + 60_000, expectedProvider: "uos" },
+    { deadline: deadlineAt, expectedProvider: "uos" },
   );
   if (report.ingested !== pending.length) {
     throw new Error("historical matrix settlement incomplete");
@@ -2696,6 +2698,7 @@ async function recoverHostedMatrixProducer(
       runAttempt: saved.execution.runAttempt,
       launcherSha: saved.execution.launcherSha,
     },
+    deadline: deadlineAt,
   });
   checkDeadline();
   if (waves.length !== 1) throw new Error("current matrix wave unavailable");
