@@ -44,18 +44,18 @@ import {
   type HttpResponseV1,
   type HttpTransportV1,
 } from "../github/http.ts";
-import {
-  type MatrixArtifactRequestV1,
-  type MatrixArtifactTransportV1,
-  type MatrixAuthenticatedWaveV1,
-  MatrixMissingCellArtifactError,
-  type MatrixRejectedCellEvidenceV1,
-  type MatrixRejectedWaveV1,
+import type {
+  MatrixArtifactRequestV1,
+  MatrixArtifactTransportV1,
+  MatrixAuthenticatedWaveV1,
+  MatrixRejectedCellEvidenceV1,
+  MatrixRejectedWaveV1,
 } from "./matrix-artifact-port.ts";
 import {
   HISTORICAL_MATRIX_QUARANTINE,
   MATRIX_ARTIFACT_RECOVERY_MAX_MS,
   MatrixHistoricalRuntimeMismatch,
+  MatrixMissingCellArtifactError,
 } from "./matrix-artifact-port.ts";
 
 const API = `https://api.github.com/repos/${REPOSITORY}/actions`;
@@ -823,7 +823,6 @@ export function createActionsMatrixArtifactTransport(options: {
           // Artifact contents only select relevant grants; native provenance below remains mandatory.
           if (
             !input.rejectionProof &&
-            input.currentRun === undefined &&
             !plan.cells.some((cell) => requested.has(cell.reservationId))
           ) {
             continue;
@@ -1017,10 +1016,7 @@ export function createActionsMatrixArtifactTransport(options: {
             // made, no record is touched.
             continue;
           }
-          if (
-            selected.length === 0 &&
-            (input.rejectionProof || input.currentRun === undefined)
-          ) continue;
+          if (selected.length === 0) continue;
           const bundlesDir = `${staging}/${run.runId}-${run.runAttempt}`;
           await Deno.mkdir(bundlesDir, { mode: 0o700 });
           const results = [], cellJobIds = [];
@@ -1165,6 +1161,11 @@ export function createActionsMatrixArtifactTransport(options: {
             });
           }
           if (input.rejectionProof) {
+            // A non-malformed plan is not a reservation-after-manifest case;
+            // skip it instead of refusing. This happens when cells were
+            // skipped due to missing artifacts (the record stays quarantined,
+            // the safe default) or when the plan simply isn't malformed.
+            // No claim is made, no record is touched.
             if (!malformed) continue;
             // The authenticated planner job interval is the only admission
             // window a legacy manifest rejection may use; a missing or
@@ -1250,6 +1251,7 @@ export function createActionsMatrixArtifactTransport(options: {
           await Deno.remove(staging, { recursive: true }).catch(() => {});
         }
         if (error instanceof MatrixHistoricalRuntimeMismatch) throw error;
+        if (error instanceof MatrixMissingCellArtifactError) throw error;
         try {
           console.error(JSON.stringify({
             kind: "sentinel_matrix_artifact_error",
@@ -1258,7 +1260,6 @@ export function createActionsMatrixArtifactTransport(options: {
         } catch {
           refuse();
         }
-        if (error instanceof MatrixMissingCellArtifactError) throw error;
         refuse();
       } finally {
         controller.abort();
@@ -1278,7 +1279,7 @@ export function createActionsMatrixArtifactTransport(options: {
     async recover(input) {
       return (await recovery.run(input)).recovered;
     },
-    async rejectHistorical({ proof, revalidateNotStarted, deadline }) {
+    async rejectHistorical({ proof, revalidateNotStarted }) {
       return (await recovery.run({
         requests: [],
         runtimeSha: proof.execution.revision,
@@ -1290,7 +1291,6 @@ export function createActionsMatrixArtifactTransport(options: {
         },
         rejectionProof: proof,
         revalidateNotStarted: revalidateNotStarted === true,
-        ...(deadline === undefined ? {} : { deadline }),
       })).rejected;
     },
   };

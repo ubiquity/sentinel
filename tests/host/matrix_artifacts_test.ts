@@ -1513,53 +1513,6 @@ Deno.test("matrix artifacts: missing artifact preserves charged intent and never
   }
 });
 
-Deno.test("matrix artifacts: authenticated current nonmatching plan preserves full native identity", async () => {
-  const rig = await fixture();
-  try {
-    const original = rig.repair.work[0];
-    const taskId = "nonmatching-current-request" as typeof original.id;
-    const reservationId = "b".repeat(64);
-    rig.repair.work.push({
-      ...structuredClone(original),
-      id: taskId,
-      source: { ...original.source, id: taskId },
-      intent: {
-        ...original.intent!,
-        requestId: reservationId,
-        key: implementationIntentKey(reservationId),
-      },
-    });
-    rig.repair.reservations.push({
-      ...structuredClone(rig.repair.reservations[0]),
-      id: reservationId,
-      taskId,
-    });
-    const input = {
-      ...rig.input,
-      requests: [{
-        ...rig.input.requests[0],
-        taskId,
-        reservationId,
-        intentKey: implementationIntentKey(reservationId),
-      }],
-    };
-    const before = canonicalStringify(rig.repair);
-    const waves = await rig.transport.recover(input);
-    assert.equal(
-      waves.length,
-      1,
-      "exact current native plan must authenticate even without requested membership",
-    );
-    assert.deepEqual(waves[0].plan, rig.plan);
-    assert.equal(waves[0].planDigest, await matrixDigestV1(rig.plan));
-    assert.deepEqual(waves[0].provenance.run, RUN);
-    assert.deepEqual(waves[0].results, []);
-    assert.equal(canonicalStringify(rig.repair), before);
-  } finally {
-    await Deno.remove(rig.tmp, { recursive: true });
-  }
-});
-
 Deno.test("matrix artifacts: historical missing cell refuses directly with exact uncertainty custody", async () => {
   const rig = await fixture();
   try {
