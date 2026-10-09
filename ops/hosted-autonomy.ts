@@ -2202,9 +2202,9 @@ async function recoverHostedHistoricalC63(
   });
   if (captured.length === 0) return 0;
   const release = await deps.state.readRelease();
-  if (!release.ok || release.value.status !== "found") {
-    throw new Error("historical matrix release unavailable");
-  }
+  // Missing or temporarily unavailable release custody defers recovery; the
+  // pass must never fail because another run holds or lacks the state.
+  if (!release.ok || release.value.status !== "found") return 0;
   const current = release.value;
   const runtime = current.snapshot.hostedRuntimes.find((row) =>
     row.id === HOSTED_RUNTIME_ID
@@ -2486,10 +2486,11 @@ async function recoverHostedCurrentMatrix(
     deps.state.readRepair(),
     deps.state.readRelease(),
   ]);
+  // Missing or temporarily unavailable custody defers recovery.
   if (
     !repair.ok || repair.value.status !== "found" || !release.ok ||
     release.value.status !== "found"
-  ) throw new Error("current matrix custody unavailable");
+  ) return null;
   if (
     !repair.value.snapshot.work.some((row) =>
       row.nextStep === "work" && row.intent &&
@@ -2615,9 +2616,7 @@ async function recoverHostedMatrixProducer(
   checkDeadline();
   const repair = await deps.state.readRepair();
   checkDeadline();
-  if (!repair.ok || repair.value.status !== "found") {
-    throw new Error("current matrix custody unavailable");
-  }
+  if (!repair.ok || repair.value.status !== "found") return null;
   const before = repair.value;
   const runtime = producer.snapshot.hostedRuntimes.find((row) =>
     row.id === HOSTED_RUNTIME_ID
