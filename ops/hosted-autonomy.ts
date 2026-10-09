@@ -2208,12 +2208,14 @@ async function recoverHostedHistoricalC63(
   const runtime = current.snapshot.hostedRuntimes.find((row) =>
     row.id === HOSTED_RUNTIME_ID
   );
+  // A missing runtime or a nonterminal release defers recovery; the next
+  // maintenance pass re-runs it.
   if (
     !runtime ||
     current.snapshot.hostedReleases.some((row) =>
       !["accepted", "rolled_back", "cancelled"].includes(row.phase)
     )
-  ) throw new Error("historical matrix saved custody unavailable");
+  ) return 0;
   if (runtime.execution !== null) {
     // An unsettled current execution defers recovery; the pass must never
     // fail because another run is still writing.
@@ -2244,7 +2246,7 @@ async function recoverHostedHistoricalC63(
     witness &&
     (!historical?.ok || historical.value.status !== "found" ||
       historical.value.head !== witness.commit)
-  ) throw new Error("historical matrix release witness unavailable");
+  ) return 0;
   const saved = historical?.ok && historical.value.status === "found"
     ? historical.value.snapshot.hostedRuntimes.find((row) =>
       row.id === HOSTED_RUNTIME_ID
@@ -2255,8 +2257,12 @@ async function recoverHostedHistoricalC63(
     : runtime.execution?.id === HISTORICAL_C63.executionId
     ? runtime.execution
     : null;
+  // An absent execution means the witness is no longer present in current
+  // custody; defer instead of failing. A present but mismatched binding is a
+  // tamper signal and still refuses.
+  if (!execution) return 0;
   if (
-    !execution || execution.runId !== HISTORICAL_C63.run.runId ||
+    execution.runId !== HISTORICAL_C63.run.runId ||
     execution.runAttempt !== HISTORICAL_C63.run.runAttempt ||
     execution.launcherSha !== HISTORICAL_C63.run.launcherSha ||
     execution.revision !== HISTORICAL_C63.runtimeSha ||
@@ -2581,6 +2587,9 @@ async function recoverHostedCurrentMatrix(
         }
         return null;
       }
+      // Unauthenticated or tampered release history stays fail-closed: the
+      // offline-history controls pin a rejection for missing, wrong-head,
+      // wrong-sequence and cycle faults.
       if (snapshots.has(parent) || !deps.state.readReleaseAt) {
         throw new Error("current matrix history unavailable");
       }
@@ -2739,10 +2748,8 @@ async function recoverHostedMatrixProducer(
   checkDeadline();
   const native = await ports.readExecution(saved.execution);
   checkDeadline();
-  if (
-    !native.ok || native.value === null ||
-    native.value.outcome === "not_started"
-  ) {
+  if (!native.ok || native.value === null) return null;
+  if (native.value.outcome === "not_started") {
     throw new Error("current matrix native proof unavailable");
   }
   const proof = parseHostedRunProofV1(native.value);
@@ -2909,7 +2916,11 @@ export async function runHostedAutonomy(
       ? await deps.closedMatrix()
       : undefined;
     closedBinding = closed?.binding ?? CLOSED_C_WAVE;
+    const releaseRead = read.ok && read.value.status === "found"
+      ? await deps.state.readRelease()
+      : null;
     if (
+      releaseRead?.ok && releaseRead.value.status === "found" &&
       read.ok && read.value.status === "found" && closed !== undefined &&
       closedCWaveNeedsRecovery(read.value.snapshot, closed.binding)
     ) {

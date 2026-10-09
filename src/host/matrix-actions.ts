@@ -410,9 +410,8 @@ export async function runHistoricalMatrixQuarantine(
     return 0;
   }
   const repair = await deps.state.readRepair();
-  if (!repair.ok || repair.value.status !== "found") {
-    throw new Error("historical matrix state unavailable");
-  }
+  // Missing or temporarily unavailable repair custody defers this pass.
+  if (!repair.ok || repair.value.status !== "found") return 0;
   const [witness, ...remainingWitnesses] = deps.historicalReleaseWitnesses ??
     [];
   const revalidate = deps.revalidateNotStarted === true;
@@ -478,6 +477,8 @@ export async function runHistoricalMatrixQuarantine(
       !deps.transport.confirmCompletedExecution ||
       !await deps.transport.confirmCompletedExecution(current)
     ) {
+      // The pass was explicitly selected to settle a known wave; an unsettled
+      // native writer is a hard refusal, never a silent deferral.
       throw new Error("historical matrix current native writers unsettled");
     }
     const observed = await deps.readExecution(current);
