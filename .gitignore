@@ -23,3 +23,6 @@
 # Local render/owner-install disposable fixtures
 /sentinel-local-render-*/
 /sentinel-owner-install-*/
+
+# Matrix Actions suite disposable plan/output fixtures
+/sentinel-matrix-actions-*/

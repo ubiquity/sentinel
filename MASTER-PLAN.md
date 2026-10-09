@@ -1,421 +1,100 @@
-# Sentinel master implementation plan
+# Sentinel master plan
 
-Owner planning session: 2026-09-06 America/New_York; created across 2026-09-07 00:00 UTC. Status: ready for implementation planning handoff, no implementation started. This file is the authoritative plan for the new standalone Sentinel goal. Read AGENTS.md and this entire document before work. `docs/lifecycle.txt` is the readable runtime tree; `docs/design-rationale.md` preserves the detailed design decisions and is subordinate to this master plan.
+This plan records current scope, architecture, invariants and canonical lane identities. [AGENTS.md](AGENTS.md) governs work in this repository; [docs/DECISIONS.md](docs/DECISIONS.md) records current owner decisions; [docs/build-status.md](docs/build-status.md) is the sole task and acceptance ledger. Earlier plans, investigations and consumed permissions remain recoverable from Git history.
 
-## 1. Outcome and scope
+## Outcome and scope
 
-Owner update, 2026-10-02 22:05 UTC: the owner requested aggressive concurrent issue processing, then directed "lift all the limits for now". The earlier one-production-implementation-writer, sequential-target, three-unfinished-PR, 120-start hourly and ordinary-hourly-cadence restrictions below are superseded for this concurrency task. Implement isolated issue matrix workers across the configured targets with no artificial throughput cap, while retaining one trusted state/integration owner and exclusive promotion ownership, durable admission/settlement history and the existing semantic/current-head review and CI gates. Existing recorded canonical goal and module identities remain unchanged. See `docs/DECISIONS.md` for the explicit uncapped policy and deployment-proof boundary.
+Sentinel runs in manually dispatched GitHub Actions. It discovers eligible work in configured repositories, preserves evidence and produced candidates, implements isolated issue repairs, obtains current-head structured review, validates and merges accepted work, and reconciles delivery through trusted controllers.
 
-Owner development policy update, 2026-09-15: use 120 shared Luna model starts
-per rolling hour and no rolling-seven-day cap during development, including
-supervised GitHub Actions runs. This supersedes all earlier 60/hour and
-168/seven-day limits below for development. Preserve every historical charge,
-shared accounting for implementation/review/retry/continuation, Luna/max,
-exclusive runtime ownership and reviewed installation. A source change alone
-does not establish the effective hosted policy.
-The owner reaffirmed that Sentinel is a cron-triggered GitHub Actions job.
+Use isolated concurrent issue workers across configured targets, with one trusted state/integration coordinator and a separate deterministic release controller that exclusively owns promotion. Provider and platform capacity remain real limits. Preserve durable admission and settlement for implementation, review, retry and continuation starts; no artificial hourly/weekly start, unfinished-PR, review-concurrency or review-drain cap is imposed.
 
-Owner policy update, 2026-09-14 14:17 UTC: raise the shared Luna model-start
-cap from one to 60 per rolling hour. This supersedes the one-start hourly cap
-below. Keep gpt-5.6-luna with max reasoning, 168 starts per rolling seven days,
-shared charging for implementation/review/retry/continuation, the existing
-ordinary-run cadence, and every historical reservation. The trusted integration
-owner updates and verifies the deployed policy through reviewed source; runtime
-model workers cannot change live admission authority.
+The implementation is Deno and TypeScript. Model workers receive credential-free checkouts and bounded evidence; they cannot write authoritative state, change live admission policy, select credentials, merge unverified work or promote releases. Runtime model and review policies are in the decisions document and must not be changed by local worker selection.
 
-Owner clarification, 2026-09-14 12:39 UTC: GitHub Actions is the runtime, and
-the immediate repair target is ubiquity/sentinel itself. This supersedes the
-immediately preceding suggestion to target ai.ubq.fi for this execution. Use
-the working hosted supervisor and existing self-repair path. Gateway-specific
-release, retention and activation choices do not block this self-repair work.
-Preserve the current Luna/max rolling limits, reviewed PRs, exclusive runtime
-writer and protected authority surfaces. Gateway acceptance remains separate;
-do not count Sentinel receipts as gateway delivery evidence.
+Current work, readiness and hosted receipts belong in the ledger. The separately owned [memory and self-healing plan](docs/sentinel-memory-plan.md) retains its active implementation contract; this cleanup does not transfer that ownership or establish new live proof.
 
-Owner scope update, 2026-09-11: the immediate authorized outcome is to make
-Sentinel repair its own GitHub backlog, launch it locally, and monitor real
-autonomous work. This supersedes the first-version exclusions on self-repair
-and initial activation for this local Sentinel target. Use reviewed PRs and a
-trusted supervisor outside the model checkout; model workers cannot change live
-admission policy, credentials, state or promotion authority. Use gpt-5.6-luna
-with max reasoning, at most one model start per rolling hour (168 per rolling
-seven days), shared by implementation, review, retry and continuation starts.
-Run hourly with one exclusive writer; deterministic bookkeeping can continue
-without a model start. A local runtime release requires exact source identity,
-supervised restart and rollback; do not fabricate Deno deployment receipts for
-Sentinel. Existing gateway release work remains distinct. Canonical lane and
-Astra-owned task register stay unchanged.
+## Canonical goal identity
 
-For the authorized local Sentinel host, use the existing owner's GitHub login
-through trusted code restricted to ubiquity/sentinel. Record the actual login;
-do not represent it as GitHub App authentication. Reserve installationId 0
-for this explicit no-App local credential scope; positive IDs retain their
-App meaning. The github adapter permits that scope, gateway configuration
-still requires a positive App installation, and every scope must match a
-configured repository. Preserve shared durable cooldown and model admission
-for scope 0. Local Git state may use a private persistent bare repository with
-the same repair/release refs and expected-head writes. Model workers receive
-neither GitHub credentials nor that state repository.
+The original goal identifier remains stable after development moved to the VPS. Reconcile exact branches, worktrees, dirty state, active writers and accepted ancestry before assigning or resuming work; a recorded identity does not authorize creating, switching or deleting a lane.
 
-Build a standalone Deno/TypeScript Sentinel at `/Users/nv/repos/ubiquity/sentinel` that polls configured repositories and incident adapters, captures sufficient failure evidence, produces permanent sanitized regression tests and bounded application fixes, waits for Codex review without holding an agent, merges accepted exact-head work, and directly promotes/monitors/rolls back exact Deno revisions through a separate deterministic release controller.
-
-Initial target: `ubiquity/ai.ubq.fi`. No webhook ingress, event bus, queue database, runtime matrix, agent fleet, generalized plugin framework, dashboard, autonomous self-modification, or automated bootstrap activation. One production implementation writer globally; at most three unfinished target PRs. A separate deterministic release writer exclusively owns Deno promotion and its release state. Multiple isolated development workers are permitted; this is not permission for multiple runtime code writers.
-
-Delivery success: two distinct previously undelivered eligible tasks advance autonomously in priority order through accepted PRs and verified production delivery, at least one driven by a captured offending request and permanent regression fixture; subsequent eligible selection is observed. The first task's review wait must overlap useful progress on the second without parallel code writers. Demonstrate interruption recovery and exact rollback in an isolated release environment before live target activation. Do not manufacture success by hand-implementing the application issues. Existing #136 is excluded.
-
-### Local self-update contract, 2026-09-11
-
-A fixed trusted supervisor outside mutable runtime checkouts owns a private
-active-runtime pointer and local release receipts; it never replaces itself.
-It accepts only an exact local scope-0 production ReleaseRequestV1 with a
-matching completed review and a merged revision in development ancestry. It
-stages that exact clean revision, saves the prior healthy runtime and intent
-before switching, and verifies a fresh real child run at the exact candidate
-SHA before acceptance. Model admission remains in the existing repair host.
-A candidate failure permits only restoration of the recorded prior revision,
-followed by a fresh prior run; missing settlement or identity proof stays
-pending. Never overwrite an unrelated newer active pointer. Persist local
-receipts atomically under the private state root with exclusive supervisor
-ownership. The repair loop receives only an optional readonly local receipt
-capability; it validates exact request identity before closure. Local scope
-cannot consume Deno release receipts. Gateway release behavior is unchanged.
-Astra bootstraps the reviewed supervisor and initial pointer; runtime agents
-cannot modify supervisor or receipt authority files, credentials or state.
-Local coding tasks are repaired BY DEFAULT: every open issue is in scope, and an
-issue is excluded only by an explicit opt-out — the exact standalone first-line
-HTML comment `<!-- sentinel:skip -->` in the issue body, or the `sentinel:skip`
-label. Source is re-read before admission, so gaining either opt-out revokes
-eligibility before any budget is spent. Owner update, 2026-09-17: the earlier
-opt-in marker `<!-- sentinel:repair -->` is no longer required; nothing is
-silently filtered out of the repair queue.
-Owner update, 2026-09-18: the repositories this deployment may repair are a
-committed setting, not code. `sentinel.targets.json` at the repository root is
-the ONLY source of targets: a plain, bounded, duplicate-free JSON array of
-`owner/name` slugs, listed in `protectedPaths` so no model worker can add itself
-a target repository. Each target's base branch is that repository's own default
-branch, read from GitHub — never a value in the file and never a constant in the
-runtime. Per-repository conventions (commands, protected paths, session bounds,
-live-start limits) come from the trusted template, so a slug cannot introduce a
-command or drop a protection. An absent, empty or malformed setting leaves the
-deployment with NO targets and the run refuses instead of falling back to any
-built-in repository; the shared 120-starts-per-hour admission cap still applies
-across all targets.
-Owner update, 2026-09-21: the hosted repair host now ADDRESSES every committed
-target instead of only the sentinel self-repository. Each target gets ONE
-separately targeted cycle — its own GitHub port, review service and trusted git
-remote, so issue rows are never guessed across repositories — and the cycles
-run sequentially over the existing state store, cooldown gate, model port and
-ONE shared admission budget and absolute run deadline. The sentinel
-self-target keeps installation scope 0; every other target runs under the
-`ubiquity-sentinel` App installation scope (`SENTINEL_APP_INSTALLATION_ID`,
-default 155687488). The advisory `sentinel_targets_diagnostic` line now reports
-the targets addressed and the ones skipped for an unavailable default branch or
-an exhausted deadline. The loop, contracts and `GitHubIssueV1` are unchanged.
-
-
-## 2. Canonical goal identity
-
-### Hosted Actions implementation checkpoint, 2026-09-14
-
-Owner update, 2026-09-14: never add branch protection rules or branch rulesets
-to Sentinel. Delete the supervisor source ruleset and proceed with the reviewed
-installation. This supersedes the proposed protection exception and restoration;
-do not recreate deleted rules. Preserve credential separation, exact revision
-validation, review and runtime writer ownership.
-
-The current delivery target is the real hosted Sentinel, using the existing
-protected supervisor workflow and App credential. The protected workflow runs
-prepare, repair, and finalize on separate runners. Only prepare and finalize
-receive the supervisor environment and release-state writer token. Repair
-receives the existing repair/model credentials and keeps one exclusive runtime
-writer. Five-minute reconciliation and hourly ordinary model admission remain
-separate; prior, candidate, rollback, and bootstrap verification runs use the
-actual repair entrypoint with model starts disabled.
-
-Persist a fixed self-scope runtime pointer and separate hosted release records
-in the existing release-state Git store. They are not Deno release records.
-Record exact execution run/attempt, protected launcher SHA, actual runtime SHA,
-pointer generation, purpose and intent before execution. Authenticate the exact
-completed runtime job and its bounded log through GitHub before recording proof.
-Keep execution settlement separate from healthy-run proof; missing evidence
-stays pending. A failed verification must restore only the recorded prior
-revision and obtain a fresh healthy rollback run before terminal rollback.
-Every pointer change consumes a previously saved exact intent through Git CAS.
-
-Installation must bind the reviewed integrated source to the existing protected
-supervisor ref, account for old direct repair runs, and establish an exact
-bootstrap pointer followed by a real healthy verification run. Do not select a
-runtime by moving branch tip, timestamp, or list order. Bootstrap alone is not
-autonomous issue delivery. Preserve PR30, issue21 state and all model charges;
-accepted candidate refresh requires a new exact-head review and current CI.
-
-Owner location update, 2026-09-14: the VPS replaces the Mac as the authoritative
-development host. The owner confirms all work is pushed to Git. Fetch all
-published branches and tags; Mac access and inspection of its worktrees are no
-longer prerequisites. Keep the existing goal suffix and branch names. The
-original Mac plan identifier below is historical identity, not a host dependency.
-For any remaining Sentinel module assignment in this plan, replace the prefix
-`/Users/nv/repos/ubiquity/sentinel` with `/home/codex/repos/ubiquity/sentinel`;
-retain the recorded lane name and branch. Historical evidence paths stay intact.
-This update does not relocate the separate gateway repository or transfer its
-runtime ownership. Development coding uses DeepSeek V4.1 Flash (`deepseek-flash`)
-at max reasoning; the product runtime remains Luna/max.
-
-| Identity | Value |
+| Field | Recorded value |
 | --- | --- |
+| Original goal ID | `/Users/nv/repos/ubiquity/sentinel/MASTER-PLAN.md` |
 | Canonical plan | `/home/codex/repos/ubiquity/sentinel/.codex-worktrees/master-plan-gfa795549e5/MASTER-PLAN.md` |
-| Original goal ID (preserved) | `/Users/nv/repos/ubiquity/sentinel/MASTER-PLAN.md` |
-| Goal slug / hash suffix | `master-plan` / `gfa795549e5` |
 | Repository root | `/home/codex/repos/ubiquity/sentinel` |
-| Canonical worktree name | `master-plan-gfa795549e5` |
+| Goal slug / suffix | `master-plan` / `gfa795549e5` |
+| Canonical worktree | `master-plan-gfa795549e5` |
 | Canonical worktree path | `/home/codex/repos/ubiquity/sentinel/.codex-worktrees/master-plan-gfa795549e5` |
 | Canonical branch | `codex/master-plan-gfa795549e5` |
-| Base ref / exact initialization SHA | local `development` / `ec4bd82df4adfdb962e10332607ee4fbf539cdeb` |
-| Lane status / owner | existing on VPS; current primary orchestrator owns integration |
+| Initialization base | `development` / `ec4bd82df4adfdb962e10332607ee4fbf539cdeb` |
+| Integration ownership | Current primary integration owner, recorded in `docs/build-status.md` |
 
+Preserve the recorded module identities below. Sentinel worktree paths use `<repository root>/.codex-worktrees/<lane>` and branches use `codex/<lane>`. The gateway module belongs to its own repository; its original recorded root is `/Users/nv/repos/ubiquity/ai.ubq.fi`, and current target ownership/path must be reconciled independently before work. Exact starting bases and current dispositions are ledger facts, not moving branch guesses.
 
-Local initialization base is a documentation-only commit. After creating the canonical lane from that exact base, fast-forward it to the root's verified planning-only `development` tip before implementation; verify the intervening commits modify only these planning documents. Record that exact documentation tip in `docs/build-status.md` before assigning work. This admits the final plan commit without a circular self-referential SHA. Do not follow a moving root tip blindly if implementation or another writer has appeared.
+| Module | Repository | Recorded lane | Surface |
+| --- | --- | --- | --- |
+| m01-github | `ubiquity/sentinel` | `master-plan-m01-github-a86bd3790da` | `src/github/**`, `tests/github/**` |
+| m02-evidence | `ubiquity/sentinel` | `master-plan-m02-evidence-afb9652dea8` | `src/adapters/gateway/**`, corresponding tests |
+| m03-replay | `ubiquity/sentinel` | `master-plan-m03-replay-ac17fc34d9a` | `src/replay/**`, `tests/replay/**` |
+| m04-repair | `ubiquity/sentinel` | `master-plan-m04-repair-ac50ee9a0a3` | `src/repair/**`, `tests/repair/**` |
+| m05-release | `ubiquity/sentinel` | `master-plan-m05-release-a2ebf3089f9` | `src/release/**`, `tests/release/**` |
+| m06-gateway | `ubiquity/ai.ubq.fi` | `master-plan-m06-gateway-ad0aef5cd31` | Incident/capture/replay producer and exact build/receipt seams |
 
-No GitHub remote was created. `gh repo view ubiquity/sentinel` did not resolve under the available account at setup; that does not prove global nonexistence. Local root was absent and was initialized on `development`. Remote name/visibility and hosted credentials are not selected by this plan. Build locally without them; resolve publication identity before creating the remote, then preserve the recorded lane.
+## Architecture and runtime order
 
-This is a new goal, not the embedded prototype's goal. Do not repurpose its branch, merge PR251 here, or change its pending work. The old ai.ubq.fi lane remains `/Users/nv/repos/ubiquity/ai.ubq.fi/.codex-worktrees/issue-throughput-handoff-2026-09-06-g5a02cbbad3`; reconcile its owner and pending changes before any target-side module or runtime cutover.
+The repair coordinator reads saved progress, reconciles incomplete external effects, reads authoritative sources, selects eligible actions, reserves any model start, executes bounded work and saves progress. Pending reviews do not hold an agent. A failed source read is unavailable, never a successful empty result. No sleeping model or unchanged busy polling is required.
 
-## 3. Review policy: concentrate Codex at acceptance
+Prioritize delivery bookkeeping, active production incidents by impact/severity and oldest first-seen time, P0/P1 corrections, other reproducible unresolved 5xx groups, existing Sentinel PR repairs, then issues/review backlog by highest recognized numeric priority and oldest creation time. Use stable repository/source tie-breaks; missing priority sorts last. Preserve dependencies, source integrity and contributor ownership; repeated identical incidents identify one task.
 
-Owner update, 2026-09-16 05:51 UTC: stop all development pull requests and
-Codex reviews. Make changes, immediately test, and deliver directly. This
-supersedes development acceptance rounds, fresh-Astra audit gates and PR
-delivery requirements in this plan and repository instructions. The owner
-explicitly clarified that autonomous repairs retain their PRs and reviews.
-Preserve those runtime gates, exact source identity, state, admission charges
-and rollback. Direct owner-authorized development installation must be recorded
-as such and must not fabricate a model review or autonomous release receipt.
+Targets come only from the protected `sentinel.targets.json` array. Each target uses its own default branch, authenticated Git remote, source mirror, review checkout and candidate objects. Trusted configuration supplies commands and protected paths; a repository slug cannot add commands or remove protections. Invalid/absent/empty target configuration refuses rather than choosing a fallback repository.
 
-During module development use focused deterministic tests and primary-agent diff inspection. Do not spend Codex reviews on module commits, internal ancestry merges, scaffolding, or every small adjustment. The first Codex review covers the complete integrated, locally accepted candidate. Batch relevant fixes; a materially changed candidate needs a fresh acceptance review, not a recycled clean verdict. At most three review rounds per acceptance cycle; unresolved substantive P0/P1 after that means blocked, never automatic merge. Review failure/no verdict is unavailable, not passed.
+One absolute execution deadline spans coordinated work. Reserve enough time for model completion, validation, publication and native handoff before starting a session. Matrix planning preserves the existing five-minute operation margin; task-owned cells retain their configured session and completion refusal bounds.
 
-Development reviews and the product's runtime review policy are distinct. Runtime target PRs still require a verified completed current-head Codex review with no unresolved P0/P1 plus passing deterministic CI and branch protections. They wait asynchronously and consume configured model-start allowance. P2/P3 become future work unless target policy requires more. The earlier embedded prototype's all-severity non-gating policy is not adopted. Codex review requests apply only to runtime code changes: a change limited to tests, fixtures, boot scripts, dev tooling, documentation or other non-runtime files does not request or require a Codex review; external `@codex review` requests are retired and the internal structured reviewer is the runtime review path for runtime target PRs.
+The deterministic release controller reconciles durable requests, identifies an exact candidate and proven healthy prior revision, records intent, promotes, monitors, and accepts or restores the exact prior revision. It uses no model. Repair workers cannot write release state; release controllers cannot edit application code or repair accounting.
 
-At final delivery, use one aggregate PR for Sentinel and at most one required gateway-integration PR, each reviewed after integrated acceptance preparation. Their CI can run throughout; no per-module public PR/review loop. Target rules still apply to the gateway PR; the owner's latest instruction defers optional repeated Codex requests, not deterministic validation or exact-head acceptance. Do not alter unrelated repository policies to save review quota.
+The protected hosted supervisor separates preparation, model repair and finalization capabilities. Only trusted controller stages receive supervisor/state authority. Hosted runtime pointer and execution proofs are distinct from target deployment receipts. Bootstrap health alone does not prove autonomous issue delivery.
 
-## 4. Architecture and runtime order
+## Contracts and durable state
 
-Repair workflow: scheduled at 7,22,37,52 minutes past the hour; manual runs use the same path. One fixed non-cancelling concurrency group. No incident/PR/review/push triggers. The loop reads saved progress, reconciles incomplete external operations, polls authoritative sources, selects an eligible action, checks model admission if needed, executes it, saves progress, and repeats only while meaningful work and sufficient time remain. Pending reviews are skipped. No sleeping agent or busy polling. A failed source read cannot become a successful empty result.
+[docs/contracts.md](docs/contracts.md) defines strict records, parsers, digest domains, ports and producer/consumer wire contracts. Shared contracts and cross-module wiring have one owner; changing them requires revalidating their actual consumers. No worker invents a status, digest or receipt variant.
 
-Priority: finish outstanding delivery bookkeeping first; then active production incidents by impact/severity and oldest first_seen; P0/P1 corrections; other reproducible unresolved 5xx groups; other existing Sentinel PR repairs; then issues/nonblocking review backlog by highest recognized numeric priority and oldest creation time. Stable repository/source tie-break, missing priority last, highest duplicate recognized label wins. Known severe security/data-loss work uses incident urgency regardless of source. Preserve protected paths, dependencies, source integrity and contributor ownership. No author/assignment/estimate/template/file-hint admission gates. Never create duplicate tasks for repeated identical incidents.
+Use the Git-backed `sentinel-state/repair` and `sentinel-state/release` records with one trusted writer per surface and expected-head, non-force writes. On conflict, reread and resolve explicitly. Model workers receive no state repository or state-writing credential.
 
-Release workflow: separate five-minute scheduled serialized job reads durable requests, reconciles current Deno state, identifies an exact built candidate, verifies it, records the healthy prior revision, promotes, monitors, and accepts or restores that exact prior revision. It uses no model and no model budget. Both workflows poll; no event-delivery protocol. The repair writer cannot promote or mutate release-state records. The release writer cannot edit application code or repair-budget records.
+Persist operation intent before candidate publication, PR creation, review, merge or promotion. Reconcile the exact remote object after an ambiguous response before repeating. Preserve candidate identity separately from the observed published head. A produced candidate must pass publication checks, survive in its operation-bound remote ref, and be fetchable from a fresh object store before durability is claimed.
 
-Repair job ceiling: 120 minutes, with no new model work after 90 minutes and a reserved validation/publication margin; obey tighter supported invocation bounds. Never start work whose declared maximum plus margin does not fit. Checkpoints must be durable before termination, not only in finally handlers. GitHub's six-hour hosted-job limit is a ceiling, not a target or availability guarantee.
+Durable reservations precede every implementation, retry, continuation and review start. Ambiguous submissions remain charged unless proven never submitted. Preserve terminal work and historical accounting; missing evidence cannot justify regeneration, refund, state rewriting or an unchanged retry. Retention cleanup is a separate decision.
 
-## 5. Shared contracts: freeze before parallel work
+## Evidence and permanent regressions
 
-Foundation owner writes strict TypeScript types, runtime parsers, canonical serialization and contract fixtures in `src/contracts/`. No worker invents its own status/digest variant or changes these files. Proposed names below become the version-one contract; minimize fields while preserving the listed semantics.
+The gateway adapter is read-only and must exhaust supported pagination, authenticate artifact identity/integrity and report missing coverage or expiry. Source, fixture, ciphertext and Git identities use distinct digests. Original identities cannot be rewritten to match a resumed run.
 
-| Contract | Required content and behavior |
-| --- | --- |
-| RepositoryConfigV1 | Repository identity, installation reference, base branch, exact adapter kind, configured validation/replay commands, protected paths, build/acceptance identifiers; secret references only. Global hourly/seven-day start limits are required before enabling inference. No model-generated shell commands. |
-| WorkRecordV1 | Stable source identity/revision, kind, severity/priority/age, related incident/issue, controller SHA, target base/checkpoint/head/PR, next step (`work`, `review`, `delivery`, `blocked`, `done`), bounded attempts/next retry/blocker, evidence references, incomplete operation intent. Waiting is a reason on a next step, not a second conflicting lifecycle. |
-| IncidentSummaryV1 / IncidentEvidenceV1 | Stable incident fingerprint, first/last seen/count/severity, failing revision, bounded error context, authenticated artifact refs/hashes/expiry and replay metadata; provenance and missing-coverage status. Sensitive content is never in public work records. |
-| ReviewReceiptV1 | Expected reviewer identity, PR/head, observed base, request/result IDs, completed/pending/unavailable outcome, full original findings and fingerprints, unresolved severity; exact head binding. No completion inferred from silence/reaction. |
-| BudgetReservationV1 | Unique task/head/attempt identity, timestamp, purpose, submitted/ambiguous/confirmed-not-submitted outcome. Durable admission precedes model start. Shared across repos/manual runs; hour and seven-day rolling checks. |
-| ReplayResultV1 | Exact original/candidate SHAs, sanitized fixture/test digest, command identity, expected behavior, before failure and after pass, output hashes and limitations. Failure must be for the intended reason. |
-| ReleaseRequestV1 | Stable request ID, target/environment, accepted merged SHA and PR/review reference; no model-supplied arbitrary revision choice. |
-| ReleaseRecordV1 | Request identity, exact candidate/prior SHA and revision, current phase/intent, actual observed identity, baseline/samples/threshold result, acceptance/rollback/error receipts. Interrupted monitoring is never fabricated continuous coverage. |
+Restricted encrypted originals and raw diagnostics stay outside public Git, issue bodies, PRs and model credentials. Commit only minimal sanitized fixtures with the fix, wired into the target's actual CI. The regression must fail on the recorded original revision for the intended defect and pass on the candidate; upstream responses are replayed locally without paid inference. Lost evidence blocks with `evidence_expired` rather than an invented fixture.
 
-Ports: `GitHubPort` for authenticated reads/exact-head writes and review normalization; `IncidentAdapter` for `listUnresolvedIncidents` and `readIncident`; `ReplayPort` for isolated deterministic validation; `ImplementationPort` for a bounded model session with secret-free checkout; `DenoReleasePort` for exact revision discovery/identity/promotion/metrics; `StateStore` for expected-head record writes; `Clock` for testable time. Tests inject transports, not alternate product logic. Production adapters implement these ports directly.
+Finite retention/storage bounds, an existing scoped key source and objective stability metrics must be confirmed before activation. Preserve provenance, capture lifetime and sampling gaps. A fixture/helper test does not establish the production producer/consumer boundary.
 
-Evidence authenticates different objects with distinct digests: source snapshot, fixture, encrypted artifact and Git commit are not interchangeable. Original historical identities never get rewritten to match a resumed run.
+## Review, merge and release safety
 
-### State and budget implementation
+Runtime code changes require the internal structured reviewer's completed current-head receipt with no unresolved P0/P1, current deterministic CI and applicable target branch protections before expected-head merge. Missing, stale, malformed or unavailable review evidence cannot pass. Local development requires no development PR or Codex review; external hosted Codex review requests are retired.
 
-Use dedicated Git branches `sentinel-state/repair` and `sentinel-state/release` in the new repository. The primary source branch is `development`. Each state branch has one trusted workflow writer and JSON records; ordinary non-force pushes with expected remote head. On ref mismatch, reread and fail/resolve explicitly; never force-overwrite. Coding agents get no state-writing credentials. Local tests use real temporary Git repositories and injected remote APIs. Production state branches are created only at activation, not during this planning setup.
+Base movement requires validation of the current integrated candidate. Changed bytes require matching current-head evidence. Human-owned PRs stay untouched unless delegated. Issue-backed repair PR bodies are exactly `Resolves #N`; delivery acceptance still requires its own receipts.
 
-Save intent before push/PR/review/merge/promotion, then reconcile the exact remote object after an ambiguous response before repeating. Deterministic task/branch identities prevent duplicate PRs. A saved candidate survives restart. Missing evidence is a blocker, not permission to regenerate or reset terminal work. Keep compact completed records to avoid restarting unchanged tasks; defer pruning.
+Never select a deployment revision by time, list order or moving branch tip. Persist exact healthy prior/candidate identity and promotion intent before switching. Missing execution settlement or identity remains pending. Refuse to overwrite a newer unrelated pointer or target revision; rollback restores only the recorded prior and requires fresh restoration proof.
 
-One shared model-start budget record lives on repair state. Charge each independently initiated agent session, continuation, retry and Codex review request. Save a reservation before invocation; persistence failure prevents invocation. Ambiguous submissions remain charged unless proven never submitted. Caps do not reset on process restart or midnight; use rolling timestamps. These are local start caps, not exact token/provider allowance. A single session can contain unobserved requests; preserve supported duration/token/turn bounds, report authoritative quota failure and leave manual-use headroom. No incident exception, automatic provider substitution or uncapped review path. No numeric owner budget is guessed: offline build works with fixtures, live inference remains disabled until configured.
+The Deno release adapter retains its exact-build, promotion, managed/custom-origin identity and rollback contract. An identified Cloudflare 403 can be a warning only after managed identity passes; any HTTP 200 identity mismatch fails. Preserve continuous 30-minute acceptance with 30-second samples and declared metrics, denominators, baseline, minimum samples and owner-approved thresholds. An interrupted monitor restarts coverage; missing telemetry is unavailable.
 
-## 6. Gateway evidence and regression requirements
+The gateway now uses its own trusted VPS deployment path. Deno receipts cannot establish VPS release delivery. [docs/activation-checklist.md](docs/activation-checklist.md) retains the separate target ownership, VPS release-contract and isolated rollback gates; no new deployment or promotion authority is implied here.
 
-Current source snapshot at setup: ai.ubq.fi root `development` at `aafb7ee0598699bb7fb8a72ea133693ed64462da`, with pre-existing untracked `.DS_Store` and `docs/provider-sentinel-redesign-2026-09-04.md`; preserve both. Do not treat this snapshot as a live lease.
+## Development ownership and acceptance
 
-Reusable code was confirmed in `src/sentinel_replay_capture.ts`, `src/sentinel_replay_admin.ts`, `src/sentinel_incident_outbox.ts`, `src/sentinel_incident_admin.ts`, `src/admin_error_log.ts` and `src/handler.ts`. Existing routes include authenticated `GET /admin/errors`, super-admin `GET /admin/sentinel/replay-captures`, and incident claim/ack/defer POSTs. Replay export accepts interval/cursor/incident ID and currently requires page limit one. Respect and exhaust pagination rather than assuming a larger page is supported.
+Shared foundation owns contracts, state, accounting and toolchain. Module writers own explicitly assigned isolated surfaces. The integration owner alone owns `docs/build-status.md`, integration, scope/disposition and acceptance. DSH workers return uncommitted changes; current local worker selection follows the applicable global routing and explicit task instruction.
 
-Important gap: both incident and replay capture TTL constants are 48 hours. Weekly budget waits can outlive them. The target integration must provide durable unresolved incident discovery and retain or export evidence before expiry; do not claim the current rotating store already meets this contract. Proposed narrow addition: authenticated `GET /admin/sentinel/incidents` exposing a paginated unresolved index with stable IDs and explicit coverage/expiry metadata, using the existing authorization pattern. Reuse existing replay export for artifacts. Do not weaken admin authentication or expose plaintext payloads in a new public API. If a suitable existing endpoint is found during reconciliation, use it instead of duplicating it.
+### Wave C
 
-Capture sensitive originals in restricted encrypted storage; the deterministic ingestion phase must secure active evidence before model budget is available. Define a finite owner-approved retention/storage bound before production, and block with `evidence_expired` rather than inventing a fixture if capture was lost. No new key/secret/env surface is approved; reuse the existing mechanism where access scope permits and request a concrete missing credential interface only after producing the exact need. Do not copy an application key into a handoff or model environment.
+Cross-module integration owns actual entrypoints, workflow/config permissions, trusted host composition and connected acceptance. Tests exercise production consumers with fake external services, real temporary Git/state and injected clocks. They contain no paid/model calls, GitHub writes or deployments. Reconcile and freeze writers before final checks; accepted worker tips must remain ancestors of canonical and the shipped branch.
 
-The permanent test is a minimal sanitized request/upstream fixture committed to the target with the fix and wired into its normal CI. It fails on the recorded original revision for the intended reason and passes on the candidate. Cover relevant status/schema/SSE termination behavior; replay upstream responses locally rather than spending paid inference to reproduce. A proper 4xx for invalid input can be correct. Irreducible private data must not be committed; report when an equivalent safe regression cannot be established. The agent cannot rewrite expected results to disguise failure.
+Use the focused local sequence and 300-second command bounds in AGENTS.md. Documentation changes need documentation checks. Whole-repository sweeps and development-triggered hosted attempts need their explicit authorizations; existing evidence on unchanged inputs should be reused.
 
-## 7. Review, merge and release safety
+Operational acceptance requires exact source/candidate/fixture identities, before/after regressions, PR head/review/CI/merge evidence, installed runtime/deployment receipts and observed delivery. Keep local, merged, installed and live evidence separate. Original gateway completion requires two distinct previously undelivered eligible tasks, including a captured-request regression, continued eligible selection, interruption recovery, exact isolated rollback and six observed hours after activation. Old prototype #136 does not count as a new delivery; preserved terminal work is not reset to manufacture throughput.
 
-GitHub App authentication supplies short-lived scoped target access to the trusted host. No webhook subscription. Models get isolated checkouts and bounded evidence, not App private keys, state credentials, or Deno tokens. Restore current Codex/runtime authentication through the existing approved mechanism; verify actual model/effort receipts, never a CLI label alone. Owner clarification, 2026-09-09 21:38 UTC: accepted evidence is trusted submitted provider/model/effort configuration bound to the exact invocation/thread/turn, with all applicable runtime routing events and terminal result; label this request/runtime evidence, not backend provider attestation. Preserve Luna/max, no fallback and fail closed when correlation or required evidence is missing.
+## Continuation
 
-Codex clean-verdict integration is an explicit uncertainty: obtain representative actual completed-clean and finding-bearing results with exact head identity. Validate them against the expected reviewer; missing machine-verifiable completion means unavailable. Do not build a permissive parser around eyes reactions or absence of comments. Use one pending request per head; corrections require new head validation and review. Do not reset review-round limits on each new commit. Human-authorized finding disputes must be recorded; the coding agent cannot clear its own merge gate.
-
-Trusted merge code rechecks current CI/protection/head and performs expected-head merge. Base movement requires current integrated validation; changed candidate content requires a fresh reviewed head. Target releases are serialized, and human-owned PRs are untouched unless delegated. An issue-backed repair pull request publishes exactly `Resolves #N` as its body, so the merge links and closes the source issue (owner directive, 2026-09-23). Retry a failed issue closure as closure only.
-
-Target CI builds the exact accepted merged SHA. The new release controller must be the exclusive stable promotion writer; the target's current automatic promotion path must be disabled/reassigned during the authorized handover, not left racing. Preserve target `deno-deploy.yml` build/receipt capability. No code in the repair agent chooses a revision by timestamp or list order.
-
-Release: attest actual healthy prior SHA/revision before promotion; identify exactly one succeeded candidate from the exact build transaction; verify immutable candidate identity; persist promotion intent; call the existing Deno promotion API and require 204; verify stable managed body/headers and custom domain. For the gateway retain identified Cloudflare 403 as warning only after managed identity passes, and fail any HTTP 200 identity mismatch. Keep 30 continuous minutes of acceptance with 30-second samples. Roll back only an objectively failed controlled candidate to its recorded prior revision and prove restoration; reviews alone do not trigger rollback.
-
-Stability policy requires declared metrics, denominators, baseline/window, minimum samples and owner-approved thresholds. Include health identity, relevant 5xx and timeout/stream failures; distinguish upstream-wide faults and low sample counts. Do not claim missing telemetry is stable or choose universal thresholds from intuition. A lost monitor restarts continuous coverage; Actions schedule/runner availability is not a rapid-rollback guarantee. Use independently supervised hosting if a hard recovery SLA is required. This remains an explicit deployment choice, not hidden extra infrastructure.
-
-## 8. Development waves and ownership
-
-Development uses DSH writers under the installed global playbook, not an assumed unlimited nested-subagent capability. Primary owns architecture, integration, Git commits/pushes and acceptance. Verify `deepseek-official/deepseek-v4-flash-vision-exp` at max in the actual request header with `NODE_ENV=production`; follow current `~/.codex/agents/deepseek-harness.md` rather than copying the old ai.ubq.fi TUI invocation into this new repo. For m06-gateway, its target AGENTS may require a different supported TUI launch path; obey those more-specific target instructions while preserving the same model/max invariant. No arbitrary process kill, restart, model substitution or secret transfer. One DSH writer per isolated worktree.
-
-No Codex implementation subagent substitution under that playbook. Independent DSH processes in recorded worktrees are sufficient; nested DSH subagents are not a prerequisite. Start at most three write-capable development workers at once, expanding only after ownership and provider capacity are established. This bounds integration load without assuming a Harness hard cap. Read-only inspections need no branch.
-
-### Wave A — shared foundation, one owner
-
-Primary owns foundation acceptance and uses one bounded DSH writer in the canonical lane before parallel writers start. Owned: `src/contracts/**`, `src/state/**`, `src/budget/**`, `tests/contracts/**`, `tests/state/**`, `tests/budget/**`, `tests/fixtures/contracts/**`, root Deno/toolchain files, `docs/contracts.md`, `docs/build-status.md`. Write strict contracts, state/budget implementation, hermetic test harness and a fake-port loop skeleton. Register production entrypoint boundaries without writing parallel modules. No paid/model/network calls in tests. Save exact foundation commit F in build status. Do not launch Wave B before F is validated and committed. Workers branch from this exact integrated F.
-
-### Wave B — bounded independent modules
-
-#### m01-github
-
-- Ownership: `src/github/**; tests/github/**`.
-- Repository: `/Users/nv/repos/ubiquity/sentinel`.
-- Module hash suffix: `a86bd3790da`.
-- Worker worktree name: `master-plan-m01-github-a86bd3790da`.
-- Exact worktree path: `/Users/nv/repos/ubiquity/sentinel/.codex-worktrees/master-plan-m01-github-a86bd3790da`.
-- Exact branch: `codex/master-plan-m01-github-a86bd3790da`.
-- Lane state: planned; primary creates after dependencies/ownership pass.
-- Dependency/base: Exact validated foundation commit F from Wave A; primary records the full SHA before launch, no moving ref.
-- Prohibited: shared contracts/state/budget, root manifests/lockfiles, other modules and production activation; target module additionally preserves old Sentinel control/policy/workflow ownership except its explicitly assigned build receipt seam.
-
-#### m02-evidence
-
-- Ownership: `src/adapters/gateway/**; tests/adapters/gateway/**`.
-- Repository: `/Users/nv/repos/ubiquity/sentinel`.
-- Module hash suffix: `afb9652dea8`.
-- Worker worktree name: `master-plan-m02-evidence-afb9652dea8`.
-- Exact worktree path: `/Users/nv/repos/ubiquity/sentinel/.codex-worktrees/master-plan-m02-evidence-afb9652dea8`.
-- Exact branch: `codex/master-plan-m02-evidence-afb9652dea8`.
-- Lane state: planned; primary creates after dependencies/ownership pass.
-- Dependency/base: Exact validated foundation commit F from Wave A; primary records the full SHA before launch, no moving ref.
-- Prohibited: shared contracts/state/budget, root manifests/lockfiles, other modules and production activation; target module additionally preserves old Sentinel control/policy/workflow ownership except its explicitly assigned build receipt seam.
-
-#### m03-replay
-
-- Ownership: `src/replay/**; tests/replay/**`.
-- Repository: `/Users/nv/repos/ubiquity/sentinel`.
-- Module hash suffix: `ac17fc34d9a`.
-- Worker worktree name: `master-plan-m03-replay-ac17fc34d9a`.
-- Exact worktree path: `/Users/nv/repos/ubiquity/sentinel/.codex-worktrees/master-plan-m03-replay-ac17fc34d9a`.
-- Exact branch: `codex/master-plan-m03-replay-ac17fc34d9a`.
-- Lane state: planned; primary creates after dependencies/ownership pass.
-- Dependency/base: Exact validated foundation commit F from Wave A; primary records the full SHA before launch, no moving ref.
-- Prohibited: shared contracts/state/budget, root manifests/lockfiles, other modules and production activation; target module additionally preserves old Sentinel control/policy/workflow ownership except its explicitly assigned build receipt seam.
-
-#### m04-repair
-
-- Ownership: `src/repair/**; tests/repair/**`.
-- Repository: `/Users/nv/repos/ubiquity/sentinel`.
-- Module hash suffix: `ac50ee9a0a3`.
-- Worker worktree name: `master-plan-m04-repair-ac50ee9a0a3`.
-- Exact worktree path: `/Users/nv/repos/ubiquity/sentinel/.codex-worktrees/master-plan-m04-repair-ac50ee9a0a3`.
-- Exact branch: `codex/master-plan-m04-repair-ac50ee9a0a3`.
-- Lane state: planned; primary creates after dependencies/ownership pass.
-- Dependency/base: Exact validated foundation commit F from Wave A; primary records the full SHA before launch, no moving ref.
-- Prohibited: shared contracts/state/budget, root manifests/lockfiles, other modules and production activation; target module additionally preserves old Sentinel control/policy/workflow ownership except its explicitly assigned build receipt seam.
-
-#### m05-release
-
-- Ownership: `src/release/**; tests/release/**`.
-- Repository: `/Users/nv/repos/ubiquity/sentinel`.
-- Module hash suffix: `a2ebf3089f9`.
-- Worker worktree name: `master-plan-m05-release-a2ebf3089f9`.
-- Exact worktree path: `/Users/nv/repos/ubiquity/sentinel/.codex-worktrees/master-plan-m05-release-a2ebf3089f9`.
-- Exact branch: `codex/master-plan-m05-release-a2ebf3089f9`.
-- Lane state: planned; primary creates after dependencies/ownership pass.
-- Dependency/base: Exact validated foundation commit F from Wave A; primary records the full SHA before launch, no moving ref.
-- Prohibited: shared contracts/state/budget, root manifests/lockfiles, other modules and production activation; target module additionally preserves old Sentinel control/policy/workflow ownership except its explicitly assigned build receipt seam.
-
-#### m06-gateway
-
-- Ownership: `src/sentinel_incident_admin.ts; src/sentinel_incident_outbox.ts; src/sentinel_replay_capture.ts; src/sentinel_replay_admin.ts; src/handler.ts exact route wiring; affected tests; .github/workflows/deno-deploy.yml build/receipt seam only`.
-- Repository: `/Users/nv/repos/ubiquity/ai.ubq.fi`.
-- Module hash suffix: `ad0aef5cd31`.
-- Worker worktree name: `master-plan-m06-gateway-ad0aef5cd31`.
-- Exact worktree path: `/Users/nv/repos/ubiquity/ai.ubq.fi/.codex-worktrees/master-plan-m06-gateway-ad0aef5cd31`.
-- Exact branch: `codex/master-plan-m06-gateway-ad0aef5cd31`.
-- Lane state: planned; primary creates after dependencies/ownership pass.
-- Dependency/base: Target snapshot `aafb7ee0598699bb7fb8a72ea133693ed64462da`; reconcile old owner/PRs first, record the exact approved target base T before lane creation; requires frozen foundation F contract and target ownership.
-- Prohibited: shared contracts/state/budget, root manifests/lockfiles, other modules and production activation; target module additionally preserves old Sentinel control/policy/workflow ownership except its explicitly assigned build receipt seam.
-
-
-Each worker's assignment must repeat the exact plan path, module ID, worktree/branch/base F (or reconciled target base), owned files, prohibited shared surfaces, required behavior/tests, runtime expectation and failure response. Workers are not alone; preserve others' edits. No commit/push by DSH. Primary verifies changed paths, terminal result and focused tests, commits the worker result in its own lane, and integrates using ancestry-preserving merges. A worker handback is only ready, not project-complete.
-
-Module behavior and acceptance:
-
-- **m01-github:** Implement GitHubPort, installation-token handling, source reads, exact-head PR publication/merge and strict review normalization. Simulate pending/clean/P1/stale/malformed review, duplicate publication and ambiguous request. No permissive clean inference; no real comments/reviews during module tests. No policy/storage schema edits.
-- **m02-evidence:** Implement gateway adapter, pagination, normalized incident identity, bounded restricted artifact retrieval/integrity and expiry reporting. Use frozen gateway HTTP fixtures; ensure incomplete coverage is surfaced and duplicate incidents link to one task. Read-only adapter; no remote claim/ack side effects hidden in listing. Coordinate producer schema through foundation owner.
-- **m03-replay:** Implement isolated checkout/replay runner, sanitized fixture validation/provenance, before/after result and target test invocation through configured commands. Prove fail-before/pass-after with a local toy server and recorded upstream fixture, no model or network. Reject sensitive fixture material and wrong revision; preserve useful checkpoints. Agent-written regression must use actual target CI, not a standalone unused script.
-- **m04-repair:** Implement pure selection/loop transitions against frozen ports, capped WIP, retry/wait handling and model admission integration. Runtime ImplementationPort uses pinned Luna/max with supported bounded sessions; tests fake it. Confirm no model calls at budget cap, unchanged wait exits, publication survives restart, terminal identities stay terminal, and review wait allows another eligible task. No GitHub/Deno transport or workflow edits.
-- **m05-release:** Implement DenoReleasePort and deterministic release state machine, candidate/prior identity, promotion/monitoring/rollback and recovery against scripted transport. Prove ambiguous promotion reconciliation, lost-monitor behavior, exact rollback, unrelated-newer-revision protection and missing telemetry failure. No real promotion or model calls. This module exclusively owns release implementation; shared storage port stays foundation-owned.
-- **m06-gateway:** In the target repository, reuse existing capture/export and add only the unresolved-discovery/retention and build-receipt seams needed by the frozen contract. Tests exercise actual authenticated handler and capture persistence, not a constructed output object. Keep OpenAI-compatible gateway behavior and current model/policy rules unchanged. Prepare but do not activate build-only/promotion-ownership cutover until authorized. No changes to old Sentinel runtime controls to bypass its ownership. This module may be postponed while its target owner is active; Sentinel modules continue against contract fixtures.
-
-### Wave C — integrate real paths, one writer
-
-Primary owns `src/main.ts`, `src/release-main.ts`, `.github/workflows/**`, repository config/example docs, end-to-end tests, permission/env wiring, and all cross-module seams. Integrate accepted worker commits, exercise the actual port adapters and entrypoints, then connect the gateway producer/consumer. Interfaces already exist; this wave fixes wiring defects rather than inventing incompatible interfaces after the fact. Any necessary contract change goes through the foundation owner with affected consumers retested before continuing. Do not add a second general abstraction layer.
-
-Use one dedicated bounded DSH integration assignment in the canonical lane after parallel writers are quiescent. Other agents can perform read-only audits without spawning Codex review calls. If integration exposes a module defect, assign a bounded correction in its recorded lane, rebase its starting ownership to the current integrated SHA with explicit recorded ancestry, and reintegrate; do not silently switch lanes.
-
-## 9. Validation and acceptance sequence
-
-Define one canonical Deno task `test:local` during foundation: focused repository suites, actual producer/consumer replays, formatting, lint and type/build checks, with credential-free child environments and no external calls. Run focused affected tests while coding; run the integrated harness when combined behavior is ready. The name is a planned existing-task interface for this new repo, not a new CLI flag/environment variable. The target gateway still uses its existing `deno task sentinel:test-local` for Sentinel-touching PRs.
-
-Local acceptance before Codex review:
-
-1. Run the complete lifecycle via actual production entrypoints with fake external transports and real temporary Git repositories: incident discovery → artifacts → before-failure replay → implementation result → after-pass regression → PR request → pending review → next-run review ingestion → exact-head merge → release request → promotion/acceptance → closure.
-2. While the first PR waits, advance a second work item using the same single writer. No duplicate review request or extra budget charge on observation.
-3. Inject crashes after candidate push, PR creation, review submission, merge and promotion; next-run recovery preserves successful work and reconciles effects. Inject real CAS/ref conflicts and old-running-job ownership rather than assuming expiry means exit.
-4. Verify both rolling budgets across repositories/restarts, including retries/continuations/reviews, clock-window boundaries and ambiguous submissions. Deterministic work still runs at cap.
-5. Prove wrong head/review identity, P0/P1 findings, no verdict, missing telemetry, stale source, dependency blockers, invalid artifact and protected changes fail closed at their actual consumers. Blocked work does not prevent eligible unrelated work.
-6. Prove exact rollback and no rollback of a newer unrelated release; continuous acceptance cannot survive an unobserved gap as if sampled.
-7. Verify gateway retention beyond the current 48-hour expiry boundary with controlled clocks; private capture never enters public logs/Git/model credentials.
-
-Then freeze the integrated head, run one Codex acceptance review, address substantive findings in a batch, rerun affected/integrated checks as justified, and obtain a new exact-head review where changed. Publish one aggregate PR and satisfy deterministic branch gates. Preserve every accepted worker tip as an ancestor. No P0/P1 bypass on exhausted review quota; report that specific acceptance blocker while keeping the implementation intact.
-
-Live proof after publication identity, credentials, budgets, thresholds and target handover are settled: first use read-only discovery with a retained captured incident; then one isolated real Deno release/rollback test; then enable target repairs. Record exact source/fixture/before-after results, PR/head/review IDs, merge SHA, Deno revision, acceptance/rollback receipts and issue closure. Start a six-hour observation window after activation and receipt verification, not while waiting for setup approval. Require two distinct new deliveries in eligible order plus continued selection. If outside-provider quota or retention prevents it, report the exact blocked boundary; do not redefine local tests as live completion.
-
-## 10. Live activation boundaries and unresolved owner choices
-
-These do not block offline module implementation:
-
-- GitHub repository name/visibility and publication authority; local plan setup does not create a remote.
-- Existing GitHub App installation/token access, target admin artifact access and Deno token scope. Inspect existing trusted sources without printing values. No new secret/env/flag without explicit owner choice.
-- Hourly/seven-day model-start caps and session policy; no guessed live allowance.
-- Evidence-retention/storage bound and stability thresholds/minimum samples. Existing 48-hour TTL is inadequate for arbitrary weekly waits.
-- Exact old Sentinel writer/drain and promotion ownership handover. Inventory current jobs/leases before intervention; do not reuse stale cancellation authority. Keep old candidates/terminal decisions and contributor work.
-- Confirmed clean-review output contract and target release build/promotion behavior. An unverified integration cannot be enabled simply because tests use fixtures.
-
-Complete a concrete activation checklist with exact current targets and settings before asking for those choices. No paid probes, live model submissions, GitHub communications, cancellation, workflow disable or production promotion is performed by this planning session. Later implementation instructions and the user's explicit activation choices govern execution; this plan does not manufacture permission.
-
-## 11. Lessons from the embedded prototype
-
-Treat these as regression inputs, not reasons to copy its architecture:
-
-- #207 produced candidate `4a21c96d46e6f98c3c04125cafce34e255e710e3`; convergence failed on model-supplied decision digest. Digests/identity are trusted code duties. A transport error did not negate the later successful cell.
-- #208 produced candidate `6dc35d06e757107b91eb58232bd15e5f671d79b4`; final integration rejected/blocked it with unknown semantic reason. Never guess the missing cause or regenerate merely because aggregate state has no candidate pointer.
-- Successful artifacts were skipped by a recovery path built only for retry reports. Test actual success-publication → failed-downstream → resume consumers.
-- Recovery observations were counted as new failures; controller faults exhausted source circuits. Charge operations once, preserve stage and typed cause; observation is not an attempt.
-- Health-green and workflow-green were mistaken for throughput. Require issue-level delivery receipts.
-- Continuous code runs blocked controller updates because everything shared a Git base. Standalone controller SHA and target application SHA are separate identities.
-- Global history was treated as per-item history; record pruning orphaned metadata; protected directory hashing and allowed-path validators disagreed. Keep strict small state with no early pruning, and test real Git/protected-directory boundaries.
-- Local helper-only tests missed production wiring defects. Freeze interfaces first and test actual entrypoints before spending review quota.
-
-Do not reset old #137's unchanged terminal state or count old #136 as a new success. Existing prototype source at setup is not proof that all its live failures remain unchanged; reconcile any reuse at implementation time.
-
-## 12. Handoff, status and completion
-
-`docs/build-status.md` is the single progress ledger: foundation SHA, exact module bases/tips, ownership/process receipt, checks, integration disposition, review identity, PR/release references, live proof and blockers. Update after each accepted result, not after every tool call. Assignments target first edit/compile in roughly ten minutes and a focused result within thirty for a small bounded task; diagnose missing progress rather than launch an unbounded mega-prompt. Read the full DSH playbook before launch and follow its supported intervention/credential rules.
-
-Primary commits validated worker output and merges with ancestry preserved; workers never commit/push under the DSH playbook. Before final completion fetch each repository's remote base: prove accepted Sentinel worker tips ancestors of the Sentinel canonical tip and remote `development`, and accepted gateway worker tips ancestors of the gateway's own canonical/remote `development`; never try to merge unrelated repository histories. Leave each local root matching its own branch when ownership permits. Preserve dirty or unfinished work with named owner and next action. Never claim complete while accepted changes remain only in worker lanes.
-
-Planning completion is distinct: a committed local documentation repository and this verified handoff, with no runtime implementation, worktrees, remote, model runs or deployments. The next session starts by reading the goal sentence below and doing canonical identity/ownership checks.
-
-## Copyable goal sentence
-
-Goal: Use canonical worktree name master-plan-gfa795549e5 at /home/codex/repos/ubiquity/sentinel/.codex-worktrees/master-plan-gfa795549e5 on branch codex/master-plan-gfa795549e5, read AGENTS.md and /home/codex/repos/ubiquity/sentinel/.codex-worktrees/master-plan-gfa795549e5/MASTER-PLAN.md in full, then orchestrate Sentinel through end-to-end operational GitHub Actions with DeepSeek V4.1 Flash coding workers, preserve the recorded runtime model and ownership policies, reconcile all published work, and verify autonomous reviewed delivery on the canonical state.
+Start from the active register and latest completed handback; reconcile the recorded lane, owner and evidence before writes. Record accepted/rejected/blocked dispositions in the sole ledger, preserve unrelated work and accepted ancestry, and return a concrete next action for each unresolved boundary. This plan contains current requirements, not progress chronology or inherited approval for a hosted run.

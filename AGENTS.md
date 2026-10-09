@@ -1,118 +1,55 @@
 # Sentinel project instructions
 
-Read MASTER-PLAN.md in full before implementation. Its recorded canonical goal
-identity and isolated worker lanes are invariants. Preserve unrelated work.
+Read [MASTER-PLAN.md](MASTER-PLAN.md) and [docs/DECISIONS.md](docs/DECISIONS.md) before changing behavior. The recorded canonical goal and module lane identities are invariants. Preserve unrelated, dirty and user-owned work. Global instructions and their routed procedures still apply.
 
-## Design
+## Architecture and authority
 
-- Owner update, 2026-10-02: implement isolated concurrent issue workers with one trusted state/integration coordinator, plus a separate deterministic Deno release controller with exclusive promotion ownership.
-- Use Deno and TypeScript. Define shared contracts before parallel implementation.
-- Owner update, 2026-10-02: artificial hourly/weekly model-start, unfinished-PR, review-concurrency and review-drain caps are lifted. Preserve durable reservations and settlement for implementation, review, retry and continuation starts. Provider and platform limits still apply; model routing is unchanged.
-- Sentinel runs as a manually dispatched GitHub Actions job. The owner disabled scheduled cron triggers on 2026-10-05; dispatch and verify with the installed `sentinel` CLI (`ops/sentinel-cli.ts`).
-- Preserve runtime implementation model gpt-5.6-luna with max reasoning. Local
-  DSH implementation follows the current global deepseek-harness.md playbook;
-  it cannot change the runtime model policy.
-- Keep credentials, state writes and promotion authority out of model workers.
-- Commit only sanitized minimal regression fixtures; original payloads and raw
-  diagnostic evidence remain restricted artifacts.
-- The owner authorized local Sentinel self-repair and initial activation on
-  2026-09-11. Require reviewed PRs and an external trusted supervisor; model
-  workers cannot modify live admission policy, credentials, state or promotion
-  authority. See the scope update in MASTER-PLAN.md.
+- Use Deno and TypeScript. Define shared contracts before independent implementation; shared contracts and cross-module wiring have one owner.
+- Use isolated concurrent issue workers, one trusted state/integration coordinator and a separate deterministic release controller with exclusive promotion ownership.
+- Artificial hourly/weekly model-start, unfinished-PR, review-concurrency and review-drain caps are lifted. Preserve durable reservations/settlement for implementation, review, retry and continuation starts. Provider/platform limits and configured session/deadline safeguards remain.
+- Sentinel is manually dispatched through the installed `sentinel` CLI (`ops/sentinel-cli.ts`); do not restore schedule triggers or enable `sentinel-release` as part of development.
+- Preserve runtime implementation policy `gpt-5.6-luna` with max reasoning. Supported trusted route aliases/configuration are documented in DECISIONS.md; local worker selection cannot change production policy or claim a live route.
+- Keep credentials, authoritative state writes, live admission changes and promotion authority out of model workers. Use the existing trusted supervisor and exact execution/pointer proofs.
+- Commit only sanitized minimal regression fixtures. Restricted originals, raw diagnostics and credentials remain outside public Git and model checkouts.
+- Never add Sentinel branch protection rules or branch rulesets, or recreate deleted rules.
 
-## Development and review
+## Development and runtime review
 
-- Owner update, 2026-09-16: no development pull requests or Codex reviews.
-  Make the scoped change, test it immediately, then deliver it directly.
-  This supersedes development acceptance-review and PR requirements below.
-  Autonomous target repairs retain their existing PR, review and merge gates.
-- Owner update, 2026-10-08: external `@codex review` requests are retired; never post `@codex review` or otherwise invoke the hosted Codex GitHub app for any PR. The internal structured reviewer (gateway `codex-auto-review` via the runtime review service) is the only review path for runtime target PRs. Development changes continue to require no review. This supersedes the 2026-10-05 instruction.
-- Owner update, 2026-10-08: the internal structured reviewer's base instructions now carry the vendored upstream Codex review rubric (`src/github/codex-review-rubric.ts`); do not edit the vendored constant, and the harness output schema attached to the review turn overrides the rubric's own output-format section. See `docs/codex-review-rubric-alignment-2026-10-08.md`.
+Development changes require no development PR or Codex review. Make the scoped change, immediately test it and deliver directly. This does not waive autonomous runtime target PR review, CI or merge gates.
 
-- Never add branch protection rules or branch rulesets to this project.
-  Do not recreate deleted protection rules.
+Never post `@codex review` or invoke the hosted Codex GitHub app. The internal structured reviewer (`codex-auto-review` through the runtime review service) is the only runtime target review path. Runtime code changes require a completed current-head receipt with no unresolved P0/P1, passing current CI and applicable target branch protections before autonomous merge. Missing/stale/unavailable evidence cannot pass. Non-runtime-only changes do not request Codex review.
 
-- Follow the owner's instruction to defer Codex review to integrated acceptance.
-  Do not request Codex review for every module, small edit or internal merge.
-- Run focused deterministic checks during development. Integrate worker results
-  with ancestry-preserving merges on the canonical lane.
-- At acceptance, validate the exact integrated candidate, then obtain a Codex
-  review. Fix substantive P0/P1 findings and review the changed candidate again;
-  do not reuse a review for different bytes or merge on exhausted review budget.
-- Runtime target PRs still require completed current-head Codex review with no
-  unresolved P0/P1, passing CI and target branch protections before autonomous
-  merge. Waiting consumes no agent slot. These runtime reviews consume the
-  configured shared model-start budget.
-- The old ai.ubq.fi non-gating review policy does not apply to this new project.
-- Do not create or publish a GitHub repository or choose its visibility based
-  solely on the local planning setup. Record that deployment choice separately.
+Do not edit the vendored upstream rubric constant in `src/github/codex-review-rubric.ts`. The attached harness schema overrides its output-format section; retain its upstream pin/hash and Sentinel read-only boundary. See [the alignment note](docs/codex-review-rubric-alignment-2026-10-08.md).
 
-## Fast local development — owner update, 2026-09-21
+## Fast local development
 
-This section governs coding-agent development, debugging and target onboarding, and supersedes earlier instructions to wait for hosted acceptance while developing. Autonomous production target PRs retain their existing CI, review and merge gates; this policy does not disable scheduled production operation.
+- Use local reproduction and checks as the edit/test loop; hosted CI and live Sentinel runs are separate acceptance surfaces. Read existing failure evidence once and keep independent local work moving.
+- Before editing, identify the changed module, affected callers/contracts and smallest observable failure. Prove the actual defect before the fix when a regression is useful; permission, type, dependency, dirty-checkout and timeout errors are setup failures.
+- After a meaningful edit, run applicable file-scoped static checks and the smallest relevant named test, then its affected module/consumer boundary. Preserve declared Deno permissions. Do not default to `deno task test`, `test:integration`, `test:local` or an equivalent whole-repository sweep.
+- Enforce a 300-second deadline on every task-owned local validation command, including final acceptance, with bounded process-group teardown. Register the bounded command through the existing evidence tool and retain command, status, elapsed time, exact candidate/diff and output reference. These bounds do not authorize terminating model sessions, shared services or other owners' processes.
+- Observe running checks at intervals of at most 30 seconds. After 60 seconds without a completed case or concrete output, inspect the active case/command/children and narrow or repair the check. A live PID or elapsed time is not progress; never repeat an unchanged failure.
+- Exercise production code through real consumers with fake external APIs/model ports, temporary Git/state and injected clocks. Advance retry/cooldown/observation time in tests. No paid/model calls, GitHub writes, credentials or deployment belong in the local harness.
+- Validation order is failing local case, repaired case, affected module, directly affected integration boundary, then one named target-specific local lifecycle scenario on the same integrated candidate. Reuse connected evidence when it already covers that lifecycle; only add the missing boundary. Whole-repository sweeps need the user's explicit request for that workload. Documentation-only changes need documentation checks.
+- Before publication, check cheap current file-size/static constraints on the exact candidate and its current-base merge input wherever CI tests that merge. Reuse unchanged-input evidence; this is not a new whole-suite gate or policy ceiling.
 
-- Never use hosted CI or a live Sentinel run as the edit/test loop. Never wait for CI to discover the next fix when the affected path can be exercised locally. Read existing failure evidence once, reproduce the failing boundary locally, and keep independent local work moving while a previously authorized hosted run is pending.
-- Before editing, identify the changed module, its directly affected callers/contracts and the smallest observable failure. Use an existing focused test or add a minimal regression when useful; prove the intended failure before the fix. For a new target, exercise actual selection, target-specific Git objects, token/repository scope, candidate restoration/publication and shared admission/deadline handling with distinct temporary repositories and injected external transports. Keep the working self-target as a regression control.
-- After each meaningful change, run file-scoped formatting/lint/type checks and the smallest relevant test file or named case, then the affected module. Use the repository's declared Deno permissions and test setup, narrowed to explicit paths; a wrong invocation is not a product failure. Do not default to `deno task test`, `deno task test:integration` or `deno task test:local` after every edit: they expand the workload.
-- Enforce a 300-second deadline on each local validation command, including final acceptance; aim for under one minute per focused case. Use an installed process-group timeout or the runner's supported deadline with bounded teardown, retain timeout/failure output, and verify test children have settled. Register the bounded command through the existing evidence tool. This bounds task-owned tests, never DSH/model sessions, shared services or another owner's processes. If a useful check cannot fit, split or repair that check before launching it; a longer whole-repository sweep requires the user's explicit request for that separate workload. Never silently raise the deadline.
-- Observe a running check at intervals of at most 30 seconds; never issue multi-minute `write_stdin` waits or sleep/poll loops. If 60 seconds pass without a completed case or other concrete output, inspect the active case, command and child process immediately. A live PID, elapsed time or changing temporary directory is not useful test evidence. An overrun is an incomplete check to diagnose and narrow, not permission to keep waiting for the suite's eventual verdict or claim a pass.
-- Local tests must exercise production code through its real consumers, using fake external APIs/model ports, temporary Git/state and injected clocks. Advance retry, cooldown, polling and observation time in tests; do not sleep through production intervals or shorten production safeguards to speed a test. Keep credentials, paid/model calls, GitHub writes and deployments out of the local harness. A helper-only test does not prove cross-module wiring.
-- Validation order is: failing local case → repaired case → affected module → directly affected integration boundary → one named, target-specific local end-to-end scenario on the integrated candidate. That final scenario must exercise the changed lifecycle through real production consumers with fake external services and fit the same 300-second command limit. It is not an exhaustive repository sweep: do not automatically run `deno task test:local`, unfiltered `deno task test`, `test-local.ts`, or a renamed equivalent as "final-local" or "E2E". Those whole-repository workloads need the user's explicit request; final acceptance wording alone is not that request. If the existing connected tests already prove the changed lifecycle on the same candidate, reuse that evidence instead of adding another run. If they miss a boundary, add or run only that missing scenario. Keep hosted/runtime release gates separate and report their pending status honestly. A documentation-only change needs documentation checks, not the runtime harness.
-- A regression's before-fix failure must demonstrate the actual defect. Type errors, missing permissions, dirty checkout guards, unavailable dependencies and timeouts are setup failures, not proof of wrong repository routing or other product behavior; correct the invocation and narrow the case without expanding into a full sweep.
-- If any stage fails, narrow back to the failing case, diagnose the failure class and check adjacent affected steps before retrying. Do not repeat an unchanged failure or restart the full suite to recover logs. Reuse existing evidence for unchanged inputs; after a fix, rerun affected checks and repeat final integration only when the changed behavior invalidates it. Capture exact command, exit status, elapsed time, candidate revision/dirty diff and saved output reference.
-- Prepublication size/static check: before publishing, verify the applicable cheap current file-size and static constraints on the exact candidate **and** on the current-base merge input wherever CI tests that merge, reusing valid unchanged-input evidence instead of repeating commands; a candidate passes only when both the candidate and its merge with the current base stay inside the configured limits (PR891 demonstrated source 990 / base 995 / merge 1003). This is a prepublication pre-check on the actual bytes, not a new whole-suite gate, ledger entry, ceiling or policy rewrite.
+### Hosted approval boundary
 
-### Hosted end-to-end approval boundary
+Every development-triggered hosted end-to-end or runtime/supervisor dispatch, retry or rerun requires explicit user approval for that identified attempt. A request to implement, fix, finish, test or deliver, and old activation/continuation permissions, do not grant this approval.
 
-- Every development-triggered hosted end-to-end or Sentinel runtime/supervisor dispatch, rerun or retry requires explicit approval from the user for that attempt. Default to local, fast, module-scoped checks. A request to implement, fix, finish, test or deliver does not authorize a hosted end-to-end run; earlier broad activation/continuation authority does not override this boundary.
-- First finish the locally reviewable candidate and its applicable checks. Then identify the exact workflow, target, candidate SHA, expected duration and the remaining hosted-only assertion for approval. Approval covers one identified attempt; a retry or changed candidate needs fresh approval. Never turn one approval into an automatic fix/dispatch/wait loop.
-- Do not bypass this boundary with an Actions API call, `gh workflow run`, `gh run rerun`, a push intended to trigger the same end-to-end run, an alternate workflow, forced schedule/eligibility, or a live-runtime invocation. Existing scheduled operation is not a substitute development test. Read-only inspection of existing CI evidence is allowed; do not cancel unrelated runs or weaken runtime merge gates.
-- If an approved hosted run fails, retain its logs, reproduce and fix the defect locally, and return to the local validation sequence. If a failure cannot be reproduced offline, state the exact environmental gap and propose the smallest hosted-only probe for explicit approval. Report local verification and hosted verification separately; pending approval never justifies claiming live acceptance.
-- Include this policy in coding-worker assignments and continuations. Re-read the current project rules before any hosted dispatch; an older handoff is not approval. Apply updates to already-running workers at the next supported steering or settled handback boundary, preserving their work.
+First complete the locally reviewable candidate and checks. For approval, identify the exact workflow, target, SHA, expected duration and remaining hosted-only assertion. One approval covers one attempt; retries and changed candidates need fresh approval. Do not bypass this boundary through API/CLI calls, triggering pushes, alternate workflows, forced eligibility or live invocation. Read-only existing CI evidence may be inspected.
+
+If an approved attempt fails, retain its logs, reproduce/fix locally and repeat only affected validation. If reproduction needs the hosted environment, identify the exact gap and smallest hosted-only probe for approval. Keep local and hosted verification separate; pending approval is not live acceptance. Include this boundary in worker assignments and continuations, and reread current rules before dispatch.
 
 ## Ownership and acceptance
 
-- `docs/build-status.md` is the single authoritative task and acceptance ledger.
-  Only the current GPT-6 Astra integration owner may edit it or change task
-  scope, status, acceptance, evidence disposition, or write ownership. Luna,
-  DSH, runtime agents and other workers return evidence and proposed updates;
-  they must not modify the ledger or create a competing authoritative task list.
-- A fresh Astra session reads the active task register first, reconciles exact
-  Git/process ownership and evidence, then records its verification before
-  resuming writes. Worker READY, elapsed time and cached test success do not
-  establish integration or acceptance. Read existing evidence before rerunning.
-- A repeated unchanged failure or a checkpoint with no useful progress requires
-  diagnosis and an updated next action before another assignment on that task.
-  Preserve the existing lane and partial work. Record the cause and evidence so
-  a fresh Astra can verify it without repeating the same investigation.
-- These are agent ownership rules, not an operating-system access restriction.
-- Before accepting a major milestone, or resuming a task after repeated failure
-  or a checkpoint with no useful progress, obtain a read-only audit from a fresh
-  GPT-6 Astra agent without inherited worker conversation history. Give it the
-  authoritative task, exact candidate diff and existing evidence references.
-  It must verify scope and acceptance independently and report pass, required
-  corrections or a concrete blocker. The integration owner records the result;
-  the auditor does not become a second writer. Do not request an audit per edit.
+`docs/build-status.md` is the single authoritative task and acceptance ledger. Only the current GPT-6 Astra integration owner may edit it or change scope, status, acceptance, evidence disposition or write ownership. Other workers return evidence and proposed updates; they do not create another authoritative task list.
 
-- Use the plan's module scopes; shared contracts and cross-module wiring have
-  one owner. DSH workers do not commit or push; the primary validates and commits
-  their changes under the global DSH playbook.
-- Reconcile and explicitly transfer target ownership before live writes. Never
-  run this Sentinel against a target already owned by the embedded prototype.
-- Exact Deno candidate/prior revision identity, verified promotion, objective
-  acceptance and exact rollback are mandatory. Never select a revision by time
-  or list order. Observe the target's Cloudflare 403 handling policy.
-- Separate local tests, reviewed code, merged code, deployed runtime, and live
-  delivery proof. Do not report completion on module tests alone.
-- No paid/model calls, GitHub writes or deployment inside the local test harness.
+A fresh integration owner reads the active register first and reconciles exact Git/process ownership, reservations, current refs and existing evidence before writes. READY, elapsed time and cached success do not establish integration or acceptance. Integrate, reject or assign a concrete owner/next action to ready work promptly; preserve original goals and accounting.
 
-## Orchestration throughput — owner update, 2026-10-04
+Before a major milestone or resuming after repeated failure/no useful progress, obtain a read-only audit from a fresh GPT-6 Astra agent without inherited worker history. Supply the authoritative task, exact candidate diff and evidence references. The owner records its independent pass/corrections/blocker; the auditor does not become another writer. Do not request an audit per edit or a development Codex review.
 
-- Keep one authoritative task, head and publisher owner across local, native, DSH and Actions work, recorded in the existing docs/build-status.md; reconcile current reservations, producer state and refs before competing implementation or publication, and give parallel scopes explicit isolation and ownership.
-- Prioritize already-authorized durable continuation, publication, base-refresh, review, merge and bookkeeping work before new model planning wherever a supported path exists; never bypass authorization or the hosted-attempt approval boundary.
-- Prefer supported event or job watches when the running interface provides one; every wait names its live handle, expected result or checkpoint and recovery action, so unchanged model polling and blind sleeps are not progress, and elapsed time alone is never stop or restart authority.
-- Keep coordinator checkpoints to roughly one or two minutes: read the current evidence, identify the one actually unmet requirement, and execute or relay one concrete next action; a missing fact gets one bounded lookup or handback instead of speculative serial planning, and estimates are checkpoints, never kill deadlines.
-- Read each mandatory reference fully once at its required revision with bounded output, and reuse known hashes and receipts; do not dump whole histories or raw API envelopes, and keep immutable inputs concise.
-- Before reopening a gate or owner decision, read the latest completed handback and the canonical ledger; integrate, accept or reject ready work promptly, and do not rerun the same input test or review without a new change, failure or gap; preserve original goals, models, budgets and accounting.
-- Bind acceptance to the actual user or issue contract and the exact current input; a stronger side-candidate assumption is not a required invariant, and never weaken meaningful temporal or cohort constraints or transfer CI and reviews between different bytes.
-- Report accepted canonical deliveries, ready-to-action latency, parent and worker elapsed time and any no-progress cause; tool counts, token counts and status chatter are not progress, and measured outcomes select the next bounded throughput improvement without inventing new authority.
+Use recorded module scopes and explicit isolated ownership. DSH workers do not commit or push; the primary validates, commits and integrates with accepted ancestry preserved. Freeze writers for final validation and acceptance. The canonical lane and shipped branch must contain accepted worker tips.
+
+Reconcile and explicitly transfer target ownership before live writes. Never run Sentinel against a target still owned by the embedded prototype. Exact candidate/prior revision identity, verified promotion, objective acceptance and exact rollback are mandatory. Never select revisions by time or list order; preserve the target's Cloudflare 403 policy and current VPS/Deno receipt distinction.
+
+Separate local checks, reviewed code, merged code, installed runtime and live delivery proof. Health/bootstrap/workflow success alone is not issue delivery. Report genuine unresolved boundaries and one concrete next action, with concise checkpoints rather than unchanged polling or full historical dumps.
