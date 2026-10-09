@@ -234,6 +234,8 @@ function repairFixture(
     replays: [],
     releaseRequests: [],
     githubCooldowns: [],
+    attemptMemory: [],
+    lessons: [],
     ...overrides,
   });
 }
@@ -288,6 +290,8 @@ function intendedSnapshot(
     replays: prior.replays,
     releaseRequests: prior.releaseRequests,
     githubCooldowns: prior.githubCooldowns,
+    attemptMemory: [],
+    lessons: [],
   });
 }
 

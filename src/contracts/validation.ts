@@ -80,6 +80,8 @@ export const MaxItems: {
   metricsSamples: number;
   dependencies: number;
   resolutionEvidence: number;
+  attemptEntries: number;
+  lessonEntries: number;
 } = {
   protectedPaths: 512,
   findings: 256,
@@ -99,6 +101,8 @@ export const MaxItems: {
   metricsSamples: 4096,
   dependencies: 64,
   resolutionEvidence: 16,
+  attemptEntries: 16,
+  lessonEntries: 16,
 };
 
 export type ParseIssueCode =

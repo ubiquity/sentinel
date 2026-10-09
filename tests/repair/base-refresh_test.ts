@@ -303,6 +303,8 @@ function seededSnapshot(
     replays: [],
     releaseRequests: [],
     githubCooldowns: [],
+    attemptMemory: [],
+    lessons: [],
     ...extra,
   };
 }

@@ -15,6 +15,10 @@
  */
 import type { GitSha, WorkItemId } from "./brands.ts";
 import { canonicalStringify } from "./canonical.ts";
+import {
+  ATTEMPT_FAILURE_CLASSES_V1 as PRIOR_ATTEMPT_CLASSES,
+  ATTEMPT_STAGES_V1 as PRIOR_ATTEMPT_STAGES,
+} from "./attempt-memory.ts";
 import type {
   CandidateOutcomeV1,
   ModelRunReceiptV1,
@@ -101,6 +105,18 @@ const REQUEST_OPTIONAL = [
   "checkoutBase",
   "reviewFindings",
   "scopeNote",
+  "priorAttempts",
+] as const;
+/** Bound on verified prior-attempt facts carried into one model request. */
+const MAX_PRIOR_ATTEMPT_FACTS = 8;
+/** Bound on one closed settlement detail constant carried in a fact. */
+const MAX_PRIOR_ATTEMPT_DETAIL_CHARS = 512;
+const PRIOR_ATTEMPT_KEYS = [
+  "detail",
+  "stage",
+  "failureClass",
+  "count",
+  "lastAtMs",
 ] as const;
 const FINDING_KEYS = ["severity", "path", "message"] as const;
 const RUN_KEYS = ["runId", "runAttempt", "launcherSha"] as const;
@@ -394,6 +410,36 @@ export function parseMatrixModelRequestV1(
   const scopeNote = obj.scopeNote === undefined
     ? undefined
     : expectNonEmptyString(obj.scopeNote, `${path}.scopeNote`, MAX_TEXT_CHARS);
+  const priorAttempts = obj.priorAttempts === undefined
+    ? undefined
+    : expectArray(
+      obj.priorAttempts,
+      `${path}.priorAttempts`,
+      MAX_PRIOR_ATTEMPT_FACTS,
+      (value, at) => {
+        const fact = expectRecord(value, at);
+        expectExactKeys(fact, PRIOR_ATTEMPT_KEYS, at);
+        return {
+          detail: expectNonEmptyString(
+            fact.detail,
+            `${at}.detail`,
+            MAX_PRIOR_ATTEMPT_DETAIL_CHARS,
+          ),
+          stage: expectEnum(
+            fact.stage,
+            PRIOR_ATTEMPT_STAGES,
+            `${at}.stage`,
+          ),
+          failureClass: expectEnum(
+            fact.failureClass,
+            PRIOR_ATTEMPT_CLASSES,
+            `${at}.failureClass`,
+          ),
+          count: expectPositiveInt(fact.count, `${at}.count`),
+          lastAtMs: expectTimestamp(fact.lastAtMs, `${at}.lastAtMs`),
+        };
+      },
+    );
   if (obj.reasoning !== "max") {
     fail(`${path}.reasoning`, "invalid_enum", "reasoning must be max");
   }
@@ -413,6 +459,7 @@ export function parseMatrixModelRequestV1(
     issue,
     evidence,
     ...(reviewFindings === undefined ? {} : { reviewFindings }),
+    ...(priorAttempts === undefined ? {} : { priorAttempts }),
     model: expectNonEmptyString(obj.model, `${path}.model`, MAX_ID_CHARS),
     reasoning: "max",
     maxDurationMs: expectPositiveInt(

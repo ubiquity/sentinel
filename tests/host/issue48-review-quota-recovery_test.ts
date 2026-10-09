@@ -141,6 +141,8 @@ function repairSnapshot(
     replays: [],
     releaseRequests: [],
     githubCooldowns: [],
+    attemptMemory: [],
+    lessons: [],
   });
 }
 

@@ -847,6 +847,8 @@ async function matrixRecoveryState() {
     replays: [],
     releaseRequests: [],
     githubCooldowns: [],
+    attemptMemory: [],
+    lessons: [],
   });
   const ingestedWork = await Promise.all(work.map(async (row, index) => {
     if (index >= CLOSED_C_WAVE.cells.length) return row;
@@ -8044,6 +8046,8 @@ Deno.test(
             replays: [],
             releaseRequests: [],
             githubCooldowns: [],
+            attemptMemory: [],
+            lessons: [],
           }),
           null,
         );

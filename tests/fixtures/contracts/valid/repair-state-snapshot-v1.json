@@ -319,5 +319,7 @@
       "createdAt": 1786004000000
     }
   ],
-  "githubCooldowns": []
+  "githubCooldowns": [],
+  "attemptMemory": [],
+  "lessons": []
 }

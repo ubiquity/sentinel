@@ -328,6 +328,8 @@ Deno.test("budget: null weekly cap uses only the rolling hour and preserves ever
       replays: [],
       releaseRequests: [],
       githubCooldowns: [],
+      attemptMemory: [],
+      lessons: [],
     };
     const written = await store.writeRepair(seed, null);
     assert.ok(written.ok && written.value.status === "applied");
@@ -406,6 +408,8 @@ Deno.test("budget: unrelated state collections survive; settlement is idempotent
       replays: [],
       releaseRequests: [],
       githubCooldowns: [],
+      attemptMemory: [],
+      lessons: [],
     };
     const seeded = await store.writeRepair(seed, null);
     assert.ok(seeded.ok && seeded.value.status === "applied");

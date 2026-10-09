@@ -7,6 +7,10 @@
  */
 
 import type { GitSha } from "./brands.ts";
+import { parseAttemptMemoryRecordV1 } from "./attempt-memory.ts";
+import type { AttemptMemoryRecordV1 } from "./attempt-memory.ts";
+import { parseMemoryLessonsRecordV1 } from "./memory-lessons.ts";
+import type { MemoryLessonsRecordV1 } from "./memory-lessons.ts";
 import { parseBudgetReservationV1 } from "./budget-reservation.ts";
 import type { BudgetReservationV1 } from "./budget-reservation.ts";
 import { parseGitHubCooldownV1 } from "./github-cooldown.ts";
@@ -58,6 +62,19 @@ export interface RepairStateSnapshotV1 {
   replays: ReplayResultV1[];
   releaseRequests: ReleaseRequestV1[];
   githubCooldowns: GitHubCooldownV1[];
+  /**
+   * Durable attempt memory (the loop-breaker). One record per attempt family
+   * — (repository, task, base, purpose) — each carrying bounded entries keyed
+   * by the canonical attempt fingerprint. Written only by trusted repair
+   * writers, appended in the same commit as the settlement it describes.
+   */
+  attemptMemory: AttemptMemoryRecordV1[];
+  /**
+   * Deterministic per-repository lesson digest (the curated long-term memory
+   * view), recomputed by trusted writers from `attemptMemory`. It is a view,
+   * never an authority: the source records stay the record of truth.
+   */
+  lessons: MemoryLessonsRecordV1[];
 }
 
 export interface ReleaseStateSnapshotV1 {
@@ -98,6 +115,8 @@ const REPAIR_KEYS = [
   "replays",
   "releaseRequests",
   "githubCooldowns",
+  "attemptMemory",
+  "lessons",
 ] as const;
 const RELEASE_KEYS = [
   "version",
@@ -171,6 +190,18 @@ export function parseRepairStateSnapshotV1(
     MaxItems.snapshotRecords,
     parseGitHubCooldownV1,
   );
+  const attemptMemory = expectArray(
+    obj.attemptMemory,
+    "$.attemptMemory",
+    MaxItems.snapshotRecords,
+    parseAttemptMemoryRecordV1,
+  );
+  const lessons = expectArray(
+    obj.lessons,
+    "$.lessons",
+    MaxItems.snapshotRecords,
+    parseMemoryLessonsRecordV1,
+  );
 
   // Frozen parsers reject duplicate ids instead of last-wins maps; a record
   // set that lost one of two same-id records is corrupted state, not a merge.
@@ -181,6 +212,8 @@ export function parseRepairStateSnapshotV1(
   expectUniqueIds(reviews, "$.reviews");
   expectUniqueIds(replays, "$.replays");
   expectUniqueIds(releaseRequests, "$.releaseRequests");
+  expectUniqueIds(attemptMemory, "$.attemptMemory");
+  expectUniqueIds(lessons, "$.lessons");
   // Cooldowns have no string id; one record per affected installation.
   expectUniqueInstallationIds(githubCooldowns, "$.githubCooldowns");
 
@@ -198,6 +231,8 @@ export function parseRepairStateSnapshotV1(
     replays,
     releaseRequests,
     githubCooldowns,
+    attemptMemory,
+    lessons,
   };
 }
 

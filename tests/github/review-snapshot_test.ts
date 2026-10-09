@@ -1264,6 +1264,8 @@ Deno.test(
               replays: [],
               releaseRequests: [],
               githubCooldowns: [],
+              attemptMemory: [],
+              lessons: [],
             }),
             null,
           );

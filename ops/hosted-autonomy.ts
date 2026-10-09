@@ -126,6 +126,7 @@ import {
   type ReviewTaskStatementV1,
 } from "../src/contracts/review-receipt.ts";
 import { reviewAuthorizesMerge } from "../src/repair/review-gate.ts";
+import { attemptEquivalenceRefusalForRecordV1 } from "../src/repair/attempt-policy.ts";
 import { RETIRED_MERGED_MESSAGE } from "../src/repair/selection.ts";
 import type { GitSha } from "../src/contracts/brands.ts";
 import { RollingStartBudget } from "../src/budget/mod.ts";
@@ -1120,11 +1121,22 @@ export interface RetryPlanV1 {
  * sentinel record's base or vice versa. `closedIssues` holds
  * `hostedIssueKey` values, so two repositories may both carry issue 120.
  */
+/**
+ * One blocked record whose equivalent-retry grant was refused by durable
+ * attempt memory. Reported by the caller; never a silent no-op.
+ */
+export interface RetryDenialV1 {
+  id: string;
+  repository: RepositoryIdentityV1;
+  reason: string;
+}
+
 export function planHostedRetries(
   snapshot: RepairStateSnapshotV1,
   now: number,
   baseTips: ReadonlyMap<string, string | null> = new Map(),
   closedIssues: ReadonlySet<string> = new Set(),
+  onDenied?: (denial: RetryDenialV1) => void,
 ): RetryPlanV1[] {
   const plans: RetryPlanV1[] = [];
   for (const record of snapshot.work) {
@@ -1169,6 +1181,31 @@ export function planHostedRetries(
     if (base === null) continue;
     const baseTip = baseTips.get(hostedRepositoryKey(record.repository)) ??
       null;
+    // Durable attempt memory gate: refuse a work-returning grant whose
+    // attempt would be equivalent to failures already recorded at this base
+    // and runtime revision. A base advance is genuinely changed evidence, so
+    // that path is exempt; a review-returning grant has its own identity
+    // space and is untouched. Refusals are reported, never silent.
+    if (rule.nextStep === "work") {
+      const advancing = baseTip !== null && baseTip !== base;
+      if (!advancing) {
+        const equivalence = attemptEquivalenceRefusalForRecordV1({
+          record,
+          snapshot,
+          now,
+        });
+        if (equivalence.refuse) {
+          onDenied?.({
+            id: record.id,
+            repository: record.repository,
+            reason: `equivalent_attempt_refused:${
+              equivalence.entry?.detail ?? "unknown"
+            }`,
+          });
+          continue;
+        }
+      }
+    }
     // A review-returning grant has its OWN identity space: the runtime admits
     // a review with attempt = reviewRounds + 1 at the record's current head, so
     // the grant must persist the floor its durable charges prove. While the
@@ -2344,6 +2381,9 @@ export async function runHostedAutonomy(
     deps.clock.now(),
     retryTips,
     closedIssues,
+    (denial) => {
+      actions.push(`retry:${denial.id}:denied:${denial.reason}`);
+    },
   );
   const plans: RetryPlanV1[] = [];
   for (const plan of planned) {
