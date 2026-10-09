@@ -7069,9 +7069,6 @@ async function historicalC63Scenario(
     const selectedIds = new Set(
       f.records.slice(0, 3).map((record) => record.id),
     );
-    const selectedReservations = new Set(
-      f.records.slice(0, 3).map((record) => record.intent!.requestId!),
-    );
     const requests = f.records.slice(0, 3).map((record) => ({
       taskId: record.id,
       repository: record.repository,
@@ -7220,18 +7217,43 @@ async function historicalC63Scenario(
           wait: record.wait,
           updatedAt: record.updatedAt,
         }, record);
+        // Each missing-cell admission reaches a final ambiguous settlement;
+        // the charge itself is retained with every other field unchanged.
+        const settledCharge: typeof f.charges[number] = after.value.snapshot
+          .reservations.find((row) => row.id === record.intent!.requestId)!;
+        const originalCharge: typeof f.charges[number] = before.value.snapshot
+          .reservations.find((row) => row.id === record.intent!.requestId)!;
+        assert.equal(settledCharge.outcome, "ambiguous");
+        assert.equal(settledCharge.proofRef, null);
+        assert(
+          settledCharge.settledAt !== null &&
+            Number.isSafeInteger(settledCharge.settledAt) &&
+            settledCharge.settledAt >= originalCharge.createdAt,
+        );
+        assert.deepEqual({
+          ...settledCharge,
+          outcome: originalCharge.outcome,
+          settledAt: originalCharge.settledAt,
+        }, originalCharge);
       }
     }
     assert.deepEqual(
       after.value.snapshot.work.filter((row) => !dispositionIds.has(row.id)),
       before.value.snapshot.work.filter((row) => !dispositionIds.has(row.id)),
     );
+    // Every dispositioned admission settles; everything outside the
+    // disposition set is preserved byte for byte.
+    const dispositionReservations = new Set(
+      f.records.slice(0, firstPass ? 19 : 3).map((record) =>
+        record.intent!.requestId!
+      ),
+    );
     assert.deepEqual(
       after.value.snapshot.reservations.filter((row) =>
-        !selectedReservations.has(row.id)
+        !dispositionReservations.has(row.id)
       ),
       before.value.snapshot.reservations.filter((row) =>
-        !selectedReservations.has(row.id)
+        !dispositionReservations.has(row.id)
       ),
     );
     assert.equal(f.records.slice(3, 19).length, 16);
