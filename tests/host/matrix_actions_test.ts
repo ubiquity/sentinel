@@ -630,6 +630,8 @@ Deno.test("preservation maintenance: real repair startup skips five blocked cand
       replays: [],
       releaseRequests: [],
       githubCooldowns: [],
+      attemptMemory: [],
+      lessons: [],
     });
     const saved = await r.store.writeRepair(capture, null);
     assert.ok(saved.ok && saved.value.status === "applied");

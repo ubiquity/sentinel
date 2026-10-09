@@ -3211,7 +3211,7 @@ const blocked = workRecord(taskId, {
 });
 const reservation = parseBudgetReservationV1({ version: "v1", kind: "budget_reservation", id: reservationId, repository, taskId, head: base, attempt: 3, purpose: "retry", createdAt: T0 - 10000, outcome: "ambiguous", settledAt: T0 - 2000, proofRef: null });
 const repairStore = createRepairStateStore({ scratchDir: root + "/repair-seed", remoteUrl: remote.remoteUrl });
-const repairSeed = await repairStore.writeRepair(parseRepairStateSnapshotV1({ version: "v1", kind: "repair_state_snapshot", stateHead: null, sequence: 1, updatedAt: T0, incidents: [], evidence: [], work: [blocked], reservations: [reservation], reviews: [], replays: [], releaseRequests: [], githubCooldowns: [] }), null);
+const repairSeed = await repairStore.writeRepair(parseRepairStateSnapshotV1({ version: "v1", kind: "repair_state_snapshot", stateHead: null, sequence: 1, updatedAt: T0, incidents: [], evidence: [], work: [blocked], reservations: [reservation], reviews: [], replays: [], releaseRequests: [], githubCooldowns: [], attemptMemory: [], lessons: [] }), null);
 assert.ok(repairSeed.ok && repairSeed.value.status === "applied", JSON.stringify(repairSeed));
 await Deno.mkdir(root + "/bin");
 await Deno.writeTextFile(root + "/bin/codex", "");

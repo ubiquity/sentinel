@@ -187,6 +187,8 @@ async function fixture(submittedPreservation = false) {
     replays: [],
     releaseRequests: [],
     githubCooldowns: [],
+    attemptMemory: [],
+    lessons: [],
   });
   const saved = await repair.writeRepair(seed, null);
   assert.ok(saved.ok && saved.value.status === "applied");

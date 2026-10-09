@@ -1476,6 +1476,8 @@ async function concurrencyInstallerFixture(
           replays: [],
           releaseRequests: [],
           githubCooldowns: [],
+          attemptMemory: [],
+          lessons: [],
         }),
         null,
       );
