@@ -350,7 +350,8 @@ export async function runHistoricalRetryDispositionMain(
     }));
     return 1;
   }
-  const written = await state.writeRepair(planned.snapshot, repair.value.head);
+  const next = { ...planned.snapshot, stateHead: repair.value.head };
+  const written = await state.writeRepair(next, repair.value.head);
   if (!written.ok || written.value.status !== "applied") {
     console.log(JSON.stringify({
       ...summary,

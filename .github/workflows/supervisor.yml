@@ -116,6 +116,9 @@ jobs:
       # It is idempotent: after the first apply it reports already_applied and
       # writes nothing. Remove this step after the disposition is observed.
       - name: Apply bounded historical retry disposition
+        # Best-effort one-shot: a refusal or failure never blocks the
+        # maintenance pass's own bounded self-upkeep.
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
         run: >-
