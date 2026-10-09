@@ -74,6 +74,7 @@ import {
   type RunBoundsV1,
   settleFailedImplementation,
 } from "../repair/loop.ts";
+import { ATTEMPT_DETAIL_INTERRUPTED_BOUND } from "../repair/attempt-policy.ts";
 import { rankEligibleWork } from "../repair/selection.ts";
 import type {
   MatrixBundleExporterV1,
@@ -922,7 +923,7 @@ export async function ingestMatrixResults(
         context,
         record,
         cell.reservationId,
-        "model run did not complete with a trusted candidate: interrupted output bound exceeded",
+        ATTEMPT_DETAIL_INTERRUPTED_BOUND,
       );
       if (step.kind === "state_error") {
         entries.push({

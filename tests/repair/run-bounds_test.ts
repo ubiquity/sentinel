@@ -204,6 +204,7 @@ function seededSnapshot(
     replays: [],
     releaseRequests: [],
     githubCooldowns: [],
+    attemptMemory: [],
     ...extra,
   };
 }

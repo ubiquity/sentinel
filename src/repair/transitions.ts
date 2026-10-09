@@ -555,6 +555,7 @@ export function updateSnapshot(
     reviews: [...snapshot.reviews],
     replays: [...snapshot.replays],
     releaseRequests: [...snapshot.releaseRequests],
+    attemptMemory: [...snapshot.attemptMemory],
   };
   mutate(draft);
   return parseRepairStateSnapshotV1(draft);

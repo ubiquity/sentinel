@@ -31,6 +31,8 @@
  * the same transport, never alternate state logic.
  */
 
+import { parseAttemptMemoryRecordV1 } from "../contracts/attempt-memory.ts";
+import type { AttemptMemoryRecordV1 } from "../contracts/attempt-memory.ts";
 import { parseBudgetReservationV1 } from "../contracts/budget-reservation.ts";
 import type { BudgetReservationV1 } from "../contracts/budget-reservation.ts";
 import { canonicalStringify } from "../contracts/canonical.ts";
@@ -289,6 +291,12 @@ const RECORD_COLLECTIONS: Record<StateKind, RecordCollection[]> = {
       directory: "githubCooldowns",
       kind: "github_cooldown",
       parse: parseGitHubCooldownV1,
+      rows: [],
+    },
+    {
+      directory: "attemptMemory",
+      kind: "attempt_memory",
+      parse: parseAttemptMemoryRecordV1,
       rows: [],
     },
   ],
@@ -941,6 +949,7 @@ export class GitStateStore implements StateStore {
       // storage identity (sha256 of String(installationId)) are fixed by the
       // collection mapping here, never inferred from the record content.
       add("github_cooldown", repair.githubCooldowns);
+      add("attempt_memory", repair.attemptMemory);
     } else {
       const release = next as ReleaseStateSnapshotV1;
       const add = (recordKind: string, rows: readonly unknown[]) => {
@@ -1181,6 +1190,9 @@ export class GitStateStore implements StateStore {
           githubCooldowns: orderRecords(
             records.githubCooldowns,
           ) as GitHubCooldownV1[],
+          attemptMemory: orderRecords(
+            records.attemptMemory,
+          ) as AttemptMemoryRecordV1[],
         };
         snapshot = parseRepairStateSnapshotV1(repair);
       } else {
@@ -1448,6 +1460,50 @@ function validateRepairTransition(
       priorRecord.status !== "open" && !sameCanonical(priorRecord, nextRecord)
     ) {
       return "terminal release request cannot restart or mutate";
+    }
+  }
+  // Attempt memory is append/merge-only: a record can never disappear, its
+  // identity is fixed, per-fingerprint counts cannot decrease and the window
+  // can never move backward. Folding at the entry cap preserves this because
+  // merged counts carry forward into the successor entry.
+  for (const priorRecord of prior.attemptMemory) {
+    const nextRecord = next.attemptMemory.find((record) =>
+      record.id === priorRecord.id
+    );
+    if (nextRecord === undefined) {
+      return "existing attempt memory record cannot be dropped";
+    }
+    if (
+      !sameRepository(priorRecord.repository, nextRecord.repository) ||
+      priorRecord.taskId !== nextRecord.taskId ||
+      priorRecord.base !== nextRecord.base ||
+      priorRecord.purpose !== nextRecord.purpose
+    ) {
+      return "existing attempt memory identity changed";
+    }
+    let priorTotal = 0;
+    for (const entry of priorRecord.entries) priorTotal += entry.count;
+    let nextTotal = 0;
+    for (const entry of nextRecord.entries) nextTotal += entry.count;
+    if (nextTotal < priorTotal) {
+      return "attempt memory counts cannot decrease";
+    }
+    for (const priorEntry of priorRecord.entries) {
+      const nextEntry = nextRecord.entries.find((entry) =>
+        entry.fingerprint === priorEntry.fingerprint
+      );
+      // An absent fingerprint was folded into a successor at the entry cap;
+      // its count is carried by the total check above.
+      if (nextEntry === undefined) continue;
+      if (nextEntry.count < priorEntry.count) {
+        return "attempt memory fingerprint count cannot decrease";
+      }
+      if (nextEntry.firstAtMs > priorEntry.firstAtMs) {
+        return "attempt memory firstAtMs cannot move forward";
+      }
+      if (nextEntry.lastAtMs < priorEntry.lastAtMs) {
+        return "attempt memory lastAtMs cannot move backward";
+      }
     }
   }
   // Replay results are terminal proof: exactly immutable, never regenerated.

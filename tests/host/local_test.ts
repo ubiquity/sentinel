@@ -239,6 +239,7 @@ function emptySnapshot(): RepairStateSnapshotV1 {
     replays: [],
     releaseRequests: [],
     githubCooldowns: [],
+    attemptMemory: [],
   });
 }
 

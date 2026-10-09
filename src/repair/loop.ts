@@ -44,6 +44,13 @@ import {
   type ReviewTaskStatementV1,
 } from "../contracts/review-receipt.ts";
 import { generatedArtifactOnly } from "../github/review-snapshot.ts";
+import {
+  ATTEMPT_DETAIL_INCOMPLETE,
+  ATTEMPT_DETAIL_LOOP_STOP,
+  ATTEMPT_DETAIL_NO_TRUSTED_RECEIPT,
+  ATTEMPT_DETAIL_UNCERTAIN,
+  attemptMemorySettlementMutationV1,
+} from "./attempt-policy.ts";
 import { parseReleaseRequestV1 } from "../contracts/release.ts";
 import type { ReleaseRequestV1 } from "../contracts/release.ts";
 import {
@@ -1193,6 +1200,7 @@ async function seedSnapshot(
     replays: [],
     releaseRequests: [],
     githubCooldowns: [],
+    attemptMemory: [],
   });
   const written = await deps.state.writeRepair(seed, null);
   if (!written.ok || written.value.status !== "applied") return null;
@@ -1252,6 +1260,7 @@ async function persistTransition(
     // The draft always clones the cooldown records: a synthesized snapshot
     // never shares (or mutates) the gate's persisted array.
     githubCooldowns: [...base.githubCooldowns],
+    attemptMemory: [...base.attemptMemory],
   };
   mutate(draft);
   let parsed: RepairStateSnapshotV1;
@@ -1336,6 +1345,7 @@ function sameNonCooldownContents(
     reviews: original.reviews,
     replays: original.replays,
     releaseRequests: original.releaseRequests,
+    attemptMemory: original.attemptMemory,
   }) === canonicalStringify({
     version: other.version,
     kind: other.kind,
@@ -1346,6 +1356,7 @@ function sameNonCooldownContents(
     reviews: other.reviews,
     replays: other.replays,
     releaseRequests: other.releaseRequests,
+    attemptMemory: other.attemptMemory,
   });
 }
 
@@ -3458,7 +3469,7 @@ async function executeImplementationStep(
       context,
       prepared.record,
       prepared.reservationId,
-      "model run ended without a trusted receipt",
+      ATTEMPT_DETAIL_NO_TRUSTED_RECEIPT,
     );
   }
   return handleModelReceipt(
@@ -3484,19 +3495,26 @@ export async function settleFailedImplementation(
   reservationId: string,
   detail: string,
 ): Promise<StepResultV1> {
+  const now = deps.clock.now();
   const blocked = await settleAndBlock(
     deps,
     reservationId,
     "ambiguous",
     record,
     detail,
-    deps.clock.now(),
+    now,
   );
-  return persistAfterSettlement(
-    deps,
-    context.bounds,
-    replaceWorkMutation(blocked),
-  );
+  // The attempt-memory entry is persisted in the SAME state commit as the
+  // blocker it describes (atomic memory + outcome, never a torn pair).
+  const memory = await attemptMemorySettlementMutationV1({
+    record,
+    detail,
+    now,
+  });
+  return persistAfterSettlement(deps, context.bounds, (draft) => {
+    replaceWorkMutation(blocked)(draft);
+    memory(draft);
+  });
 }
 
 function implementationIntent(
@@ -3540,14 +3558,13 @@ export async function handleModelReceipt(
     // blocker message; every other incomplete receipt keeps the generic
     // message. The settlement write moved the authoritative head, so the
     // block is persisted against the reloaded state (never a stale CAS).
-    const loopStopped = receipt.error === "failed_command_loop";
+    const loopStopped = receipt.error === ATTEMPT_DETAIL_LOOP_STOP;
     const artifactOnly = receipt.outcome === "completed" &&
       candidate !== null &&
       candidate.changedPaths.length > 0 &&
       generatedArtifactOnly(candidate.changedPaths);
-    let incompleteMessage =
-      "model run did not complete with a trusted candidate";
-    if (loopStopped) incompleteMessage = "failed_command_loop";
+    let incompleteMessage: string = ATTEMPT_DETAIL_INCOMPLETE;
+    if (loopStopped) incompleteMessage = ATTEMPT_DETAIL_LOOP_STOP;
     if (artifactOnly) {
       incompleteMessage =
         "model candidate changed only generated/cache artifacts";
@@ -3560,11 +3577,15 @@ export async function handleModelReceipt(
       incompleteMessage,
       now,
     );
-    return persistAfterSettlement(
-      deps,
-      context.bounds,
-      replaceWorkMutation(blocked),
-    );
+    const memory = await attemptMemorySettlementMutationV1({
+      record,
+      detail: incompleteMessage,
+      now,
+    });
+    return persistAfterSettlement(deps, context.bounds, (draft) => {
+      replaceWorkMutation(blocked)(draft);
+      memory(draft);
+    });
   }
   const head = candidate!.head!;
   const protectedHit = candidate!.changedPaths.some((path) =>
@@ -3868,16 +3889,17 @@ async function handleImplementationUncertainty(
   // The ambiguous settlement above writes the SAME authoritative repair state,
   // so the block is applied against the reread head exactly like the adjacent
   // settled-budget paths (a pre-settlement CAS is refused as state_error).
-  return persistAfterSettlement(
-    deps,
-    context.bounds,
-    replaceWorkMutation(markBlocked(
-      record,
-      "other",
-      "implementation outcome uncertain; awaiting authoritative disposition",
-      deps.clock.now(),
-    )),
-  );
+  const now = deps.clock.now();
+  const blocked = markBlocked(record, "other", ATTEMPT_DETAIL_UNCERTAIN, now);
+  const memory = await attemptMemorySettlementMutationV1({
+    record,
+    detail: ATTEMPT_DETAIL_UNCERTAIN,
+    now,
+  });
+  return persistAfterSettlement(deps, context.bounds, (draft) => {
+    replaceWorkMutation(blocked)(draft);
+    memory(draft);
+  });
 }
 
 // ---------------------------------------------------------------------------

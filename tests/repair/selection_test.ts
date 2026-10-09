@@ -46,6 +46,7 @@ function snapshot(
     replays: [],
     releaseRequests: [],
     githubCooldowns: [],
+    attemptMemory: [],
     ...extra,
   };
 }

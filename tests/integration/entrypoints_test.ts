@@ -1127,6 +1127,7 @@ async function postDrainTaskScenario(
         replays: [],
         releaseRequests: [],
         githubCooldowns: [],
+        attemptMemory: [],
       }),
       null,
     );

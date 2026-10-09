@@ -460,6 +460,7 @@ function seedSnapshot(work: WorkRecordV1[]): RepairStateSnapshotV1 {
     replays: [],
     releaseRequests: [],
     githubCooldowns: [],
+    attemptMemory: [],
   });
 }
 

@@ -1181,6 +1181,7 @@ for (const mode of [false, true, "expensive_reads", "fresh_drift"] as const) {
             replays: [],
             releaseRequests: [],
             githubCooldowns: [],
+            attemptMemory: [],
           }),
           null,
         );

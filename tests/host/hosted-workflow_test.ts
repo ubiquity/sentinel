@@ -179,6 +179,7 @@ function emptyRepairSnapshot() {
     replays: [],
     releaseRequests: [],
     githubCooldowns: [],
+    attemptMemory: [],
   });
 }
 

@@ -249,6 +249,7 @@ async function seedRepair(
     replays: [],
     releaseRequests: [],
     githubCooldowns,
+    attemptMemory: [],
   });
   const written = await rig.repair.writeRepair(next, head);
   assert.ok(
