@@ -2163,10 +2163,15 @@ async function recoverHostedHistoricalC63(
     const reservation = before.snapshot.reservations.find((row) =>
       row.id === binding.reservation
     );
-    // A row that was already removed or reconciled is skipped, never fatal:
-    // this pass runs on every maintenance cycle and must continue toward the
-    // rows that still need recovery.
-    if (!record || !reservation) return [];
+    // Only a row absent from BOTH repair halves is treated as already
+    // removed. A half-present binding is incomplete custody and fails closed:
+    // durable settlement never removes one side alone.
+    if (record === undefined && reservation === undefined) return [];
+    if (record === undefined || reservation === undefined) {
+      throw new Error(
+        "historical matrix selected reservation binding unavailable",
+      );
+    }
     const recoverable = record.nextStep === "work" ||
       (record.nextStep === "blocked" && reservation.outcome === "ambiguous");
     if (!recoverable) return [];
@@ -2256,14 +2261,21 @@ async function recoverHostedHistoricalC63(
       row.id === HOSTED_RUNTIME_ID
     )?.lastExecutionProof
     : runtime.lastExecutionProof;
-  const execution = saved?.execution.id === HISTORICAL_C63.executionId
+  // A configured, readable witness must carry the exact C63 failed proof. A
+  // missing or different proof inside a present witness commit is tampered or
+  // mismatched history and fails closed; only genuinely absent custody defers.
+  const execution = witness
+    ? (saved?.execution.id === HISTORICAL_C63.executionId
+      ? saved.execution
+      : null)
+    : saved?.execution.id === HISTORICAL_C63.executionId
     ? saved.execution
     : runtime.execution?.id === HISTORICAL_C63.executionId
     ? runtime.execution
     : null;
-  // An absent execution means the witness is no longer present in current
-  // custody; defer instead of failing. A present but mismatched binding is a
-  // tamper signal and still refuses.
+  if (witness && execution === null) {
+    throw new Error("historical matrix release witness binding changed");
+  }
   if (!execution) return { ingested: 0, deferred: true };
   if (
     execution.runId !== HISTORICAL_C63.run.runId ||
