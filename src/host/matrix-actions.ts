@@ -692,6 +692,7 @@ export async function runHistoricalMatrixQuarantine(
           "historical matrix rejection reservation outside witness",
         );
       }
+      if (deps.clock.now() >= deadlineAt) return count;
       await quarantineRow(deps, wave, captured, current, historical);
       count++;
     }
