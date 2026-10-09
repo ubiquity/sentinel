@@ -465,9 +465,9 @@ export async function runHistoricalMatrixQuarantine(
     )
   ) return 0;
   const release = await deps.state.readRelease();
-  if (!release.ok || release.value.status !== "found") {
-    throw new Error("historical matrix release unavailable");
-  }
+  // Missing or temporarily unavailable release custody defers this pass; the
+  // next maintenance cycle re-runs it instead of failing the run.
+  if (!release.ok || release.value.status !== "found") return 0;
   const runtime = release.value.snapshot.hostedRuntimes.find((row) =>
     row.id === HOSTED_RUNTIME_ID
   );

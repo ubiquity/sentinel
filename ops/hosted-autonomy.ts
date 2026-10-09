@@ -2147,9 +2147,8 @@ async function recoverHostedHistoricalC63(
   deps: HistoricalMatrixQuarantineDepsV1,
 ): Promise<number> {
   const repair = await deps.state.readRepair();
-  if (!repair.ok || repair.value.status !== "found") {
-    throw new Error("historical matrix state unavailable");
-  }
+  // Missing or temporarily unavailable repair custody defers recovery.
+  if (!repair.ok || repair.value.status !== "found") return 0;
   const before = repair.value;
   if (
     !HISTORICAL_C63.rows.some((binding) =>
@@ -2904,15 +2903,14 @@ export async function runHostedAutonomy(
   let closedBinding: ClosedCWaveBindingV1 = CLOSED_C_WAVE;
   if (deps.closedMatrix) {
     const read = await deps.state.readRepair();
-    if (!read.ok) {
-      throw new Error("C maintenance repair state unavailable");
-    }
-    const closed = read.value.status === "found"
+    // Missing or temporarily unavailable repair custody defers the closed and
+    // current matrix pre-passes instead of failing the maintenance pass.
+    const closed = read.ok && read.value.status === "found"
       ? await deps.closedMatrix()
       : undefined;
     closedBinding = closed?.binding ?? CLOSED_C_WAVE;
     if (
-      read.value.status === "found" && closed !== undefined &&
+      read.ok && read.value.status === "found" && closed !== undefined &&
       closedCWaveNeedsRecovery(read.value.snapshot, closed.binding)
     ) {
       const recovered = await ingestClosedCWave(closed);
