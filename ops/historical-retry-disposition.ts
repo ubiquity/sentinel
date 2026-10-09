@@ -293,8 +293,28 @@ export async function runHistoricalRetryDispositionMain(
     );
     return 1;
   }
+  const snapshot = repair.value.snapshot;
+  const alreadyApplied = HISTORICAL_RETRY_DISPOSITION_BINDING_V1.every(
+    (entry) => {
+      const record = snapshot.work.find((row) => String(row.id) === entry.id);
+      const reservation = snapshot.reservations.find((row) =>
+        row.id === entry.reservationId
+      );
+      return record?.nextStep === "blocked" &&
+        record.blocker?.message === HISTORICAL_RETRY_DISPOSITION_MESSAGE &&
+        reservation?.outcome === "ambiguous";
+    },
+  );
+  if (alreadyApplied) {
+    console.log(JSON.stringify({
+      kind: "historical_retry_disposition",
+      status: "already_applied",
+      transitions: HISTORICAL_RETRY_DISPOSITION_BINDING_V1.length,
+    }));
+    return 0;
+  }
   const planned = planHistoricalRetryDisposition(
-    repair.value.snapshot,
+    snapshot,
     HISTORICAL_RETRY_DISPOSITION_BINDING_V1,
     Date.now(),
   );
