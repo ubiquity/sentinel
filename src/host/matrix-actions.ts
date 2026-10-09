@@ -818,6 +818,25 @@ function disabledResult(
   };
 }
 /** This is the production composition invoked by import.meta.main below. */
+export function matrixPlanCarrierOf(carrier: {
+  waveId: string;
+  run: { runId: number; runAttempt: number; launcherSha: string };
+  controllerSha: string;
+  generation: number;
+  planDigest: string;
+  prepared: number;
+}): Record<string, unknown> {
+  return {
+    kind: "sentinel_matrix_plan",
+    waveId: carrier.waveId,
+    run: carrier.run,
+    runtimeSha: carrier.controllerSha,
+    generation: carrier.generation,
+    planDigest: carrier.planDigest,
+    prepared: carrier.prepared,
+  };
+}
+
 export async function runActionsMatrixHost(
   deps: ActionsMatrixHostDepsV1 = {},
 ): Promise<
@@ -908,22 +927,14 @@ export async function runActionsMatrixHost(
             "\n",
           { append: true },
         );
-        console.log(JSON.stringify({
-          kind: "sentinel_matrix_plan",
+        console.log(JSON.stringify(matrixPlanCarrierOf({
           waveId: result.plan.waveId,
           run: host.run,
-          runtimeSha: input.controllerSha,
+          controllerSha: input.controllerSha,
           generation: host.execution.generation,
           planDigest: result.planDigest,
           prepared: result.prepared,
-          attempted: result.attempted,
-          notReady: result.notReady,
-          deferred: result.deferred,
-          // Diagnostic breakdown when zero cells were prepared.
-          ...(result.diagnostic !== undefined
-            ? { diagnostic: result.diagnostic }
-            : {}),
-        }));
+        })));
         return cycles;
       }
       if (carrier === null) {
