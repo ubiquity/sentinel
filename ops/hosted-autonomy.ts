@@ -2145,17 +2145,19 @@ export async function runSelfObservationPass(input: {
 /** Only these three authenticated failed cells may bypass legacy rejection. */
 async function recoverHostedHistoricalC63(
   deps: HistoricalMatrixQuarantineDepsV1,
-): Promise<number> {
+): Promise<{ ingested: number; deferred: boolean }> {
   const repair = await deps.state.readRepair();
   // Missing or temporarily unavailable repair custody defers recovery.
-  if (!repair.ok || repair.value.status !== "found") return 0;
+  if (!repair.ok || repair.value.status !== "found") {
+    return { ingested: 0, deferred: true };
+  }
   const before = repair.value;
   if (
     !HISTORICAL_C63.rows.some((binding) =>
       before.snapshot.work.some((row) => row.id === binding.id) ||
       before.snapshot.reservations.some((row) => row.id === binding.reservation)
     )
-  ) return 0;
+  ) return { ingested: 0, deferred: false };
   const captured = HISTORICAL_C63.rows.flatMap((binding) => {
     const record = before.snapshot.work.find((row) => row.id === binding.id);
     const reservation = before.snapshot.reservations.find((row) =>
@@ -2199,11 +2201,13 @@ async function recoverHostedHistoricalC63(
     }
     return [{ binding, record, reservation }];
   });
-  if (captured.length === 0) return 0;
+  if (captured.length === 0) return { ingested: 0, deferred: false };
   const release = await deps.state.readRelease();
   // Missing or temporarily unavailable release custody defers recovery; the
   // pass must never fail because another run holds or lacks the state.
-  if (!release.ok || release.value.status !== "found") return 0;
+  if (!release.ok || release.value.status !== "found") {
+    return { ingested: 0, deferred: true };
+  }
   const current = release.value;
   const runtime = current.snapshot.hostedRuntimes.find((row) =>
     row.id === HOSTED_RUNTIME_ID
@@ -2215,14 +2219,14 @@ async function recoverHostedHistoricalC63(
     current.snapshot.hostedReleases.some((row) =>
       !["accepted", "rolled_back", "cancelled"].includes(row.phase)
     )
-  ) return 0;
+  ) return { ingested: 0, deferred: true };
   if (runtime.execution !== null) {
     // An unsettled current execution defers recovery; the pass must never
     // fail because another run is still writing.
     if (
       !deps.transport.confirmCompletedExecution ||
       !await deps.transport.confirmCompletedExecution(runtime.execution)
-    ) return 0;
+    ) return { ingested: 0, deferred: true };
     const observed = await deps.readExecution(runtime.execution);
     if (
       !observed.ok || observed.value === null ||
@@ -2246,7 +2250,7 @@ async function recoverHostedHistoricalC63(
     witness &&
     (!historical?.ok || historical.value.status !== "found" ||
       historical.value.head !== witness.commit)
-  ) return 0;
+  ) return { ingested: 0, deferred: true };
   const saved = historical?.ok && historical.value.status === "found"
     ? historical.value.snapshot.hostedRuntimes.find((row) =>
       row.id === HOSTED_RUNTIME_ID
@@ -2260,7 +2264,7 @@ async function recoverHostedHistoricalC63(
   // An absent execution means the witness is no longer present in current
   // custody; defer instead of failing. A present but mismatched binding is a
   // tamper signal and still refuses.
-  if (!execution) return 0;
+  if (!execution) return { ingested: 0, deferred: true };
   if (
     execution.runId !== HISTORICAL_C63.run.runId ||
     execution.runAttempt !== HISTORICAL_C63.run.runAttempt ||
@@ -2299,7 +2303,7 @@ async function recoverHostedHistoricalC63(
   };
   await custody();
   const pending = captured.filter((row) => row.record.nextStep === "work");
-  if (pending.length === 0) return 0;
+  if (pending.length === 0) return { ingested: 0, deferred: false };
   const native = await deps.readExecution(execution);
   if (
     !native.ok || native.value === null || native.value.outcome !== "failed"
@@ -2469,12 +2473,13 @@ async function recoverHostedHistoricalC63(
   if (canonicalStringify(normalized) !== canonicalStringify(expected)) {
     throw new Error("historical matrix block readback incomplete");
   }
-  return report.ingested;
+  return { ingested: report.ingested, deferred: false };
 }
 
 async function recoverHostedCurrentMatrix(
   deps: HostedAutonomyDepsV1,
   binding: ClosedCWaveBindingV1,
+  onDeferred: () => void,
 ): Promise<HostedAutonomyResultV1 | null> {
   if (!deps.closedMatrix) return null;
   const deadlineAt = deps.clock.now() + 60_000;
@@ -2495,7 +2500,10 @@ async function recoverHostedCurrentMatrix(
   if (
     !repair.ok || repair.value.status !== "found" || !release.ok ||
     release.value.status !== "found"
-  ) return null;
+  ) {
+    onDeferred();
+    return null;
+  }
   if (
     !repair.value.snapshot.work.some((row) =>
       row.nextStep === "work" && row.intent &&
@@ -2507,7 +2515,10 @@ async function recoverHostedCurrentMatrix(
   const runtime = current.snapshot.hostedRuntimes.find((row) =>
     row.id === HOSTED_RUNTIME_ID
   );
-  if (!runtime) return null;
+  if (!runtime) {
+    onDeferred();
+    return null;
+  }
   // An active execution or a nonterminal release defers current-matrix
   // recovery; the existing maintenance guard owns that disposition and the
   // pass must never fail here. Return no recovery so active promotion stays
@@ -2517,7 +2528,10 @@ async function recoverHostedCurrentMatrix(
     current.snapshot.hostedReleases.some((row) =>
       !["accepted", "rolled_back", "cancelled"].includes(row.phase)
     )
-  ) return null;
+  ) {
+    onDeferred();
+    return null;
+  }
   const snapshots = new Set<string>();
   const proofs = new Map<string, string>();
   const covered = new Set<string>();
@@ -2570,6 +2584,7 @@ async function recoverHostedCurrentMatrix(
               deadlineAt,
               covered,
               dedicated,
+              onDeferred,
             );
             if (result?.status === "applied") return result;
             if (
@@ -2615,6 +2630,7 @@ async function recoverHostedMatrixProducer(
   deadlineAt: number,
   covered: Set<string>,
   dedicated: ReadonlySet<string>,
+  onDeferred: () => void,
 ): Promise<HostedAutonomyResultV1 | null> {
   const checkDeadline = () => {
     if (deps.clock.now() >= deadlineAt) {
@@ -2624,7 +2640,10 @@ async function recoverHostedMatrixProducer(
   checkDeadline();
   const repair = await deps.state.readRepair();
   checkDeadline();
-  if (!repair.ok || repair.value.status !== "found") return null;
+  if (!repair.ok || repair.value.status !== "found") {
+    onDeferred();
+    return null;
+  }
   const before = repair.value;
   const runtime = producer.snapshot.hostedRuntimes.find((row) =>
     row.id === HOSTED_RUNTIME_ID
@@ -2743,12 +2762,16 @@ async function recoverHostedMatrixProducer(
   ) {
     // A producer whose own native run is still in flight is not recoverable
     // yet; skip it instead of failing the whole pass.
+    onDeferred();
     return null;
   }
   checkDeadline();
   const native = await ports.readExecution(saved.execution);
   checkDeadline();
-  if (!native.ok || native.value === null) return null;
+  if (!native.ok || native.value === null) {
+    onDeferred();
+    return null;
+  }
   if (native.value.outcome === "not_started") {
     throw new Error("current matrix native proof unavailable");
   }
@@ -2943,14 +2966,28 @@ export async function runHostedAutonomy(
       };
     }
   }
-  const currentMatrix = await recoverHostedCurrentMatrix(deps, closedBinding);
+  let custodyDeferred = false;
+  const currentMatrix = await recoverHostedCurrentMatrix(
+    deps,
+    closedBinding,
+    () => {
+      custodyDeferred = true;
+    },
+  );
   if (currentMatrix?.status === "applied") return currentMatrix;
   if (deps.historicalMatrix) {
     let count: number;
     try {
-      const recovered = await recoverHostedHistoricalC63(deps.historicalMatrix);
-      if (recovered > 0) actions.push(`historical-c63:ingested:${recovered}`);
-      count = await runHistoricalMatrixQuarantine(deps.historicalMatrix);
+      const c63 = await recoverHostedHistoricalC63(deps.historicalMatrix);
+      if (c63.deferred) custodyDeferred = true;
+      if (c63.ingested > 0) {
+        actions.push(`historical-c63:ingested:${c63.ingested}`);
+      }
+      // A custody-absent pre-pass must not fall through to the legacy
+      // quarantine pass, whose refusals would turn it into a hard failure.
+      count = custodyDeferred
+        ? 0
+        : await runHistoricalMatrixQuarantine(deps.historicalMatrix);
     } catch (error) {
       // Only fixed quarantine vocabulary reaches hosted logs, never transport text.
       let errorName: unknown;
