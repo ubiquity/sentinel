@@ -296,7 +296,7 @@ Deno.test("owner startup recovery: actual GitHub compare shape binds exact candi
   }
 });
 
-Deno.test("owner startup recovery: workflow suppresses maintenance and retains the existing verification path", async () => {
+Deno.test("supervisor workflow: ordinary maintenance precedes the existing verification path", async () => {
   const text = await Deno.readTextFile(
     new URL("../../.github/workflows/supervisor.yml", import.meta.url),
   );
@@ -304,8 +304,11 @@ Deno.test("owner startup recovery: workflow suppresses maintenance and retains t
     text.indexOf("  maintenance:"),
     text.indexOf("  prepare:"),
   );
-  assert.match(maintenance, /if: \$\{\{ false \}\}/);
-  assert.match(text, /needs\.maintenance\.result == 'skipped'/);
+  assert.match(
+    maintenance,
+    /if: github\.ref == 'refs\/heads\/sentinel-supervisor'/,
+  );
+  assert.match(text, /needs\.maintenance\.result == 'success'/);
   // The retired recovery flags no longer appear; the prepare and finalize
   // verification runs stay on the plain supervisor entrypoint.
   assert.doesNotMatch(text, /--startup-recovery|--owner-startup-recovery-only/);
