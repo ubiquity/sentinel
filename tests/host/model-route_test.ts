@@ -57,6 +57,34 @@ Deno.test("model route: the gateway route is the default", () => {
   assert.equal(resolveModelRoute({}).reasoning, "max");
 });
 
+Deno.test("model route: a declared model id overrides the gateway model", () => {
+  // A valid declared id changes only the gateway model id.
+  assert.deepEqual(
+    resolveModelRoute({
+      SENTINEL_MODEL_ID: "deepseek-ai/DeepSeek-V4.1-Flash-ultra",
+      UOS_AI_TOKEN: "gateway-token",
+    }),
+    { ...GATEWAY, model: "deepseek-ai/DeepSeek-V4.1-Flash-ultra" },
+  );
+  // An empty declared value counts as unset: the default model stays.
+  assert.deepEqual(resolveModelRoute({ SENTINEL_MODEL_ID: "" }), GATEWAY);
+  // An invalid declared id (padded or over-long) also yields the default.
+  assert.deepEqual(resolveModelRoute({ SENTINEL_MODEL_ID: " x" }), GATEWAY);
+  assert.deepEqual(
+    resolveModelRoute({ SENTINEL_MODEL_ID: "a".repeat(300) }),
+    GATEWAY,
+  );
+  // The explicit owner override branch still wins over the gateway override.
+  assert.equal(
+    resolveModelRoute({
+      SENTINEL_MODEL_BASE_URL: "https://api.deepseek.com/v1",
+      SENTINEL_MODEL_ID: "deepseek-v4-pro",
+      SENTINEL_DEEPSEEK_API_KEY: SECRET,
+    }).provider,
+    "deepseek",
+  );
+});
+
 Deno.test("model route: the explicit owner override selects the endpoint", () => {
   const route = resolveModelRoute({
     SENTINEL_MODEL_BASE_URL: "https://api.deepseek.com/v1",

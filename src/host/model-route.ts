@@ -16,8 +16,9 @@
  *   2. Fallback: `SENTINEL_MODEL_FALLBACK === "deepseek"` together with a
  *      non-empty `SENTINEL_DEEPSEEK_API_KEY` selects the DeepSeek-direct
  *      endpoint (`https://api.deepseek.com/v1`) and `deepseek-flash`.
- *   3. Gateway: the existing primary route (`uos`, `gpt-reserve`, no key
- *      environment; the caller keeps its existing `UOS_AI_TOKEN` input).
+ *   3. Gateway: the existing primary route (`uos`, `gpt-reserve` or a
+ *      declared valid `SENTINEL_MODEL_ID`, no key environment; the caller
+ *      keeps its existing `UOS_AI_TOKEN` input).
  *
  * Every route also carries `failoverModel`: the model id the implementation
  * port retries with when the primary model is rate limited (HTTP 429) by the
@@ -140,12 +141,15 @@ function isBoundedModelId(value: string): boolean {
   return true;
 }
 
-/** The frozen primary gateway route. */
-function gatewayRoute(failoverModel: string): ModelRouteV1 {
+/** The frozen primary gateway route (model id optionally overridden). */
+function gatewayRoute(
+  failoverModel: string,
+  model: string = GATEWAY_MODEL_ID,
+): ModelRouteV1 {
   return {
     provider: GATEWAY_PROVIDER,
     baseUrl: GATEWAY_BASE_URL,
-    model: GATEWAY_MODEL_ID,
+    model,
     reasoning: REASONING,
     apiKeyEnv: null,
     failoverModel,
@@ -208,6 +212,13 @@ export function resolveModelRoute(
     declared(env, MODEL_FALLBACK_ENV) === FALLBACK_SELECTOR && usableKey
   ) {
     return deepseekRoute(DEEPSEEK_BASE_URL, DEEPSEEK_MODEL_ID, failoverModel);
+  }
+  // Gateway route: `SENTINEL_MODEL_ID`, when declared and valid, overrides
+  // the gateway model id; an unset, empty or invalid value yields the default
+  // (`gpt-reserve`). Endpoint, credentials and failover never change.
+  const gatewayModelId = declared(env, MODEL_ID_ENV);
+  if (gatewayModelId !== null && isBoundedModelId(gatewayModelId)) {
+    return gatewayRoute(failoverModel, gatewayModelId);
   }
   return gatewayRoute(failoverModel);
 }
