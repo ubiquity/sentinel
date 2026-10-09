@@ -306,10 +306,11 @@ Deno.test("owner startup recovery: workflow suppresses maintenance and retains t
   );
   assert.match(maintenance, /if: \$\{\{ false \}\}/);
   assert.match(text, /needs\.maintenance\.result == 'skipped'/);
-  assert.match(text, /owner-development-install\.ts --startup-recovery/);
+  // The retired recovery flags no longer appear; the prepare and finalize
+  // verification runs stay on the plain supervisor entrypoint.
+  assert.doesNotMatch(text, /--startup-recovery|--owner-startup-recovery-only/);
   assert.equal(
-    (text.match(/deno task supervisor:run --owner-startup-recovery-only/g) ??
-      []).length,
+    (text.match(/run: deno task supervisor:run$/gm) ?? []).length,
     2,
   );
   assert.match(text, /--allow-run=git/);

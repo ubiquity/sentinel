@@ -25,19 +25,14 @@ Deno.test("workflow maintenance contract: rejects mixed recovery and ordinary ad
     )
     .replaceAll(" --startup-recovery", "")
     .replaceAll(" --owner-startup-recovery-only", "");
+  // The retired --startup-recovery markers no longer exist; scoped recovery
+  // is exactly the suppressed maintenance writer plus the plain supervisor
+  // verification runs.
   const recovery = ordinary
     .replace(protectedIf, skippedIf)
     .replace(
       "needs.maintenance.result == 'success'",
       "needs.maintenance.result == 'skipped'",
-    )
-    .replace(
-      "src/host/owner-development-install.ts\n",
-      "src/host/owner-development-install.ts --startup-recovery\n",
-    )
-    .replaceAll(
-      "run: deno task supervisor:run\n",
-      "run: deno task supervisor:run --owner-startup-recovery-only\n",
     );
   assert.equal(assertSupervisorMaintenanceContract(ordinary), "ordinary");
   assert.equal(assertSupervisorMaintenanceContract(recovery), "recovery");
@@ -48,8 +43,11 @@ Deno.test("workflow maintenance contract: rejects mixed recovery and ordinary ad
         "needs.maintenance.result == 'skipped'",
         "needs.maintenance.result == 'success'",
       ),
-      recovery.replace(" --owner-startup-recovery-only", ""),
-      recovery.replace(" --startup-recovery", ""),
+      recovery.replace(
+        "run: deno task supervisor:run",
+        "run: deno task supervisor:run --owner-startup-recovery-only",
+      ),
+      recovery.replace("needs: maintenance\n", ""),
       ordinary.replace(" && needs.maintenance.result == 'success'", ""),
     ]
   ) assert.throws(() => assertSupervisorMaintenanceContract(malformed));
