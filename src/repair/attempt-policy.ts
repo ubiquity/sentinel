@@ -322,6 +322,49 @@ export function priorAttemptFactsForRecordV1(
   return facts;
 }
 
+/** Maximum cross-task lessons carried into one model request. */
+export const MAX_REPOSITORY_LESSONS = 5;
+
+/**
+ * Bounded cross-task learning: the most recent distinct failure modes recorded
+ * for OTHER work items in the same repository at the record's current runtime
+ * revision. This is the OpenClaw "memory search" analog made deterministic:
+ * a new task sees what already failed elsewhere in this repository under this
+ * exact revision, so a fresh session inherits the repository's operational
+ * lessons instead of repeating them. Deduped per failure detail (highest count
+ * wins), newest first, capped. Pure; returns [] when nothing applies.
+ */
+export function repositoryPriorFactsForRecordV1(
+  snapshot: RepairStateSnapshotV1,
+  record: WorkRecordV1,
+  maxFacts: number = MAX_REPOSITORY_LESSONS,
+): PriorAttemptFactV1[] {
+  const byDetail = new Map<string, PriorAttemptFactV1>();
+  for (const memory of snapshot.attemptMemory) {
+    if (!sameRepository(memory.repository, record.repository)) continue;
+    if (memory.taskId === record.id) continue;
+    for (const entry of memory.entries) {
+      if (entry.controllerSha !== record.controller.sha) continue;
+      const prior = byDetail.get(entry.detail);
+      if (
+        prior === undefined || entry.count > prior.count ||
+        (entry.count === prior.count && entry.lastAtMs > prior.lastAtMs)
+      ) {
+        byDetail.set(entry.detail, {
+          detail: entry.detail,
+          stage: entry.stage,
+          failureClass: entry.failureClass,
+          count: entry.count,
+          lastAtMs: entry.lastAtMs,
+        });
+      }
+    }
+  }
+  return [...byDetail.values()]
+    .sort((left, right) => right.lastAtMs - left.lastAtMs)
+    .slice(0, maxFacts);
+}
+
 /**
  * Mutation factory for one failed implementation settlement. Callers persist
  * the returned mutation in the SAME state commit as the blocker it describes

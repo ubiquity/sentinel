@@ -106,6 +106,7 @@ const REQUEST_OPTIONAL = [
   "reviewFindings",
   "scopeNote",
   "priorAttempts",
+  "repositoryLessons",
 ] as const;
 /** Bound on verified prior-attempt facts carried into one model request. */
 const MAX_PRIOR_ATTEMPT_FACTS = 8;
@@ -410,35 +411,44 @@ export function parseMatrixModelRequestV1(
   const scopeNote = obj.scopeNote === undefined
     ? undefined
     : expectNonEmptyString(obj.scopeNote, `${path}.scopeNote`, MAX_TEXT_CHARS);
+  const parsePriorAttemptFact = (value: unknown, at: string) => {
+    const fact = expectRecord(value, at);
+    expectExactKeys(fact, PRIOR_ATTEMPT_KEYS, at);
+    return {
+      detail: expectNonEmptyString(
+        fact.detail,
+        `${at}.detail`,
+        MAX_PRIOR_ATTEMPT_DETAIL_CHARS,
+      ),
+      stage: expectEnum(
+        fact.stage,
+        PRIOR_ATTEMPT_STAGES,
+        `${at}.stage`,
+      ),
+      failureClass: expectEnum(
+        fact.failureClass,
+        PRIOR_ATTEMPT_CLASSES,
+        `${at}.failureClass`,
+      ),
+      count: expectPositiveInt(fact.count, `${at}.count`),
+      lastAtMs: expectTimestamp(fact.lastAtMs, `${at}.lastAtMs`),
+    };
+  };
   const priorAttempts = obj.priorAttempts === undefined
     ? undefined
     : expectArray(
       obj.priorAttempts,
       `${path}.priorAttempts`,
       MAX_PRIOR_ATTEMPT_FACTS,
-      (value, at) => {
-        const fact = expectRecord(value, at);
-        expectExactKeys(fact, PRIOR_ATTEMPT_KEYS, at);
-        return {
-          detail: expectNonEmptyString(
-            fact.detail,
-            `${at}.detail`,
-            MAX_PRIOR_ATTEMPT_DETAIL_CHARS,
-          ),
-          stage: expectEnum(
-            fact.stage,
-            PRIOR_ATTEMPT_STAGES,
-            `${at}.stage`,
-          ),
-          failureClass: expectEnum(
-            fact.failureClass,
-            PRIOR_ATTEMPT_CLASSES,
-            `${at}.failureClass`,
-          ),
-          count: expectPositiveInt(fact.count, `${at}.count`),
-          lastAtMs: expectTimestamp(fact.lastAtMs, `${at}.lastAtMs`),
-        };
-      },
+      parsePriorAttemptFact,
+    );
+  const repositoryLessons = obj.repositoryLessons === undefined
+    ? undefined
+    : expectArray(
+      obj.repositoryLessons,
+      `${path}.repositoryLessons`,
+      MAX_PRIOR_ATTEMPT_FACTS,
+      parsePriorAttemptFact,
     );
   if (obj.reasoning !== "max") {
     fail(`${path}.reasoning`, "invalid_enum", "reasoning must be max");
@@ -460,6 +470,7 @@ export function parseMatrixModelRequestV1(
     evidence,
     ...(reviewFindings === undefined ? {} : { reviewFindings }),
     ...(priorAttempts === undefined ? {} : { priorAttempts }),
+    ...(repositoryLessons === undefined ? {} : { repositoryLessons }),
     model: expectNonEmptyString(obj.model, `${path}.model`, MAX_ID_CHARS),
     reasoning: "max",
     maxDurationMs: expectPositiveInt(

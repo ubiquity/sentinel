@@ -741,6 +741,13 @@ export interface ModelRunRequestV1 {
    * permission to change budgets, credentials, review or model policy.
    */
   priorAttempts?: readonly PriorAttemptFactV1[];
+  /**
+   * Bounded cross-task lessons from durable memory: recent distinct failure
+   * modes recorded for OTHER work items in the same repository at this exact
+   * runtime revision. Shared operational context for a fresh session; never
+   * permission to change budgets, credentials, review or model policy.
+   */
+  repositoryLessons?: readonly PriorAttemptFactV1[];
   model: ModelIdV1;
   reasoning: ReasoningEffortV1;
   maxDurationMs: number;

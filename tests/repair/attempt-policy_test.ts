@@ -25,6 +25,7 @@ import {
   classifyAttemptDetailV1,
   decideEquivalentAttemptV1,
   priorAttemptFactsForRecordV1,
+  repositoryPriorFactsForRecordV1,
 } from "../../src/repair/attempt-policy.ts";
 import { REPO, SHA1, SHA2, T0, workRecord } from "../state/helpers.ts";
 
@@ -438,4 +439,62 @@ Deno.test("attempt policy: prior-attempt facts are newest-first and exclude olde
     blocker: { kind: "other", message: DETAIL, since: T0 + 1000 },
   });
   assert.equal(priorAttemptFactsForRecordV1(snapshot, movedBase).length, 0);
+});
+
+Deno.test("attempt policy: cross-task repository lessons are deduped, bounded and revision-scoped", async () => {
+  const record = workRecord(TASK, {
+    nextStep: "blocked",
+    blocker: { kind: "other", message: DETAIL, since: T0 + 1000 },
+  });
+  const otherTask = asWorkItemId("issue-ubiquity-sentinel-49");
+  const ownTaskMemory = await memoryRecord({ id: "1".repeat(64) }, {
+    count: 9,
+  });
+  const crossTaskLow = await memoryRecord(
+    { taskId: otherTask, id: "2".repeat(64) },
+    {
+      count: 3,
+      lastAtMs: T0 + 5000,
+    },
+  );
+  const crossTaskHigh = await memoryRecord(
+    { taskId: asWorkItemId("issue-ubiquity-sentinel-50"), id: "3".repeat(64) },
+    { count: 5, lastAtMs: T0 + 6000 },
+  );
+  const otherRevision = await memoryRecord(
+    { taskId: asWorkItemId("issue-ubiquity-sentinel-51"), id: "4".repeat(64) },
+    { count: 7, controllerSha: SHA2, lastAtMs: T0 + 7000 },
+  );
+  const distinctDetail = await memoryRecord(
+    { taskId: asWorkItemId("issue-ubiquity-sentinel-52"), id: "5".repeat(64) },
+    {
+      count: 2,
+      detail: ATTEMPT_DETAIL_NO_TRUSTED_RECEIPT,
+      lastAtMs: T0 + 9000,
+    },
+  );
+  const snapshot = snapshotWith([
+    ownTaskMemory,
+    crossTaskLow,
+    crossTaskHigh,
+    otherRevision,
+    distinctDetail,
+  ], record);
+
+  const facts = repositoryPriorFactsForRecordV1(snapshot, record);
+  assert.equal(facts.length, 2);
+  // Newest first; the duplicate detail keeps the highest count seen.
+  assert.equal(facts[0].detail, ATTEMPT_DETAIL_NO_TRUSTED_RECEIPT);
+  assert.equal(facts[1].detail, DETAIL);
+  assert.equal(facts[1].count, 5);
+  // The own task and other-revision entries never leak in.
+  assert.equal(
+    facts.some((fact) => fact.count === 9 || fact.count === 7),
+    false,
+  );
+  // Cap respected.
+  assert.equal(
+    repositoryPriorFactsForRecordV1(snapshot, record, 1).length,
+    1,
+  );
 });

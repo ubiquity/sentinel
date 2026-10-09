@@ -2337,6 +2337,27 @@ function buildPrompt(
           .join("\n"),
     );
   }
+  if (
+    request.repositoryLessons !== undefined &&
+    request.repositoryLessons.length > 0
+  ) {
+    // Cross-task lessons from durable memory for the SAME repository and the
+    // SAME runtime revision. Advisory shared context only: evidence about what
+    // fails elsewhere, never permission to touch unrelated code, budgets,
+    // credentials, review or model policy.
+    parts.push(
+      "RECENT FAILURES ELSEWHERE IN THIS REPOSITORY at the same runtime " +
+        "revision (other work items; shared context so you do not repeat " +
+        "these failure modes — do not modify unrelated code for them):\n" +
+        request.repositoryLessons
+          .map((fact) =>
+            `- ${fact.detail} (stage ${fact.stage}, ${fact.failureClass}, ${fact.count} recorded outcome${
+              fact.count === 1 ? "" : "s"
+            })`
+          )
+          .join("\n"),
+    );
+  }
   parts.push(
     "Runtime implementer role: you are the bounded runtime implementer for " +
       "this task. Edit only the current provided checkout, and only the files " +

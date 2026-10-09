@@ -55,6 +55,7 @@ import {
   ATTEMPT_DETAIL_UNCERTAIN,
   attemptMemorySettlementMutationV1,
   priorAttemptFactsForRecordV1,
+  repositoryPriorFactsForRecordV1,
 } from "./attempt-policy.ts";
 import type {
   AttemptFailureClassV1,
@@ -3268,6 +3269,10 @@ export async function prepareImplementationStart(
   const findings = correctionFindings(context.snapshot, record);
   const part = decompositionPartOf(record.id);
   const priorAttempts = priorAttemptFactsForRecordV1(context.snapshot, record);
+  const repositoryLessons = repositoryPriorFactsForRecordV1(
+    context.snapshot,
+    record,
+  );
   const request: ModelRunRequestV1 = {
     taskId: record.id,
     repository: record.repository,
@@ -3282,6 +3287,7 @@ export async function prepareImplementationStart(
       ? {}
       : { scopeNote: decompositionScopeNote(part.index, part.total) }),
     ...(priorAttempts.length === 0 ? {} : { priorAttempts }),
+    ...(repositoryLessons.length === 0 ? {} : { repositoryLessons }),
     model: implementationModelId(deps),
     reasoning: REASONING,
     maxDurationMs: bound.maxDurationMs,
