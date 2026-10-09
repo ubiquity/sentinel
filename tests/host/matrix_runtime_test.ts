@@ -102,6 +102,47 @@ const LAUNCHER = "1".repeat(40) as GitSha;
 const RUN = { runId: 41, runAttempt: 1, launcherSha: LAUNCHER };
 const ACTUAL = { run: RUN, runtimeSha: LAUNCHER, generation: 1 };
 const PROVIDER = "sentinel-host";
+
+Deno.test("matrix runtime: the trusted provider allowlist accepts documented routes only", () => {
+  const request = {
+    model: "fixture-model",
+    reasoning: "max",
+    maxDurationMs: 1_000,
+    maxOutputChars: 100,
+  };
+  const receipt: ModelRunReceiptV1 = {
+    invocationId: "provider-allowlist",
+    outcome: "interrupted",
+    actual: {
+      evidenceKind: "request-runtime",
+      provider: "deepseek",
+      threadId: "fixture-thread",
+      turnId: "fixture-turn",
+      terminalOrigin: "runtime",
+      observedTerminalStatus: "interrupted",
+      observedModel: request.model,
+      observedReasoning: request.reasoning,
+      durationMs: 10,
+      outputChars: 10,
+    },
+    candidate: null,
+    error: null,
+  };
+  assert.equal(
+    verifyMatrixReceiptV1(receipt, request, [PROVIDER, "deepseek"]),
+    true,
+    "the documented fallback provider stays acceptable",
+  );
+  assert.equal(
+    verifyMatrixReceiptV1(receipt, request, PROVIDER),
+    false,
+    "a single mismatched provider still refuses",
+  );
+  assert.equal(
+    verifyMatrixReceiptV1(receipt, request, [PROVIDER, "deepseek", ""]),
+    true,
+  );
+});
 const DEADLINE = T0 + 60 * 60_000;
 
 Deno.test("matrix runtime: authenticated interrupted output overage stays charged and blocked with strict guards", async () => {
