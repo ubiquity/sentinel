@@ -2577,7 +2577,7 @@ async function recoverHostedCurrentMatrix(
           }
           if (prior === undefined) {
             proofs.set(identity, proof);
-            const result = await recoverHostedMatrixProducer(
+            const produced = await recoverHostedMatrixProducer(
               deps,
               current,
               producer,
@@ -2586,7 +2586,13 @@ async function recoverHostedCurrentMatrix(
               dedicated,
               onDeferred,
             );
-            if (result?.status === "applied") return result;
+            // An unresolved newer producer stops older-history recovery:
+            // an older wave must never settle a reservation whose newer
+            // producer outcome is still unavailable.
+            if (produced.deferred) return null;
+            if (produced.result?.status === "applied") {
+              return produced.result;
+            }
             if (
               pending.every((row) =>
                 row.intent?.requestId && covered.has(row.intent.requestId)
@@ -2631,7 +2637,7 @@ async function recoverHostedMatrixProducer(
   covered: Set<string>,
   dedicated: ReadonlySet<string>,
   onDeferred: () => void,
-): Promise<HostedAutonomyResultV1 | null> {
+): Promise<{ result: HostedAutonomyResultV1 | null; deferred: boolean }> {
   const checkDeadline = () => {
     if (deps.clock.now() >= deadlineAt) {
       throw new Error("current matrix history deadline exhausted");
@@ -2642,7 +2648,7 @@ async function recoverHostedMatrixProducer(
   checkDeadline();
   if (!repair.ok || repair.value.status !== "found") {
     onDeferred();
-    return null;
+    return { result: null, deferred: true };
   }
   const before = repair.value;
   const runtime = producer.snapshot.hostedRuntimes.find((row) =>
@@ -2652,7 +2658,7 @@ async function recoverHostedMatrixProducer(
   if (
     !runtime || !saved || saved.outcome === "not_started" ||
     saved.execution.purpose !== "ordinary"
-  ) return null;
+  ) return { result: null, deferred: false };
   if (
     runtime.execution !== null || saved.execution.releaseId !== null ||
     runtime.activeRevision !== saved.execution.revision ||
@@ -2742,7 +2748,7 @@ async function recoverHostedMatrixProducer(
       attempt: record.counters.attempts,
     }];
   });
-  if (requests.length === 0) return null;
+  if (requests.length === 0) return { result: null, deferred: false };
   const producerState: StateReadView & RepairStateWriter = {
     ...state,
     readRelease: () =>
@@ -2761,16 +2767,16 @@ async function recoverHostedMatrixProducer(
     !await transport.confirmCompletedExecution(saved.execution)
   ) {
     // A producer whose own native run is still in flight is not recoverable
-    // yet; skip it instead of failing the whole pass.
+    // yet; stop the history traversal and defer instead of failing.
     onDeferred();
-    return null;
+    return { result: null, deferred: true };
   }
   checkDeadline();
   const native = await ports.readExecution(saved.execution);
   checkDeadline();
   if (!native.ok || native.value === null) {
     onDeferred();
-    return null;
+    return { result: null, deferred: true };
   }
   if (native.value.outcome === "not_started") {
     throw new Error("current matrix native proof unavailable");
@@ -2826,7 +2832,7 @@ async function recoverHostedMatrixProducer(
     ) {
       throw new Error("current matrix repair custody changed");
     }
-    return null;
+    return { result: null, deferred: false };
   }
   const fresh = await state.readRepair();
   if (
@@ -2916,13 +2922,16 @@ async function recoverHostedMatrixProducer(
   }
   for (const id of selected) covered.add(id);
   return {
-    kind: "hosted_autonomy",
-    status: after.value.head === before.head ? "skipped" : "applied",
-    reason: after.value.head === before.head ? "no_change" : "applied",
-    beforeHead: before.head,
-    appliedHead: after.value.head,
-    actions: [`current-matrix:ingested:${ingested}`],
-    revisions: [],
+    result: {
+      kind: "hosted_autonomy",
+      status: after.value.head === before.head ? "skipped" : "applied",
+      reason: after.value.head === before.head ? "no_change" : "applied",
+      beforeHead: before.head,
+      appliedHead: after.value.head,
+      actions: [`current-matrix:ingested:${ingested}`],
+      revisions: [],
+    },
+    deferred: false,
   };
 }
 
