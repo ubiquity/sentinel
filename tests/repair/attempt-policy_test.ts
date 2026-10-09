@@ -27,6 +27,7 @@ import {
   decideEquivalentAttemptV1,
   priorAttemptFactsForRecordV1,
   repositoryPriorFactsForRecordV1,
+  repositoryRegressionFactsV1,
 } from "../../src/repair/attempt-policy.ts";
 import { REPO, SHA1, SHA2, T0, workRecord } from "../state/helpers.ts";
 
@@ -523,6 +524,7 @@ Deno.test("attempt policy: an accepted candidate records success on the family",
   assert.equal(applied.attemptMemory.length, 1);
   assert.equal(applied.attemptMemory[0].successes, 1);
   assert.equal(applied.attemptMemory[0].lastSuccessAtMs, T0 + 9000);
+  assert.equal(applied.attemptMemory[0].lastSuccessRevision, SHA1);
   assert.equal(applied.attemptMemory[0].entries.length, 0);
 
   // A second success increments; failures recorded afterwards keep their
@@ -539,4 +541,62 @@ Deno.test("attempt policy: an accepted candidate records success on the family",
   })());
   assert.equal(second.attemptMemory[0].successes, 2);
   assert.equal(second.attemptMemory[0].lastSuccessAtMs, T0 + 9000);
+});
+
+Deno.test("attempt policy: worked-before failures are reported as versioned regressions", async () => {
+  const record = workRecord(TASK, {
+    nextStep: "blocked",
+    blocker: { kind: "other", message: DETAIL, since: T0 + 1000 },
+  });
+  // The family succeeded at an older revision, then failed at the current one.
+  const memory = await memoryRecord({}, { count: 2, lastAtMs: T0 + 6000 });
+  const withSuccess = {
+    ...memory,
+    successes: 1,
+    lastSuccessAtMs: T0 + 2000,
+    lastSuccessRevision: SHA2,
+  };
+  const snapshot = snapshotWith([withSuccess], record);
+  const facts = repositoryRegressionFactsV1(snapshot, record.repository, SHA1);
+  assert.equal(facts.length, 1);
+  assert.equal(facts[0].detail, DETAIL);
+  assert.equal(facts[0].priorSuccessRevision, SHA2);
+  assert.equal(facts[0].priorSuccessAtMs, T0 + 2000);
+  assert.equal(facts[0].failuresAtCurrentRevision, 2);
+  assert.equal(facts[0].lastFailureAtMs, T0 + 6000);
+
+  // A success at the CURRENT revision is not a regression, and a failure
+  // before the success is history rather than a regression.
+  const currentSuccess = {
+    ...memory,
+    successes: 1,
+    lastSuccessAtMs: T0 + 2000,
+    lastSuccessRevision: SHA1,
+  };
+  assert.equal(
+    repositoryRegressionFactsV1(
+      snapshotWith([currentSuccess], record),
+      record.repository,
+      SHA1,
+    ).length,
+    0,
+  );
+  const successAfter = {
+    ...memory,
+    entries: memory.entries.map((entry) => ({
+      ...entry,
+      lastAtMs: T0 + 1000,
+    })),
+    successes: 1,
+    lastSuccessAtMs: T0 + 5000,
+    lastSuccessRevision: SHA2,
+  };
+  assert.equal(
+    repositoryRegressionFactsV1(
+      snapshotWith([successAfter], record),
+      record.repository,
+      SHA1,
+    ).length,
+    0,
+  );
 });

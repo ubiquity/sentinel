@@ -107,6 +107,7 @@ const REQUEST_OPTIONAL = [
   "scopeNote",
   "priorAttempts",
   "repositoryLessons",
+  "regressions",
 ] as const;
 /** Bound on verified prior-attempt facts carried into one model request. */
 const MAX_PRIOR_ATTEMPT_FACTS = 8;
@@ -118,6 +119,15 @@ const PRIOR_ATTEMPT_KEYS = [
   "failureClass",
   "count",
   "lastAtMs",
+] as const;
+/** Bound on versioned regression facts carried into one model request. */
+const MAX_REGRESSION_FACTS = 3;
+const REGRESSION_KEYS = [
+  "detail",
+  "priorSuccessRevision",
+  "priorSuccessAtMs",
+  "failuresAtCurrentRevision",
+  "lastFailureAtMs",
 ] as const;
 const FINDING_KEYS = ["severity", "path", "message"] as const;
 const RUN_KEYS = ["runId", "runAttempt", "launcherSha"] as const;
@@ -450,6 +460,38 @@ export function parseMatrixModelRequestV1(
       MAX_PRIOR_ATTEMPT_FACTS,
       parsePriorAttemptFact,
     );
+  const regressions = obj.regressions === undefined ? undefined : expectArray(
+    obj.regressions,
+    `${path}.regressions`,
+    MAX_REGRESSION_FACTS,
+    (value, at) => {
+      const fact = expectRecord(value, at);
+      expectExactKeys(fact, REGRESSION_KEYS, at);
+      return {
+        detail: expectNonEmptyString(
+          fact.detail,
+          `${at}.detail`,
+          MAX_PRIOR_ATTEMPT_DETAIL_CHARS,
+        ),
+        priorSuccessRevision: expectGitSha(
+          fact.priorSuccessRevision,
+          `${at}.priorSuccessRevision`,
+        ),
+        priorSuccessAtMs: expectTimestamp(
+          fact.priorSuccessAtMs,
+          `${at}.priorSuccessAtMs`,
+        ),
+        failuresAtCurrentRevision: expectPositiveInt(
+          fact.failuresAtCurrentRevision,
+          `${at}.failuresAtCurrentRevision`,
+        ),
+        lastFailureAtMs: expectTimestamp(
+          fact.lastFailureAtMs,
+          `${at}.lastFailureAtMs`,
+        ),
+      };
+    },
+  );
   if (obj.reasoning !== "max") {
     fail(`${path}.reasoning`, "invalid_enum", "reasoning must be max");
   }
@@ -471,6 +513,7 @@ export function parseMatrixModelRequestV1(
     ...(reviewFindings === undefined ? {} : { reviewFindings }),
     ...(priorAttempts === undefined ? {} : { priorAttempts }),
     ...(repositoryLessons === undefined ? {} : { repositoryLessons }),
+    ...(regressions === undefined ? {} : { regressions }),
     model: expectNonEmptyString(obj.model, `${path}.model`, MAX_ID_CHARS),
     reasoning: "max",
     maxDurationMs: expectPositiveInt(

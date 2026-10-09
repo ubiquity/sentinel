@@ -38,6 +38,7 @@ import type {
 } from "../../src/contracts/ports.ts";
 import { portOk } from "../../src/contracts/ports.ts";
 import { parseRepairStateSnapshotV1 } from "../../src/contracts/state-snapshots.ts";
+import { parseMatrixModelRequestV1 } from "../../src/contracts/matrix.ts";
 import type { RepairStateSnapshotV1 } from "../../src/contracts/state-snapshots.ts";
 import type { WorkRecordV1 } from "../../src/contracts/work-record.ts";
 import { DurableGitHubCooldownGate } from "../../src/repair/github-cooldown.ts";
@@ -96,6 +97,7 @@ import {
   parseAttemptMemoryRecordV1,
 } from "../../src/contracts/attempt-memory.ts";
 import { ATTEMPT_DETAIL_INCOMPLETE } from "../../src/repair/attempt-policy.ts";
+import { tryParse } from "../../src/contracts/validation.ts";
 
 const WAVE = "wave-test-1";
 const LAUNCHER = "1".repeat(40) as GitSha;
@@ -1519,5 +1521,46 @@ Deno.test(
     } finally {
       await Deno.remove(rig.tmp, { recursive: true }).catch(() => {});
     }
+  },
+);
+
+Deno.test(
+  "matrix runtime: versioned regression facts round-trip through the strict request parser",
+  () => {
+    const base = "1ad85317e2e681b9deb5a2f4c7b653df34a691b7" as GitSha;
+    const prior = "ee5e6518a4333c20d8bc6a4c3c577a2536ec6b9b" as GitSha;
+    const request = {
+      taskId: "issue-parser-1",
+      repository: { owner: "ubiquity", name: "sentinel", installationId: 0 },
+      base,
+      issue: null,
+      evidence: [],
+      regressions: [
+        {
+          detail: "model run did not complete with a trusted candidate",
+          priorSuccessRevision: prior,
+          priorSuccessAtMs: T0,
+          failuresAtCurrentRevision: 3,
+          lastFailureAtMs: T0 + 1000,
+        },
+      ],
+      model: "gpt-reserve",
+      reasoning: "max",
+      maxDurationMs: 1000,
+      maxOutputChars: 1000,
+    };
+    const parsed = parseMatrixModelRequestV1(request, "$");
+    assert.equal(parsed.regressions?.length, 1);
+    assert.equal(parsed.regressions?.[0].priorSuccessRevision, prior);
+
+    const malformed = {
+      ...request,
+      regressions: [{ ...request.regressions[0], extra: true }],
+    };
+    const rejected = tryParse(
+      (value) => parseMatrixModelRequestV1(value, "$"),
+      malformed,
+    );
+    assert.equal(rejected.ok, false);
   },
 );

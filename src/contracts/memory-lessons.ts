@@ -66,6 +66,12 @@ export interface MemoryLessonV1 {
    * an open blocker.
    */
   resolved: boolean;
+  /**
+   * True when this failure mode previously succeeded at an OLDER runtime
+   * revision and now fails at the current one: a regression signal derived
+   * from the versioned success history.
+   */
+  regression: boolean;
 }
 
 export interface MemoryLessonsRecordV1 {
@@ -122,6 +128,7 @@ const ENTRY_KEYS = [
   "lastAtMs",
   "refused",
   "resolved",
+  "regression",
 ] as const;
 
 const LESSON_KINDS: readonly MemoryLessonKindV1[] = [
@@ -221,6 +228,7 @@ function parseMemoryLessonV1(input: unknown, path: string): MemoryLessonV1 {
   const lastAtMs = expectTimestamp(obj.lastAtMs, `${path}.lastAtMs`);
   const refused = expectBoolean(obj.refused, `${path}.refused`);
   const resolved = expectBoolean(obj.resolved, `${path}.resolved`);
+  const regression = expectBoolean(obj.regression, `${path}.regression`);
   if (refused && resolved) {
     fail(`${path}.resolved`, "invalid_value", "refused and resolved conflict");
   }
@@ -235,5 +243,6 @@ function parseMemoryLessonV1(input: unknown, path: string): MemoryLessonV1 {
     lastAtMs,
     refused,
     resolved,
+    regression,
   };
 }

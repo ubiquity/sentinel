@@ -40,7 +40,11 @@ import {
   recordAttemptSuccessV1,
 } from "../contracts/attempt-memory.ts";
 import type { RepairStateSnapshotV1 } from "../contracts/state-snapshots.ts";
-import type { PriorAttemptFactV1 } from "../contracts/ports.ts";
+import type { GitSha } from "../contracts/brands.ts";
+import type {
+  PriorAttemptFactV1,
+  RepositoryRegressionFactV1,
+} from "../contracts/ports.ts";
 import type { RepositoryIdentityV1 } from "../contracts/shared.ts";
 import type { WorkRecordV1 } from "../contracts/work-record.ts";
 
@@ -323,6 +327,68 @@ export function priorAttemptFactsForRecordV1(
   return facts;
 }
 
+/** Maximum regression facts carried into one model request or digest. */
+export const MAX_REGRESSION_FACTS = 3;
+
+/**
+ * Version-control awareness: work whose SAME failure-detail history shows an
+ * accepted candidate at an OLDER runtime revision while equivalent failures
+ * are recorded at the CURRENT revision. The repository is version-controlled,
+ * so "it worked at revision X and fails at the current revision" is evidence
+ * that a change in `(X, current]` regressed the behavior, and argues for
+ * restoring/aligning with the older working behavior instead of pressing
+ * forward. Pure; newest-first, deduped per detail, capped.
+ */
+export function repositoryRegressionFactsV1(
+  snapshot: RepairStateSnapshotV1,
+  repository: RepositoryIdentityV1,
+  currentRevision: GitSha,
+  maxFacts: number = MAX_REGRESSION_FACTS,
+): RepositoryRegressionFactV1[] {
+  const failures = new Map<string, { count: number; lastAtMs: number }>();
+  for (const memory of snapshot.attemptMemory) {
+    if (!sameRepository(memory.repository, repository)) continue;
+    for (const entry of memory.entries) {
+      if (entry.controllerSha !== currentRevision) continue;
+      const aggregate = failures.get(entry.detail) ??
+        { count: 0, lastAtMs: 0 };
+      aggregate.count += entry.count;
+      aggregate.lastAtMs = Math.max(aggregate.lastAtMs, entry.lastAtMs);
+      failures.set(entry.detail, aggregate);
+    }
+  }
+  if (failures.size === 0) return [];
+  const byDetail = new Map<string, RepositoryRegressionFactV1>();
+  for (const memory of snapshot.attemptMemory) {
+    if (!sameRepository(memory.repository, repository)) continue;
+    const successRevision = memory.lastSuccessRevision ?? null;
+    const successAt = memory.lastSuccessAtMs ?? null;
+    if (
+      successRevision === null || successRevision === currentRevision ||
+      successAt === null
+    ) continue;
+    for (const entry of memory.entries) {
+      if (entry.controllerSha !== currentRevision) continue;
+      if (entry.lastAtMs <= successAt) continue;
+      const aggregate = failures.get(entry.detail);
+      if (aggregate === undefined) continue;
+      const prior = byDetail.get(entry.detail);
+      if (prior === undefined || successAt > prior.priorSuccessAtMs) {
+        byDetail.set(entry.detail, {
+          detail: entry.detail,
+          priorSuccessRevision: successRevision,
+          priorSuccessAtMs: successAt,
+          failuresAtCurrentRevision: aggregate.count,
+          lastFailureAtMs: aggregate.lastAtMs,
+        });
+      }
+    }
+  }
+  return [...byDetail.values()]
+    .sort((left, right) => right.lastFailureAtMs - left.lastFailureAtMs)
+    .slice(0, maxFacts);
+}
+
 /** Maximum cross-task lessons carried into one model request. */
 export const MAX_REPOSITORY_LESSONS = 5;
 
@@ -397,7 +463,11 @@ export async function attemptMemorySuccessMutationV1(input: {
         entries: [],
       }
       : draft.attemptMemory[index];
-    const next = recordAttemptSuccessV1(existing, input.now);
+    const next = recordAttemptSuccessV1(
+      existing,
+      input.now,
+      input.record.controller.sha,
+    );
     const sorted = [...draft.attemptMemory];
     if (index === -1) {
       sorted.push(next);

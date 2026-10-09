@@ -709,6 +709,26 @@ export interface PriorAttemptFactV1 {
   lastAtMs: number;
 }
 
+/**
+ * One bounded regression fact: a failure mode observed at the current runtime
+ * revision for this repository whose SAME work previously produced an
+ * accepted candidate at an OLDER runtime revision. The repository is
+ * version-controlled: this is the "it worked before, it is broken now"
+ * signal that argues for restoring/aligning with the older working behavior
+ * instead of pressing forward. Advisory evidence, never an automatic
+ * rollback command.
+ */
+export interface RepositoryRegressionFactV1 {
+  /** Closed settlement detail constant that now fails. */
+  detail: string;
+  /** Runtime revision at which this work last succeeded. */
+  priorSuccessRevision: GitSha;
+  priorSuccessAtMs: number;
+  /** Equivalent failures recorded at the current revision. */
+  failuresAtCurrentRevision: number;
+  lastFailureAtMs: number;
+}
+
 export interface ModelRunRequestV1 {
   taskId: WorkItemId;
   repository: RepositoryIdentityV1;
@@ -748,6 +768,13 @@ export interface ModelRunRequestV1 {
    * permission to change budgets, credentials, review or model policy.
    */
   repositoryLessons?: readonly PriorAttemptFactV1[];
+  /**
+   * Bounded regression facts: work that succeeded at an older runtime
+   * revision and now fails at the current one. Shared version-control
+   * awareness for a fresh session; never permission to change budgets,
+   * credentials, review, promotion or model policy.
+   */
+  regressions?: readonly RepositoryRegressionFactV1[];
   model: ModelIdV1;
   reasoning: ReasoningEffortV1;
   maxDurationMs: number;

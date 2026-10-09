@@ -2358,6 +2358,31 @@ function buildPrompt(
           .join("\n"),
     );
   }
+  if (request.regressions !== undefined && request.regressions.length > 0) {
+    // Version-control awareness: the repository is version-controlled and
+    // these failure modes previously produced accepted candidates at OLDER
+    // runtime revisions. Evidence for restoring or aligning with the older
+    // working behavior; never permission to change policy or roll anything
+    // back by yourself.
+    parts.push(
+      "REGRESSION SIGNAL — worked before, broken now: the following failure " +
+        "modes produced an accepted candidate at an OLDER runtime revision " +
+        "and now fail at the current revision. A change between those " +
+        "revisions likely regressed them; prefer restoring or aligning with " +
+        "the older working behavior and state which change window you " +
+        "believe regressed it:\n" +
+        request.regressions
+          .map((fact) =>
+            `- ${fact.detail} — ${fact.failuresAtCurrentRevision} recorded ` +
+            `failure${
+              fact.failuresAtCurrentRevision === 1 ? "" : "s"
+            } now; succeeded at revision ${
+              String(fact.priorSuccessRevision).slice(0, 12)
+            }`
+          )
+          .join("\n"),
+    );
+  }
   parts.push(
     "Runtime implementer role: you are the bounded runtime implementer for " +
       "this task. Edit only the current provided checkout, and only the files " +

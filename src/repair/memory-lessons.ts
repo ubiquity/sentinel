@@ -94,6 +94,14 @@ export async function buildMemoryLessonsV1(
         record.lastSuccessAtMs !== undefined &&
         record.lastSuccessAtMs >= chosen.lastAtMs;
       if (resolved) refused = false;
+      // Version-control awareness: the family succeeded at an OLDER runtime
+      // revision and still fails at a different (current) one.
+      const successRevision = record.lastSuccessRevision ?? null;
+      const successAt = record.lastSuccessAtMs ?? null;
+      const regression = successRevision !== null && successAt !== null &&
+        record.entries.some((entry) =>
+          entry.controllerSha !== successRevision && entry.lastAtMs > successAt
+        );
       entries.push({
         taskId: record.taskId,
         kind: "equivalent_failures_recorded",
@@ -105,6 +113,7 @@ export async function buildMemoryLessonsV1(
         lastAtMs: chosen.lastAtMs,
         refused,
         resolved,
+        regression,
       });
     }
     // Refused lessons first, then most recent: the reader sees what currently

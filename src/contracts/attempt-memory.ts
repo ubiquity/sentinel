@@ -109,14 +109,18 @@ export interface AttemptMemoryRecordV1 {
   entries: AttemptMemoryEntryV1[];
   /**
    * Optional success awareness: how many attempts in this family produced an
-   * accepted candidate ([`successes`]) and when the latest one did. ABSENT is
-   * the exact legacy shape and a default is never injected; when present both
-   * keys carry values together, counts never decrease and time never moves
-   * backward. A family resolved after its failures stops reading as refused
-   * in the lesson digest.
+   * accepted candidate ([`successes`]), when the latest one did, and the exact
+   * runtime revision it ran under ([`lastSuccessRevision`], the versioned
+   * "it worked here" fact). ABSENT is the exact legacy shape and a default is
+   * never injected; when present all three keys carry values together, counts
+   * never decrease and time never moves backward. A family resolved after its
+   * failures stops reading as refused in the lesson digest, and a success at
+   * an OLDER revision followed by failures at the current one is a regression
+   * signal (worked before, broken now).
    */
   successes?: number;
   lastSuccessAtMs?: number | null;
+  lastSuccessRevision?: GitSha | null;
 }
 
 /**
@@ -195,11 +199,13 @@ export const ATTEMPT_FAILURE_CLASSES_V1: readonly AttemptFailureClassV1[] = [
 export function recordAttemptSuccessV1(
   record: AttemptMemoryRecordV1,
   atMs: number,
+  revision: GitSha,
 ): AttemptMemoryRecordV1 {
   return {
     ...record,
     successes: (record.successes ?? 0) + 1,
     lastSuccessAtMs: atMs,
+    lastSuccessRevision: revision,
   };
 }
 
@@ -216,7 +222,11 @@ const RECORD_KEYS = [
   "purpose",
   "entries",
 ] as const;
-const RECORD_OPTIONAL_KEYS = ["successes", "lastSuccessAtMs"] as const;
+const RECORD_OPTIONAL_KEYS = [
+  "successes",
+  "lastSuccessAtMs",
+  "lastSuccessRevision",
+] as const;
 
 const ENTRY_KEYS = [
   "fingerprint",
@@ -271,21 +281,31 @@ export function parseAttemptMemoryRecordV1(
   }
   const hasSuccesses = obj.successes !== undefined;
   const hasLastSuccess = obj.lastSuccessAtMs !== undefined;
-  if (hasSuccesses !== hasLastSuccess) {
+  const hasLastSuccessRevision = obj.lastSuccessRevision !== undefined;
+  if (
+    hasSuccesses !== hasLastSuccess ||
+    hasSuccesses !== hasLastSuccessRevision
+  ) {
     fail(
       "$",
       "invalid_value",
-      "successes and lastSuccessAtMs must be present together",
+      "successes, lastSuccessAtMs and lastSuccessRevision must be present together",
     );
   }
   let successes: number | undefined;
   let lastSuccessAtMs: number | null | undefined;
+  let lastSuccessRevision: GitSha | null | undefined;
   if (hasSuccesses) {
     successes = expectPositiveInt(obj.successes, "$.successes");
     lastSuccessAtMs = expectNullable(
       obj.lastSuccessAtMs,
       "$.lastSuccessAtMs",
       expectTimestamp,
+    );
+    lastSuccessRevision = expectNullable(
+      obj.lastSuccessRevision,
+      "$.lastSuccessRevision",
+      expectGitSha,
     );
   }
   return {
@@ -298,7 +318,11 @@ export function parseAttemptMemoryRecordV1(
     purpose,
     entries,
     ...(hasSuccesses && successes !== undefined
-      ? { successes, lastSuccessAtMs: lastSuccessAtMs ?? null }
+      ? {
+        successes,
+        lastSuccessAtMs: lastSuccessAtMs ?? null,
+        lastSuccessRevision: lastSuccessRevision ?? null,
+      }
       : {}),
   };
 }

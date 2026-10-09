@@ -192,14 +192,20 @@ Deno.test("attempt memory: unknown keys, bad enums and unordered entries fail cl
 
 Deno.test("attempt memory: optional success awareness round-trips and stays paired", () => {
   const withSuccess = parseAttemptMemoryRecordV1(
-    validRecord({ successes: 2, lastSuccessAtMs: 1786000030000 }),
+    validRecord({
+      successes: 2,
+      lastSuccessAtMs: 1786000030000,
+      lastSuccessRevision: CONTROLLER,
+    }),
   );
   assert.equal(withSuccess.successes, 2);
   assert.equal(withSuccess.lastSuccessAtMs, 1786000030000);
+  assert.equal(withSuccess.lastSuccessRevision, CONTROLLER);
   // Legacy shape (absent) still parses byte-for-byte.
   const legacy = parseAttemptMemoryRecordV1(validRecord());
   assert.equal(legacy.successes, undefined);
   assert.equal(legacy.lastSuccessAtMs, undefined);
+  assert.equal(legacy.lastSuccessRevision, undefined);
   // A half-present pair fails closed.
   const half = tryParse(
     parseAttemptMemoryRecordV1,
@@ -208,12 +214,14 @@ Deno.test("attempt memory: optional success awareness round-trips and stays pair
   assert.equal(half.ok, false);
   if (!half.ok) assert.equal(half.issues[0].code, "invalid_value");
 
-  const bumped = recordAttemptSuccessV1(legacy, 1786000040000);
+  const bumped = recordAttemptSuccessV1(legacy, 1786000040000, CONTROLLER);
   assert.equal(bumped.successes, 1);
   assert.equal(bumped.lastSuccessAtMs, 1786000040000);
-  const twice = recordAttemptSuccessV1(bumped, 1786000050000);
+  assert.equal(bumped.lastSuccessRevision, CONTROLLER);
+  const twice = recordAttemptSuccessV1(bumped, 1786000050000, BASE);
   assert.equal(twice.successes, 2);
   assert.equal(twice.lastSuccessAtMs, 1786000050000);
+  assert.equal(twice.lastSuccessRevision, BASE);
 });
 
 Deno.test("attempt memory: merge increments the matching entry and appends new evidence", () => {

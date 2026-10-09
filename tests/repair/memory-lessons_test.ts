@@ -109,12 +109,49 @@ Deno.test("memory lessons: the digest is deterministic and reproducible", async 
   assert.equal(record.entries[0].base, SHA1);
 });
 
+Deno.test("memory lessons: an older-revision success followed by current failures is a regression", async () => {
+  const memory = await memoryRecord({ count: 2, lastAtMs: T0 + 6000 });
+  const regressed = {
+    ...memory,
+    successes: 1,
+    lastSuccessAtMs: T0 + 2000,
+    lastSuccessRevision: SHA2,
+  };
+  const built = await buildMemoryLessonsV1(
+    snapshotWith([regressed]),
+    T0 + 9000,
+  );
+  const parsed = parseMemoryLessonsRecordV1(built[0]);
+  assert.equal(parsed.entries[0].regression, true);
+  // The current failure is still refused (unresolved at the current revision).
+  assert.equal(parsed.entries[0].refused, true);
+  assert.equal(parsed.entries[0].resolved, false);
+
+  // A success at the SAME revision as the failures is not a regression.
+  const sameRevision = {
+    ...memory,
+    entries: memory.entries.map((entry) => ({
+      ...entry,
+      controllerSha: SHA1,
+    })),
+    successes: 1,
+    lastSuccessAtMs: T0 + 2000,
+    lastSuccessRevision: SHA1,
+  };
+  const clean = await buildMemoryLessonsV1(
+    snapshotWith([sameRevision]),
+    T0 + 9000,
+  );
+  assert.equal(clean[0].entries[0].regression, false);
+});
+
 Deno.test("memory lessons: a recorded success resolves the lesson and clears the refusal", async () => {
   const memory = await memoryRecord({ count: 2 });
   const resolvedMemory = {
     ...memory,
     successes: 1,
     lastSuccessAtMs: T0 + 8000,
+    lastSuccessRevision: SHA1,
   };
   const snapshot = snapshotWith([resolvedMemory]);
   const built = await buildMemoryLessonsV1(snapshot, T0 + 9000);
@@ -128,6 +165,7 @@ Deno.test("memory lessons: a recorded success resolves the lesson and clears the
     ...memory,
     successes: 1,
     lastSuccessAtMs: T0 - 5000,
+    lastSuccessRevision: SHA1,
   };
   const stale = await buildMemoryLessonsV1(
     snapshotWith([staleSuccess]),

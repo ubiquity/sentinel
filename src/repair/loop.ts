@@ -57,6 +57,7 @@ import {
   attemptMemorySuccessMutationV1,
   priorAttemptFactsForRecordV1,
   repositoryPriorFactsForRecordV1,
+  repositoryRegressionFactsV1,
 } from "./attempt-policy.ts";
 import type {
   AttemptFailureClassV1,
@@ -3274,6 +3275,11 @@ export async function prepareImplementationStart(
     context.snapshot,
     record,
   );
+  const regressions = repositoryRegressionFactsV1(
+    context.snapshot,
+    record.repository,
+    record.controller.sha,
+  );
   const request: ModelRunRequestV1 = {
     taskId: record.id,
     repository: record.repository,
@@ -3289,6 +3295,7 @@ export async function prepareImplementationStart(
       : { scopeNote: decompositionScopeNote(part.index, part.total) }),
     ...(priorAttempts.length === 0 ? {} : { priorAttempts }),
     ...(repositoryLessons.length === 0 ? {} : { repositoryLessons }),
+    ...(regressions.length === 0 ? {} : { regressions }),
     model: implementationModelId(deps),
     reasoning: REASONING,
     maxDurationMs: bound.maxDurationMs,
