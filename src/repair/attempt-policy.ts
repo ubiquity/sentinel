@@ -39,6 +39,7 @@ import {
   mergeAttemptOutcomeV1,
 } from "../contracts/attempt-memory.ts";
 import type { RepairStateSnapshotV1 } from "../contracts/state-snapshots.ts";
+import type { PriorAttemptFactV1 } from "../contracts/ports.ts";
 import type { RepositoryIdentityV1 } from "../contracts/shared.ts";
 import type { WorkRecordV1 } from "../contracts/work-record.ts";
 
@@ -248,6 +249,47 @@ export function attemptEquivalenceRefusalForRecordV1(input: {
     policy: input.policy,
   });
   return { refuse: decision.decision === "refuse", entry };
+}
+
+/** Maximum verified prior-attempt facts carried into one model request. */
+export const MAX_PRIOR_ATTEMPT_FACTS = 8;
+
+/**
+ * Bounded, newest-first verified facts for the current approach generation of
+ * one work item: entries of its attempt-memory family at the record's exact
+ * base whose runtime revision equals the record's current controller. Entries
+ * from older revisions are deliberately excluded — they describe a different
+ * approach generation, and the prompt must not advise a session to avoid
+ * failures that the current runtime already replaced. Pure; returns [] when no
+ * memory applies.
+ */
+export function priorAttemptFactsForRecordV1(
+  snapshot: RepairStateSnapshotV1,
+  record: WorkRecordV1,
+  maxFacts: number = MAX_PRIOR_ATTEMPT_FACTS,
+): PriorAttemptFactV1[] {
+  const purpose: AttemptPurposeV1 = "implementation";
+  const memory = snapshot.attemptMemory.find((candidate) =>
+    sameRepository(candidate.repository, record.repository) &&
+    candidate.taskId === record.id &&
+    candidate.base === record.target.base &&
+    candidate.purpose === purpose
+  );
+  if (memory === undefined || memory.entries.length === 0) return [];
+  const facts: PriorAttemptFactV1[] = [];
+  for (let index = memory.entries.length - 1; index >= 0; index--) {
+    const entry = memory.entries[index];
+    if (entry.controllerSha !== record.controller.sha) continue;
+    facts.push({
+      detail: entry.detail,
+      stage: entry.stage,
+      failureClass: entry.failureClass,
+      count: entry.count,
+      lastAtMs: entry.lastAtMs,
+    });
+    if (facts.length >= maxFacts) break;
+  }
+  return facts;
 }
 
 /**

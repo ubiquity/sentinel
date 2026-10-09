@@ -74,7 +74,10 @@ import {
   type RunBoundsV1,
   settleFailedImplementation,
 } from "../repair/loop.ts";
-import { ATTEMPT_DETAIL_INTERRUPTED_BOUND } from "../repair/attempt-policy.ts";
+import {
+  ATTEMPT_DETAIL_INTERRUPTED_BOUND,
+  attemptEquivalenceRefusalForRecordV1,
+} from "../repair/attempt-policy.ts";
 import { rankEligibleWork } from "../repair/selection.ts";
 import type {
   MatrixBundleExporterV1,
@@ -217,6 +220,15 @@ export interface MatrixPlanReportV1 {
   notReady: number;
   /** Records whose preparation persisted a wait/refusal step instead. */
   deferred: number;
+  /**
+   * Ready records whose admission was refused by durable attempt memory
+   * because the attempt would replay failures already recorded at this base
+   * and runtime revision. Nothing is charged and the record stays untouched;
+   * changed evidence (a moved base, a new runtime revision, the transient
+   * decay window) or the transient allowance re-opens admission on a later
+   * plan.
+   */
+  memoryRefused: number;
 }
 
 /**
@@ -256,6 +268,7 @@ export async function planMatrixWave(
   let attempted = 0;
   let deferred = 0;
   let notReady = 0;
+  let memoryRefused = 0;
 
   while (cells.length < limit) {
     const readAt = deps.clock.now();
@@ -289,6 +302,20 @@ export async function planMatrixWave(
     attempted++;
     if (!isMatrixImplementationReadyV1(record, context.snapshot, config)) {
       notReady++;
+      continue;
+    }
+    // Durable attempt memory gate: a ready record whose next attempt would be
+    // equivalent to failures already recorded at this base and runtime
+    // revision is skipped for this wave. Nothing is charged or written; the
+    // refusal is counted in the report so the loop breaker is observable.
+    if (
+      attemptEquivalenceRefusalForRecordV1({
+        record,
+        snapshot: context.snapshot,
+        now,
+      }).refuse
+    ) {
+      memoryRefused++;
       continue;
     }
     const outcome = await prepareImplementationStart(
@@ -373,6 +400,7 @@ export async function planMatrixWave(
     prepared: cells.length,
     notReady,
     deferred,
+    memoryRefused,
   };
 }
 

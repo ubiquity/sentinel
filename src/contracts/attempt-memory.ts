@@ -159,7 +159,8 @@ export function attemptFingerprintV1(
   });
 }
 
-const STAGES: readonly AttemptStageV1[] = [
+/** Closed stage value list (single source for every parser and view). */
+export const ATTEMPT_STAGES_V1: readonly AttemptStageV1[] = [
   "reservation",
   "startup",
   "session",
@@ -167,11 +168,15 @@ const STAGES: readonly AttemptStageV1[] = [
   "candidate",
 ];
 
-const FAILURE_CLASSES: readonly AttemptFailureClassV1[] = [
+/** Closed failure-class value list (single source for every parser/view). */
+export const ATTEMPT_FAILURE_CLASSES_V1: readonly AttemptFailureClassV1[] = [
   "transient_infrastructure",
   "semantic_no_progress",
   "unknown",
 ];
+
+const STAGES = ATTEMPT_STAGES_V1;
+const FAILURE_CLASSES = ATTEMPT_FAILURE_CLASSES_V1;
 
 const RECORD_KEYS = [
   "version",

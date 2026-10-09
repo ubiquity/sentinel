@@ -24,6 +24,7 @@ import {
   attemptMemorySettlementMutationV1,
   classifyAttemptDetailV1,
   decideEquivalentAttemptV1,
+  priorAttemptFactsForRecordV1,
 } from "../../src/repair/attempt-policy.ts";
 import { REPO, SHA1, SHA2, T0, workRecord } from "../state/helpers.ts";
 
@@ -335,4 +336,50 @@ Deno.test("attempt policy: the settlement mutation merges into the draft it is a
   })());
   assert.equal(third.attemptMemory.length, 1);
   assert.equal(third.attemptMemory[0].entries.length, 2);
+});
+
+Deno.test("attempt policy: prior-attempt facts are newest-first and exclude older revisions", async () => {
+  const record = workRecord(TASK, {
+    nextStep: "blocked",
+    blocker: { kind: "other", message: DETAIL, since: T0 + 1000 },
+    counters: { attempts: 2, retries: 1, reviewRounds: 0 },
+  });
+  const memory = await memoryRecord({}, { count: 2 });
+  // A second entry under an OLDER runtime revision must not be advised.
+  memory.entries.unshift({
+    fingerprint: "9".repeat(64),
+    stage: "model",
+    failureClass: "transient_infrastructure",
+    detail: ATTEMPT_DETAIL_NO_TRUSTED_RECEIPT,
+    controllerSha: SHA2,
+    count: 3,
+    firstAtMs: T0,
+    lastAtMs: T0 + 500,
+  });
+  const snapshot = snapshotWith([memory], record);
+
+  const facts = priorAttemptFactsForRecordV1(snapshot, record);
+  assert.equal(facts.length, 1);
+  assert.equal(facts[0].detail, DETAIL);
+  assert.equal(facts[0].count, 2);
+  assert.equal(facts[0].stage, "model");
+
+  // No memory at this base: no facts, no prompt section.
+  assert.equal(
+    priorAttemptFactsForRecordV1(snapshotWith([]), record).length,
+    0,
+  );
+  // A different base is a different family: still no facts.
+  const movedBase = workRecord(TASK, {
+    target: {
+      base: SHA2,
+      branch: null,
+      checkpoint: null,
+      head: null,
+      pr: null,
+    },
+    nextStep: "blocked",
+    blocker: { kind: "other", message: DETAIL, since: T0 + 1000 },
+  });
+  assert.equal(priorAttemptFactsForRecordV1(snapshot, movedBase).length, 0);
 });

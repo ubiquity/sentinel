@@ -50,6 +50,7 @@ import {
   ATTEMPT_DETAIL_NO_TRUSTED_RECEIPT,
   ATTEMPT_DETAIL_UNCERTAIN,
   attemptMemorySettlementMutationV1,
+  priorAttemptFactsForRecordV1,
 } from "./attempt-policy.ts";
 import { parseReleaseRequestV1 } from "../contracts/release.ts";
 import type { ReleaseRequestV1 } from "../contracts/release.ts";
@@ -3239,6 +3240,7 @@ export async function prepareImplementationStart(
 
   const rejectedHead = headRejectedByReview(context.snapshot, record);
   const findings = correctionFindings(context.snapshot, record);
+  const priorAttempts = priorAttemptFactsForRecordV1(context.snapshot, record);
   const request: ModelRunRequestV1 = {
     taskId: record.id,
     repository: record.repository,
@@ -3249,6 +3251,7 @@ export async function prepareImplementationStart(
     issue,
     evidence: record.evidence,
     ...(findings === null ? {} : { reviewFindings: findings }),
+    ...(priorAttempts.length === 0 ? {} : { priorAttempts }),
     model: implementationModelId(deps),
     reasoning: REASONING,
     maxDurationMs: bound.maxDurationMs,
