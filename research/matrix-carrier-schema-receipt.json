@@ -1,0 +1,48 @@
+{
+  "base_guard": {
+    "actual_head": "e8f02805f9ffc9bf99b612d97d6135a561122c61",
+    "branch": "detached HEAD at expected base (pushed to existing sentinel-supervisor; no new lane)",
+    "competing_writer": false,
+    "expected_base": "e8f02805f9ffc9bf99b612d97d6135a561122c61",
+    "status": "only owned files modified; pre-existing untracked scratch dirs untouched"
+  },
+  "change": {
+    "owned_files": [
+      "src/host/matrix-actions.ts",
+      "tests/host/hosted-runtime_test.ts"
+    ],
+    "summary": "matrix_plan carrier emission now passes through exported matrixPlanCarrierOf, which emits exactly the consumer contract keys (kind, waveId, run, runtimeSha, generation, planDigest, prepared). Removed non-contract fields attempted/notReady/deferred and the optional diagnostic from the trusted carrier output only. Planning behavior, native GITHUB_OUTPUT, stored plan data and all consumer provenance validation unchanged; consumer accepted keys not broadened."
+  },
+  "evidence": {
+    "adjacent_regression": {
+      "command": "deno test <same flags> --filter \"matrix launcher\" tests/host/hosted-runtime_test.ts",
+      "exit": 0,
+      "result": "4 passed | 0 failed | 29 filtered out (consumer strictness unchanged)"
+    },
+    "command": "deno test --allow-read=.,/usr,/bin,/home/hatch/.deno/bin --allow-run --allow-write --allow-env=PATH,NODE_V8_COVERAGE --filter \"producer emits exact\" tests/host/hosted-runtime_test.ts",
+    "executable": "/home/hatch/.deno/bin/deno",
+    "exit": 0,
+    "format": "deno fmt --check src/host/matrix-actions.ts tests/host/hosted-runtime_test.ts => clean, no pass needed",
+    "hashes": {
+      "src/host/matrix-actions.ts": "2c4e07bc6ed1874855c7422b8b8193b37aec56fc076f2d51593ee815c30187f2",
+      "tests/host/hosted-runtime_test.ts": "3367af601444e43943c7e6f03b7ae337533ba13c9a7fe24737d2ceaa433f0169"
+    },
+    "host": "Muse VM 8c1c1ce8-7139-40db-b1e6-5db3dd3bfff1",
+    "proven_by_test": [
+      "fixture asserts rig launcher SHA differs from runtime SHA",
+      "real producer function output has exactly the 7 contract keys, no attempted/notReady/deferred/diagnostic",
+      "emitted carrier passes through the existing consumer: healthy, matrixCarrier deep-equal",
+      "forged carriers with unexpected keys, wrong runtimeSha or wrong generation still refused (unavailable, null terminal, no carrier)"
+    ],
+    "result": "1 passed | 0 failed | 32 filtered out",
+    "stderr_bounded": "",
+    "stdout_bounded": "hosted matrix plan: producer emits exact consumer carrier schema ... ok (1s)",
+    "utc": "2026-10-09T09:24:19Z",
+    "workdir": "/home/hatch/workspace/sentinel-ralph/repo"
+  },
+  "instruction": "O1-carrier-schema-20261009T092055Z",
+  "label": "synthetic",
+  "note": "Synthetic offline evidence only. Not hosted acceptance. No carrier SHA values from the failed hosted run are claimed; the fixture uses locally generated SHAs. Installed test-evidence capture is absent; actual command, UTC time, exit code and bounded safe outputs retained above.",
+  "pending_gates": "hosted proving run and runtime installation owned by Codex; source publication alone will not update the already selected runtime",
+  "task": "O1-sentinel-autonomy"
+}

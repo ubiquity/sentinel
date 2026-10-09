@@ -54,6 +54,7 @@ import type {
   HostedRuntimeLauncherInputV1,
   HostedRuntimeLauncherResultV1,
 } from "../../src/host/hosted-runtime.ts";
+import { matrixPlanCarrierOf } from "../../src/host/matrix-actions.ts";
 import {
   createLocalRepositoryConfig,
   localCheckoutKey,
@@ -2948,6 +2949,72 @@ Deno.test("hosted matrix CLI: unavailable result emits rejection receipt before 
   });
   assert.equal(healthy.exit, 0);
   assert.equal(healthy.stderr.length, 0);
+});
+
+Deno.test("hosted matrix plan: producer emits exact consumer carrier schema", async () => {
+  const rig = await makeRig();
+  try {
+    await seedRelease(rig);
+    const planDigest = "d".repeat(64);
+    // The rig's launcher checkout SHA differs from its runtime SHA, exactly
+    // the fixture the hosted run 37905961284 failure confused.
+    assert.notEqual(
+      rig.identity.launcherSha,
+      rig.execution.revision,
+      "fixture requires launcher SHA != runtime SHA",
+    );
+    const carrier = matrixPlanCarrierOf({
+      waveId: rig.execution.id,
+      run: {
+        runId: RUN_ID,
+        runAttempt: RUN_ATTEMPT,
+        launcherSha: rig.identity.launcherSha,
+      },
+      controllerSha: rig.execution.revision,
+      generation: rig.execution.generation,
+      planDigest,
+      prepared: 1,
+    });
+    assert.deepEqual(Object.keys(carrier).sort(), [
+      "generation",
+      "kind",
+      "planDigest",
+      "prepared",
+      "run",
+      "runtimeSha",
+      "waveId",
+    ], "producer must emit exactly the consumer contract keys");
+    const input = {
+      env: {
+        ...rig.env,
+        GITHUB_JOB: "matrix_plan",
+        GITHUB_OUTPUT: "/tmp/native-output",
+      },
+    };
+    rig.process.child = exited(JSON.stringify(carrier) + "\n");
+    const accepted = await launch(rig, input);
+    assert.equal(accepted.status, "healthy", JSON.stringify(accepted));
+    assert.deepEqual(
+      (accepted as unknown as { matrixCarrier: unknown }).matrixCarrier,
+      carrier,
+    );
+    for (
+      const forged of [
+        { ...carrier, attempted: 1 },
+        { ...carrier, diagnostic: { zero: true } },
+        { ...carrier, runtimeSha: OTHER_REVISION },
+        { ...carrier, generation: 2 },
+      ]
+    ) {
+      rig.process.child = exited(JSON.stringify(forged) + "\n");
+      const refused = await launch(rig, input);
+      assert.equal(refused.status, "unavailable", JSON.stringify(refused));
+      assert.equal(refused.terminal, null);
+      assert.equal(refused.matrixCarrier, undefined);
+    }
+  } finally {
+    await rig.cleanup();
+  }
 });
 
 Deno.test("hosted matrix identity: explicit native roles share read-only repair identity", async () => {
