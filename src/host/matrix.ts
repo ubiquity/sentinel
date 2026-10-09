@@ -1016,7 +1016,6 @@ function settlementClassification(
   // Pre-inference refusal (never started, or refused at a pre-start binding
   // check): only admission is proven, and the failure is infrastructure.
   return { stage: "reservation", failureClass: "transient_infrastructure" };
-
 }
 
 /**
