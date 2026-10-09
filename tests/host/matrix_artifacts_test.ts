@@ -74,7 +74,7 @@ async function zip(
   }
   return await writer.close();
 }
-async function fixture(paginated = false) {
+async function fixture(paginated = false, partialMismatch = false) {
   const tmp = await Deno.makeTempDir({
     dir: ROOT,
     prefix: "matrix-transport-test-",
@@ -113,6 +113,25 @@ async function fixture(paginated = false) {
     plannedAt: T0,
     cells: [cell],
   };
+  const reservationB = "b".repeat(64);
+  const cellIdB = await matrixCellIdV1(WAVE, "artifact-task-b", reservationB);
+  const requestB: ModelRunRequestV1 = {
+    ...request,
+    taskId: "artifact-task-b" as never,
+  };
+  const cellB = {
+    cellId: cellIdB,
+    taskId: requestB.taskId,
+    repository: REPO,
+    reservationId: reservationB,
+    intentKey: implementationIntentKey(reservationB),
+    expectedBase: SHA1,
+    runtimeSha: RUNTIME,
+    generation: 3,
+    requestDigest: await matrixDigestV1(requestB),
+    request: requestB,
+  };
+  if (partialMismatch) plan.cells.push(cellB);
   const bundle = new Uint8Array([0x50, 0x4b, 0x00, 0xff, 0x80]);
   const result: MatrixCellResultV1 = {
     version: "v1",
@@ -176,6 +195,27 @@ async function fixture(paginated = false) {
       resultId: null,
     },
   });
+  const workB = workRecord("artifact-task-b", {
+    repository: REPO,
+    target: {
+      base: SHA1,
+      branch: "sentinel/test",
+      checkpoint: null,
+      head: null,
+      pr: null,
+    },
+    intent: {
+      kind: "implementation",
+      key: implementationIntentKey(reservationB),
+      startedAt: T0,
+      branch: "sentinel/test",
+      expectedHead: null,
+      observedBase: SHA1,
+      pr: null,
+      requestId: reservationB,
+      resultId: null,
+    },
+  });
   const repair = parseRepairStateSnapshotV1({
     version: "v1",
     kind: "repair_state_snapshot",
@@ -184,21 +224,52 @@ async function fixture(paginated = false) {
     updatedAt: T0,
     incidents: [],
     evidence: [],
-    work: [work],
-    reservations: [{
-      version: "v1",
-      kind: "budget_reservation",
-      repository: REPO,
-      id: RESERVATION,
-      taskId: work.id,
-      attempt: 1,
-      head: SHA1,
-      purpose: "implementation",
-      createdAt: T0,
-      outcome: "reserved",
-      settledAt: null,
-      proofRef: null,
-    }],
+    work: partialMismatch ? [work, workB] : [work],
+    reservations: partialMismatch
+      ? [
+        {
+          version: "v1",
+          kind: "budget_reservation",
+          repository: REPO,
+          id: RESERVATION,
+          taskId: work.id,
+          attempt: 1,
+          head: SHA1,
+          purpose: "implementation",
+          createdAt: T0,
+          outcome: "reserved",
+          settledAt: null,
+          proofRef: null,
+        },
+        {
+          version: "v1",
+          kind: "budget_reservation",
+          repository: REPO,
+          id: reservationB,
+          taskId: workB.id,
+          attempt: 1,
+          head: SHA1,
+          purpose: "implementation",
+          createdAt: T0,
+          outcome: "reserved",
+          settledAt: null,
+          proofRef: null,
+        },
+      ]
+      : [{
+        version: "v1",
+        kind: "budget_reservation",
+        repository: REPO,
+        id: RESERVATION,
+        taskId: work.id,
+        attempt: 1,
+        head: SHA1,
+        purpose: "implementation",
+        createdAt: T0,
+        outcome: "reserved",
+        settledAt: null,
+        proofRef: null,
+      }],
     reviews: [],
     replays: [],
     releaseRequests: [],
@@ -293,7 +364,7 @@ async function fixture(paginated = false) {
     runtimeSha: RUNTIME,
     generation: 3,
     planDigest: await matrixDigestV1(plan),
-    prepared: 1,
+    prepared: plan.cells.length,
   };
   const cellMarker = {
     kind: "sentinel_matrix_cell",
@@ -461,14 +532,26 @@ async function fixture(paginated = false) {
     },
   };
   const input = {
-    requests: [{
-      taskId: work.id,
-      repository: REPO,
-      reservationId: RESERVATION,
-      intentKey: cell.intentKey,
-      expectedBase: SHA1,
-      attempt: 1,
-    }],
+    requests: [
+      {
+        taskId: work.id,
+        repository: REPO,
+        reservationId: RESERVATION,
+        intentKey: cell.intentKey,
+        expectedBase: SHA1,
+        attempt: 1,
+      },
+      ...(partialMismatch
+        ? [{
+          taskId: workB.id,
+          repository: REPO,
+          reservationId: reservationB,
+          intentKey: cellB.intentKey,
+          expectedBase: SHA1,
+          attempt: 1,
+        }]
+        : []),
+    ],
     runtimeSha: RUNTIME,
     launcherSha: LAUNCHER,
     currentRun: RUN,
@@ -479,6 +562,9 @@ async function fixture(paginated = false) {
     result,
     bundle,
     cell,
+    cellB,
+    reservationB,
+    workB,
     repair,
     release,
     artifacts,
@@ -1896,6 +1982,40 @@ Deno.test("matrix artifacts: only authenticated historical runtime mismatch has 
         await Deno.remove(rig.tmp, { recursive: true });
       }
     });
+  }
+});
+
+Deno.test("matrix artifacts: a historical runtime mismatch with a missing cell artifact isolates only the authenticated cells", async () => {
+  const rig = await fixture(false, true);
+  try {
+    const input: Parameters<typeof rig.transport.recover>[0] = {
+      ...rig.input,
+      currentRun: undefined,
+      runtimeSha: SHA3,
+      consumerRun: { ...RUN, runId: 99, runAttempt: 1 },
+    };
+    const custody = structuredClone(rig.repair);
+    const archives = [...rig.archives].map((
+      [id, content],
+    ) => [id, content.slice()]);
+    await assert.rejects(
+      () => rig.transport.recover(input),
+      (error: unknown) => {
+        assert.ok(error instanceof MatrixHistoricalRuntimeMismatch);
+        assert.equal(error.evidence.affected.length, 1);
+        assert.equal(error.evidence.affected[0].reservation.id, RESERVATION);
+        return true;
+      },
+    );
+    assert.deepEqual(rig.repair, custody);
+    assert.deepEqual([...rig.archives], archives);
+    assert.deepEqual(
+      [...Deno.readDirSync(rig.tmp + "/recovered")],
+      [],
+      "rejected bundles never escape transport staging",
+    );
+  } finally {
+    await Deno.remove(rig.tmp, { recursive: true });
   }
 });
 

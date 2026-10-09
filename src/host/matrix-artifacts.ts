@@ -1019,6 +1019,7 @@ export function createActionsMatrixArtifactTransport(options: {
           const bundlesDir = `${staging}/${run.runId}-${run.runAttempt}`;
           await Deno.mkdir(bundlesDir, { mode: 0o700 });
           const results = [], cellJobIds = [];
+          let missingArtifacts = 0;
           const evidence: MatrixRejectedCellEvidenceV1[] = [];
           for (const cell of selected) {
             const name =
@@ -1026,15 +1027,16 @@ export function createActionsMatrixArtifactTransport(options: {
             if (names.filter((value) => value === name).length > 1) refuse();
             const cellArtifact = artifacts.find((row) => row.name === name);
             if (!cellArtifact) {
-              if (runtimeMismatch) refuse();
-              // Missing evidence never establishes non-submission. In the
-              // historical revalidation path the record simply stays
-              // unquarantined; failing the entire run here would deadlock the
-              // supervisor on any permanently unrecoverable historical
-              // artifact (expired, never uploaded, or otherwise lost). The
-              // safe default is preserved: no not-started claim is made
-              // without the artifact proof. Remove the prematurely added
-              // affected entry so the unprovable record is left untouched.
+              // Missing evidence never establishes non-submission, and a wave
+              // that cannot be fully authenticated cannot isolate its
+              // records: the unprovable cells stay charged and untouched
+              // instead of deadlocking the supervisor on a permanently
+              // missing artifact (never uploaded, expired or otherwise
+              // lost). Only cells with complete authenticated evidence enter
+              // the historical mismatch isolation below. Remove any
+              // prematurely added affected entry so the unprovable record is
+              // left untouched.
+              missingArtifacts += 1;
               const affectedIndex = affected.findIndex(
                 (entry) => entry.reservation.id === cell.reservationId,
               );
@@ -1175,8 +1177,12 @@ export function createActionsMatrixArtifactTransport(options: {
           if (runtimeMismatch) {
             if (
               !historical || !input.consumerRun ||
-              evidence.length !== selected.length
+              evidence.length + missingArtifacts !== selected.length
             ) refuse();
+            // A partially authenticated wave isolates exactly the cells with
+            // complete evidence; unprovable cells were left charged above and
+            // are never claimed.
+            if (evidence.length === 0) continue;
             throw new MatrixHistoricalRuntimeMismatch({
               consumerRun: input.consumerRun,
               expectedRuntimeSha: input.runtimeSha,
