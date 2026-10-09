@@ -142,3 +142,12 @@ Mapping to the current implementation slice (this lane):
 - One writer per surface; cells never write state; sanitized minimal records only.
 - Local validation follows AGENTS.md "Fast local development": focused files first, 300-second bounded commands, one named end-to-end scenario, no whole-repository sweeps.
 - Hosted dispatch requires explicit user approval per attempt; this plan does not request one.
+
+## Live deployment checkpoint — 2026-10-09 12:45 UTC (awaiting owner approval)
+
+The memory/loop-breaker is staged for the LIVE hosted runtime as generation 68 under the protected installer:
+
+- Pinned runtime revision: `33a962978036d85e21ea42440bf14ead258ccf54` (live supervisor lineage merged with the durable-memory lane, all fixtures/custody/lint reconciliations included). Its `test-local` check is `completed/success` (API-verified the same way the installer verifies it).
+- Launcher lane tip: `8bf6a0833` (`codex/memory-live-20261009`) pins generation 68 = that revision, with the standard rung: healthy generation 67 installs 68; a failed 68 restores generation 67 once at generation 69 (terminal).
+- Fast-forward gates verified: `origin/sentinel-supervisor` (`36458206a`) and `origin/development` (`5a84c15dc`) are both ancestors of the lane tip.
+- The publish+dispatch one-shot (push lane tip to `sentinel-supervisor` and `development`, then `sentinel run supervisor`) is blocked only on explicit owner approval; the platform's safety review rejects protected-ref publication without it. Once approved: installer verifies the pinned revision, installs generation 68, bootstrap-verifies, and memory becomes live for settlements, planner admission, prompts and the (re-enabled) maintenance retry guard.
