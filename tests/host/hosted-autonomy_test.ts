@@ -8288,7 +8288,7 @@ Deno.test("C63 first-pass recovery: nineteen charged admissions retain exact his
 Deno.test("C63 current plan nonmembership: production maintenance factory still drains retained old cells", () =>
   historicalC63Scenario(false, true));
 
-Deno.test("historical missing-cell quarantine: strict leaf, preserved charge and idempotent maintenance", async () => {
+Deno.test("historical missing-cell quarantine: strict leaf, retained ambiguous charge and idempotent maintenance", async () => {
   const f = await historicalMalformedRig(true, 1, true, true);
   const previousCwd = Deno.cwd();
   Deno.chdir(f.checkout);
@@ -8386,9 +8386,35 @@ Deno.test("historical missing-cell quarantine: strict leaf, preserved charge and
       wait: f.records[0].wait,
       updatedAt: f.records[0].updatedAt,
     }, f.records[0]);
-    assert.equal(
-      canonicalStringify(after.value.snapshot.reservations),
-      canonicalStringify(before.value.snapshot.reservations),
+    // The missing-cell admission reaches a final ambiguous settlement:
+    // absence cannot prove non-submission, and the retained charge is never
+    // refunded or rewritten beyond the settlement transition. Every other
+    // reservation is preserved byte for byte.
+    const missingCharge = after.value.snapshot.reservations.find((row) =>
+      row.id === f.charges[0].id
+    )!;
+    const originalCharge = before.value.snapshot.reservations.find((row) =>
+      row.id === f.charges[0].id
+    )!;
+    assert.equal(missingCharge.outcome, "ambiguous");
+    assert.equal(missingCharge.proofRef, null);
+    assert(
+      missingCharge.settledAt !== null &&
+        Number.isSafeInteger(missingCharge.settledAt) &&
+        missingCharge.settledAt >= originalCharge.createdAt,
+    );
+    assert.deepEqual({
+      ...missingCharge,
+      outcome: originalCharge.outcome,
+      settledAt: originalCharge.settledAt,
+    }, originalCharge);
+    assert.deepEqual(
+      after.value.snapshot.reservations.filter((row) =>
+        row.id !== f.charges[0].id
+      ),
+      before.value.snapshot.reservations.filter((row) =>
+        row.id !== f.charges[0].id
+      ),
     );
     assert.deepEqual(
       after.value.snapshot.work.find((row) => row.id === f.records[1].id),

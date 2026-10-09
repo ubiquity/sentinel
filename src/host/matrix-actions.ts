@@ -299,12 +299,12 @@ async function quarantineRow(
     throw new Error("historical matrix pre-settlement custody unavailable");
   }
   // An already-settled ambiguous charge is preserved byte for byte: it is
-  // never re-settled and never receives a new settlement instant.
+  // never re-settled and never receives a new settlement instant. A missing
+  // cell artifact cannot prove non-submission, but its admission must still
+  // reach a final ambiguous settlement; the charge is retained, never
+  // refunded, and the terminal blocker records that absence is unproven.
   let settledReservation = reservation;
-  if (
-    !unprovable &&
-    (reservation.outcome !== "ambiguous" || reservation.settledAt === null)
-  ) {
+  if (reservation.outcome !== "ambiguous" || reservation.settledAt === null) {
     const settled = await deps.budget.settleModelStart({
       id: reservation.id,
       outcome: "ambiguous",
