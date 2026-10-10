@@ -8,6 +8,20 @@ import {
 import type { BudgetReservationV1 } from "../../src/contracts/budget-reservation.ts";
 import type { RepairStateSnapshotV1 } from "../../src/contracts/state-snapshots.ts";
 import type { WorkRecordV1 } from "../../src/contracts/work-record.ts";
+import type { ReleaseStateSnapshotV1 } from "../../src/contracts/state-snapshots.ts";
+
+function testRelease(): ReleaseStateSnapshotV1 {
+  return {
+    version: "v1",
+    kind: "release_state_snapshot",
+    stateHead: null,
+    sequence: 1,
+    updatedAt: T0,
+    releases: [],
+    hostedRuntimes: [],
+    hostedReleases: [],
+  } as ReleaseStateSnapshotV1;
+}
 
 const T0 = 1791623000000;
 
@@ -145,7 +159,7 @@ async function validInput(): Promise<RuntimeMismatchPlanInputV1> {
   const reservation = testReservation();
   return {
     repair: testSnapshot([record], [reservation]),
-    release: null,
+    release: testRelease(),
     bindings: [
       testBinding({
         recordDigest: await canonicalStringifySha256(record),

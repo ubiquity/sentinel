@@ -1,7 +1,19 @@
+import { deriveReservationId } from "../src/budget/mod.ts";
 import type { BudgetReservationV1 } from "../src/contracts/budget-reservation.ts";
 import { canonicalStringifySha256 } from "../src/contracts/canonical.ts";
-import type { RepairStateSnapshotV1 } from "../src/contracts/state-snapshots.ts";
+import {
+  parseReleaseStateSnapshotV1,
+  parseRepairStateSnapshotV1,
+} from "../src/contracts/state-snapshots.ts";
+import type {
+  ReleaseStateSnapshotV1,
+  RepairStateSnapshotV1,
+} from "../src/contracts/state-snapshots.ts";
 import type { WorkRecordV1 } from "../src/contracts/work-record.ts";
+import {
+  candidateBranch,
+  implementationIntentKey,
+} from "../src/repair/keys.ts";
 
 export interface RuntimeMismatchBindingV1 {
   readonly id: string;
@@ -36,7 +48,7 @@ export interface RuntimeMismatchProofV1 {
 }
 
 export interface RuntimeMismatchPlanInputV1 {
-  readonly repair: RepairStateSnapshotV1;
+  readonly repair: unknown;
   readonly release: unknown;
   readonly bindings: readonly RuntimeMismatchBindingV1[];
   readonly proofs: Readonly<Record<string, RuntimeMismatchProofV1>>;
@@ -67,20 +79,31 @@ export type RuntimeMismatchPlanV1 =
     rows: readonly { id: string; reason: string }[];
   };
 
-export function planRuntimeMismatchRecovery(
-  input: RuntimeMismatchPlanInputV1,
-): Promise<RuntimeMismatchPlanV1> {
-  return planAsync(input);
-}
-
-async function planAsync(
+export async function planRuntimeMismatchRecovery(
   input: RuntimeMismatchPlanInputV1,
 ): Promise<RuntimeMismatchPlanV1> {
   const rows: { id: string; reason: string }[] = [];
-  const refuse = (id: string, reason: string): RuntimeMismatchPlanV1 => {
+  const refuse = (
+    id: string,
+    reason: string,
+  ): RuntimeMismatchPlanV1 => {
     rows.push({ id, reason });
     return { ok: false, refused: "binding failed", rows };
   };
+
+  let repair: RepairStateSnapshotV1;
+  let release: ReleaseStateSnapshotV1;
+  try {
+    repair = parseRepairStateSnapshotV1(input.repair);
+  } catch {
+    return { ok: false, refused: "invalid repair snapshot", rows };
+  }
+  try {
+    release = parseReleaseStateSnapshotV1(input.release);
+  } catch {
+    return { ok: false, refused: "invalid release snapshot", rows };
+  }
+  void release;
 
   if (input.bindings.length === 0 || input.bindings.length > 36) {
     return { ok: false, refused: "binding count out of range", rows };
@@ -89,14 +112,37 @@ async function planAsync(
     return { ok: false, refused: "invalid clock", rows };
   }
 
-  const seen = new Set<string>();
+  const workIds = new Set<string>();
+  for (const record of repair.work) {
+    const key = String(record.id);
+    if (workIds.has(key)) {
+      return { ok: false, refused: "duplicate work id", rows };
+    }
+    workIds.add(key);
+  }
+  const reservationIds = new Set<string>();
+  for (const row of repair.reservations) {
+    const key = String(row.id);
+    if (reservationIds.has(key)) {
+      return { ok: false, refused: "duplicate reservation id", rows };
+    }
+    reservationIds.add(key);
+    if (
+      row.outcome === "reserved" &&
+      (row.settledAt !== null || row.proofRef !== null)
+    ) {
+      return { ok: false, refused: "reserved lifecycle invalid", rows };
+    }
+  }
+
   const workById = new Map<string, WorkRecordV1>(
-    input.repair.work.map((record) => [String(record.id), record]),
+    repair.work.map((record) => [String(record.id), record]),
   );
   const reservationById = new Map<string, BudgetReservationV1>(
-    input.repair.reservations.map((row) => [String(row.id), row]),
+    repair.reservations.map((row) => [String(row.id), row]),
   );
 
+  const seen = new Set<string>();
   const proposals: RuntimeMismatchProposalV1[] = [];
   for (const binding of input.bindings) {
     if (seen.has(binding.id)) return refuse(binding.id, "duplicate binding");
@@ -131,8 +177,20 @@ async function planAsync(
     if (intent.key !== binding.intentKey) {
       return refuse(binding.id, "intent key mismatch");
     }
+    if (intent.key !== implementationIntentKey(binding.reservationId)) {
+      return refuse(binding.id, "native intent key mismatch");
+    }
     if (record.target.branch !== binding.branch) {
       return refuse(binding.id, "branch mismatch");
+    }
+    if (record.target.branch !== candidateBranch(binding.id as never)) {
+      return refuse(binding.id, "native branch mismatch");
+    }
+    if (record.target.base !== binding.base) {
+      return refuse(binding.id, "base mismatch");
+    }
+    if (intent.observedBase !== binding.base) {
+      return refuse(binding.id, "intent base mismatch");
     }
     if (record.target.head !== null) {
       return refuse(binding.id, "candidate-bearing record excluded");
@@ -166,6 +224,16 @@ async function planAsync(
     }
     if (reservation.outcome !== "reserved") {
       return refuse(binding.id, "reservation not reserved");
+    }
+    const derivedId = await deriveReservationId({
+      repository: reservation.repository,
+      taskId: reservation.taskId,
+      head: reservation.head,
+      attempt: reservation.attempt,
+      purpose: reservation.purpose,
+    });
+    if (derivedId !== reservation.id) {
+      return refuse(binding.id, "native reservation id mismatch");
     }
 
     const proof = input.proofs[binding.id];
