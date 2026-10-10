@@ -54,22 +54,25 @@ async function baselineInput(
 }> {
   const recordId = WORK_ID;
   const branch = candidateBranch(recordId as never);
+  const repo = {
+    owner: "ubiquity",
+    name: "ai.ubq.fi",
+    installationId: 155687488,
+  };
   const reservationId = await deriveReservationId({
-    repository: {
-      owner: "ubiquity",
-      name: "ai.ubq.fi",
-      installationId: 155687488,
-    },
+    repository: repo,
     taskId: recordId as never,
     head: BASE_SHA as never,
     attempt: 1,
     purpose,
   });
-  const record = workRecord("1", {
+  const record = workRecord(WORK_ID, {
+    repository: repo,
     nextStep: "blocked",
     blocker: {
       kind: "other",
       message: "authenticated historical matrix runtime mismatch; producer=1:1",
+      since: T0,
     },
     target: { base: BASE_SHA, branch, checkpoint: null, head: null, pr: null },
     intent: {
@@ -85,6 +88,7 @@ async function baselineInput(
     },
   });
   const res = reservation(reservationId, {
+    repository: repo,
     taskId: recordId,
     head: BASE_SHA,
     purpose,
@@ -177,22 +181,42 @@ Deno.test("planner refuses non-terminal producer", async () => {
 });
 
 Deno.test("planner refuses candidate-bearing record", async () => {
-  const { input, recordId } = await baselineInput();
-  const record = workRecord("1", {
+  const { input, recordId, reservationId } = await baselineInput();
+  const repo = {
+    owner: "ubiquity",
+    name: "ai.ubq.fi",
+    installationId: 155687488,
+  };
+  const branch = candidateBranch(recordId as never);
+  const record = workRecord(recordId, {
+    repository: repo,
     nextStep: "blocked",
     blocker: {
       kind: "other",
       message: "authenticated historical matrix runtime mismatch; producer=1:1",
+      since: T0,
     },
     target: {
       base: BASE_SHA,
-      branch: candidateBranch(recordId as never),
+      branch,
       checkpoint: null,
       head: SHA1,
       pr: null,
     },
+    intent: {
+      kind: "implementation",
+      key: implementationIntentKey(reservationId),
+      startedAt: T0 - 1000,
+      branch,
+      expectedHead: null,
+      observedBase: BASE_SHA,
+      pr: null,
+      requestId: reservationId,
+      resultId: null,
+    },
   });
-  const repair = { ...input.repair, work: [record] };
+  const nativeRepair = parseRepairStateSnapshotV1(input.repair);
+  const repair = { ...nativeRepair, work: [record] };
   const bindings = [{
     ...input.bindings[0],
     recordDigest: await canonicalStringifySha256(record),
@@ -327,5 +351,21 @@ Deno.test("planner refuses selected reservation B when intent names A", async ()
   });
   const bindings = [{ ...input.bindings[0], reservationId: otherId }];
   const result = await planRuntimeMismatchRecovery({ ...input, bindings });
+  assert.equal(result.ok, false);
+});
+
+Deno.test("planner refuses changed record bytes", async () => {
+  const { input } = await baselineInput();
+  const nativeRepair = parseRepairStateSnapshotV1(input.repair);
+  const changedRecord = {
+    ...nativeRepair.work[0],
+    counters: { attempts: 99, retries: 0, reviewRounds: 0 },
+  };
+  const repair = { ...nativeRepair, work: [changedRecord] };
+  const result = await planRuntimeMismatchRecovery({
+    ...input,
+    repair,
+    bindings: input.bindings,
+  });
   assert.equal(result.ok, false);
 });
