@@ -4,9 +4,9 @@ These are current owner decisions for Sentinel. [AGENTS.md](../AGENTS.md) govern
 
 ## Runtime and dispatch
 
-Sentinel runs in manually dispatched GitHub Actions. `observe.yml`, `repair.yml` and `supervisor-dispatch.yml` have no schedule triggers; `sentinel-release` remains disabled. Use the installed trusted-host CLI: `sentinel status`, `sentinel run observe`, `sentinel run supervisor`, and `sentinel receipts <run-id>`. The supervisor uses the exact protected `sentinel-supervisor` ref and authenticated execution receipts; neither time nor list order selects a runtime.
+Sentinel runs in GitHub Actions. Per the owner directive of 2026-10-07 (commit `5aac94da8`, "Make it fully autonomous"), `supervisor-dispatch.yml` runs every five minutes and dispatches the exact protected `sentinel-supervisor` ref; `observe.yml` and `repair.yml` stay manual-only, and `sentinel-release` remains disabled. The installed trusted-host CLI stays available for explicit dispatch: `sentinel status`, `sentinel run observe`, `sentinel run supervisor`, and `sentinel receipts <run-id>`. The supervisor uses the exact protected `sentinel-supervisor` ref and authenticated execution receipts; neither time nor list order selects a runtime.
 
-Every development-triggered hosted end-to-end/runtime/supervisor dispatch, retry or rerun needs explicit user approval for that identified attempt after local preparation. Earlier activation/recovery permissions do not authorize this task's next attempt.
+Every development-triggered hosted end-to-end/runtime/supervisor dispatch, retry or rerun needs explicit user approval for that identified attempt after local preparation; earlier activation/recovery permissions do not authorize this task's next attempt. The scheduled autonomous dispatcher and the runtime's own retries are runtime behavior, not development-triggered attempts.
 
 ## Concurrent issue processing
 

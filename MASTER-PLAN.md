@@ -4,7 +4,7 @@ This plan records current scope, architecture, invariants and canonical lane ide
 
 ## Outcome and scope
 
-Sentinel runs in manually dispatched GitHub Actions. It discovers eligible work in configured repositories, preserves evidence and produced candidates, implements isolated issue repairs, obtains current-head structured review, validates and merges accepted work, and reconciles delivery through trusted controllers.
+Sentinel runs in GitHub Actions, with a five-minute autonomous dispatch of its protected supervisor (owner directive 2026-10-07) and explicit CLI dispatch still available. It discovers eligible work in configured repositories, preserves evidence and produced candidates, implements isolated issue repairs, obtains current-head structured review, validates and merges accepted work, and reconciles delivery through trusted controllers.
 
 Use isolated concurrent issue workers across configured targets, with one trusted state/integration coordinator and a separate deterministic release controller that exclusively owns promotion. Provider and platform capacity remain real limits. Preserve durable admission and settlement for implementation, review, retry and continuation starts; no artificial hourly/weekly start, unfinished-PR, review-concurrency or review-drain cap is imposed.
 
