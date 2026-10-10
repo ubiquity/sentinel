@@ -266,3 +266,78 @@ Deno.test("historical retry disposition: a missing bound record refuses", () => 
   const plan = planHistoricalRetryDisposition(value, BINDING, NOW);
   assert.strictEqual(plan.ok, false);
 });
+
+Deno.test("historical retry disposition: consumed entries are skipped, the rest still applies", () => {
+  const value = snapshot(
+    [
+      record("issue-ubiquity-ai.ubq.fi-398", RID_A, {
+        nextStep: "done",
+        intent: null,
+        target: {
+          base: BASE,
+          branch: "sentinel/test",
+          checkpoint: null,
+          head: SHA1,
+          pr: 955,
+        },
+      }),
+      record("issue-ubiquity-ai.ubq.fi-420", RID_B),
+    ],
+    [
+      reservation(RID_A, "issue-ubiquity-ai.ubq.fi-398", {
+        outcome: "ambiguous",
+        settledAt: T0,
+      }),
+      reservation(RID_B, "issue-ubiquity-ai.ubq.fi-420"),
+    ],
+  );
+  const plan = planHistoricalRetryDisposition(value, BINDING, NOW);
+  assert.ok(plan.ok, plan.ok ? "" : plan.refused);
+  assert.deepEqual(plan.transitions, [
+    { id: "issue-ubiquity-ai.ubq.fi-420", reservationId: RID_B },
+  ]);
+  const delivered = plan.snapshot.work.find((row) =>
+    row.id === "issue-ubiquity-ai.ubq.fi-398"
+  )!;
+  assert.deepEqual(delivered.nextStep, "done");
+  assert.deepEqual(delivered.target.pr, 955);
+  const consumed = plan.snapshot.reservations.find((row) => row.id === RID_A)!;
+  assert.deepEqual(consumed.outcome, "ambiguous");
+  assert.deepEqual(consumed.settledAt, T0);
+  const applied = plan.snapshot.reservations.find((row) => row.id === RID_B)!;
+  assert.deepEqual(applied.outcome, "ambiguous");
+  assert.deepEqual(applied.settledAt, NOW);
+  const blocked = plan.snapshot.work.find((row) =>
+    row.id === "issue-ubiquity-ai.ubq.fi-420"
+  )!;
+  assert.deepEqual(blocked.nextStep, "blocked");
+});
+
+Deno.test("historical retry disposition: an all-consumed binding writes nothing", () => {
+  const value = snapshot(
+    [
+      record("issue-ubiquity-ai.ubq.fi-398", RID_A, {
+        nextStep: "done",
+        intent: null,
+      }),
+      record("issue-ubiquity-ai.ubq.fi-420", RID_B, {
+        nextStep: "done",
+        intent: null,
+      }),
+    ],
+    [
+      reservation(RID_A, "issue-ubiquity-ai.ubq.fi-398", {
+        outcome: "ambiguous",
+        settledAt: T0,
+      }),
+      reservation(RID_B, "issue-ubiquity-ai.ubq.fi-420", {
+        outcome: "ambiguous",
+        settledAt: T0,
+      }),
+    ],
+  );
+  const plan = planHistoricalRetryDisposition(value, BINDING, NOW);
+  assert.ok(plan.ok, plan.ok ? "" : plan.refused);
+  assert.deepEqual(plan.transitions, []);
+  assert.deepEqual(plan.snapshot, value);
+});

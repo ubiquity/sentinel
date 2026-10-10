@@ -111,24 +111,6 @@ jobs:
           private-key: ${{ secrets.SENTINEL_SUPERVISOR_APP_PRIVATE_KEY }}
           owner: ubiquity
           repositories: ${{ steps.targets.outputs.repositories }}
-      # One-shot owner-authorized disposition for the sixteen historical
-      # retry admissions stuck by the missing-artifact wave 37354374590.
-      # It is idempotent: after the first apply it reports already_applied and
-      # writes nothing. Remove this step after the disposition is observed.
-      - name: Apply bounded historical retry disposition
-        # Best-effort one-shot: a refusal or failure never blocks the
-        # maintenance pass's own bounded self-upkeep.
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: >-
-          deno run --no-lock
-          --allow-read
-          --allow-write
-          --allow-run
-          --allow-net=api.github.com
-          --allow-env=GH_TOKEN,PATH,HOME,TMPDIR,DENO_DIR
-          ops/historical-retry-disposition.ts --apply
       - name: Run hosted autonomy (retry transient failures, deliver reviewed heads)
         env:
           GITHUB_TOKEN: ${{ github.token }}
