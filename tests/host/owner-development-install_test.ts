@@ -2935,6 +2935,25 @@ Deno.test(
     );
     assert.equal(earlyFrameRollback.move.nextGeneration, 74);
 
+    // A generation 72 pointer carrying BOTH a healthy proof and a failed
+    // settlement still takes the original rollback path: the successor never
+    // installs over a failed candidate.
+    const stackedBoth = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: STACKED_MERGE_RUNTIME_REVISION,
+          generation: 72,
+          healthyProof: stackedHealthy,
+          executionProof: failedProof(STACKED_MERGE_RUNTIME_REVISION, 72, 185),
+        }),
+      }),
+      NOW,
+    );
+    // With no recorded healthy proof for the rollback predecessor the chain
+    // waits instead of installing: the successor still never installs over a
+    // failed candidate.
+    assert.equal(stackedBoth.status, "waiting");
+
     // A failed generation 72 still falls through to the stacked-merge rung's
     // own rollback, never to the early-frame rung.
     const stackedFailed = planOwnerDevelopmentInstall(

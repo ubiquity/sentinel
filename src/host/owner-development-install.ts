@@ -3040,7 +3040,10 @@ export function planOwnerDevelopmentInstall(
   if (
     revision === OWNER_DEVELOPMENT_INSTALL_EARLY_FRAME_PRIOR_REVISION &&
     generation === OWNER_DEVELOPMENT_INSTALL_EARLY_FRAME_PRIOR_GENERATION &&
-    healthy !== null
+    healthy !== null &&
+    // A failed settlement on the prior generation keeps the original
+    // rollback path: the successor never installs over a failed candidate.
+    failed === null
   ) {
     return movePlan(
       "install",
