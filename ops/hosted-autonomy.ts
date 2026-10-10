@@ -2489,13 +2489,22 @@ async function recoverHostedHistoricalC63(
   return { ingested: report.ingested, deferred: false };
 }
 
+/**
+ * Bounded budget for the current-matrix release-history walk. The walk is
+ * best-effort recovery: when the bound is exhausted the pass defers (no
+ * writes, every other pass continues) instead of failing the maintenance job,
+ * because a failing maintenance job skips prepare and blocks the entire
+ * supervisor on every run while the release history keeps growing.
+ */
+const CURRENT_MATRIX_HISTORY_DEADLINE_MS = 180_000;
+
 async function recoverHostedCurrentMatrix(
   deps: HostedAutonomyDepsV1,
   binding: ClosedCWaveBindingV1,
   onDeferred: () => void,
 ): Promise<HostedAutonomyResultV1 | null> {
   if (!deps.closedMatrix) return null;
-  const deadlineAt = deps.clock.now() + 60_000;
+  const deadlineAt = deps.clock.now() + CURRENT_MATRIX_HISTORY_DEADLINE_MS;
   const dedicated = new Set<string>([
     ...binding.cells.map((row) => row.reservationId),
     ...(deps.historicalMatrix
@@ -2557,7 +2566,15 @@ async function recoverHostedCurrentMatrix(
     let producer = current;
     while (true) {
       if (deps.clock.now() >= deadlineAt) {
-        throw new Error("current matrix history deadline exhausted");
+        // Availability, not integrity: defer the walk with an explicit,
+        // bounded reason so the maintenance pass still succeeds and the next
+        // dispatch can continue recovery from the current custody.
+        onDeferred();
+        console.log(JSON.stringify({
+          kind: "sentinel_current_matrix_deferred",
+          detail: "history deadline exhausted",
+        }));
+        return null;
       }
       if (snapshots.has(producer.head)) {
         throw new Error("current matrix history cycle");
