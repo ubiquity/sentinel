@@ -10446,6 +10446,25 @@ Deno.test(
 );
 
 Deno.test(
+  "hosted autonomy: a run-window scheduling refusal returns to work",
+  () => {
+    const record = blockedRecord({
+      blocker: {
+        kind: "other",
+        message:
+          "implementation start is past the model cutoff or no longer fits the run bounds",
+        since: T0 + 3000,
+      },
+      counters: { attempts: 2, retries: 0, reviewRounds: 0 },
+    });
+    const plans = planHostedRetries(repairSnapshot([record]), T0 + 5000);
+    assert.equal(plans.length, 1);
+    assert.equal(plans[0].id, TARGET);
+    assert.equal(plans[0].nextStep, "work");
+  },
+);
+
+Deno.test(
   "attempt memory: repeated no-progress outcomes refuse sooner than transient ones",
   async () => {
     const record = blockedRecord({

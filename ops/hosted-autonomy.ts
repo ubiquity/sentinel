@@ -371,6 +371,15 @@ export const HOSTED_AUTONOMY_RETRYABLE: readonly {
     nextStep: "work",
   },
   {
+    // A cell that never started because the run's own session window closed
+    // ("past the model cutoff or no longer fits the run bounds") proves
+    // nothing about the task: the next run has a fresh window. Five records
+    // were parked on this scheduling refusal since 2026-10-05.
+    prefix:
+      "implementation start is past the model cutoff or no longer fits the run bounds",
+    nextStep: "work",
+  },
+  {
     prefix: "model run did not complete with a trusted candidate",
     nextStep: "work",
   },
