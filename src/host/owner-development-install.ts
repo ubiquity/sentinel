@@ -631,6 +631,21 @@ export const OWNER_DEVELOPMENT_INSTALL_STACKED_MERGE_PRIOR_GENERATION = 71;
 export const OWNER_DEVELOPMENT_INSTALL_STACKED_MERGE_REVISION =
   "dc5e08af05ed04be2e45a0acca72505fcad0b922" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_STACKED_MERGE_GENERATION = 72;
+/**
+ * Early-frame diagnostics rung: the hosted early-failure summary now names
+ * every code-owned source basename and retains up to six frames, so the
+ * innermost abort site of an uncaught repair failure is identifiable (the
+ * 2026-10-10 failure emitted only outer host frames). Installed only after the
+ * recorded generation 72 healthy proof; a failed generation 73 candidate
+ * restores the recorded generation 72 revision once at monotonic generation
+ * 74.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_EARLY_FRAME_PRIOR_REVISION =
+  "dc5e08af05ed04be2e45a0acca72505fcad0b922" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_EARLY_FRAME_PRIOR_GENERATION = 72;
+export const OWNER_DEVELOPMENT_INSTALL_EARLY_FRAME_REVISION =
+  "37c81e771cfedcf0b1e6b4cb70cbed04c8bb6e87" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_EARLY_FRAME_GENERATION = 73;
 export interface OwnerMatrixRecoveryEvidenceV1 {
   candidate: GitSha;
   repairHead: GitSha;
@@ -3016,6 +3031,56 @@ export function planOwnerDevelopmentInstall(
     }
     return waiting(
       "the planner successor generation 60 healthy proof is not recorded",
+    );
+  }
+
+  // Early-frame diagnostics rung. Only a HEALTHY generation 72 record takes
+  // this branch; a failed 72 falls through to the stacked-merge rung's own
+  // rollback below, so its rollback semantics stay as recorded.
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_EARLY_FRAME_PRIOR_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_EARLY_FRAME_PRIOR_GENERATION &&
+    healthy !== null
+  ) {
+    return movePlan(
+      "install",
+      runtime,
+      OWNER_DEVELOPMENT_INSTALL_EARLY_FRAME_REVISION,
+      OWNER_DEVELOPMENT_INSTALL_EARLY_FRAME_GENERATION,
+      healthy,
+      "install the early-frame diagnostics runtime after its generation 72 healthy proof",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_EARLY_FRAME_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_EARLY_FRAME_GENERATION
+  ) {
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_EARLY_FRAME_PRIOR_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_EARLY_FRAME_PRIOR_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded generation 72 healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_EARLY_FRAME_PRIOR_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed early-frame diagnostics runtime to its recorded proven predecessor",
+      );
+    }
+    if (healthy !== null) {
+      return noChange("the owner development installation is complete");
+    }
+    return waiting(
+      "the early-frame diagnostics generation 73 healthy proof is not recorded",
     );
   }
 

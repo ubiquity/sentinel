@@ -757,6 +757,8 @@ const CANCELLED_RELEASE_RUNTIME_REVISION =
   "7c3baee145310141a666bd05360f4e03c56cfd04" as GitSha;
 const STACKED_MERGE_RUNTIME_REVISION =
   "dc5e08af05ed04be2e45a0acca72505fcad0b922" as GitSha;
+const EARLY_FRAME_RUNTIME_REVISION =
+  "37c81e771cfedcf0b1e6b4cb70cbed04c8bb6e87" as GitSha;
 
 async function matrixRecoveryState() {
   const work = CLOSED_C_WAVE.cells.map((cell) =>
@@ -2874,6 +2876,91 @@ Deno.test(
     }
     assert.equal(cancelledFailed.move.nextRevision, VERSIONED_RUNTIME_REVISION);
     assert.equal(cancelledFailed.move.nextGeneration, 72);
+  },
+);
+
+Deno.test(
+  "owner development install plan: generation 73 early-frame diagnostics install follows a healthy 72 and rolls back once",
+  () => {
+    const stackedHealthy = healthyProof(
+      STACKED_MERGE_RUNTIME_REVISION,
+      72,
+      181,
+    );
+    const earlyFrameInstall = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: STACKED_MERGE_RUNTIME_REVISION,
+          generation: 72,
+          healthyProof: stackedHealthy,
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(earlyFrameInstall.status, "install");
+    if (earlyFrameInstall.status !== "install") {
+      throw new Error("expected install");
+    }
+    assert.equal(
+      earlyFrameInstall.move.priorRevision,
+      STACKED_MERGE_RUNTIME_REVISION,
+    );
+    assert.equal(earlyFrameInstall.move.priorGeneration, 72);
+    assert.equal(
+      earlyFrameInstall.move.nextRevision,
+      EARLY_FRAME_RUNTIME_REVISION,
+    );
+    assert.equal(earlyFrameInstall.move.nextGeneration, 73);
+
+    // A failed generation 73 restores the recorded generation 72 revision
+    // once at monotonic generation 74.
+    const earlyFrameRollback = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: EARLY_FRAME_RUNTIME_REVISION,
+          generation: 73,
+          healthyProof: stackedHealthy,
+          executionProof: failedProof(EARLY_FRAME_RUNTIME_REVISION, 73, 182),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(earlyFrameRollback.status, "rollback");
+    if (earlyFrameRollback.status !== "rollback") {
+      throw new Error("expected rollback");
+    }
+    assert.equal(
+      earlyFrameRollback.move.nextRevision,
+      STACKED_MERGE_RUNTIME_REVISION,
+    );
+    assert.equal(earlyFrameRollback.move.nextGeneration, 74);
+
+    // A failed generation 72 still falls through to the stacked-merge rung's
+    // own rollback, never to the early-frame rung.
+    const stackedFailed = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: STACKED_MERGE_RUNTIME_REVISION,
+          generation: 72,
+          healthyProof: healthyProof(
+            CANCELLED_RELEASE_RUNTIME_REVISION,
+            71,
+            183,
+          ),
+          executionProof: failedProof(STACKED_MERGE_RUNTIME_REVISION, 72, 184),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(stackedFailed.status, "rollback");
+    if (stackedFailed.status !== "rollback") {
+      throw new Error("expected rollback");
+    }
+    assert.equal(
+      stackedFailed.move.nextRevision,
+      CANCELLED_RELEASE_RUNTIME_REVISION,
+    );
+    assert.equal(stackedFailed.move.nextGeneration, 73);
   },
 );
 
