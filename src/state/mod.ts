@@ -452,7 +452,12 @@ export class GitStateStore implements StateStore {
       ) {
         return portError("invalid", "historical repair identity is malformed");
       }
-      const loaded = await this.loadRemote(op, REPAIR_REF, "repair");
+      const loaded = await this.loadRemote(
+        op,
+        REPAIR_REF,
+        "repair",
+        "complete",
+      );
       if (!loaded.ok) return loaded;
       if (
         loaded.value.status !== "found" ||
@@ -507,7 +512,12 @@ export class GitStateStore implements StateStore {
       ) {
         return portError("invalid", "historical release identity is malformed");
       }
-      const loaded = await this.loadRemote(op, RELEASE_REF, "release");
+      const loaded = await this.loadRemote(
+        op,
+        RELEASE_REF,
+        "release",
+        "complete",
+      );
       if (!loaded.ok) return loaded;
       if (
         loaded.value.status !== "found" ||
@@ -668,6 +678,7 @@ export class GitStateStore implements StateStore {
     op: OpContext,
     ref: string,
     kind: StateKind,
+    history: "latest" | "complete" = "latest",
   ): Promise<PortResultV1<LoadedState>> {
     const init = await this.git(op, ["init", "-q"]);
     if (!init.ok) return this.gitFailure("unavailable", "init", init);
@@ -706,6 +717,11 @@ export class GitStateStore implements StateStore {
       "fetch",
       "-q",
       "--no-tags",
+      // Ordinary operations validate only the current tree and its actual
+      // parent. Fetch both so shallow traversal cannot hide that parent,
+      // without repeatedly downloading years of state history. Exact
+      // historical witnesses need full ancestry and opt in explicitly.
+      ...(history === "latest" ? ["--depth=2"] : []),
       "origin",
       ref,
     ]);
@@ -1107,6 +1123,11 @@ export class GitStateStore implements StateStore {
     for (const collection of collections) {
       byDirectory[collection.directory] = {};
     }
+    const recordEntries: {
+      sha: string;
+      directory: string;
+      fileName: string;
+    }[] = [];
     for (const entry of entries) {
       if (entry.path === "manifest.json") continue;
       const slash = entry.path.indexOf("/");
@@ -1124,9 +1145,12 @@ export class GitStateStore implements StateStore {
           "state record file name is not digest-encoded",
         );
       }
-      const blob = await this.git(op, ["cat-file", "blob", entry.sha]);
-      if (!blob.ok) return this.gitFailure("unavailable", "cat-file", blob);
-      byDirectory[directory][fileName] = blob.stdout;
+      recordEntries.push({ sha: entry.sha, directory, fileName });
+    }
+    const blobs = await this.readRecordBlobs(op, recordEntries);
+    if (!blobs.ok) return blobs;
+    for (const [index, entry] of recordEntries.entries()) {
+      byDirectory[entry.directory][entry.fileName] = blobs.value[index];
     }
 
     // Parse and validate every record file; the filename must be the SHA-256
@@ -1233,6 +1257,45 @@ export class GitStateStore implements StateStore {
     return portOk(snapshot);
   }
 
+  /**
+   * State records have exactly one canonical JSON line followed by a newline.
+   * Git prints explicit blob objects in argument order without separators, so
+   * bounded batches avoid a child per record. Authenticate each framed body
+   * against the tree's blob id before parsing: newline counts alone would let
+   * malformed adjacent blobs move a body across an object boundary.
+   */
+  private async readRecordBlobs(
+    op: OpContext,
+    entries: readonly { sha: string }[],
+  ): Promise<PortResultV1<string[]>> {
+    const texts: string[] = [];
+    for (let offset = 0; offset < entries.length; offset += 64) {
+      const chunk = entries.slice(offset, offset + 64);
+      const shown = await this.git(op, [
+        "show",
+        "--no-ext-diff",
+        "--no-textconv",
+        ...chunk.map((entry) => entry.sha),
+      ]);
+      if (!shown.ok) return this.gitFailure("unavailable", "show", shown);
+      const lines = shown.stdout.split("\n");
+      if (lines.pop() !== "" || lines.length !== chunk.length) {
+        return portError("invalid", "state record batch has malformed framing");
+      }
+      for (const [index, line] of lines.entries()) {
+        const text = `${line}\n`;
+        if (await gitBlobSha1(text) !== chunk[index].sha) {
+          return portError(
+            "invalid",
+            "state record batch does not match its blob identities",
+          );
+        }
+        texts.push(text);
+      }
+    }
+    return portOk(texts);
+  }
+
   private classifyGitError(
     result: GitRunResultV1,
   ): "auth_failed" | "not_found" | "unavailable" {
@@ -1308,6 +1371,19 @@ async function sha256Hex(text: string): Promise<string> {
     "SHA-256",
     new TextEncoder().encode(text),
   );
+  return Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+async function gitBlobSha1(text: string): Promise<string> {
+  const encoder = new TextEncoder();
+  const body = encoder.encode(text);
+  const header = encoder.encode(`blob ${body.length}\0`);
+  const object = new Uint8Array(header.length + body.length);
+  object.set(header);
+  object.set(body, header.length);
+  const digest = await crypto.subtle.digest("SHA-1", object);
   return Array.from(new Uint8Array(digest))
     .map((byte) => byte.toString(16).padStart(2, "0"))
     .join("");

@@ -355,7 +355,16 @@ export const HOSTED_AUTONOMY_TRUSTED_AUTHORS: readonly string[] = [
 export const HOSTED_AUTONOMY_RETRYABLE: readonly {
   readonly prefix: string;
   readonly nextStep: "work" | "review";
+  readonly exact?: boolean;
 }[] = [
+  {
+    // The matrix cell emits this exact transient port refusal. Keep its
+    // ambiguous charge; authentication, integrity and unknown errors are not
+    // retry grants, and arbitrary suffixes cannot widen this closed case.
+    prefix: "model run failed (unavailable)",
+    nextStep: "work",
+    exact: true,
+  },
   {
     prefix: "model run ended without a trusted receipt",
     nextStep: "work",
@@ -1282,7 +1291,9 @@ export function planHostedRetries(
     }
     if (!Number.isSafeInteger(now)) continue;
     const rule = HOSTED_AUTONOMY_RETRYABLE.find((item) =>
-      blocker.message.startsWith(item.prefix)
+      item.exact
+        ? blocker.message === item.prefix
+        : blocker.message.startsWith(item.prefix)
     );
     if (rule === undefined) continue;
     if (!intentClosable(record, snapshot.reservations)) continue;
@@ -3485,6 +3496,10 @@ export async function runHostedAutonomy(
   // exact repository/pull/head/base. The closure pass owns the actual closure
   // and consumes these only as the evidence it re-checks below.
   const foreignMerged = new Map<string, unknown>();
+  // A lost response or unreadable readback does not prove the remote merge
+  // never happened. Consume the one external attempt before awaiting it;
+  // already-merged read-only reconciliation can still finish other records.
+  let mergeAttempted = false;
 
   // The self scope keeps its exact pre-existing refusal: once sentinel has a
   // record to deliver, an unreadable `development` tip stops the pass before
@@ -3565,6 +3580,10 @@ export async function runHostedAutonomy(
 
     let revision: string | null = null;
     if (pull.state === "open" && pull.merged === false) {
+      if (mergeAttempted) {
+        actions.push(`delivery:${record.id}:merge_attempt_already_used`);
+        continue;
+      }
       // The base must be exactly the reviewed base, and the repository's own
       // deterministic check must already have succeeded on the exact head.
       const baseTip = await deliveryTip(scope);
@@ -3608,6 +3627,7 @@ export async function runHostedAutonomy(
         continue;
       }
       let merged: { merged: boolean; sha: string | null } | null;
+      mergeAttempted = true;
       try {
         merged = await scope.surface.merge(pullRequest, head);
       } catch {
@@ -3908,7 +3928,7 @@ export async function runHostedAutonomy(
     released,
     foreignMerged,
     closureTasks,
-  ).slice(0, 5);
+  );
   if (closures.length > 0) {
     for (const plan of closures) {
       const record = closureSnapshot.work.find((item) =>

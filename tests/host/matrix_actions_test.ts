@@ -3732,7 +3732,7 @@ Deno.test("matrix actions: ordinary missing-health and verification purposes pro
   }
 });
 
-Deno.test("matrix actions: one wave durably admits 128 fresh issues through real paginated source intake", async () => {
+Deno.test("matrix actions: one wave durably admits 256 fresh issues through real paginated source intake", async () => {
   const r = await rig();
   try {
     const memory = new MemoryState();
@@ -3740,7 +3740,7 @@ Deno.test("matrix actions: one wave durably admits 128 fresh issues through real
     assert.ok(release.ok && release.value.status === "found");
     memory.setRelease(release.value.snapshot);
     const pages: number[] = [];
-    const rows = Array.from({ length: 128 }, (_, index) =>
+    const rows = Array.from({ length: 256 }, (_, index) =>
       issueWire({
         number: index + 1,
         title: "issue " + (index + 1),
@@ -3781,11 +3781,13 @@ Deno.test("matrix actions: one wave durably admits 128 fresh issues through real
         } else if (url.pathname === "/repos/ubiquity/sentinel/issues") {
           const page = Number(url.searchParams.get("page"));
           pages.push(page);
-          body = page === 1 ? rows.slice(0, 100) : rows.slice(100);
-          if (page === 1) {
+          body = rows.slice((page - 1) * 100, page * 100);
+          if (page < 3) {
             headers.set(
               "link",
-              '<https://api.github.com/repos/ubiquity/sentinel/issues?state=open&per_page=100&page=2>; rel="next"',
+              `<https://api.github.com/repos/ubiquity/sentinel/issues?state=open&per_page=100&page=${
+                page + 1
+              }>; rel="next"`,
             );
           }
         } else {
@@ -3805,12 +3807,14 @@ Deno.test("matrix actions: one wave durably admits 128 fresh issues through real
     port.readIssue = (number) => client.readIssue(number);
     r.github.get("ubiquity/ai.ubq.fi")!.listOpenIssues = () =>
       Promise.resolve(portOk([]));
+    let modelCalls = 0;
     const planned = await runActionsMatrixHost({
       ...deps,
       state: memory,
       model: {
         modelId: "gpt-reserve",
         runModel: () => {
+          modelCalls++;
           throw new Error("planning cannot infer");
         },
       },
@@ -3818,18 +3822,18 @@ Deno.test("matrix actions: one wave durably admits 128 fresh issues through real
     assert.ok("plan" in planned);
     assert.deepEqual(
       pages,
-      [1, 2],
-      "actual GitHub source must exhaust its second page",
+      [1, 2, 3],
+      "actual GitHub source must exhaust all three pages",
     );
     assert.equal(
       planned.prepared,
-      128,
+      256,
       "one native wave must not stop at an artificial preparation limit",
     );
-    assert.equal(memory.repair!.reservations.length, 128);
+    assert.equal(memory.repair!.reservations.length, 256);
     assert.equal(
       new Set(memory.repair!.reservations.map((row) => row.id)).size,
-      128,
+      256,
     );
     assert.ok(
       memory.repair!.reservations.every((row) => row.outcome === "reserved"),
@@ -3837,8 +3841,19 @@ Deno.test("matrix actions: one wave durably admits 128 fresh issues through real
     assert.equal(
       memory.repair!.work.filter((row) => row.intent?.kind === "implementation")
         .length,
-      128,
+      256,
     );
+    assert.equal(
+      new Set(memory.repair!.work.map((row) => row.intent?.key)).size,
+      256,
+      "every implementation intent has its own charged operation identity",
+    );
+    assert.ok(
+      (await Deno.stat(r.root + "/high-count/.sentinel-matrix/plan.json"))
+        .size <= MAX_MATRIX_ARTIFACT_BYTES,
+      "the full native matrix preserves the immutable manifest byte ceiling",
+    );
+    assert.equal(modelCalls, 0);
   } finally {
     await r.cleanup();
   }

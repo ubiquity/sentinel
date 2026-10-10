@@ -184,6 +184,164 @@ function appliedHead(
   return result.value.head;
 }
 
+Deno.test("state scale: latest reads and CAS writes bound history and blob processes while historical witnesses remain complete", async () => {
+  const ctx = await makeCtx("bounded-io");
+  try {
+    const cooldowns = Array.from(
+      { length: 130 },
+      (_, i) => githubCooldown(i + 1),
+    );
+    const writer = storeAt(ctx, "seed", "repair");
+    const history: { head: GitSha; snapshot: RepairStateSnapshotV1 }[] = [];
+    let head: GitSha | null = null;
+    for (let sequence = 1; sequence <= 8; sequence++) {
+      const snapshot = repairSnapshot({
+        stateHead: head,
+        sequence,
+        updatedAt: T0 + sequence * 1000,
+        githubCooldowns: cooldowns,
+        work: [workRecord("bounded-io", {
+          source: {
+            kind: "issue",
+            id: "bounded-io\nembedded newline",
+            revision: SHA1,
+          },
+        })],
+      });
+      head = appliedHead(await writer.writeRepair(snapshot, head));
+      history.push({ head, snapshot });
+    }
+
+    const real = new DenoGitRunner(`${ctx.tmp}/git-home`);
+    const commands: string[][] = [];
+    const fetchedCommitCounts: number[] = [];
+    const runner: GitRunnerV1 = {
+      async runGit(args, opts) {
+        commands.push([...args]);
+        const result = await real.runGit(args, opts);
+        if (args[0] === "fetch" && result.ok) {
+          const count = await real.runGit(
+            ["rev-list", "--count", "FETCH_HEAD"],
+            opts,
+          );
+          assert(count.ok);
+          fetchedCommitCounts.push(Number(count.stdout.trim()));
+        }
+        return result;
+      },
+    };
+    const reader = storeAt(ctx, "bounded-reader", "repair", runner);
+    const current = history.at(-1)!;
+    const latest = await reader.readRepair();
+    assert(latest.ok && latest.value.status === "found");
+    assert.equal(latest.value.head, current.head);
+    assert.equal(latest.value.snapshot.stateHead, history.at(-2)!.head);
+    assert.equal(latest.value.snapshot.githubCooldowns.length, 130);
+    assert.deepEqual(
+      fetchedCommitCounts,
+      [2],
+      "a fresh latest-state operation must not download the complete history",
+    );
+    const blobCommands = commands.filter((args) =>
+      args[0] === "show" || args[0] === "cat-file"
+    );
+    assert(
+      blobCommands.length <= 4,
+      "a snapshot must not spawn one Git process per record",
+    );
+    for (const args of blobCommands.filter((args) => args[0] === "show")) {
+      assert(args.includes("--no-ext-diff") && args.includes("--no-textconv"));
+    }
+
+    const historical = await reader.readRepairAt({
+      commit: history[2]!.head,
+      expectedHead: current.head,
+    });
+    assert(historical.ok && historical.value.status === "found");
+    assert.equal(historical.value.snapshot.stateHead, history[1]!.head);
+    assert.equal(historical.value.snapshot.sequence, 3);
+    assert.deepEqual(
+      fetchedCommitCounts,
+      [2, 8],
+      "an exact historical witness must retain complete ancestry",
+    );
+
+    const next = repairSnapshot({
+      ...latest.value.snapshot,
+      stateHead: current.head,
+      sequence: 9,
+      updatedAt: T0 + 9000,
+    });
+    const nextHead = appliedHead(await reader.writeRepair(next, current.head));
+    assert.deepEqual(fetchedCommitCounts, [2, 8, 2]);
+    assert.equal(await remoteHead(ctx, REPAIR_STATE_REF), nextHead);
+    const stale = await reader.writeRepair(next, current.head);
+    assert(stale.ok && stale.value.status === "conflict");
+    assert.equal(stale.value.currentHead, nextHead);
+    assert.equal(await remoteHead(ctx, REPAIR_STATE_REF), nextHead);
+    for (const args of commands.filter((args) => args[0] === "push")) {
+      assert(
+        !args.some((arg) => arg.startsWith("--force") || arg.startsWith("+")),
+      );
+    }
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+Deno.test("state scale: batched blob reads refuse missing extra reordered and shifted bodies", async () => {
+  const ctx = await makeCtx("batch-integrity");
+  try {
+    const store = storeAt(ctx, "writer", "repair");
+    const records = [workRecord("batch:a"), workRecord("batch:b")];
+    const head = appliedHead(
+      await store.writeRepair(repairSnapshot({ work: records }), null),
+    );
+    const real = new DenoGitRunner(`${ctx.tmp}/git-home`);
+    const malformedOutputs: ((text: string) => string)[] = [
+      (text) => text.slice(0, -1),
+      (text) => `${text}{}\n`,
+      (text) => `${text.split("\n")[0]}\n`,
+      (text) => `${text.trimEnd().split("\n").reverse().join("\n")}\n`,
+    ];
+    for (const [index, mutate] of malformedOutputs.entries()) {
+      const reader = storeAt(ctx, `malformed-${index}`, "repair", {
+        async runGit(args, opts) {
+          const result = await real.runGit(args, opts);
+          return args[0] === "show" && result.ok
+            ? { ...result, stdout: mutate(result.stdout) }
+            : result;
+        },
+      });
+      const result = await reader.readRepair();
+      assert(!result.ok);
+      assert.equal(result.error.kind, "invalid");
+      assert.equal(await remoteHead(ctx, REPAIR_STATE_REF), head);
+    }
+
+    const files = await Promise.all(records.map(async (record) => ({
+      path: `work/${await sha256Hex(record.id)}.json`,
+      text: `${canonicalStringify(record)}\n`,
+    })));
+    files.sort((a, b) => a.path < b.path ? -1 : 1);
+    // Concatenation has exactly two canonical lines in the correct order,
+    // but neither individual stored blob has its expected canonical body.
+    // Authenticating each frame against its Git blob id must reject this.
+    assert(
+      (await pushRawTree(ctx, head, REPAIR_STATE_REF, {
+        "manifest.json": rawManifestText(2, T0 + 2000, head),
+        [files[0].path]: `${files[0].text}${files[1].text.slice(0, -1)}`,
+        [files[1].path]: "\n",
+      }, ctx.env)).ok,
+    );
+    const shifted = await store.readRepair();
+    assert(!shifted.ok);
+    assert.equal(shifted.error.kind, "invalid");
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
 Deno.test("state history: strict fixed-ref ancestor read refuses stale missing foreign and malformed witnesses", async () => {
   const ctx = await makeCtx("release-history");
   try {

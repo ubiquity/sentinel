@@ -4,7 +4,7 @@
  * These drive the REAL `GitHubApiClient` over the synthetic scripted HTTP
  * transport plus fake auth/cooldown capabilities (no network, no timers, no
  * Git, no credentials). They prove that the trusted `includeIssueRelations`
- * opt-in enriches actual REST issue records from the native GraphQL
+ * opt-in enriches individual REST issue reads from the native GraphQL
  * `blockedBy`/sub-issue read, that closed blockers are excluded while open
  * cross-repository blockers are retained, and that every GraphQL error,
  * malformed shape, identity mismatch or truncated page fails closed instead
@@ -178,19 +178,13 @@ Deno.test(
 );
 
 Deno.test(
-  "issue relations: listOpenIssues enriches actual issues and skips pull requests",
+  "issue relations: listOpenIssues leaves dependencies for admission and skips pull requests",
   async () => {
     const { client, transport } = makeClient([
       httpRespond("GET", "/issues", 200, [
         issueWire({ number: 7 }),
         pullWire({ number: 8, pull_request: {} }),
       ]),
-      httpRespond(
-        "POST",
-        "/graphql",
-        200,
-        relationsWire({ subIssues: { totalCount: 1 } }),
-      ),
     ], true);
 
     const result = await client.listOpenIssues();
@@ -198,14 +192,12 @@ Deno.test(
     if (!result.ok) return;
     assert.equal(result.value.length, 1);
     assert.equal(result.value[0].number, 7);
-    assert.deepEqual(result.value[0].relations, {
-      openBlockers: [],
-      subIssueCount: 1,
-    });
-    // A pull request row is never enriched and never becomes an issue.
+    assert.equal(result.value[0].relations, undefined);
+    // Listing is intake metadata; the mandatory readIssue admission check
+    // authenticates current dependencies only for a selected candidate.
     assert.equal(
       transport.requests.filter((request) => request.method === "POST").length,
-      1,
+      0,
     );
   },
 );
@@ -332,38 +324,34 @@ Deno.test(
 );
 
 Deno.test(
-  "issue relations: listOpenIssues includes the issue without relations when one relation read fails",
+  "issue relations: listOpenIssues does not fan out dependency reads for a 256 issue backlog",
   async () => {
     const { client, transport } = makeClient([
-      httpRespond("GET", "/issues", 200, [
-        issueWire({ number: 7 }),
-        issueWire({ number: 8 }),
-      ]),
-      httpRespond("POST", "/graphql", 200, relationsWire()),
       httpRespond(
-        "POST",
-        "/graphql",
+        "GET",
+        "/issues",
         200,
-        { errors: [{ message: "boom" }], data: null },
+        Array.from(
+          { length: 256 },
+          (_, index) => issueWire({ number: index + 1 }),
+        ),
       ),
     ], true);
 
     const result = await client.listOpenIssues();
-    // The issue with failed relations is included WITHOUT relations; the
-    // intake admits it and the cell's pre-start check does final verification.
-    // Dropping it here would starve intake when GraphQL is unavailable.
+    // Eager dependency enrichment used to serially reread authoritative
+    // cooldown state for every listed issue, even records already in state.
     assert.equal(result.ok, true, JSON.stringify(result));
     if (result.ok) {
-      assert.equal(result.value.length, 2);
-      assert.equal(result.value[0].number, 7);
-      assert.equal(result.value[1].number, 8);
-      assert.notEqual(result.value[0].relations, undefined);
-      assert.equal(result.value[1].relations, undefined);
+      assert.equal(result.value.length, 256);
+      assert.equal(result.value[0].number, 1);
+      assert.equal(result.value[255].number, 256);
+      assert.ok(result.value.every((issue) => issue.relations === undefined));
     }
-    // Both relation reads were attempted (one per actual issue).
+    assert.equal(transport.requests.length, 1);
     assert.equal(
       transport.requests.filter((request) => request.method === "POST").length,
-      2,
+      0,
     );
   },
 );

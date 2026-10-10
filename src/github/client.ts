@@ -215,10 +215,11 @@ export interface GitHubApiClientOptionsV1 {
   /** Injectable clock for rate-limit observation timestamps. */
   clock: Clock;
   /**
-   * Trusted opt-in: when exactly `true`, `listOpenIssues` and `readIssue`
-   * enrich each real REST issue record with native dependency relations
-   * (`blockedBy`/sub-issue count). Any other value (including absence) leaves
-   * `relations` unknown; it is never synthesized as empty.
+   * Trusted opt-in: when exactly `true`, `readIssue` enriches the selected
+   * REST issue with current native dependency relations (`blockedBy`/sub-issue
+   * count). Lists retain intake metadata only; admission re-reads dependencies
+   * before reserving work. Any other value leaves `relations` unknown, never
+   * synthesized as empty.
    */
   includeIssueRelations?: boolean;
   /** Paged read bounds (safety limits; exceeding them is unavailable). */
@@ -325,23 +326,11 @@ export class GitHubApiClient {
       const parsed = parseWith(item, (v) => parseIssueWire(v, "$"));
       if (!parsed.ok) return parsed;
       if (parsed.value.kind === "issue") {
-        if (!this.includeIssueRelations) {
-          issues.push(parsed.value.issue);
-          continue;
-        }
-        // Trusted enrichment of an actual REST issue record. If relations
-        // cannot be fetched for an issue, include it WITHOUT relations —
-        // the intake admits it and the matrix cell's pre-start verification
-        // does the final blocker check. Skipping the issue here would starve
-        // intake when GraphQL is unavailable.
-        const relations = await this.readIssueRelations(
-          parsed.value.issue.number,
-        );
-        if (!relations.ok) {
-          issues.push(parsed.value.issue);
-          continue;
-        }
-        issues.push({ ...parsed.value.issue, relations: relations.value });
+        // Most listed issues already have durable work records. Do not
+        // serially authenticate dependencies for that entire backlog: the
+        // mandatory admission readIssue checks the selected issue before any
+        // reservation, and cells recheck immediately before model execution.
+        issues.push(parsed.value.issue);
       }
     }
     return portOk(issues);

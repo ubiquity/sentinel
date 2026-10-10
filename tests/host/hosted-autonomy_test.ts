@@ -25,6 +25,12 @@ import {
 } from "../../src/host/matrix-artifacts.ts";
 import { GitHubApiClient } from "../../src/github/client.ts";
 import { RollingStartBudget } from "../../src/budget/mod.ts";
+import {
+  ingestMatrixResults,
+  planMatrixWave,
+  runMatrixCell,
+} from "../../src/host/matrix.ts";
+import { createRunBounds } from "../../src/repair/loop.ts";
 import { HostedRepairCooldownGate } from "../../src/host/hosted-cooldown.ts";
 import {
   createGitBundleExporter,
@@ -1525,6 +1531,166 @@ Deno.test(
     assert.equal(next.sequence, snapshot.sequence + 1);
   },
 );
+
+Deno.test("hosted autonomy: unavailable matrix models recover with a fresh charged identity", async () => {
+  const config = repositoryConfig(undefined, undefined, {
+    repository: SELF_REPO,
+    liveStartLimits: { perHour: null, perSevenDays: null },
+    adapter: { kind: "github" },
+    sessionBound: { maxDurationMs: 10_000, maxOutputChars: 10_000 },
+  });
+  const { rig, github } = await makeRig("matrix-unavailable-retry", {
+    repair: repairSnapshot([deliveryRecord({
+      nextStep: "work",
+      target: {
+        base: BASE,
+        branch: candidateBranch(TARGET),
+        checkpoint: null,
+        head: null,
+        pr: null,
+      },
+      counters: { attempts: 0, retries: 0, reviewRounds: 0 },
+      evidence: [],
+    })], []),
+  });
+  try {
+    const clock = { now: () => T0 + 5000 };
+    const model = new FakeModel({ portError: true });
+    const source = new FakeGithub({ baseSha: BASE });
+    source.readIssue = (number) =>
+      Promise.resolve(portOk({
+        number,
+        title: SELF_TASK.title,
+        body: SELF_TASK.body,
+        state: "open",
+        author: null,
+        labels: [],
+        createdAt: T0,
+        updatedAt: T0,
+        closedAt: null,
+        relations: { openBlockers: [], subIssueCount: 0 },
+      }));
+    const deps = {
+      state: rig.state,
+      clock,
+      configs: [config],
+      controllerSha: SHA1,
+      github: source,
+      githubCooldown: new HostedRepairCooldownGate({ state: rig.state, clock }),
+      incidents: new FakeIncidents(),
+      replay: new FakeReplay(),
+      model,
+      budget: new RollingStartBudget({
+        state: rig.state,
+        clock,
+        configs: [config],
+      }),
+    };
+    const runIdentity = { runId: 41, runAttempt: 1, launcherSha: SHA1 };
+    const options = {
+      waveId: "unavailable-model-wave",
+      run: runIdentity,
+      runtimeSha: SHA1,
+      generation: 1,
+      plannedAt: clock.now(),
+      runStartedAt: clock.now(),
+      deadline: clock.now() + 3_600_000,
+    };
+    const planned = await planMatrixWave(deps, options);
+    const { plan } = planned;
+    assert.equal(plan.cells.length, 1, JSON.stringify(planned));
+    const cell = plan.cells[0];
+    const result = await runMatrixCell(
+      {
+        ...deps,
+        bounds: createRunBounds(deps, options),
+        sessionBound: config.sessionBound,
+      },
+      { waveId: plan.waveId, run: plan.run, cell },
+      {
+        run: runIdentity,
+        runtimeSha: SHA1,
+        generation: 1,
+      },
+      clock.now(),
+    );
+    assert.equal(result.status, "failed");
+    assert.equal(result.detail, "model run failed (unavailable)");
+    assert.equal(model.requests.length, 1);
+    const ingested = await ingestMatrixResults(deps, plan, [result], {
+      ...options,
+      expectedProvider: "sentinel-host",
+    });
+    assert.equal(ingested.ingested, 1);
+    const failed = await rig.state.readRepair();
+    assert(failed.ok && failed.value.status === "found");
+    const originalCharge = failed.value.snapshot.reservations[0];
+    assert.equal(originalCharge.outcome, "ambiguous");
+    assert.notEqual(originalCharge.settledAt, null);
+    assert.equal(failed.value.snapshot.work[0].nextStep, "blocked");
+    assert.equal(
+      failed.value.snapshot.work[0].intent?.requestId,
+      originalCharge.id,
+    );
+
+    const resumed = await runHostedAutonomy({
+      state: rig.state,
+      githubFor: () => github,
+      clock,
+    });
+    assert.equal(resumed.reason, "retried", JSON.stringify(resumed));
+    const recovered = await rig.state.readRepair();
+    assert(recovered.ok && recovered.value.status === "found");
+    assert.equal(recovered.value.snapshot.work[0].nextStep, "work");
+    assert.equal(recovered.value.snapshot.work[0].intent, null);
+    assert.deepEqual(recovered.value.snapshot.reservations, [originalCharge]);
+    const next = await planMatrixWave(deps, {
+      ...options,
+      waveId: "fresh-retry-wave",
+    });
+    assert.equal(next.plan.cells.length, 1);
+    assert.notEqual(next.plan.cells[0].reservationId, originalCharge.id);
+    assert.equal(model.requests.length, 1, "planning never runs another model");
+
+    for (
+      const detail of [
+        "model run failed (auth_failed)",
+        "model run failed (invalid)",
+        "model run failed (unknown)",
+        "model run failed (unavailable) unexpected suffix",
+      ]
+    ) {
+      const refused = parseRepairStateSnapshotV1({
+        ...failed.value.snapshot,
+        work: failed.value.snapshot.work.map((record) => ({
+          ...record,
+          blocker: { kind: "other", message: detail, since: clock.now() },
+        })),
+      });
+      assert.deepEqual(planHostedRetries(refused, clock.now()), [], detail);
+    }
+    const reserved = parseRepairStateSnapshotV1({
+      ...failed.value.snapshot,
+      reservations: [{
+        ...originalCharge,
+        outcome: "reserved",
+        settledAt: null,
+      }],
+    });
+    assert.deepEqual(planHostedRetries(reserved, clock.now()), []);
+    assert.deepEqual(
+      planHostedRetries(
+        failed.value.snapshot,
+        clock.now(),
+        selfTips(BASE),
+        selfClosed(SELF_TASK.issueNumber),
+      ),
+      [],
+    );
+  } finally {
+    await Deno.remove(rig.tmp, { recursive: true });
+  }
+});
 
 Deno.test(
   "hosted autonomy: the retry budget is closed and non-transient blockers are untouched",
@@ -5194,6 +5360,223 @@ Deno.test(
     await Deno.remove(rig.tmp, { recursive: true });
   },
 );
+
+Deno.test("hosted autonomy: closure scans beyond five records and refused predecessors", async (t) => {
+  const tasks = await Promise.all(
+    Array.from({ length: 6 }, async (_, index) => {
+      const task = {
+        issueNumber: 130 + index,
+        title: `Deliver reviewed foreign issue ${130 + index}`,
+        body: "The reviewed change fulfills this source issue.",
+      };
+      return { ...task, digest: await reviewTaskStatementDigest(task) };
+    }),
+  );
+  const records = tasks.map((task, index) => {
+    const id = `issue-ubiquity-ai.ubq.fi-${task.issueNumber}` as WorkItemId;
+    return foreignRecord({
+      id,
+      source: { kind: "issue", id: String(task.issueNumber), revision: SHA1 },
+      related: { incidentId: null, issueNumber: task.issueNumber },
+      target: {
+        base: BASE,
+        branch: candidateBranch(id),
+        checkpoint: null,
+        head: (index + 10).toString(16).padStart(40, "0"),
+        pr: FOREIGN_PR + index,
+      },
+    });
+  });
+  const receipts = records.map((record, index) =>
+    foreignReceipt({
+      id: `review-receipt:${(index + 10).toString(16).padStart(64, "0")}`,
+      pullRequest: {
+        number: record.target.pr,
+        head: record.target.head,
+        base: BASE,
+      },
+      taskAcceptance: {
+        issueNumber: tasks[index].issueNumber,
+        taskDigest: tasks[index].digest,
+        verdict: "fulfilled",
+        evidence: ["the reviewed candidate fulfills its exact source issue"],
+      },
+    })
+  );
+  for (const refusePredecessors of [false, true]) {
+    await t.step(
+      refusePredecessors ? "first five checks refuse" : "all six close",
+      async () => {
+        const { rig, github } = await makeRig("six-foreign-closures", {
+          repair: repairSnapshot(records, receipts),
+        });
+        try {
+          github.readIssueTask = (number) =>
+            Promise.resolve(
+              tasks.find((task) => task.issueNumber === number) ?? null,
+            );
+          github.readPull = (number) => {
+            const record = records.find((record) =>
+              record.target.pr === number
+            );
+            return Promise.resolve(
+              record === undefined ? null : foreignPullFacts({
+                number,
+                headSha: record.target.head!,
+                parents: [BASE, record.target.head!],
+              }),
+            );
+          };
+          const checked: string[] = [];
+          github.hasAllChecksGreen = (head) => {
+            checked.push(head);
+            return Promise.resolve(
+              !refusePredecessors || head === records[5].target.head,
+            );
+          };
+          const result = await run(rig, github);
+          assert.equal(result.reason, "closed_issues", JSON.stringify(result));
+          assert.deepEqual(
+            rig.closed,
+            refusePredecessors
+              ? [tasks[5].issueNumber]
+              : tasks.map((task) => task.issueNumber),
+          );
+          assert.deepEqual(
+            checked,
+            records.map((record) => record.target.head),
+          );
+          assert.equal(rig.merges, 0);
+          assert.equal(rig.writes, 1, "all verified closures share one CAS");
+          const work = await readWork(rig);
+          assert.equal(
+            work.filter((record) => record.nextStep === "done").length,
+            refusePredecessors ? 1 : 6,
+          );
+          if (refusePredecessors) {
+            assert.deepEqual(
+              work.filter((record) => record.nextStep !== "done"),
+              records.slice(0, 5),
+            );
+          }
+          assert.deepEqual(await readRequests(rig), []);
+        } finally {
+          await Deno.remove(rig.tmp, { recursive: true });
+        }
+      },
+    );
+  }
+});
+
+Deno.test("hosted autonomy: an ambiguous merge attempt cannot merge another pull", async (t) => {
+  const task = {
+    issueNumber: 122,
+    title: "Settle a previously merged foreign repair",
+    body: "The exact reviewed change fulfills the issue.",
+  };
+  const settledTask = {
+    ...task,
+    digest: await reviewTaskStatementDigest(task),
+  };
+  const settledRecord = foreignRecord({
+    id: "issue-ubiquity-ai.ubq.fi-122",
+    source: { kind: "issue", id: "122", revision: SHA1 },
+    related: { incidentId: null, issueNumber: 122 },
+    target: {
+      base: BASE,
+      branch: "sentinel/repair/issue-ubiquity-ai.ubq.fi-122",
+      checkpoint: null,
+      head: HEAD,
+      pr: FOREIGN_PR + 2,
+    },
+  });
+  const records = [foreignRecord(), foreignRecord2(), settledRecord];
+  const receipts = [
+    foreignReceipt(),
+    FOREIGN_RECEIPT_2,
+    foreignReceipt({
+      id: `review-receipt:${"f".repeat(64)}`,
+      pullRequest: { number: FOREIGN_PR + 2, head: HEAD, base: BASE },
+      taskAcceptance: {
+        issueNumber: settledTask.issueNumber,
+        taskDigest: settledTask.digest,
+        verdict: "fulfilled",
+        evidence: ["the reviewed candidate fulfills its exact source issue"],
+      },
+    }),
+  ];
+  const charge = reservation("retained-merge-charge", {
+    repository: FOREIGN_REPO,
+    taskId: FOREIGN_TARGET,
+    head: BASE,
+    purpose: "implementation",
+    attempt: 1,
+    outcome: "submitted",
+    settledAt: T0 + 2000,
+  });
+  for (const mode of ["null", "throw", "unreadable-readback"]) {
+    await t.step(mode, async () => {
+      const { rig, github } = await makeRig("merge-attempt-bound", {
+        repair: repairSnapshot(records, receipts, [], [charge]),
+      });
+      try {
+        const tasks = [FOREIGN_TASK, FOREIGN_TASK_2, settledTask];
+        github.readIssueTask = (number) =>
+          Promise.resolve(
+            tasks.find((task) => task.issueNumber === number) ?? null,
+          );
+        const attempted: number[] = [];
+        github.readPull = (number) => {
+          if (number === FOREIGN_PR + 2) {
+            return Promise.resolve(foreignPullFacts({ number }));
+          }
+          if (mode === "unreadable-readback" && attempted.includes(number)) {
+            return Promise.resolve(null);
+          }
+          return Promise.resolve(foreignPullFacts({
+            number,
+            state: "open",
+            merged: false,
+            mergeCommitSha: null,
+          }));
+        };
+        github.merge = (number) => {
+          rig.merges++;
+          attempted.push(number);
+          if (mode === "throw") {
+            return Promise.reject(new Error("merge response unavailable"));
+          }
+          return Promise.resolve(
+            mode === "null" ? null : { merged: true, sha: MERGE },
+          );
+        };
+        const result = await run(rig, github);
+        assert.deepEqual(attempted, [FOREIGN_PR]);
+        assert.equal(rig.merges, 1);
+        assert.equal(result.reason, "closed_issues", JSON.stringify(result));
+        assert.deepEqual(
+          rig.closed,
+          [settledTask.issueNumber],
+          "already-merged read-only reconciliation continues after the refused second merge",
+        );
+        const after = await rig.state.readRepair();
+        assert(after.ok && after.value.status === "found");
+        assert.deepEqual(
+          after.value.snapshot.work.filter((record) =>
+            record.nextStep !== "done"
+          ),
+          records.slice(0, 2),
+        );
+        assert.deepEqual(after.value.snapshot.reservations, [charge]);
+        assert.deepEqual(after.value.snapshot.reviews, receipts);
+        assert.deepEqual(after.value.snapshot.releaseRequests, []);
+        assert.equal(rig.writes, 1);
+      } finally {
+        await Deno.remove(rig.tmp, { recursive: true });
+      }
+    });
+  }
+});
 
 /** Sanitized advancing admissions, immutable native archives and actual protected maintenance. */
 async function historicalMalformedRig(
