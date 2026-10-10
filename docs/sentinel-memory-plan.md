@@ -176,3 +176,19 @@ Beyond the deployed generation 68 (failures + refusal + prompt facts), the lane 
 - The owner-session restored the maintenance writer on top of the deployed ref (`af4d79ffe`), and the first restored maintenance pass ran green (`kind: hosted_autonomy status: applied reason: retired_records`) — the memory-guarded retry pass is live; no equivalent-retry refusals were needed yet because durable memory has zero settlements so far (`attemptMemory: 0`, `lessons: 0`; the first records appear when an implementation attempt settles as failed).
 - A bounded `sentinel_memory_digest` line (records / refused / resolved / regressions) is now written by the maintenance entry for live observability (commit `767e55cc0`).
 - Generation 69 (learning depth: success recording + resolved lessons + cross-task lessons + versioned regression signal) is staged at lane tip `767e55cc0`, pinned runtime `6db6166d2` with a green `test-local` check; publishing + dispatch await the owner's explicit one-shot approval (fast-forward verified).
+
+
+## Live deploy — generation 69 (learning depth) installed, healthy and planning again (2026-10-10 01:32 UTC)
+
+Owner directive: stop waiting for approval and finish the job. The live runtime was additionally failing every dispatch in the maintenance pass, so prepare, matrix_plan, matrix_cell, repair and delivery were skipped on every run.
+
+- Root cause of the live outage: the bounded current-matrix release-history walk in `ops/hosted-autonomy.ts` exhausted its 60s budget on the live state and THREW `current matrix history deadline exhausted`; the catch-all reported `hosted_autonomy status=failed reason=unexpected_failure`, the maintenance job failed, and every downstream job was skipped (runs `38006411915`, `38006938607`, `38010273012`).
+- Fix: exhausting that walk's bound is now an availability condition, not an integrity one. The pass defers with a bounded `sentinel_current_matrix_deferred` reason, writes nothing and lets every other pass continue; the walk budget is 180s. Late-write and custody integrity guards are unchanged.
+- Published the merged lineage to `sentinel-supervisor` and `development`: the live retained-recovery fixes (`22ecf00b8`, `d96ba3d94`, …) plus the memory/learning lane and the generation-69 staging. Tips: `502c063eb` (merge + staging), `ad99b5eba` (deferral fix), `67974f2fd` (format), `2ca8298ea` (versioned regression facts in the digest).
+- Bootstrap run `38010611646`: maintenance success → prepare installed generation 69 → repair completed success → finalize success; recorded proof `lastHealthyProof: healthy, revision 6db6166d2, generation 69, settled=true`.
+- First ordinary run at generation 69 is `38011275533`: maintenance success → prepare success → matrix_plan running. The planner path that had been dead for days is producing a plan again on the learning runtime.
+
+### Remaining follow-ups
+
+- The strengthened regression wording (exact older working revision plus the explicit version-control restore instruction) and the `versionedRegressions` digest facts are launcher code on `development`/`sentinel-supervisor`; the live runtime revision `6db6166d2` carries the original regression signal. The next runtime rung should pin a revision that contains the strengthened prompt, with a green `test-local` check first.
+- If the current-matrix walk keeps exceeding its 180s bound it defers every run instead of failing; a resumable scan position is the follow-up, owned with the retained-recovery lane.
