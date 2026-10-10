@@ -58,6 +58,8 @@ The system is version-controlled and regression-aware: a recorded success stores
 
 Bounded self-upkeep passes defer instead of failing the run: exhausting a recovery pass's budget, absent custody or an unavailable producer is reported with an explicit bounded reason, writes nothing and lets prepare, matrix_plan and delivery continue. Only integrity faults (tampered, conflicting or changed custody) fail closed.
 
+A release request the trusted controller cancelled or marked failed is terminal delivery evidence: the affected delivery record is parked blocked with the recorded failure reason instead of waiting for release acceptance that can no longer exist.
+
 ## Evidence, target release and local development
 
 Use fast module checks and directly affected production-consumer boundaries with fake external transports, temporary Git/state and injected clocks. Enforce a 300-second deadline on each local validation command. One named changed-lifecycle scenario is final local acceptance; whole-repository sweeps require a separate explicit request. [AGENTS.md](../AGENTS.md) defines observation, teardown and evidence rules.
