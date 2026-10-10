@@ -10402,6 +10402,50 @@ Deno.test(
 );
 
 Deno.test(
+  "hosted autonomy: a transient model-run failure is retried under the attempt-memory gate",
+  async () => {
+    const detail = "model run failed (unavailable)";
+    const record = blockedRecord({
+      blocker: { kind: "other", message: detail, since: T0 + 3000 },
+      counters: { attempts: 2, retries: 0, reviewRounds: 1 },
+    });
+    const snapshot = repairSnapshot([record]);
+    // The family is retryable: a work-returning grant is planned.
+    const plans = planHostedRetries(snapshot, T0 + 5000);
+    assert.equal(plans.length, 1);
+    assert.equal(plans[0].id, TARGET);
+    assert.equal(plans[0].nextStep, "work");
+
+    // The same attempt memory that bounds every other transient outcome still
+    // bounds this family: four equivalents refuse, the six-hour decay reopens.
+    const denials: { reason: string }[] = [];
+    const refused = withAttemptMemory(snapshot, [
+      await attemptMemoryFixture({ detail, count: 4 }),
+    ]);
+    assert.equal(
+      planHostedRetries(refused, T0 + 5000, new Map(), new Set(), (denial) => {
+        denials.push({ reason: denial.reason });
+      }).length,
+      0,
+    );
+    assert.equal(denials.length, 1);
+    assert.match(denials[0].reason, /^equivalent_attempt_refused:/);
+    const decayed = withAttemptMemory(snapshot, [
+      await attemptMemoryFixture({
+        detail,
+        count: 4,
+        lastAtMs: T0 + 1000,
+      }),
+    ]);
+    assert.equal(
+      planHostedRetries(decayed, T0 + 1000 + ATTEMPT_TRANSIENT_DECAY_MS)
+        .length,
+      1,
+    );
+  },
+);
+
+Deno.test(
   "attempt memory: repeated no-progress outcomes refuse sooner than transient ones",
   async () => {
     const record = blockedRecord({

@@ -361,6 +361,16 @@ export const HOSTED_AUTONOMY_RETRYABLE: readonly {
     nextStep: "work",
   },
   {
+    // A cell whose model run failed on infrastructure ("model run failed
+    // (unavailable)", "(bundle)", ...) is the runtime's own transient class:
+    // the durable attempt memory bounds equivalent outcomes and owns the
+    // six-hour decay window. Without this entry the classified transient
+    // decay could never fire, because the record stayed blocked forever
+    // (twelve such records had been parked since 2026-10-04).
+    prefix: "model run failed (",
+    nextStep: "work",
+  },
+  {
     prefix: "model run did not complete with a trusted candidate",
     nextStep: "work",
   },
