@@ -755,6 +755,8 @@ const VERSIONED_RUNTIME_REVISION =
   "7f43cf0b93b82c521a55d3fae26996831dc8c27e" as GitSha;
 const CANCELLED_RELEASE_RUNTIME_REVISION =
   "7c3baee145310141a666bd05360f4e03c56cfd04" as GitSha;
+const STACKED_MERGE_RUNTIME_REVISION =
+  "dc5e08af05ed04be2e45a0acca72505fcad0b922" as GitSha;
 
 async function matrixRecoveryState() {
   const work = CLOSED_C_WAVE.cells.map((cell) =>
@@ -2777,6 +2779,101 @@ Deno.test(
     }
     assert.equal(versionedFailed.move.nextRevision, LEARNING_RUNTIME_REVISION);
     assert.equal(versionedFailed.move.nextGeneration, 71);
+  },
+);
+
+Deno.test(
+  "owner development install plan: generation 72 stacked-merge verification install follows a healthy 71 and rolls back once",
+  () => {
+    const cancelledHealthy = healthyProof(
+      CANCELLED_RELEASE_RUNTIME_REVISION,
+      71,
+      171,
+    );
+    const stackedInstall = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: CANCELLED_RELEASE_RUNTIME_REVISION,
+          generation: 71,
+          healthyProof: cancelledHealthy,
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(stackedInstall.status, "install");
+    if (stackedInstall.status !== "install") {
+      throw new Error("expected install");
+    }
+    assert.equal(
+      stackedInstall.move.priorRevision,
+      CANCELLED_RELEASE_RUNTIME_REVISION,
+    );
+    assert.equal(stackedInstall.move.priorGeneration, 71);
+    assert.equal(
+      stackedInstall.move.nextRevision,
+      STACKED_MERGE_RUNTIME_REVISION,
+    );
+    assert.equal(stackedInstall.move.nextGeneration, 72);
+    assert.equal(
+      canonicalStringify(stackedInstall.move.priorHealthyProof),
+      canonicalStringify(cancelledHealthy),
+    );
+
+    // A failed generation 72 restores the recorded generation 71 revision
+    // once at monotonic generation 73.
+    const stackedRollback = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: STACKED_MERGE_RUNTIME_REVISION,
+          generation: 72,
+          healthyProof: cancelledHealthy,
+          executionProof: failedProof(
+            STACKED_MERGE_RUNTIME_REVISION,
+            72,
+            172,
+          ),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(stackedRollback.status, "rollback");
+    if (stackedRollback.status !== "rollback") {
+      throw new Error("expected rollback");
+    }
+    assert.equal(
+      stackedRollback.move.priorRevision,
+      STACKED_MERGE_RUNTIME_REVISION,
+    );
+    assert.equal(stackedRollback.move.priorGeneration, 72);
+    assert.equal(
+      stackedRollback.move.nextRevision,
+      CANCELLED_RELEASE_RUNTIME_REVISION,
+    );
+    assert.equal(stackedRollback.move.nextGeneration, 73);
+
+    // A failed generation 71 still falls through to the cancelled-delivery
+    // rung's own rollback, never to the stacked-merge rung.
+    const cancelledFailed = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: CANCELLED_RELEASE_RUNTIME_REVISION,
+          generation: 71,
+          healthyProof: healthyProof(VERSIONED_RUNTIME_REVISION, 70, 173),
+          executionProof: failedProof(
+            CANCELLED_RELEASE_RUNTIME_REVISION,
+            71,
+            174,
+          ),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(cancelledFailed.status, "rollback");
+    if (cancelledFailed.status !== "rollback") {
+      throw new Error("expected rollback");
+    }
+    assert.equal(cancelledFailed.move.nextRevision, VERSIONED_RUNTIME_REVISION);
+    assert.equal(cancelledFailed.move.nextGeneration, 72);
   },
 );
 
