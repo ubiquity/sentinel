@@ -443,14 +443,40 @@ export interface PreparedImplementationV1 {
  * preservation, live-intent and unpublished-head records are left to the
  * ordinary serial lifecycle and must never receive a matrix grant.
  */
+/**
+ * TTL for an in-flight implementation intent. Any implementation intent older
+ * than this with no result is treated as stale (its run died without settling)
+ * and no longer blocks re-admission. 6h exceeds the 5h matrix timeout ceiling.
+ */
+export const STALE_IMPLEMENTATION_INTENT_TTL_MS = 6 * 60 * 60 * 1000;
+
+/**
+ * True when an implementation intent is stale: started longer than the TTL ago
+ * with no result recorded. Stale intents come from runs that died after
+ * reserving but before settling; they must not block re-admission forever.
+ */
+export function isStaleImplementationIntent(
+  intent: IncompleteOperationV1 | null,
+  now: number,
+): boolean {
+  if (intent === null) return false;
+  if (intent.kind !== "implementation") return false;
+  if (intent.resultId !== null) return false;
+  return intent.startedAt <= now - STALE_IMPLEMENTATION_INTENT_TTL_MS;
+}
+
 export function isMatrixImplementationReadyV1(
   record: WorkRecordV1,
   snapshot: RepairStateSnapshotV1,
   config: RepositoryConfigV1,
+  now: number,
 ): boolean {
   if (record.source.kind !== "issue") return false;
   if (record.nextStep !== "work") return false;
-  if (record.intent !== null) return false;
+  if (
+    record.intent !== null &&
+    !isStaleImplementationIntent(record.intent, now)
+  ) return false;
   const candidateState = record.target.candidateState;
   if (candidateState !== undefined && candidateState.preserved === null) {
     return false;
