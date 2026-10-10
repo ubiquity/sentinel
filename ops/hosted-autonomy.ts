@@ -4680,6 +4680,23 @@ export async function runHostedAutonomyMain(input?: {
       }
     }
   } catch (error) {
+    // Bounded diagnostic: only this codebase's own failure vocabulary is
+    // echoed, so an external payload can never reach the log.
+    if (error instanceof Error) {
+      const message = typeof error.message === "string" ? error.message : "";
+      if (
+        message.length <= 200 &&
+        /^(historical matrix|current matrix|C maintenance|closed-c matrix)/
+          .test(
+            message,
+          )
+      ) {
+        console.log(JSON.stringify({
+          kind: "sentinel_autonomy_failure_detail",
+          detail: message,
+        }));
+      }
+    }
     result = failed(
       error instanceof HistoricalQuarantineIncomplete
         ? "historical_quarantine_incomplete"
