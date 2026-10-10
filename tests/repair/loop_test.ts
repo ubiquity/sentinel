@@ -572,6 +572,81 @@ Deno.test(
   },
 );
 
+Deno.test(
+  "delivery: a cancelled release request parks the record with its reason",
+  async () => {
+    const rig = await makeRig("cancelledrelease", {
+      github: { candidateLifecycle: positiveLifecycle() },
+    });
+    try {
+      // Run 1 -> review wait; run 2 (after the review poll) -> merge and the
+      // durable release request -> delivery wait for acceptance.
+      const first = await rig.run();
+      assert.equal(first.status, "idle", JSON.stringify(first));
+      rig.clock.advance(100_000_000 + 1);
+      rig.github.completeReview([], rig.clock.now());
+      const second = await rig.run();
+      assert.equal(second.status, "idle", JSON.stringify(second));
+
+      const held = await rig.store.readRepair();
+      assert.ok(held.ok && held.value.status === "found");
+      if (!held.ok || held.value.status !== "found") {
+        throw new Error("no repair state");
+      }
+      const state = held.value.snapshot;
+      assert.equal(state.work[0].nextStep, "delivery");
+      assert.equal(state.work[0].wait?.reason, "unavailable");
+      assert.equal(state.releaseRequests.length, 1);
+
+      // The trusted maintenance pass cancels an invalid historical
+      // authorization: the request carries a terminal status and reason, so no
+      // release entry can ever appear for it.
+      const reason =
+        "historical PR110 merged against an unreviewed base; release authorization cancelled";
+      const written = await rig.store.writeRepair({
+        ...state,
+        stateHead: held.value.head,
+        sequence: state.sequence + 1,
+        updatedAt: rig.clock.now(),
+        releaseRequests: [{
+          ...state.releaseRequests[0],
+          status: "cancelled",
+          failureReason: reason,
+        }],
+      }, held.value.head);
+      assert.ok(
+        written.ok && written.value.status === "applied",
+        JSON.stringify(written),
+      );
+
+      rig.clock.advance(5 * 60_000 + 1);
+      const third = await rig.run();
+      assert.equal(third.status, "idle", JSON.stringify(third));
+      const after = await rig.snapshot();
+      assert.equal(after.work[0].nextStep, "blocked");
+      assert.equal(after.work[0].blocker?.message, reason);
+      assert.equal(after.work[0].wait, null);
+      assert.equal(
+        after.work[0].target.pr,
+        null,
+        "terminal block clears the dead publication identity",
+      );
+      assert.equal(
+        after.releaseRequests[0].status,
+        "cancelled",
+        "the cancelled authorization is preserved for audit",
+      );
+      assert.equal(
+        rig.github.calls.filter((call) => call === "merge").length,
+        1,
+        "no merge is repeated for a cancelled authorization",
+      );
+    } finally {
+      await rig.ctx.cleanup();
+    }
+  },
+);
+
 Deno.test("a second eligible task advances while the first review waits", async () => {
   const rig = await makeRig("secondtask", {
     github: { candidateLifecycle: positiveLifecycle() },

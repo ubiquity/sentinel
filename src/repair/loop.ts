@@ -7058,6 +7058,22 @@ async function observeReleaseAcceptance(
   record: WorkRecordV1,
   request: ReleaseRequestV1,
 ): Promise<StepResultV1> {
+  // A request the trusted controller cancelled (or failed) is terminal
+  // authorization evidence: no release entry can ever appear for it, so the
+  // record is parked with the recorded reason instead of waiting forever.
+  // The exact historical cancellation reason is preserved on the blocker.
+  if (request.status === "cancelled" || request.status === "failed") {
+    return persistWork(
+      deps,
+      context,
+      markTerminalBlocked(
+        record,
+        "other",
+        request.failureReason ?? `release request ${request.status}`,
+        deps.clock.now(),
+      ),
+    );
+  }
   if (isLocalReleaseScope(request)) {
     return await observeLocalReleaseAcceptance(deps, context, record, request);
   }
