@@ -1,16 +1,23 @@
 import assert from "node:assert/strict";
+import { deriveReservationId } from "../../src/budget/mod.ts";
+import { canonicalStringifySha256 } from "../../src/contracts/canonical.ts";
+import { parseRepairStateSnapshotV1 } from "../../src/contracts/state-snapshots.ts";
+import {
+  candidateBranch,
+  implementationIntentKey,
+} from "../../src/repair/keys.ts";
 import {
   planRuntimeMismatchRecovery,
   type RuntimeMismatchBindingV1,
   type RuntimeMismatchPlanInputV1,
   type RuntimeMismatchProofV1,
 } from "../../ops/runtime-mismatch-recovery-plan.ts";
-import type { BudgetReservationV1 } from "../../src/contracts/budget-reservation.ts";
-import type { RepairStateSnapshotV1 } from "../../src/contracts/state-snapshots.ts";
-import type { WorkRecordV1 } from "../../src/contracts/work-record.ts";
-import type { ReleaseStateSnapshotV1 } from "../../src/contracts/state-snapshots.ts";
+import { reservation, SHA1, T0, workRecord } from "../state/helpers.ts";
 
-function testRelease(): ReleaseStateSnapshotV1 {
+const WORK_ID = "issue-ubiquity-ai.ubq.fi-1";
+const BASE_SHA = "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1";
+
+function testRelease(): unknown {
   return {
     version: "v1",
     kind: "release_state_snapshot",
@@ -20,121 +27,7 @@ function testRelease(): ReleaseStateSnapshotV1 {
     releases: [],
     hostedRuntimes: [],
     hostedReleases: [],
-  } as ReleaseStateSnapshotV1;
-}
-
-const T0 = 1791623000000;
-
-function testRecord(overrides: Partial<WorkRecordV1> = {}): WorkRecordV1 {
-  return {
-    version: "v1",
-    kind: "work",
-    id: "issue-ubiquity-ai.ubq.fi-1",
-    repository: {
-      owner: "ubiquity",
-      name: "ai.ubq.fi",
-      installationId: 155687488,
-    },
-    source: { kind: "issue", id: "1", revision: "r1" },
-    target: {
-      base: "b1",
-      branch: "sentinel/repair/issue-ubiquity-ai.ubq.fi-1",
-      checkpoint: null,
-      head: null,
-      pr: null,
-    },
-    nextStep: "blocked",
-    blocker: {
-      kind: "other",
-      message: "authenticated historical matrix runtime mismatch; producer=1:1",
-    },
-    wait: null,
-    intent: {
-      kind: "implementation",
-      key: "impl:k1",
-      startedAt: T0 - 1000,
-      branch: "sentinel/repair/issue-ubiquity-ai.ubq.fi-1",
-      expectedHead: null,
-      observedBase: "b1",
-      pr: null,
-      requestId: "req1",
-      resultId: null,
-    },
-    dependencies: [],
-    counters: { attempts: 1, retries: 0, reviewRounds: 0, stalled: 0 },
-    ...overrides,
-  } as WorkRecordV1;
-}
-
-function testReservation(
-  overrides: Partial<BudgetReservationV1> = {},
-): BudgetReservationV1 {
-  return {
-    version: "v1",
-    kind: "budget_reservation",
-    repository: {
-      owner: "ubiquity",
-      name: "ai.ubq.fi",
-      installationId: 155687488,
-    },
-    id: "req1",
-    taskId: "issue-ubiquity-ai.ubq.fi-1" as never,
-    attempt: 1,
-    head: "b1" as never,
-    purpose: "retry",
-    createdAt: T0 - 2000,
-    outcome: "reserved",
-    settledAt: null,
-    proofRef: null,
-    ...overrides,
-  } as BudgetReservationV1;
-}
-
-function testSnapshot(
-  work: WorkRecordV1[],
-  reservations: BudgetReservationV1[],
-): RepairStateSnapshotV1 {
-  return {
-    version: "v1",
-    kind: "repair_state_snapshot",
-    stateHead: null,
-    sequence: 1,
-    updatedAt: T0,
-    incidents: [],
-    evidence: [],
-    work,
-    reservations,
-    reviews: [],
-    replays: [],
-    releaseRequests: [],
     githubCooldowns: [],
-    attemptMemory: [],
-    lessons: [],
-  } as RepairStateSnapshotV1;
-}
-
-function testBinding(
-  overrides: Partial<RuntimeMismatchBindingV1> = {},
-): RuntimeMismatchBindingV1 {
-  return {
-    id: "issue-ubiquity-ai.ubq.fi-1",
-    reservationId: "req1",
-    repository: {
-      owner: "ubiquity",
-      name: "ai.ubq.fi",
-      installationId: 155687488,
-    },
-    base: "b1",
-    branch: "sentinel/repair/issue-ubiquity-ai.ubq.fi-1",
-    requestId: "req1",
-    intentKey: "impl:k1",
-    purpose: "retry",
-    recordDigest: "h0",
-    reservationDigest: "h0",
-    producerRun: "1",
-    producerAttempt: 1,
-    producerTerminal: true,
-    ...overrides,
   };
 }
 
@@ -152,36 +45,116 @@ function testProof(
   };
 }
 
-import { canonicalStringifySha256 } from "../../src/contracts/canonical.ts";
-
-async function validInput(): Promise<RuntimeMismatchPlanInputV1> {
-  const record = testRecord();
-  const reservation = testReservation();
+async function baselineInput(
+  purpose: "retry" | "implementation" = "retry",
+): Promise<{
+  input: RuntimeMismatchPlanInputV1;
+  recordId: string;
+  reservationId: string;
+}> {
+  const recordId = WORK_ID;
+  const branch = candidateBranch(recordId as never);
+  const reservationId = await deriveReservationId({
+    repository: {
+      owner: "ubiquity",
+      name: "ai.ubq.fi",
+      installationId: 155687488,
+    },
+    taskId: recordId as never,
+    head: BASE_SHA as never,
+    attempt: 1,
+    purpose,
+  });
+  const record = workRecord("1", {
+    nextStep: "blocked",
+    blocker: {
+      kind: "other",
+      message: "authenticated historical matrix runtime mismatch; producer=1:1",
+    },
+    target: { base: BASE_SHA, branch, checkpoint: null, head: null, pr: null },
+    intent: {
+      kind: "implementation",
+      key: implementationIntentKey(reservationId),
+      startedAt: T0 - 1000,
+      branch,
+      expectedHead: null,
+      observedBase: BASE_SHA,
+      pr: null,
+      requestId: reservationId,
+      resultId: null,
+    },
+  });
+  const res = reservation(reservationId, {
+    taskId: recordId,
+    head: BASE_SHA,
+    purpose,
+  });
+  const repair = parseRepairStateSnapshotV1({
+    version: "v1",
+    kind: "repair_state_snapshot",
+    stateHead: null,
+    sequence: 1,
+    updatedAt: T0,
+    incidents: [],
+    evidence: [],
+    work: [record],
+    reservations: [res],
+    reviews: [],
+    replays: [],
+    releaseRequests: [],
+    githubCooldowns: [],
+    attemptMemory: [],
+    lessons: [],
+  });
+  const binding: RuntimeMismatchBindingV1 = {
+    id: recordId,
+    reservationId,
+    repository: {
+      owner: "ubiquity",
+      name: "ai.ubq.fi",
+      installationId: 155687488,
+    },
+    base: BASE_SHA,
+    branch,
+    requestId: reservationId,
+    intentKey: implementationIntentKey(reservationId),
+    purpose,
+    recordDigest: await canonicalStringifySha256(record),
+    reservationDigest: await canonicalStringifySha256(res),
+    producerRun: "1",
+    producerAttempt: 1,
+    producerTerminal: true,
+  };
   return {
-    repair: testSnapshot([record], [reservation]),
-    release: testRelease(),
-    bindings: [
-      testBinding({
-        recordDigest: await canonicalStringifySha256(record),
-        reservationDigest: await canonicalStringifySha256(reservation),
-      }),
-    ],
-    proofs: { "issue-ubiquity-ai.ubq.fi-1": testProof() },
-    expectedRepairHead: "rh1",
-    expectedReleaseHead: "eh1",
-    expectedSequence: 1,
-    now: T0,
+    input: {
+      repair,
+      release: testRelease(),
+      bindings: [binding],
+      proofs: { [recordId]: testProof() },
+      expectedRepairHead: "rh1",
+      expectedReleaseHead: "eh1",
+      expectedSequence: 1,
+      now: T0,
+    },
+    recordId,
+    reservationId,
   };
 }
 
 Deno.test("planner refuses empty bindings", async () => {
-  const input = { ...await validInput(), bindings: [] };
-  const result = await planRuntimeMismatchRecovery(input);
+  const { input } = await baselineInput();
+  const result = await planRuntimeMismatchRecovery({ ...input, bindings: [] });
+  assert.equal(result.ok, false);
+});
+
+Deno.test("planner refuses null release", async () => {
+  const { input } = await baselineInput();
+  const result = await planRuntimeMismatchRecovery({ ...input, release: null });
   assert.equal(result.ok, false);
 });
 
 Deno.test("planner refuses duplicate bindings", async () => {
-  const input = await validInput();
+  const { input } = await baselineInput();
   const doubled = {
     ...input,
     bindings: [input.bindings[0], input.bindings[0]],
@@ -191,42 +164,52 @@ Deno.test("planner refuses duplicate bindings", async () => {
 });
 
 Deno.test("planner refuses missing proof", async () => {
-  const input = { ...await validInput(), proofs: {} };
-  const result = await planRuntimeMismatchRecovery(input);
+  const { input } = await baselineInput();
+  const result = await planRuntimeMismatchRecovery({ ...input, proofs: {} });
   assert.equal(result.ok, false);
 });
 
 Deno.test("planner refuses non-terminal producer", async () => {
-  const input = await validInput();
+  const { input } = await baselineInput();
   const bindings = [{ ...input.bindings[0], producerTerminal: false }];
   const result = await planRuntimeMismatchRecovery({ ...input, bindings });
   assert.equal(result.ok, false);
 });
 
 Deno.test("planner refuses candidate-bearing record", async () => {
-  const record = testRecord({
-    target: { ...testRecord().target, head: "h1" as never },
+  const { input, recordId } = await baselineInput();
+  const record = workRecord("1", {
+    nextStep: "blocked",
+    blocker: {
+      kind: "other",
+      message: "authenticated historical matrix runtime mismatch; producer=1:1",
+    },
+    target: {
+      base: BASE_SHA,
+      branch: candidateBranch(recordId as never),
+      checkpoint: null,
+      head: SHA1,
+      pr: null,
+    },
   });
-  const reservation = testReservation();
-  const input: RuntimeMismatchPlanInputV1 = {
-    ...await validInput(),
-    repair: testSnapshot([record], [reservation]),
-    bindings: [
-      testBinding({
-        recordDigest: await canonicalStringifySha256(record),
-        reservationDigest: await canonicalStringifySha256(reservation),
-      }),
-    ],
-  };
-  const result = await planRuntimeMismatchRecovery(input);
+  const repair = { ...input.repair, work: [record] };
+  const bindings = [{
+    ...input.bindings[0],
+    recordDigest: await canonicalStringifySha256(record),
+  }];
+  const result = await planRuntimeMismatchRecovery({
+    ...input,
+    repair,
+    bindings,
+  });
   assert.equal(result.ok, false);
 });
 
 Deno.test("planner refuses present PR observations", async () => {
-  const input = await validInput();
+  const { input, recordId } = await baselineInput();
   const proofs = {
-    "issue-ubiquity-ai.ubq.fi-1": testProof({
-      prObservations: [{ number: 1, state: "open", head: "h1" }],
+    [recordId]: testProof({
+      prObservations: [{ number: 1, state: "open", head: SHA1 }],
     }),
   };
   const result = await planRuntimeMismatchRecovery({ ...input, proofs });
@@ -234,48 +217,32 @@ Deno.test("planner refuses present PR observations", async () => {
 });
 
 Deno.test("planner refuses missing effect disposition", async () => {
-  const input = await validInput();
-  const proofs = {
-    "issue-ubiquity-ai.ubq.fi-1": testProof({ effectDisposition: null }),
-  };
+  const { input, recordId } = await baselineInput();
+  const proofs = { [recordId]: testProof({ effectDisposition: null }) };
   const result = await planRuntimeMismatchRecovery({ ...input, proofs });
   assert.equal(result.ok, false);
 });
 
 Deno.test("planner refuses non-exclusive custody", async () => {
-  const input = await validInput();
-  const proofs = {
-    "issue-ubiquity-ai.ubq.fi-1": testProof({ exclusiveCustody: false }),
-  };
+  const { input, recordId } = await baselineInput();
+  const proofs = { [recordId]: testProof({ exclusiveCustody: false }) };
   const result = await planRuntimeMismatchRecovery({ ...input, proofs });
   assert.equal(result.ok, false);
 });
 
-Deno.test("planner proposes on fully bound input", async () => {
-  const input = await validInput();
+Deno.test("planner proposes on fully bound retry input", async () => {
+  const { input } = await baselineInput("retry");
   const result = await planRuntimeMismatchRecovery(input);
   assert.equal(result.ok, true);
   if (result.ok) {
     assert.equal(result.proposals.length, 1);
-    assert.equal(result.proposals[0].id, "issue-ubiquity-ai.ubq.fi-1");
+    assert.equal(result.proposals[0].id, WORK_ID);
     assert.equal(result.proposals[0].settleReservation.outcome, "ambiguous");
   }
 });
 
-Deno.test("planner distinguishes retry and implementation purposes", async () => {
-  const record = testRecord();
-  const reservation = testReservation({ purpose: "implementation" });
-  const input: RuntimeMismatchPlanInputV1 = {
-    ...await validInput(),
-    repair: testSnapshot([record], [reservation]),
-    bindings: [
-      testBinding({
-        purpose: "implementation",
-        recordDigest: await canonicalStringifySha256(record),
-        reservationDigest: await canonicalStringifySha256(reservation),
-      }),
-    ],
-  };
+Deno.test("planner proposes on fully bound implementation input", async () => {
+  const { input } = await baselineInput("implementation");
   const result = await planRuntimeMismatchRecovery(input);
   assert.equal(result.ok, true);
 });
@@ -289,8 +256,8 @@ Deno.test("planner accepts insertion-order equivalent digests", async () => {
   );
 });
 
-Deno.test("planner refuses truncated digest", async () => {
-  const input = await validInput();
+Deno.test("planner refuses truncated record digest", async () => {
+  const { input } = await baselineInput();
   const bindings = [{
     ...input.bindings[0],
     recordDigest: input.bindings[0].recordDigest.slice(0, 32),
@@ -299,19 +266,66 @@ Deno.test("planner refuses truncated digest", async () => {
   assert.equal(result.ok, false);
 });
 
-Deno.test("planner refuses changed record bytes", async () => {
-  const record = testRecord({ nextStep: "work" as never });
-  const reservation = testReservation();
-  const input: RuntimeMismatchPlanInputV1 = {
-    ...await validInput(),
-    repair: testSnapshot([record], [reservation]),
-    bindings: [
-      testBinding({
-        recordDigest: await canonicalStringifySha256(testRecord()),
-        reservationDigest: await canonicalStringifySha256(reservation),
-      }),
-    ],
-  };
-  const result = await planRuntimeMismatchRecovery(input);
+Deno.test("planner refuses truncated reservation digest", async () => {
+  const { input } = await baselineInput();
+  const bindings = [{
+    ...input.bindings[0],
+    reservationDigest: input.bindings[0].reservationDigest.slice(0, 32),
+  }];
+  const result = await planRuntimeMismatchRecovery({ ...input, bindings });
+  assert.equal(result.ok, false);
+});
+
+Deno.test("planner refuses nonhex record digest", async () => {
+  const { input } = await baselineInput();
+  const bindings = [{
+    ...input.bindings[0],
+    recordDigest: "z".repeat(64),
+  }];
+  const result = await planRuntimeMismatchRecovery({ ...input, bindings });
+  assert.equal(result.ok, false);
+});
+
+Deno.test("planner refuses changed reservation bytes", async () => {
+  const { input, reservationId } = await baselineInput();
+  const changed = reservation(reservationId, {
+    taskId: WORK_ID,
+    head: BASE_SHA,
+    purpose: "retry",
+    attempt: 2,
+  });
+  const bindings = [{
+    ...input.bindings[0],
+    reservationDigest: await canonicalStringifySha256(changed),
+  }];
+  const result = await planRuntimeMismatchRecovery({ ...input, bindings });
+  assert.equal(result.ok, false);
+});
+
+Deno.test("planner refuses wrong installation scope", async () => {
+  const { input } = await baselineInput();
+  const bindings = [{
+    ...input.bindings[0],
+    repository: { owner: "ubiquity", name: "ai.ubq.fi", installationId: 999 },
+  }];
+  const result = await planRuntimeMismatchRecovery({ ...input, bindings });
+  assert.equal(result.ok, false);
+});
+
+Deno.test("planner refuses selected reservation B when intent names A", async () => {
+  const { input } = await baselineInput();
+  const otherId = await deriveReservationId({
+    repository: {
+      owner: "ubiquity",
+      name: "ai.ubq.fi",
+      installationId: 155687488,
+    },
+    taskId: WORK_ID as never,
+    head: SHA1 as never,
+    attempt: 1,
+    purpose: "retry",
+  });
+  const bindings = [{ ...input.bindings[0], reservationId: otherId }];
+  const result = await planRuntimeMismatchRecovery({ ...input, bindings });
   assert.equal(result.ok, false);
 });
