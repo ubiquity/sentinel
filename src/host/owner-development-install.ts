@@ -616,6 +616,21 @@ export const OWNER_DEVELOPMENT_INSTALL_CANCELLED_DELIVERY_PRIOR_GENERATION = 70;
 export const OWNER_DEVELOPMENT_INSTALL_CANCELLED_DELIVERY_REVISION =
   "7c3baee145310141a666bd05360f4e03c56cfd04" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_CANCELLED_DELIVERY_GENERATION = 71;
+/**
+ * Stacked-merge verification rung: a trusted external merge whose first parent
+ * is a descendant of the reviewed base (the owner merged the bot's PRs
+ * 890/892/894/895 as a stack on 2026-10-05) is verified by the exact head
+ * binding plus the recorded base's proven ancestry instead of first-parent
+ * equality. Installed only after the recorded generation 71 healthy proof; a
+ * failed generation 72 candidate restores the recorded generation 71 revision
+ * once at monotonic generation 73.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_STACKED_MERGE_PRIOR_REVISION =
+  "7c3baee145310141a666bd05360f4e03c56cfd04" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_STACKED_MERGE_PRIOR_GENERATION = 71;
+export const OWNER_DEVELOPMENT_INSTALL_STACKED_MERGE_REVISION =
+  "dc5e08af05ed04be2e45a0acca72505fcad0b922" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_STACKED_MERGE_GENERATION = 72;
 export interface OwnerMatrixRecoveryEvidenceV1 {
   candidate: GitSha;
   repairHead: GitSha;
@@ -3001,6 +3016,56 @@ export function planOwnerDevelopmentInstall(
     }
     return waiting(
       "the planner successor generation 60 healthy proof is not recorded",
+    );
+  }
+
+  // Stacked-merge verification rung. Only a HEALTHY generation 71 record
+  // takes this branch; a failed 71 falls through to the cancelled-delivery
+  // rung's own rollback below, so its rollback semantics stay as recorded.
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_STACKED_MERGE_PRIOR_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_STACKED_MERGE_PRIOR_GENERATION &&
+    healthy !== null
+  ) {
+    return movePlan(
+      "install",
+      runtime,
+      OWNER_DEVELOPMENT_INSTALL_STACKED_MERGE_REVISION,
+      OWNER_DEVELOPMENT_INSTALL_STACKED_MERGE_GENERATION,
+      healthy,
+      "install the stacked-merge verification runtime after its generation 71 healthy proof",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_STACKED_MERGE_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_STACKED_MERGE_GENERATION
+  ) {
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_STACKED_MERGE_PRIOR_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_STACKED_MERGE_PRIOR_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded generation 71 healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_STACKED_MERGE_PRIOR_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed stacked-merge verification runtime to its recorded proven predecessor",
+      );
+    }
+    if (healthy !== null) {
+      return noChange("the owner development installation is complete");
+    }
+    return waiting(
+      "the stacked-merge verification generation 72 healthy proof is not recorded",
     );
   }
 
