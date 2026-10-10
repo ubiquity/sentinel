@@ -86,6 +86,7 @@ export type IncompleteOpKindV1 =
   | "review_request"
   | "merge"
   | "issue_closure"
+  | "already_satisfied_closure"
   | "push"
   | "implementation"
   | "replay"
@@ -486,6 +487,22 @@ export function parseWorkRecordV1(input: unknown): WorkRecordV1 {
   const evidence = parseEvidenceRefs(obj.evidence, "$.evidence");
   const intent = expectNullable(obj.intent, "$.intent", parseIntent);
 
+  if (intent?.kind === "already_satisfied_closure") {
+    if (
+      sourceKind !== "issue" ||
+      (nextStep !== "delivery" && nextStep !== "blocked") ||
+      intent.expectedHead !== target.head ||
+      intent.observedBase !== target.base ||
+      intent.pr !== target.pr || intent.branch !== target.branch
+    ) {
+      fail(
+        "$.intent",
+        "invalid_lifecycle",
+        "already-satisfied closure must bind its issue delivery target",
+      );
+    }
+  }
+
   const firstSeenAt = expectNullable(
     obj.firstSeenAt,
     "$.firstSeenAt",
@@ -878,6 +895,7 @@ function parseIntent(input: unknown, path: string): IncompleteOperationV1 {
       "review_request",
       "merge",
       "issue_closure",
+      "already_satisfied_closure",
       "push",
       "implementation",
       "replay",
@@ -914,6 +932,26 @@ function parseIntent(input: unknown, path: string): IncompleteOperationV1 {
   );
   const startedAt = expectTimestamp(obj.startedAt, `${path}.startedAt`);
   const key = expectNonEmptyString(obj.key, `${path}.key`, MaxText.token);
+
+  if (kind === "already_satisfied_closure") {
+    if (
+      expectedHead === null || observedBase === null || pr === null ||
+      branch === null || requestId === null || resultId === null
+    ) {
+      fail(
+        path,
+        "invalid_lifecycle",
+        "already-satisfied closure requires exact publication and review identities",
+      );
+    }
+    if (key !== `satisfied:${pr}:${expectedHead}:${observedBase}`) {
+      fail(
+        `${path}.key`,
+        "invalid_lifecycle",
+        "already-satisfied closure key must bind exact PR/head/base",
+      );
+    }
+  }
 
   // Fail-closed exact-identity rules per operation kind.
   if (kind === "pull_request" || kind === "push") {

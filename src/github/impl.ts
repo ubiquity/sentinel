@@ -38,6 +38,7 @@ import {
   type ReviewTaskStatementV1,
 } from "../contracts/review-receipt.ts";
 import type {
+  AlreadySatisfiedClosureRequestV1,
   CandidatePreservationRequestV1,
   Clock,
   GitHubBranchProtectionsV1,
@@ -80,6 +81,10 @@ import {
   reviewOperationKeyBindsHead,
 } from "./review-normalize.ts";
 import { reviewOperationKey } from "../repair/keys.ts";
+import { classifyReviewTerminalDisposition } from "../repair/review-gate.ts";
+import { decideCiGate } from "../repair/loop.ts";
+import { parseWorkRecordV1 } from "../contracts/work-record.ts";
+import { parseReviewReceiptV1 } from "../contracts/review-receipt.ts";
 import type { ReviewNormalizationV1 } from "./review-normalize.ts";
 import type {
   HumanResolutionVerifierV1,
@@ -901,6 +906,254 @@ export class GitHubPortImpl implements GitHubPort {
   // -------------------------------------------------------------------------
   // closeIssue
   // -------------------------------------------------------------------------
+
+  async closeAlreadySatisfiedTask(
+    request: AlreadySatisfiedClosureRequestV1,
+  ): Promise<PortResultV1<IssueCloseOutcomeV1>> {
+    const parsed = tryParse(
+      (value: unknown) => parseWorkRecordV1(value),
+      request.record,
+    );
+    const parsedReview = tryParse(
+      (value: unknown) => parseReviewReceiptV1(value),
+      request.review,
+    );
+    if (
+      !parsed.ok || !parsedReview.ok || !Number.isSafeInteger(request.deadline)
+    ) {
+      return portError(
+        "invalid",
+        "already-satisfied closure request is malformed",
+      );
+    }
+    const record = parsed.value;
+    const review = parsedReview.value;
+    const intent = record.intent;
+    const { pr, head, base, branch } = record.target;
+    const issueNumber = record.related.issueNumber;
+    if (
+      record.repository.owner !== this.repository.owner ||
+      record.repository.name !== this.repository.name ||
+      record.repository.installationId !== this.repository.installationId ||
+      record.nextStep !== "delivery" ||
+      intent?.kind !== "already_satisfied_closure" || issueNumber === null ||
+      pr === null || head === null || branch === null ||
+      intent.requestId !== review.requestId ||
+      intent.resultId !== review.resultId
+    ) {
+      return portError(
+        "invalid",
+        "already-satisfied closure identity mismatch",
+      );
+    }
+    const verify = async (): Promise<PortResultV1<GitHubPullRequestV1>> => {
+      if (this.clock.now() >= request.deadline) {
+        return portError(
+          "unavailable",
+          "already-satisfied closure deadline reached",
+        );
+      }
+      const pull = await this.client.readPullRequest(pr);
+      if (!pull.ok) return pull;
+      if (
+        pull.value === null || pull.value.number !== pr ||
+        pull.value.head !== head || pull.value.base !== base ||
+        pull.value.headRef !== branch ||
+        pull.value.author !== this.trustedPrAuthor ||
+        pull.value.mergeSha !== null || pull.value.state === "merged" ||
+        closingIssueNumber(pull.value.body) !== issueNumber
+      ) return portError("conflict", "already-satisfied PR identity mismatch");
+      const candidate = await this.client.readRef(`refs/heads/${branch}`);
+      if (!candidate.ok) return candidate;
+      const currentBase = await this.client.readRef(
+        `refs/heads/${pull.value.baseRef}`,
+      );
+      if (!currentBase.ok) return currentBase;
+      if (candidate.value?.sha !== head || currentBase.value?.sha !== base) {
+        return portError(
+          "conflict",
+          "already-satisfied candidate/base identity mismatch",
+        );
+      }
+      const issue = await this.client.readIssue(issueNumber);
+      if (!issue.ok) return issue;
+      if (issue.value === null || issue.value.number !== issueNumber) {
+        return portError(
+          "conflict",
+          "already-satisfied source issue unavailable",
+        );
+      }
+      const text = {
+        issueNumber,
+        title: issue.value.title,
+        body: issue.value.body,
+      };
+      const task = await checkReviewTaskStatement({
+        ...text,
+        digest: await reviewTaskStatementDigest(text),
+      });
+      if (
+        !task.ok ||
+        classifyReviewTerminalDisposition(
+            review,
+            record,
+            this.trustedReviewer,
+            task.statement,
+          ).kind !== "qualified_already_satisfied"
+      ) {
+        return portError(
+          "conflict",
+          "already-satisfied review/task authorization refused",
+        );
+      }
+      const currentReview = await this.currentReviewEvidence(pr, {
+        expectedHead: head,
+        review,
+      });
+      if (!currentReview.ok) return { ok: false, error: currentReview.error };
+      if (
+        currentReview.normalized === null ||
+        !completedReviewMatchesReceipt(currentReview.normalized, review) ||
+        !(await this.resolutionsTrusted(review, pull.value))
+      ) {
+        return portError(
+          "conflict",
+          "already-satisfied native review authorization refused",
+        );
+      }
+      const checks = await this.client.readChecks(head);
+      if (!checks.ok) return checks;
+      if (
+        checks.value.head !== head ||
+        checks.value.checks.some((check) => check.head !== head) ||
+        decideCiGate(checks.value.checks) !== "proceed"
+      ) {
+        return portError(
+          "unavailable",
+          "already-satisfied current CI has not passed",
+        );
+      }
+      const ancestry = await this.git.isAncestor(base, head);
+      if (!ancestry.ok) return ancestry;
+      if (!ancestry.value) {
+        return portError(
+          "conflict",
+          "already-satisfied candidate ancestry mismatch",
+        );
+      }
+      if (this.clock.now() >= request.deadline) {
+        return portError(
+          "unavailable",
+          "already-satisfied closure deadline reached",
+        );
+      }
+      const immediate = await this.client.readPullRequest(pr);
+      if (!immediate.ok) return immediate;
+      if (
+        immediate.value === null || immediate.value.head !== head ||
+        immediate.value.base !== base || immediate.value.headRef !== branch ||
+        immediate.value.baseRef !== pull.value.baseRef ||
+        immediate.value.author !== this.trustedPrAuthor ||
+        immediate.value.mergeSha !== null ||
+        immediate.value.state === "merged" ||
+        closingIssueNumber(immediate.value.body) !== issueNumber
+      ) {
+        return portError(
+          "conflict",
+          "already-satisfied PR changed before closure",
+        );
+      }
+      if (this.clock.now() >= request.deadline) {
+        return portError(
+          "unavailable",
+          "already-satisfied closure deadline reached",
+        );
+      }
+      return portOk(immediate.value);
+    };
+    const before = await verify();
+    if (!before.ok) return before;
+    if (before.value.state === "open") {
+      const closed = await this.client.closePullRequest(pr);
+      if (!closed.ok) {
+        const reconciled = await verify();
+        if (!reconciled.ok) return reconciled;
+        if (reconciled.value.state !== "closed") return closed;
+      } else if (
+        closed.value.state !== "closed" || closed.value.head !== head ||
+        closed.value.base !== base || closed.value.mergeSha !== null
+      ) {
+        return portError(
+          "conflict",
+          "already-satisfied PR closure was not applied exactly",
+        );
+      }
+    }
+    const beforeIssue = await verify();
+    if (!beforeIssue.ok) return beforeIssue;
+    if (beforeIssue.value.state !== "closed") {
+      return portError("conflict", "already-satisfied PR is not closed");
+    }
+    const issue = await this.client.readIssue(issueNumber);
+    if (!issue.ok) return issue;
+    if (issue.value === null || issue.value.number !== issueNumber) {
+      return portError(
+        "conflict",
+        "already-satisfied source issue unavailable",
+      );
+    }
+    const text = {
+      issueNumber,
+      title: issue.value.title,
+      body: issue.value.body,
+    };
+    const task = await checkReviewTaskStatement({
+      ...text,
+      digest: await reviewTaskStatementDigest(text),
+    });
+    if (
+      !task.ok ||
+      classifyReviewTerminalDisposition(
+          review,
+          record,
+          this.trustedReviewer,
+          task.statement,
+        ).kind !== "qualified_already_satisfied"
+    ) {
+      return portError(
+        "conflict",
+        "already-satisfied task changed before closure",
+      );
+    }
+    if (issue.value.state === "closed") return portOk("already_closed");
+    if (this.clock.now() >= request.deadline) {
+      return portError(
+        "unavailable",
+        "already-satisfied closure deadline reached",
+      );
+    }
+    const closedIssue = await this.client.closeIssue(issueNumber);
+    if (!closedIssue.ok) {
+      const reconciled = await this.client.readIssue(issueNumber);
+      if (!reconciled.ok) return reconciled;
+      if (
+        reconciled.value === null || reconciled.value.state !== "closed" ||
+        reconciled.value.title !== text.title ||
+        reconciled.value.body !== text.body
+      ) return closedIssue;
+    } else if (
+      closedIssue.value.number !== issueNumber ||
+      closedIssue.value.state !== "closed" ||
+      closedIssue.value.title !== text.title ||
+      closedIssue.value.body !== text.body
+    ) {
+      return portError(
+        "conflict",
+        "already-satisfied issue closure was not applied exactly",
+      );
+    }
+    return portOk("closed");
+  }
 
   async closeIssue(
     issueNumber: number,

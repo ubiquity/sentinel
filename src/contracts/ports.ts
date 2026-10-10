@@ -30,7 +30,7 @@ import type {
   ReleaseStateSnapshotV1,
   RepairStateSnapshotV1,
 } from "./state-snapshots.ts";
-import type { CandidatePreservationV1 } from "./work-record.ts";
+import type { CandidatePreservationV1, WorkRecordV1 } from "./work-record.ts";
 import type {
   AttemptFailureClassV1,
   AttemptStageV1,
@@ -413,6 +413,12 @@ export interface MergeRequestV1 {
 
 export type IssueCloseOutcomeV1 = "closed" | "already_closed";
 
+export interface AlreadySatisfiedClosureRequestV1 {
+  record: WorkRecordV1;
+  review: ReviewReceiptV1;
+  deadline: number;
+}
+
 /**
  * Trusted candidate-preservation request.
  *
@@ -517,6 +523,9 @@ export interface GitHubPort {
     request: MergeRequestV1,
   ): Promise<PortResultV1<MergeOutcomeV1>>;
   closeIssue(issueNumber: number): Promise<PortResultV1<IssueCloseOutcomeV1>>;
+  closeAlreadySatisfiedTask?(
+    request: AlreadySatisfiedClosureRequestV1,
+  ): Promise<PortResultV1<IssueCloseOutcomeV1>>;
   /**
    * Assigns the trusted publication identity to the source issue BEFORE any
    * pull request for it is created. The organization's anti-spam policy closes

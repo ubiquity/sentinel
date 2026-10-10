@@ -790,6 +790,22 @@ export class GitHubApiClient {
     return portError(...this.mapError(response.value));
   }
 
+  async closePullRequest(
+    number: number,
+  ): Promise<PortResultV1<GitHubPullRequestV1>> {
+    const response = await this.send(
+      "PATCH",
+      `/repos/${repoPath(this.repository)}/pulls/${number}`,
+      {},
+      { state: "closed" },
+    );
+    if (!response.ok) return response;
+    if (response.value.status !== 200) {
+      return portError(...this.mapError(response.value));
+    }
+    return parseWire(response.value, (value) => parsePullWire(value, "$"));
+  }
+
   // -------------------------------------------------------------------------
   // Exact self-target CI approval
   // -------------------------------------------------------------------------

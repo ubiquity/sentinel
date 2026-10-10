@@ -97,6 +97,92 @@ export const REVIEW_STEP_ATTACHMENT =
   "GitHubCodexReviewTransportOptionsV1.reviewer / CodexStructuredReviewerOptionsV1.openSession";
 
 /**
+ * Discriminated terminal-review disposition for a durable review receipt.
+ * `qualified_new_repair` means the receipt authorizes a new repair merge.
+ * `qualified_already_satisfied` means the receipt is fully trusted and
+ * complete but its task acceptance is already_satisfied_at_base: no new
+ * repair is authorized, and this classification alone grants no merge,
+ * close, CI/candidate/ownership/CAS/release bypass. `refused` carries the
+ * exact native refusal detail.
+ */
+export type ReviewTerminalDispositionV1 =
+  | { kind: "qualified_new_repair" }
+  | { kind: "qualified_already_satisfied" }
+  | { kind: "refused"; reason: string };
+
+function checkSharedReviewGuards(
+  receipt: ReviewReceiptV1 | null | undefined,
+  record: WorkRecordV1,
+  expectedReviewer: string | null,
+): string | null {
+  if (receipt === null || receipt === undefined) return "missing receipt";
+  const { pr, head, base } = record.target;
+  if (pr === null || head === null) return "missing pr/head";
+  if (receipt.outcome !== "completed") return "incomplete receipt";
+  if (receipt.repository.owner !== record.repository.owner) {
+    return "repository mismatch";
+  }
+  if (receipt.repository.name !== record.repository.name) {
+    return "repository mismatch";
+  }
+  if (receipt.repository.installationId !== record.repository.installationId) {
+    return "repository mismatch";
+  }
+  if (receipt.pullRequest.number !== pr) return "pr mismatch";
+  if (!sameSha(receipt.pullRequest.head, head)) return "head mismatch";
+  if (!sameSha(receipt.pullRequest.base, base)) return "base mismatch";
+  if (receipt.resultId === null) return "missing result";
+  if (receipt.completedAt === null) return "missing completion";
+  if (receipt.observedReviewer === null) return "missing reviewer";
+  if (receipt.observedReviewer !== receipt.expectedReviewer) {
+    return "reviewer mismatch";
+  }
+  if (
+    expectedReviewer !== null && receipt.expectedReviewer !== expectedReviewer
+  ) {
+    return "reviewer mismatch";
+  }
+  if (receipt.findingsUncounted !== 0) return "uncounted findings";
+  if (
+    receipt.unresolvedSeverities.some((severity) =>
+      severity === "P0" || severity === "P1"
+    )
+  ) {
+    return "blocking findings";
+  }
+  return null;
+}
+
+/**
+ * Pure classifier distinguishing qualified new-repair authorization from
+ * qualified already-satisfied terminal-review eligibility. Reuses the exact
+ * native trust/identity/completion/finding guards; only the task-acceptance
+ * verdict branches. already_satisfied_at_base is a distinct no-new-repair
+ * classification, never a merge authorization.
+ */
+export function classifyReviewTerminalDisposition(
+  receipt: ReviewReceiptV1 | null | undefined,
+  record: WorkRecordV1,
+  expectedReviewer: string | null = null,
+  task: ReviewTaskStatementV1 | null | "unavailable" = "unavailable",
+): ReviewTerminalDispositionV1 {
+  const guardRefusal = checkSharedReviewGuards(
+    receipt,
+    record,
+    expectedReviewer,
+  );
+  if (guardRefusal !== null) {
+    return { kind: "refused", reason: guardRefusal };
+  }
+  const trustedReceipt = receipt as ReviewReceiptV1;
+  const refusal = taskAcceptanceRefusal(trustedReceipt, record, task);
+  if (refusal === null) return { kind: "qualified_new_repair" };
+  if (refusal === TASK_ACCEPTANCE_ALREADY_SATISFIED_DETAIL) {
+    return { kind: "qualified_already_satisfied" };
+  }
+  return { kind: "refused", reason: refusal };
+}
+/**
  * The one and only authorization for a merge. Returns true only for a durable
  * completed review receipt that covers the record's exact published identity
  * AND whose task acceptance is positively, exactly bound to the TRUSTED live
@@ -111,32 +197,7 @@ export function reviewAuthorizesMerge(
   task: ReviewTaskStatementV1 | null | "unavailable" = "unavailable",
 ): boolean {
   if (receipt === null || receipt === undefined) return false;
-  const { pr, head, base } = record.target;
-  if (pr === null || head === null) return false;
-  if (receipt.outcome !== "completed") return false;
-  if (receipt.repository.owner !== record.repository.owner) return false;
-  if (receipt.repository.name !== record.repository.name) return false;
-  if (receipt.repository.installationId !== record.repository.installationId) {
-    return false;
-  }
-  if (receipt.pullRequest.number !== pr) return false;
-  if (!sameSha(receipt.pullRequest.head, head)) return false;
-  if (!sameSha(receipt.pullRequest.base, base)) return false;
-  if (receipt.resultId === null) return false;
-  if (receipt.completedAt === null) return false;
-  if (receipt.observedReviewer === null) return false;
-  if (receipt.observedReviewer !== receipt.expectedReviewer) return false;
-  if (
-    expectedReviewer !== null && receipt.expectedReviewer !== expectedReviewer
-  ) {
-    return false;
-  }
-  if (receipt.findingsUncounted !== 0) return false;
-  if (
-    receipt.unresolvedSeverities.some((severity) =>
-      severity === "P0" || severity === "P1"
-    )
-  ) {
+  if (checkSharedReviewGuards(receipt, record, expectedReviewer) !== null) {
     return false;
   }
   // Task completion is a SEPARATE proof from a clean code review: an

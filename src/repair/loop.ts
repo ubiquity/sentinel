@@ -119,6 +119,7 @@ import {
 } from "./selection.ts";
 import {
   authorizingReceipt,
+  classifyReviewTerminalDisposition,
   MERGE_WITHOUT_REVIEW_DETAIL,
   TASK_ACCEPTANCE_CONTEXT_DETAIL,
   TASK_ACCEPTANCE_DIGEST_DETAIL,
@@ -766,6 +767,8 @@ export async function runRepairCycle(
           ) break;
           if (record.intent?.kind === "merge") {
             result = await reconcileMergeIntent(deps, context, record);
+          } else if (record.intent?.kind === "already_satisfied_closure") {
+            result = await retryAlreadySatisfiedClosure(deps, context, record);
           } else if (record.intent?.kind === "issue_closure") {
             result = await retryClosure(deps, context, record);
           } else if (record.intent !== null) {
@@ -5685,6 +5688,41 @@ async function applyObservedReview(
         ),
       );
     }
+    const disposition = classifyReviewTerminalDisposition(
+      receipt,
+      record,
+      deps.github.reviewerIdentity,
+      task,
+    );
+    if (
+      disposition.kind === "qualified_already_satisfied" &&
+      record.source.kind === "issue" && record.target.branch !== null
+    ) {
+      const next = setIntent(advanceToDelivery(clearIntent(record, now), now), {
+        kind: "already_satisfied_closure",
+        key:
+          `satisfied:${record.target.pr}:${record.target.head}:${record.target.base}`,
+        startedAt: now,
+        branch: record.target.branch,
+        expectedHead: record.target.head,
+        observedBase: record.target.base,
+        pr: record.target.pr,
+        requestId: receipt.requestId,
+        resultId: receipt.resultId,
+      }, now);
+      return persistTransition(deps, context, (draft) => {
+        replaceWorkMutation({
+          ...next,
+          evidence: mergeEvidence(next.evidence, [{
+            kind: "review_receipt",
+            ref: reviewEvidenceRef(receipt.id),
+          }]),
+        })(draft);
+        if (!draft.reviews.some((review) => review.id === receipt.id)) {
+          draft.reviews.push(receipt);
+        }
+      });
+    }
     const refusal = taskAcceptanceRefusal(receipt, record, task);
     if (refusal !== null) {
       if (refusal === TASK_ACCEPTANCE_MISSING_DETAIL) {
@@ -5742,6 +5780,9 @@ async function executeDeliveryStep(
   }
 
   if (record.intent !== null) {
+    if (record.intent.kind === "already_satisfied_closure") {
+      return retryAlreadySatisfiedClosure(deps, context, record);
+    }
     if (record.intent.kind === "base_refresh") {
       // A saved candidate-base refresh is reconciled before any other
       // delivery effect: the old candidate is preserved until the exact
@@ -7095,6 +7136,96 @@ async function observeReleaseAcceptance(
     return blockRelease(deps, context, record, observed.phase, now);
   }
   return waitRelease(deps, context, record, now);
+}
+
+async function retryAlreadySatisfiedClosure(
+  deps: RepairCycleDepsV1,
+  context: LoopContextV1,
+  record: WorkRecordV1,
+): Promise<StepResultV1> {
+  const intent = record.intent;
+  const close = deps.github.closeAlreadySatisfiedTask;
+  if (intent?.kind !== "already_satisfied_closure" || close === undefined) {
+    return {
+      kind: "deferred",
+      detail: "already-satisfied closure capability unavailable",
+    };
+  }
+  const now = deps.clock.now();
+  if (now >= context.bounds.runDeadline) {
+    return {
+      kind: "margin",
+      detail: "already-satisfied closure crossed the total run deadline",
+    };
+  }
+  const cooling = await checkGithubCooldown(
+    deps,
+    record.repository,
+    context.bounds,
+  );
+  if (cooling.kind !== "ok") {
+    return { kind: cooling.kind, detail: cooling.detail };
+  }
+  const receipt = context.snapshot.reviews.find((review) =>
+    review.requestId === intent.requestId &&
+    review.resultId === intent.resultId && record.evidence.some((evidence) =>
+      evidence.kind === "review_receipt" &&
+      evidence.ref === reviewEvidenceRef(review.id)
+    )
+  );
+  const task = await readDeliveryTaskContext(deps, record);
+  if (task === "unavailable") {
+    return {
+      kind: "deferred",
+      detail: "already-satisfied task context unavailable",
+    };
+  }
+  const disposition = classifyReviewTerminalDisposition(
+    receipt,
+    record,
+    deps.github.reviewerIdentity,
+    task,
+  );
+  if (disposition.kind !== "qualified_already_satisfied") {
+    return persistWork(
+      deps,
+      context,
+      markBlocked(
+        record,
+        "missing_evidence",
+        disposition.kind === "refused"
+          ? disposition.reason
+          : "already-satisfied verdict changed",
+        now,
+      ),
+    );
+  }
+  const ciGate = await gateDeliveryOnChecks(deps, context, record, now);
+  if (ciGate !== null) return ciGate;
+  const closed = await close.call(deps.github, {
+    record,
+    review: receipt!,
+    deadline: context.bounds.runDeadline,
+  });
+  if (!closed.ok) {
+    if (closed.error.kind === "invalid" || closed.error.kind === "conflict") {
+      return persistWork(
+        deps,
+        context,
+        markBlocked(record, "missing_evidence", closed.error.detail, now),
+      );
+    }
+    return persistWork(
+      deps,
+      context,
+      setWait(record, {
+        reason: "unavailable",
+        since: now,
+        until: now + CHECK_POLL_MS,
+      }, now),
+    );
+  }
+  return persistWork(deps, context, markDone(record, deps.clock.now()));
 }
 
 async function retryClosure(

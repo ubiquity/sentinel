@@ -50,6 +50,7 @@ import {
   candidatePreservationRef,
   implementationIntentKey,
   pushIntentKey,
+  reviewEvidenceRef,
   reviewOperationKey,
   reviewReceiptId,
   workItemIdForIncident,
@@ -1207,7 +1208,13 @@ Deno.test(
           acceptedObservation(head, acceptance, completedAt),
         );
         const outcome = await rig.run();
-        assert.equal(outcome.status, "idle", JSON.stringify(outcome));
+        const alreadySatisfied =
+          acceptance?.verdict === "already_satisfied_at_base";
+        assert.equal(
+          outcome.status,
+          alreadySatisfied ? "margin" : "idle",
+          JSON.stringify(outcome),
+        );
         const state = await rig.snapshot();
         const work = state.work[0]!;
         if (acceptance === null) {
@@ -1239,12 +1246,59 @@ Deno.test(
             false,
             label,
           );
+        } else if (alreadySatisfied) {
+          assert.equal(
+            outcome.detail,
+            "all eligible work is deferred (cooldown or run bounds)",
+            label,
+          );
+          assert.equal(work.nextStep, "delivery", label);
+          assert.equal(work.blocker, null, label);
+          assert.deepEqual(work.intent, {
+            kind: "already_satisfied_closure",
+            key: `satisfied:7:${head}:${SHA1}`,
+            startedAt: rig.clock.now(),
+            branch: "sentinel/repair/issue-1",
+            expectedHead: head,
+            observedBase: SHA1,
+            pr: 7,
+            requestId: "review-req-1",
+            resultId: "result-1",
+          });
+          assert.deepEqual(work.target, reviewWaitIssueRecord(head).target);
+          assert.deepEqual(work.counters, {
+            attempts: 1,
+            retries: 0,
+            reviewRounds: 1,
+          });
+          const receiptId = await reviewReceiptId(currentKey, head);
+          const retained = state.reviews.find((receipt) =>
+            receipt.id === receiptId
+          );
+          assert.ok(retained);
+          assert.deepEqual(retained.taskAcceptance, acceptance);
+          assert.equal(retained.outcome, "completed");
+          assert.ok(
+            work.evidence.some((evidence) =>
+              evidence.kind === "review_receipt" &&
+              evidence.ref === reviewEvidenceRef(receiptId)
+            ),
+          );
+          assert.equal(rig.github.reviewRequestIdentities.length, 0, label);
+          assert.equal(state.reservations.length, 0, label);
+          assert.equal(rig.github.calls.includes("createPr"), false, label);
+          assert.equal(rig.github.pushes.length, 0, label);
         } else {
           assert.equal(work.nextStep, "blocked", label);
           assert.equal(work.blocker?.message, detail, label);
           assert.equal(work.blocker?.kind, kind, label);
         }
         assert.equal(rig.model.requests.length, 0);
+        assert.equal(
+          rig.github.calls.some((call) => call.startsWith("closeIssue:")),
+          false,
+          `${label} must never close an issue`,
+        );
         assert.equal(work.target.head, head);
         assert.equal(
           rig.github.calls.includes("merge"),

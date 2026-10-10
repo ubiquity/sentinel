@@ -14,6 +14,7 @@ import type { WorkRecordV1 } from "../../src/contracts/work-record.ts";
 import type { ReviewTaskStatementV1 } from "../../src/contracts/review-receipt.ts";
 import {
   authorizingReceipt,
+  classifyReviewTerminalDisposition,
   MERGE_WITHOUT_REVIEW_DETAIL,
   REVIEW_STEP_ATTACHMENT,
   reviewAuthorizesMerge,
@@ -494,4 +495,311 @@ Deno.test("ordinary block retains a residual review intent; clearing it is expli
   );
   assert.equal(exhausted.target.pr, 12, "the published PR is retained");
   assert.equal(exhausted.intent, null, "the dead review request is cleared");
+});
+
+Deno.test("classifier: fulfilled receipt yields qualified_new_repair", () => {
+  const receipt = completedReceipt();
+  const targetRecord = record();
+  const disposition = classifyReviewTerminalDisposition(
+    receipt,
+    targetRecord,
+    REVIEWER,
+    TRUSTED_TASK,
+  );
+  assert.equal(disposition.kind, "qualified_new_repair");
+  assert.equal(
+    reviewAuthorizesMerge(receipt, targetRecord, REVIEWER, TRUSTED_TASK),
+    true,
+  );
+});
+
+Deno.test("classifier: already_satisfied_at_base yields qualified_already_satisfied", () => {
+  const receipt = completedReceipt({
+    taskAcceptance: {
+      issueNumber: 1,
+      taskDigest: TRUSTED_TASK.digest,
+      verdict: "already_satisfied_at_base",
+      evidence: ["the base already implements the required behavior"],
+    },
+  });
+  const targetRecord = record();
+  const disposition = classifyReviewTerminalDisposition(
+    receipt,
+    targetRecord,
+    REVIEWER,
+    TRUSTED_TASK,
+  );
+  assert.equal(disposition.kind, "qualified_already_satisfied");
+  assert.equal(
+    receipt.taskAcceptance?.verdict,
+    "already_satisfied_at_base",
+    "original verdict retained",
+  );
+  assert.equal(
+    reviewAuthorizesMerge(receipt, targetRecord, REVIEWER, TRUSTED_TASK),
+    false,
+    "already-base still refuses merge",
+  );
+});
+
+Deno.test("classifier: missing receipt refuses", () => {
+  const targetRecord = record();
+  const disposition = classifyReviewTerminalDisposition(
+    null,
+    targetRecord,
+    REVIEWER,
+    TRUSTED_TASK,
+  );
+  assert.equal(disposition.kind, "refused");
+});
+
+Deno.test("classifier: wrong head refuses", () => {
+  const receipt = completedReceipt({
+    pullRequest: { number: 12, head: SHA2, base: SHA2 },
+  });
+  const targetRecord = record();
+  const disposition = classifyReviewTerminalDisposition(
+    receipt,
+    targetRecord,
+    REVIEWER,
+    TRUSTED_TASK,
+  );
+  assert.equal(disposition.kind, "refused");
+});
+
+Deno.test("classifier: blocking P0 finding refuses", () => {
+  const receipt = completedReceipt({
+    findings: [finding("P0")],
+    unresolvedSeverities: ["P0"],
+  });
+  const targetRecord = record();
+  const disposition = classifyReviewTerminalDisposition(
+    receipt,
+    targetRecord,
+    REVIEWER,
+    TRUSTED_TASK,
+  );
+  assert.equal(disposition.kind, "refused");
+});
+
+Deno.test("classifier: unavailable live task refuses", () => {
+  const receipt = completedReceipt();
+  const targetRecord = record();
+  const disposition = classifyReviewTerminalDisposition(
+    receipt,
+    targetRecord,
+    REVIEWER,
+    "unavailable",
+  );
+  assert.equal(disposition.kind, "refused");
+});
+
+Deno.test("classifier: wrong issue number refuses", () => {
+  const receipt = completedReceipt({
+    taskAcceptance: fulfilledAcceptance(99),
+  });
+  const targetRecord = record();
+  const disposition = classifyReviewTerminalDisposition(
+    receipt,
+    targetRecord,
+    REVIEWER,
+    TRUSTED_TASK,
+  );
+  assert.equal(disposition.kind, "refused");
+});
+
+Deno.test("classifier: live task digest mismatch refuses", () => {
+  const receipt = completedReceipt({
+    taskAcceptance: fulfilledAcceptance(1, "c".repeat(64)),
+  });
+  const targetRecord = record();
+  const disposition = classifyReviewTerminalDisposition(
+    receipt,
+    targetRecord,
+    REVIEWER,
+    TRUSTED_TASK,
+  );
+  assert.equal(disposition.kind, "refused");
+});
+
+Deno.test("classifier: deliberately raw negative receipt with wrong observed reviewer refuses", () => {
+  const receipt = { ...completedReceipt(), observedReviewer: "someone-else" };
+  const targetRecord = record();
+  const disposition = classifyReviewTerminalDisposition(
+    receipt,
+    targetRecord,
+    REVIEWER,
+    TRUSTED_TASK,
+  );
+  assert.equal(disposition.kind, "refused");
+});
+
+Deno.test("classifier: wrong configured reviewer refuses", () => {
+  const receipt = completedReceipt();
+  const targetRecord = record();
+  const disposition = classifyReviewTerminalDisposition(
+    receipt,
+    targetRecord,
+    "other-reviewer",
+    TRUSTED_TASK,
+  );
+  assert.equal(disposition.kind, "refused");
+});
+
+Deno.test("classifier: repository installation drift refuses", () => {
+  const receipt = completedReceipt({
+    repository: { owner: "ubiquity", name: "ai.ubq.fi", installationId: 999 },
+  });
+  const targetRecord = record();
+  const disposition = classifyReviewTerminalDisposition(
+    receipt,
+    targetRecord,
+    REVIEWER,
+    TRUSTED_TASK,
+  );
+  assert.equal(disposition.kind, "refused");
+});
+
+Deno.test("classifier: PR number drift refuses", () => {
+  const receipt = completedReceipt({
+    pullRequest: { number: 99, head: SHA1, base: SHA2 },
+  });
+  const targetRecord = record();
+  const disposition = classifyReviewTerminalDisposition(
+    receipt,
+    targetRecord,
+    REVIEWER,
+    TRUSTED_TASK,
+  );
+  assert.equal(disposition.kind, "refused");
+});
+
+Deno.test("classifier: base drift refuses", () => {
+  const receipt = completedReceipt({
+    pullRequest: { number: 12, head: SHA1, base: SHA1 },
+  });
+  const targetRecord = record();
+  const disposition = classifyReviewTerminalDisposition(
+    receipt,
+    targetRecord,
+    REVIEWER,
+    TRUSTED_TASK,
+  );
+  assert.equal(disposition.kind, "refused");
+});
+
+Deno.test("classifier: deliberately raw negative receipt with missing result refuses", () => {
+  const receipt = { ...completedReceipt(), resultId: null };
+  const targetRecord = record();
+  const disposition = classifyReviewTerminalDisposition(
+    receipt,
+    targetRecord,
+    REVIEWER,
+    TRUSTED_TASK,
+  );
+  assert.equal(disposition.kind, "refused");
+});
+
+Deno.test("classifier: not_fulfilled verdict refuses", () => {
+  const receipt = completedReceipt({
+    taskAcceptance: {
+      issueNumber: 1,
+      taskDigest: TRUSTED_TASK.digest,
+      verdict: "not_fulfilled",
+      evidence: ["the changed file is unrelated to the task"],
+    },
+  });
+  const targetRecord = record();
+  const disposition = classifyReviewTerminalDisposition(
+    receipt,
+    targetRecord,
+    REVIEWER,
+    TRUSTED_TASK,
+  );
+  assert.equal(disposition.kind, "refused");
+});
+
+Deno.test("classifier: qualified fulfilled preserves inputs unchanged", () => {
+  const receipt = completedReceipt();
+  const targetRecord = record();
+  const receiptBefore = JSON.stringify(receipt);
+  const recordBefore = JSON.stringify(targetRecord);
+  const disposition = classifyReviewTerminalDisposition(
+    receipt,
+    targetRecord,
+    REVIEWER,
+    TRUSTED_TASK,
+  );
+  assert.equal(disposition.kind, "qualified_new_repair");
+  assert.equal(JSON.stringify(receipt), receiptBefore);
+  assert.equal(JSON.stringify(targetRecord), recordBefore);
+});
+
+Deno.test("classifier: qualified already-base preserves inputs unchanged", () => {
+  const receipt = completedReceipt({
+    taskAcceptance: {
+      issueNumber: 1,
+      taskDigest: TRUSTED_TASK.digest,
+      verdict: "already_satisfied_at_base",
+      evidence: ["the base already implements the required behavior"],
+    },
+  });
+  const targetRecord = record();
+  const receiptBefore = JSON.stringify(receipt);
+  const recordBefore = JSON.stringify(targetRecord);
+  const disposition = classifyReviewTerminalDisposition(
+    receipt,
+    targetRecord,
+    REVIEWER,
+    TRUSTED_TASK,
+  );
+  assert.equal(disposition.kind, "qualified_already_satisfied");
+  assert.equal(JSON.stringify(receipt), receiptBefore);
+  assert.equal(JSON.stringify(targetRecord), recordBefore);
+});
+
+Deno.test("classifier: uncertain acceptance refuses", () => {
+  const receipt = completedReceipt({
+    taskAcceptance: {
+      issueNumber: 1,
+      taskDigest: TRUSTED_TASK.digest,
+      verdict: "uncertain",
+      evidence: [],
+    },
+  });
+  const targetRecord = record();
+  const disposition = classifyReviewTerminalDisposition(
+    receipt,
+    targetRecord,
+    REVIEWER,
+    TRUSTED_TASK,
+  );
+  assert.equal(disposition.kind, "refused");
+});
+
+Deno.test("classifier: missing acceptance refuses", () => {
+  const receipt = completedReceipt({ taskAcceptance: null });
+  const targetRecord = record();
+  const disposition = classifyReviewTerminalDisposition(
+    receipt,
+    targetRecord,
+    REVIEWER,
+    TRUSTED_TASK,
+  );
+  assert.equal(disposition.kind, "refused");
+  if (disposition.kind === "refused") {
+    assert.equal(disposition.reason, TASK_ACCEPTANCE_MISSING_DETAIL);
+  }
+});
+
+Deno.test("classifier: legacy absent acceptance refuses", () => {
+  const receipt = completedReceipt({ taskAcceptance: undefined });
+  const targetRecord = record();
+  const disposition = classifyReviewTerminalDisposition(
+    receipt,
+    targetRecord,
+    REVIEWER,
+    TRUSTED_TASK,
+  );
+  assert.equal(disposition.kind, "refused");
 });
