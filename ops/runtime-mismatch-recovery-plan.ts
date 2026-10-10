@@ -1,4 +1,5 @@
 import type { BudgetReservationV1 } from "../src/contracts/budget-reservation.ts";
+import { canonicalStringifySha256 } from "../src/contracts/canonical.ts";
 import type { RepairStateSnapshotV1 } from "../src/contracts/state-snapshots.ts";
 import type { WorkRecordV1 } from "../src/contracts/work-record.ts";
 
@@ -66,22 +67,15 @@ export type RuntimeMismatchPlanV1 =
     rows: readonly { id: string; reason: string }[];
   };
 
-function digestOf(value: unknown): string {
-  const text = JSON.stringify(value);
-  let hash = 0;
-  for (let index = 0; index < text.length; index++) {
-    hash = (hash * 31 + text.charCodeAt(index)) | 0;
-  }
-  return "h" + Math.abs(hash).toString(16);
-}
-
 export function planRuntimeMismatchRecovery(
   input: RuntimeMismatchPlanInputV1,
 ): Promise<RuntimeMismatchPlanV1> {
-  return Promise.resolve(planSync(input));
+  return planAsync(input);
 }
 
-function planSync(input: RuntimeMismatchPlanInputV1): RuntimeMismatchPlanV1 {
+async function planAsync(
+  input: RuntimeMismatchPlanInputV1,
+): Promise<RuntimeMismatchPlanV1> {
   const rows: { id: string; reason: string }[] = [];
   const refuse = (id: string, reason: string): RuntimeMismatchPlanV1 => {
     rows.push({ id, reason });
@@ -110,7 +104,10 @@ function planSync(input: RuntimeMismatchPlanInputV1): RuntimeMismatchPlanV1 {
 
     const record = workById.get(binding.id);
     if (record === undefined) return refuse(binding.id, "missing record");
-    if (digestOf(record) !== binding.recordDigest) {
+    if (!/^[0-9a-f]{64}$/.test(binding.recordDigest)) {
+      return refuse(binding.id, "malformed record digest");
+    }
+    if (await canonicalStringifySha256(record) !== binding.recordDigest) {
       return refuse(binding.id, "record digest mismatch");
     }
     if (record.nextStep !== "blocked") {
@@ -153,7 +150,12 @@ function planSync(input: RuntimeMismatchPlanInputV1): RuntimeMismatchPlanV1 {
     if (reservation === undefined) {
       return refuse(binding.id, "missing reservation");
     }
-    if (digestOf(reservation) !== binding.reservationDigest) {
+    if (!/^[0-9a-f]{64}$/.test(binding.reservationDigest)) {
+      return refuse(binding.id, "malformed reservation digest");
+    }
+    if (
+      await canonicalStringifySha256(reservation) !== binding.reservationDigest
+    ) {
       return refuse(binding.id, "reservation digest mismatch");
     }
     if (String(reservation.taskId) !== binding.id) {

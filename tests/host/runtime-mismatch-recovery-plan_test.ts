@@ -138,16 +138,9 @@ function testProof(
   };
 }
 
-function digestOf(value: unknown): string {
-  const text = JSON.stringify(value);
-  let hash = 0;
-  for (let index = 0; index < text.length; index++) {
-    hash = (hash * 31 + text.charCodeAt(index)) | 0;
-  }
-  return "h" + Math.abs(hash).toString(16);
-}
+import { canonicalStringifySha256 } from "../../src/contracts/canonical.ts";
 
-function validInput(): RuntimeMismatchPlanInputV1 {
+async function validInput(): Promise<RuntimeMismatchPlanInputV1> {
   const record = testRecord();
   const reservation = testReservation();
   return {
@@ -155,8 +148,8 @@ function validInput(): RuntimeMismatchPlanInputV1 {
     release: null,
     bindings: [
       testBinding({
-        recordDigest: digestOf(record),
-        reservationDigest: digestOf(reservation),
+        recordDigest: await canonicalStringifySha256(record),
+        reservationDigest: await canonicalStringifySha256(reservation),
       }),
     ],
     proofs: { "issue-ubiquity-ai.ubq.fi-1": testProof() },
@@ -168,13 +161,13 @@ function validInput(): RuntimeMismatchPlanInputV1 {
 }
 
 Deno.test("planner refuses empty bindings", async () => {
-  const input = { ...validInput(), bindings: [] };
+  const input = { ...await validInput(), bindings: [] };
   const result = await planRuntimeMismatchRecovery(input);
   assert.equal(result.ok, false);
 });
 
 Deno.test("planner refuses duplicate bindings", async () => {
-  const input = validInput();
+  const input = await validInput();
   const doubled = {
     ...input,
     bindings: [input.bindings[0], input.bindings[0]],
@@ -184,13 +177,13 @@ Deno.test("planner refuses duplicate bindings", async () => {
 });
 
 Deno.test("planner refuses missing proof", async () => {
-  const input = { ...validInput(), proofs: {} };
+  const input = { ...await validInput(), proofs: {} };
   const result = await planRuntimeMismatchRecovery(input);
   assert.equal(result.ok, false);
 });
 
 Deno.test("planner refuses non-terminal producer", async () => {
-  const input = validInput();
+  const input = await validInput();
   const bindings = [{ ...input.bindings[0], producerTerminal: false }];
   const result = await planRuntimeMismatchRecovery({ ...input, bindings });
   assert.equal(result.ok, false);
@@ -202,12 +195,12 @@ Deno.test("planner refuses candidate-bearing record", async () => {
   });
   const reservation = testReservation();
   const input: RuntimeMismatchPlanInputV1 = {
-    ...validInput(),
+    ...await validInput(),
     repair: testSnapshot([record], [reservation]),
     bindings: [
       testBinding({
-        recordDigest: digestOf(record),
-        reservationDigest: digestOf(reservation),
+        recordDigest: await canonicalStringifySha256(record),
+        reservationDigest: await canonicalStringifySha256(reservation),
       }),
     ],
   };
@@ -216,7 +209,7 @@ Deno.test("planner refuses candidate-bearing record", async () => {
 });
 
 Deno.test("planner refuses present PR observations", async () => {
-  const input = validInput();
+  const input = await validInput();
   const proofs = {
     "issue-ubiquity-ai.ubq.fi-1": testProof({
       prObservations: [{ number: 1, state: "open", head: "h1" }],
@@ -227,7 +220,7 @@ Deno.test("planner refuses present PR observations", async () => {
 });
 
 Deno.test("planner refuses missing effect disposition", async () => {
-  const input = validInput();
+  const input = await validInput();
   const proofs = {
     "issue-ubiquity-ai.ubq.fi-1": testProof({ effectDisposition: null }),
   };
@@ -236,7 +229,7 @@ Deno.test("planner refuses missing effect disposition", async () => {
 });
 
 Deno.test("planner refuses non-exclusive custody", async () => {
-  const input = validInput();
+  const input = await validInput();
   const proofs = {
     "issue-ubiquity-ai.ubq.fi-1": testProof({ exclusiveCustody: false }),
   };
@@ -245,7 +238,7 @@ Deno.test("planner refuses non-exclusive custody", async () => {
 });
 
 Deno.test("planner proposes on fully bound input", async () => {
-  const input = validInput();
+  const input = await validInput();
   const result = await planRuntimeMismatchRecovery(input);
   assert.equal(result.ok, true);
   if (result.ok) {
@@ -259,16 +252,52 @@ Deno.test("planner distinguishes retry and implementation purposes", async () =>
   const record = testRecord();
   const reservation = testReservation({ purpose: "implementation" });
   const input: RuntimeMismatchPlanInputV1 = {
-    ...validInput(),
+    ...await validInput(),
     repair: testSnapshot([record], [reservation]),
     bindings: [
       testBinding({
         purpose: "implementation",
-        recordDigest: digestOf(record),
-        reservationDigest: digestOf(reservation),
+        recordDigest: await canonicalStringifySha256(record),
+        reservationDigest: await canonicalStringifySha256(reservation),
       }),
     ],
   };
   const result = await planRuntimeMismatchRecovery(input);
   assert.equal(result.ok, true);
+});
+
+Deno.test("planner accepts insertion-order equivalent digests", async () => {
+  const first = { b: 2, a: 1 };
+  const second = { a: 1, b: 2 };
+  assert.equal(
+    await canonicalStringifySha256(first),
+    await canonicalStringifySha256(second),
+  );
+});
+
+Deno.test("planner refuses truncated digest", async () => {
+  const input = await validInput();
+  const bindings = [{
+    ...input.bindings[0],
+    recordDigest: input.bindings[0].recordDigest.slice(0, 32),
+  }];
+  const result = await planRuntimeMismatchRecovery({ ...input, bindings });
+  assert.equal(result.ok, false);
+});
+
+Deno.test("planner refuses changed record bytes", async () => {
+  const record = testRecord({ nextStep: "work" as never });
+  const reservation = testReservation();
+  const input: RuntimeMismatchPlanInputV1 = {
+    ...await validInput(),
+    repair: testSnapshot([record], [reservation]),
+    bindings: [
+      testBinding({
+        recordDigest: await canonicalStringifySha256(testRecord()),
+        reservationDigest: await canonicalStringifySha256(reservation),
+      }),
+    ],
+  };
+  const result = await planRuntimeMismatchRecovery(input);
+  assert.equal(result.ok, false);
 });
