@@ -4616,12 +4616,42 @@ async function emitMemoryDigest(state: StateReadView): Promise<void> {
         if (entry.resolved) resolved++;
       }
     }
+    // Version-control awareness: name the exact older working revision of
+    // each currently failing family (bounded, closed fields only), so the
+    // rollback/restore signal is actionable for an operator instead of only
+    // a count. Advisory: the installer chain remains the only rollback
+    // authority.
+    const versioned: {
+      taskId: string;
+      detail: string;
+      priorSuccessRevision: string;
+      failuresAtCurrentRevision: number;
+    }[] = [];
+    for (const memory of snapshot.attemptMemory) {
+      const successRevision = memory.lastSuccessRevision ?? null;
+      const successAt = memory.lastSuccessAtMs ?? null;
+      if (successRevision === null || successAt === null) continue;
+      for (const entry of memory.entries) {
+        if (entry.controllerSha === successRevision) continue;
+        if (entry.lastAtMs <= successAt) continue;
+        versioned.push({
+          taskId: String(memory.taskId),
+          detail: entry.detail,
+          priorSuccessRevision: successRevision,
+          failuresAtCurrentRevision: entry.count,
+        });
+      }
+    }
+    versioned.sort((left, right) =>
+      right.failuresAtCurrentRevision - left.failuresAtCurrentRevision
+    );
     console.log(JSON.stringify({
       kind: "sentinel_memory_digest",
       records: snapshot.attemptMemory.length,
       refused,
       regressions,
       resolved,
+      versionedRegressions: versioned.slice(0, 5),
     }));
   } catch {
     // Advisory only; never blocks the pass.
