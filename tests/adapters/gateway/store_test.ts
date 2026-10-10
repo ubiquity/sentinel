@@ -204,6 +204,32 @@ Deno.test("store: same ref with same bytes is idempotent, different bytes confli
   }
 });
 
+Deno.test("store: an expired ref can be admitted again", async () => {
+  const { store, root } = await makeStore({
+    totalMaxBytes: 1_000,
+    artifactMaxBytes: 600,
+    retentionMaxAgeMs: 1_000,
+  });
+  try {
+    const first = await putCapture(store, ciphertextFor(10, 500), REF_A, T0);
+    assert.ok(first.ok, JSON.stringify(first));
+    const replacement = await putCapture(
+      store,
+      ciphertextFor(12, 500),
+      REF_A,
+      T0 + 1_000,
+    );
+    assert.ok(replacement.ok, JSON.stringify(replacement));
+    const stats = await store.stats();
+    assert.ok(
+      stats.ok && stats.value.count === 1 && stats.value.totalBytes === 500,
+      JSON.stringify(stats),
+    );
+  } finally {
+    await removeTemp(root);
+  }
+});
+
 Deno.test("store: traversal and foreign refs are rejected", async () => {
   const { store, root } = await makeStore();
   try {

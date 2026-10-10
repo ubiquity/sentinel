@@ -14,8 +14,8 @@
  *   symlinks are rejected at every level (root, directory, files).
  * - Writes are atomic (temp file + rename) with owner-only permissions
  *   (0o700 directories, 0o600 files).
- * - A ref is immutable in the strongest sense: same ref + different bytes is
- *   a `conflict`; same ref + same digest is an idempotent no-op.
+ * - A retained ref is immutable: same ref + different bytes is a `conflict`;
+ *   after expiry is purged, the ref can be admitted again.
  * - Total-capacity exhaustion is a `full` error: active evidence is never
  *   deleted to make room.
  * - Expiry is explicit: each entry stores `sourceExpiresAt` (the producer
@@ -449,7 +449,13 @@ export class LocalArtifactStore implements ArtifactStoreV1 {
       const key = await entryKey(input.ref);
       const metaPath = `${this.entriesDir}/${key}.json`;
       const binPath = `${this.entriesDir}/${key}.bin`;
-      const existing = await this.readOrNull(metaPath);
+      let existing = await this.readOrNull(metaPath);
+      if (existing !== null && nowMs >= existing.expiresAt) {
+        // An expired ref is absent from the retained store. Purge it before
+        // applying immutability or capacity admission to the replacement.
+        await this.removeEntry(existing);
+        existing = null;
+      }
       if (existing !== null) {
         if (
           existing.digest === input.digest &&
