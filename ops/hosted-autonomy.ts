@@ -2039,11 +2039,12 @@ export function applyHostedClosures(
 }
 
 /**
- * One bounded autonomy pass: retries first (one CAS batch), then at most one
- * delivery action (one CAS write), then the closure of every task whose exact
- * reviewed head already has an ACCEPTED hosted release (one CAS batch). A
- * single maintenance run can therefore never write an unbounded amount of
- * state.
+ * One bounded autonomy pass: retries first (one CAS batch), then the delivery
+ * pass (at most one external merge per pass; every already-merged verified
+ * delivery is read-only and may settle together), then the closure of every
+ * task whose exact reviewed head already has an ACCEPTED hosted release (one
+ * CAS batch). A single maintenance run can therefore never write an unbounded
+ * amount of state.
  */
 /**
  * Bounded self-observation: read this deployment's own recent failed or
@@ -3627,6 +3628,9 @@ export async function runHostedAutonomy(
       pull = after;
     }
     if (pull.merged !== true || pull.mergeCommitSha === null) continue;
+    // A merge performed earlier in THIS pass is an external write and keeps
+    // the one-merge bound; an already-merged pull is read-only.
+    const mergedThisPass = revision !== null;
     if (revision === null) revision = pull.mergeCommitSha;
     if (revision !== pull.mergeCommitSha) continue;
     if (
@@ -3652,7 +3656,12 @@ export async function runHostedAutonomy(
       );
       actions.push(`delivery:${record.id}:foreign_merged`);
       revisions.push(revision);
-      break;
+      // One external merge per pass stays the bound. An already-merged
+      // verified delivery is read-only, so keep scanning and settle the rest
+      // of the backlog in the same pass: with an unconditional break the four
+      // stacked merges stalled 70 runs behind every newly verified delivery.
+      if (mergedThisPass) break;
+      continue;
     }
 
     const now = deps.clock.now();

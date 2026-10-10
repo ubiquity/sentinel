@@ -193,6 +193,20 @@ const FOREIGN_TASK: ReviewTaskStatementV1 = {
   }),
 };
 
+const FOREIGN_TASK_2_TITLE = "Deliver the second reviewed foreign candidate";
+const FOREIGN_TASK_2_BODY =
+  "The foreign repository must deliver its own issue 121.";
+const FOREIGN_TASK_2: ReviewTaskStatementV1 = {
+  issueNumber: 121,
+  title: FOREIGN_TASK_2_TITLE,
+  body: FOREIGN_TASK_2_BODY,
+  digest: await reviewTaskStatementDigest({
+    issueNumber: 121,
+    title: FOREIGN_TASK_2_TITLE,
+    body: FOREIGN_TASK_2_BODY,
+  }),
+};
+
 /** The trusted statement the live surface returns for one fixture issue. */
 function taskFor(issueNumber: number): ReviewTaskStatementV1 | null {
   if (issueNumber === SELF_TASK.issueNumber) return SELF_TASK;
@@ -447,6 +461,33 @@ function foreignRecord(overrides: Record<string, unknown> = {}): WorkRecordV1 {
     ...overrides,
   });
 }
+
+/** A second foreign record: a distinct issue and pull in the same repository. */
+function foreignRecord2(): WorkRecordV1 {
+  return foreignRecord({
+    id: "issue-ubiquity-ai.ubq.fi-121" as WorkItemId,
+    related: { incidentId: null, issueNumber: 121 },
+    target: {
+      base: BASE,
+      branch: "sentinel/repair/issue-ubiquity-ai.ubq.fi-121",
+      checkpoint: null,
+      head: HEAD,
+      pr: FOREIGN_PR + 1,
+    },
+  });
+}
+
+/** The completed receipt bound to the second record's PR/head/base. */
+const FOREIGN_RECEIPT_2 = foreignReceipt({
+  id: `review-receipt:${"e".repeat(64)}`,
+  pullRequest: { number: FOREIGN_PR + 1, head: HEAD, base: BASE },
+  taskAcceptance: {
+    issueNumber: 121,
+    taskDigest: FOREIGN_TASK_2.digest,
+    verdict: "fulfilled",
+    evidence: ["the second reviewed candidate satisfies the foreign issue"],
+  },
+});
 
 /** The completed receipt bound to the foreign repository/PR/head/base. */
 function foreignReceipt(overrides: Record<string, unknown> = {}) {
@@ -3319,6 +3360,55 @@ Deno.test(
       "delivery",
     );
     await Deno.remove(unproven.rig.tmp, { recursive: true });
+  },
+);
+
+Deno.test(
+  "hosted autonomy: one pass settles every already-merged foreign delivery",
+  async () => {
+    // Already-merged verified deliveries are read-only: the pass keeps
+    // scanning after one instead of breaking, so a backlog settles in one
+    // run rather than one record per run.
+    const stacked = () =>
+      foreignPullFacts({
+        parents: [SHA1, HEAD],
+        baseAncestorOfRevision: true,
+      });
+    const { rig } = await makeRig("autonomy-sweep", {
+      repair: repairSnapshot(
+        [foreignRecord(), foreignRecord2()],
+        [foreignReceipt(), FOREIGN_RECEIPT_2],
+      ),
+      pull: stacked(),
+      issueTask: (number: number) =>
+        Promise.resolve(number === 121 ? FOREIGN_TASK_2 : taskFor(number)),
+    });
+    const result = await run(rig);
+    assert.equal(result.status, "applied", JSON.stringify(result));
+    assert.ok(
+      result.actions.includes(`delivery:${FOREIGN_TARGET}:foreign_merged`),
+      JSON.stringify(result),
+    );
+    assert.ok(
+      result.actions.includes(
+        "delivery:issue-ubiquity-ai.ubq.fi-121:foreign_merged",
+      ),
+      JSON.stringify(result),
+    );
+    const read = await rig.state.readRepair();
+    if (!read.ok || read.value.status !== "found") {
+      throw new Error("unreadable");
+    }
+    const steps = new Map(
+      read.value.snapshot.work.map((row) => [row.id, row.nextStep]),
+    );
+    assert.equal(steps.get(FOREIGN_TARGET), "done");
+    assert.equal(
+      steps.get("issue-ubiquity-ai.ubq.fi-121" as WorkItemId),
+      "done",
+    );
+    assert.deepEqual([...rig.closed].sort(), [120, 121]);
+    await Deno.remove(rig.tmp, { recursive: true });
   },
 );
 
