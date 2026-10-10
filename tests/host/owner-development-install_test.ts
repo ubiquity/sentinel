@@ -757,6 +757,9 @@ const CANCELLED_RELEASE_RUNTIME_REVISION =
   "7c3baee145310141a666bd05360f4e03c56cfd04" as GitSha;
 const STACKED_MERGE_RUNTIME_REVISION =
   "dc5e08af05ed04be2e45a0acca72505fcad0b922" as GitSha;
+// Keep the tested candidate literal independent of the new production rung.
+const MATRIX_DELIVERY_RUNTIME_REVISION =
+  "fc98bb376146496f76281203bcdeca8961f6d859" as GitSha;
 
 async function matrixRecoveryState() {
   const work = CLOSED_C_WAVE.cells.map((cell) =>
@@ -2876,6 +2879,304 @@ Deno.test(
     assert.equal(cancelledFailed.move.nextGeneration, 72);
   },
 );
+
+Deno.test("owner install runtime73: matrix delivery plan binds healthy72 and preserves failed72 rollback", () => {
+  const prior = healthyProof(STACKED_MERGE_RUNTIME_REVISION, 72, 181);
+  const runtime = runtimeRecord({
+    revision: STACKED_MERGE_RUNTIME_REVISION,
+    generation: 72,
+    healthyProof: prior,
+    executionProof: prior,
+  });
+  const state = releaseSnapshot({ runtime });
+  const install = planOwnerDevelopmentInstall(state, NOW);
+  assert.equal(install.status, "install");
+  if (install.status !== "install") {
+    throw new Error("expected matrix delivery install");
+  }
+  assert.deepEqual(install.move, {
+    action: "install",
+    priorRevision: STACKED_MERGE_RUNTIME_REVISION,
+    priorGeneration: 72,
+    nextRevision: MATRIX_DELIVERY_RUNTIME_REVISION,
+    nextGeneration: 73,
+    priorHealthyProof: prior,
+  });
+  const installed = buildOwnerDevelopmentInstallSnapshot(
+    state,
+    STATE_HEAD,
+    install.move,
+    NOW,
+  );
+  assert.equal(
+    planOwnerDevelopmentInstall(installed, NOW).status,
+    "waiting",
+    "installation does not establish candidate health",
+  );
+  const accepted = healthyProof(MATRIX_DELIVERY_RUNTIME_REVISION, 73, 182);
+  assert.equal(
+    planOwnerDevelopmentInstall({
+      ...installed,
+      hostedRuntimes: [{
+        ...installed.hostedRuntimes[0],
+        lastHealthyProof: accepted,
+        lastExecutionProof: accepted,
+      }],
+    }, NOW).status,
+    "no_change",
+  );
+
+  for (
+    const gated of [
+      { ...runtime, lastHealthyProof: null },
+      { ...runtime, lastHealthyProof: healthyProof(UNRELATED, 72, 183) },
+      {
+        ...runtime,
+        lastHealthyProof: healthyProof(STACKED_MERGE_RUNTIME_REVISION, 71, 184),
+      },
+      {
+        ...runtime,
+        lastExecutionProof: failedProof(
+          STACKED_MERGE_RUNTIME_REVISION,
+          72,
+          185,
+        ),
+      },
+      {
+        ...runtime,
+        execution: executionIntent(STACKED_MERGE_RUNTIME_REVISION, 72),
+      },
+    ]
+  ) {
+    assert.equal(
+      planOwnerDevelopmentInstall(releaseSnapshot({ runtime: gated }), NOW)
+        .status,
+      "waiting",
+    );
+  }
+  for (
+    const gated of [
+      releaseSnapshot({ runtime, hostedReleases: [requestedRelease()] }),
+      releaseSnapshot({ runtime, cooldowns: [cooldown(NOW + 1)] }),
+      releaseSnapshot({ runtime, cooldowns: [cooldown(null)] }),
+    ]
+  ) {
+    assert.equal(planOwnerDevelopmentInstall(gated, NOW).status, "waiting");
+  }
+  for (
+    const unrelated of [
+      runtimeRecord({
+        revision: UNRELATED,
+        generation: 72,
+        healthyProof: prior,
+      }),
+      runtimeRecord({
+        revision: STACKED_MERGE_RUNTIME_REVISION,
+        generation: 73,
+        healthyProof: prior,
+      }),
+      runtimeRecord({
+        revision: MATRIX_DELIVERY_RUNTIME_REVISION,
+        generation: 74,
+        healthyProof: accepted,
+      }),
+    ]
+  ) {
+    assert.equal(
+      planOwnerDevelopmentInstall(releaseSnapshot({ runtime: unrelated }), NOW)
+        .status,
+      "no_change",
+    );
+  }
+  const failed72 = planOwnerDevelopmentInstall(
+    releaseSnapshot({
+      runtime: runtimeRecord({
+        revision: STACKED_MERGE_RUNTIME_REVISION,
+        generation: 72,
+        healthyProof: healthyProof(CANCELLED_RELEASE_RUNTIME_REVISION, 71, 186),
+        executionProof: failedProof(STACKED_MERGE_RUNTIME_REVISION, 72, 187),
+      }),
+    }),
+    NOW,
+  );
+  assert.equal(failed72.status, "rollback");
+  if (failed72.status !== "rollback") {
+    throw new Error("expected existing failed72 rollback");
+  }
+  assert.equal(failed72.move.nextRevision, CANCELLED_RELEASE_RUNTIME_REVISION);
+  assert.equal(failed72.move.nextGeneration, 73);
+
+  const failedRuntime = runtimeRecord({
+    revision: MATRIX_DELIVERY_RUNTIME_REVISION,
+    generation: 73,
+    healthyProof: prior,
+    executionProof: failedProof(MATRIX_DELIVERY_RUNTIME_REVISION, 73, 188),
+  });
+  const rollback = planOwnerDevelopmentInstall(
+    releaseSnapshot({ runtime: failedRuntime }),
+    NOW,
+  );
+  assert.equal(rollback.status, "rollback");
+  if (rollback.status !== "rollback") {
+    throw new Error("expected matrix delivery rollback");
+  }
+  assert.equal(rollback.move.nextRevision, STACKED_MERGE_RUNTIME_REVISION);
+  assert.equal(rollback.move.nextGeneration, 74);
+  assert.deepEqual(rollback.move.priorHealthyProof, prior);
+  const restored = buildOwnerDevelopmentInstallSnapshot(
+    releaseSnapshot({ runtime: failedRuntime }),
+    STATE_HEAD,
+    rollback.move,
+    NOW,
+  );
+  assert.equal(
+    planOwnerDevelopmentInstall(restored, NOW).status,
+    "no_change",
+    "the monotonic rollback never reinstalls",
+  );
+  for (
+    const proof of [
+      null,
+      healthyProof(UNRELATED, 72, 189),
+      healthyProof(STACKED_MERGE_RUNTIME_REVISION, 71, 190),
+    ]
+  ) {
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: { ...failedRuntime, lastHealthyProof: proof },
+        }),
+        NOW,
+      ).status,
+      "waiting",
+    );
+  }
+});
+
+Deno.test("owner install runtime73: real controller stages exact matrix delivery and rolls back once", async (test) => {
+  const prior = healthyProof(STACKED_MERGE_RUNTIME_REVISION, 72, 181);
+  await test.step("healthy72 installs exact73 with current CI and immutable state readback", async () => {
+    const state = releaseSnapshot({
+      runtime: runtimeRecord({
+        revision: STACKED_MERGE_RUNTIME_REVISION,
+        generation: 72,
+        healthyProof: prior,
+        executionProof: prior,
+      }),
+      hostedReleases: [acceptedRelease()],
+      cooldowns: [cooldown(NOW - 1)],
+    });
+    const fixture = await concurrencyInstallerFixture(
+      state,
+      undefined,
+      MATRIX_DELIVERY_RUNTIME_REVISION,
+    );
+    try {
+      assert.equal(await fixture.run(), 0);
+      assert.equal(fixture.reports.at(-1)?.status, "installed");
+      assert.equal(fixture.patches(), 1);
+      const read = await fixture.read();
+      assert.ok(read.ok && read.value.status === "found");
+      const installed = read.value.snapshot;
+      assert.equal(
+        installed.hostedRuntimes[0].activeRevision,
+        MATRIX_DELIVERY_RUNTIME_REVISION,
+      );
+      assert.equal(installed.hostedRuntimes[0].generation, 73);
+      assert.deepEqual(installed.hostedRuntimes[0].lastHealthyProof, prior);
+      assert.deepEqual(installed.hostedReleases, state.hostedReleases);
+      assert.deepEqual(installed.githubCooldowns, state.githubCooldowns);
+      const recorded = JSON.parse(
+        (await fixture.message()).trim().split("\n").at(-1)!,
+      );
+      assert.equal(recorded.priorGeneration, 72);
+      assert.equal(recorded.nextGeneration, 73);
+      assert.equal(recorded.nextRevision, MATRIX_DELIVERY_RUNTIME_REVISION);
+      assert.deepEqual(recorded.priorHealthyProof, prior);
+      assert.ok(
+        fixture.requests.some((request) =>
+          request.path.includes(
+            `${MATRIX_DELIVERY_RUNTIME_REVISION}/check-runs`,
+          )
+        ),
+      );
+      assert.equal(await fixture.run(), 0);
+      assert.equal(fixture.reports.at(-1)?.status, "waiting");
+      assert.equal(fixture.patches(), 1);
+    } finally {
+      await fixture.close();
+    }
+  });
+  await test.step("failed73 restores proven72 only at terminal74", async () => {
+    const state = releaseSnapshot({
+      runtime: runtimeRecord({
+        revision: MATRIX_DELIVERY_RUNTIME_REVISION,
+        generation: 73,
+        healthyProof: prior,
+        executionProof: failedProof(MATRIX_DELIVERY_RUNTIME_REVISION, 73, 188),
+      }),
+    });
+    const fixture = await concurrencyInstallerFixture(
+      state,
+      undefined,
+      MATRIX_DELIVERY_RUNTIME_REVISION,
+    );
+    try {
+      assert.equal(await fixture.run(), 0);
+      assert.equal(fixture.reports.at(-1)?.status, "rolled_back");
+      assert.equal(
+        fixture.reports.at(-1)?.candidateRevision,
+        STACKED_MERGE_RUNTIME_REVISION,
+      );
+      assert.equal(fixture.reports.at(-1)?.candidateGeneration, 74);
+      assert.equal(fixture.patches(), 1);
+      const read = await fixture.read();
+      assert.ok(read.ok && read.value.status === "found");
+      assert.deepEqual(
+        read.value.snapshot.hostedRuntimes[0].lastHealthyProof,
+        prior,
+      );
+      assert.ok(
+        !fixture.requests.some((request) =>
+          request.path.includes("/check-runs") ||
+          request.path.includes("/compare/")
+        ),
+      );
+      assert.equal(await fixture.run(), 0);
+      assert.equal(fixture.reports.at(-1)?.status, "no_change");
+      assert.equal(fixture.patches(), 1);
+    } finally {
+      await fixture.close();
+    }
+  });
+});
+
+Deno.test("owner install runtime73: real controller refuses exact CI ancestry and stale state", async (test) => {
+  const prior = healthyProof(STACKED_MERGE_RUNTIME_REVISION, 72, 181);
+  for (const refusal of ["ci", "ancestry", "parent", "readback"] as const) {
+    await test.step(refusal, async () => {
+      const fixture = await concurrencyInstallerFixture(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: STACKED_MERGE_RUNTIME_REVISION,
+            generation: 72,
+            healthyProof: prior,
+            executionProof: prior,
+          }),
+        }),
+        refusal,
+        MATRIX_DELIVERY_RUNTIME_REVISION,
+      );
+      try {
+        assert.equal(await fixture.run(), 0);
+        assert.notEqual(fixture.reports.at(-1)?.status, "installed");
+        assert.equal(fixture.patches(), refusal === "readback" ? 1 : 0);
+      } finally {
+        await fixture.close();
+      }
+    });
+  }
+});
 
 Deno.test(
   "owner development install plan: completed and unrelated pointers do nothing",

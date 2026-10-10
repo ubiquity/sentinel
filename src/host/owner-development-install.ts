@@ -631,6 +631,21 @@ export const OWNER_DEVELOPMENT_INSTALL_STACKED_MERGE_PRIOR_GENERATION = 71;
 export const OWNER_DEVELOPMENT_INSTALL_STACKED_MERGE_REVISION =
   "dc5e08af05ed04be2e45a0acca72505fcad0b922" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_STACKED_MERGE_GENERATION = 72;
+/**
+ * Matrix-delivery rung: the exact locally tested candidate drains every
+ * verified merged foreign delivery, reads issue dependencies at admission,
+ * and batches authenticated state blobs for native 256-cell planning. Only
+ * the exact healthy generation 72 may install it. Failed candidate verification
+ * at generation 73 can restore that predecessor once at monotonic generation 74
+ * only while the recorded healthy generation 72 proof is retained. A later
+ * ordinary failure without that predecessor proof cannot authorize rollback.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_MATRIX_DELIVERY_PRIOR_REVISION =
+  "dc5e08af05ed04be2e45a0acca72505fcad0b922" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_MATRIX_DELIVERY_PRIOR_GENERATION = 72;
+export const OWNER_DEVELOPMENT_INSTALL_MATRIX_DELIVERY_REVISION =
+  "fc98bb376146496f76281203bcdeca8961f6d859" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_MATRIX_DELIVERY_GENERATION = 73;
 export interface OwnerMatrixRecoveryEvidenceV1 {
   candidate: GitSha;
   repairHead: GitSha;
@@ -3017,6 +3032,59 @@ export function planOwnerDevelopmentInstall(
     return waiting(
       "the planner successor generation 60 healthy proof is not recorded",
     );
+  }
+
+  // Matrix-delivery installation is pinned to the exact healthy predecessor.
+  // A later exact failure takes the previous rung's rollback path below.
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_MATRIX_DELIVERY_PRIOR_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_MATRIX_DELIVERY_PRIOR_GENERATION &&
+    healthy !== null && failed === null
+  ) {
+    return movePlan(
+      "install",
+      runtime,
+      OWNER_DEVELOPMENT_INSTALL_MATRIX_DELIVERY_REVISION,
+      OWNER_DEVELOPMENT_INSTALL_MATRIX_DELIVERY_GENERATION,
+      healthy,
+      "install the exact matrix-delivery runtime after its generation 72 healthy proof",
+    );
+  }
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_MATRIX_DELIVERY_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_MATRIX_DELIVERY_GENERATION
+  ) {
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_MATRIX_DELIVERY_PRIOR_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_MATRIX_DELIVERY_PRIOR_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded generation 72 healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_MATRIX_DELIVERY_PRIOR_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed matrix-delivery runtime to its recorded proven predecessor",
+      );
+    }
+    return healthy === null
+      ? waiting(
+        "the matrix-delivery generation 73 healthy proof is not recorded",
+      )
+      : noChange("the matrix-delivery installation is complete");
+  }
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_MATRIX_DELIVERY_PRIOR_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_MATRIX_DELIVERY_GENERATION + 1
+  ) {
+    return noChange("the matrix-delivery rollback is terminal");
   }
 
   // Stacked-merge verification rung. Only a HEALTHY generation 71 record
