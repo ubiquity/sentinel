@@ -129,12 +129,15 @@ function sameRepository(
 function receiptIdentityMatches(
   receipt: ModelRunReceiptV1,
   request: { model: string; reasoning: string },
-  expectedProvider: string,
+  expectedProvider: string | readonly string[],
 ): boolean {
+  const accepted = typeof expectedProvider === "string"
+    ? [expectedProvider]
+    : expectedProvider;
   return receipt.actual.evidenceKind === "request-runtime" &&
     receipt.actual.observedModel === request.model &&
     receipt.actual.observedReasoning === request.reasoning &&
-    receipt.actual.provider === expectedProvider;
+    accepted.includes(receipt.actual.provider);
 }
 
 export function verifyMatrixReceiptV1(
@@ -145,7 +148,7 @@ export function verifyMatrixReceiptV1(
     maxDurationMs: number;
     maxOutputChars: number;
   },
-  expectedProvider: string,
+  expectedProvider: string | readonly string[],
 ): boolean {
   if (!receiptIdentityMatches(receipt, request, expectedProvider)) return false;
   if (receipt.actual.durationMs > request.maxDurationMs) return false;
@@ -163,7 +166,7 @@ export function verifyMatrixReceiptV1(
 function interruptedOutputFailure(
   result: MatrixCellResultV1,
   cell: MatrixCellPlanV1,
-  expectedProvider: string,
+  expectedProvider: string | readonly string[],
 ): boolean {
   const receipt = result.receipt;
   if (
@@ -900,8 +903,11 @@ export interface MatrixIngestReportV1 {
 export interface MatrixIngestOptionsV1 {
   deadline: number;
   runStartedAt?: number;
-  /** Trusted provider identity the runtime route must have used. */
-  expectedProvider: string;
+  /**
+   * Trusted provider identity (or the closed allowlist of documented routes)
+   * the runtime route must have used.
+   */
+  expectedProvider: string | readonly string[];
   /**
    * Trusted per-target bundle importer. A completed result with a candidate
    * head is rejected as `candidate_unavailable` unless its bundle digest and
