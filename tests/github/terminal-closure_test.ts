@@ -113,6 +113,7 @@ async function fixture() {
     tamperJournal: false,
     failCi: false,
     base: SHA2,
+    baseTip: null as typeof SHA2 | null,
   };
   const requests: HttpRequestV1[] = [];
   const http = (request: HttpRequestV1): Promise<HttpResponseV1> => {
@@ -146,7 +147,7 @@ async function fixture() {
     else if (path.endsWith("/git/ref/heads/sentinel/fix-1")) {
       body = refWire(state.head);
     } else if (path.endsWith("/git/ref/heads/development")) {
-      body = refWire(state.base, "refs/heads/development");
+      body = refWire(state.baseTip ?? state.base, "refs/heads/development");
     } else if (path.endsWith("/check-runs")) {
       body = checksPageWire([
         checkRunWire({ conclusion: state.failCi ? "failure" : "success" }),
@@ -371,4 +372,33 @@ Deno.test("terminal lifecycle: real Git CAS controller and native adapter retry 
   } finally {
     await Deno.remove(temporary, { recursive: true });
   }
+});
+
+Deno.test("terminal adapter: historical closed own PR with an advanced base still closes the digest-bound issue", async () => {
+  const context = await fixture();
+  // The exact issue-731 class: the own pull is already closed unmerged, the
+  // digest-bound issue is already closed, and development has legitimately
+  // moved past the reviewed base while the journal verdict stays exact.
+  context.state.prClosed = true;
+  context.state.issueClosed = true;
+  context.state.baseTip = SHA3;
+  const outcome = await context.port.closeAlreadySatisfiedTask(context.request);
+  assert(outcome.ok, JSON.stringify(outcome));
+  assert.equal(outcome.value, "already_closed");
+  assert.equal(
+    context.requests.some((request) => request.method === "PATCH"),
+    false,
+  );
+});
+
+Deno.test("terminal adapter: open pull with an advanced base still refuses closure", async () => {
+  const context = await fixture();
+  context.state.baseTip = SHA3;
+  const outcome = await context.port.closeAlreadySatisfiedTask(context.request);
+  assert.equal(outcome.ok, false);
+  if (!outcome.ok) assert.equal(outcome.error.kind, "conflict");
+  assert.equal(
+    context.requests.some((request) => request.method === "PATCH"),
+    false,
+  );
 });

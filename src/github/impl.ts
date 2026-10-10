@@ -965,15 +965,30 @@ export class GitHubPortImpl implements GitHubPort {
       ) return portError("conflict", "already-satisfied PR identity mismatch");
       const candidate = await this.client.readRef(`refs/heads/${branch}`);
       if (!candidate.ok) return candidate;
-      const currentBase = await this.client.readRef(
-        `refs/heads/${pull.value.baseRef}`,
-      );
-      if (!currentBase.ok) return currentBase;
-      if (candidate.value?.sha !== head || currentBase.value?.sha !== base) {
+      // An own pull that is already closed unmerged is a historical
+      // confirmation: the base branch legitimately advances after the pull
+      // closes, and the pull object's own exact base field still binds the
+      // reviewed base. Keep the strict tip equality only while the closure
+      // could still mutate an open pull.
+      const historical = pull.value.state === "closed" &&
+        pull.value.mergeSha === null;
+      if (candidate.value?.sha !== head) {
         return portError(
           "conflict",
           "already-satisfied candidate/base identity mismatch",
         );
+      }
+      if (!historical) {
+        const currentBase = await this.client.readRef(
+          `refs/heads/${pull.value.baseRef}`,
+        );
+        if (!currentBase.ok) return currentBase;
+        if (currentBase.value?.sha !== base) {
+          return portError(
+            "conflict",
+            "already-satisfied candidate/base identity mismatch",
+          );
+        }
       }
       const issue = await this.client.readIssue(issueNumber);
       if (!issue.ok) return issue;
