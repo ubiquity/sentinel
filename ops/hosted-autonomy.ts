@@ -2965,6 +2965,15 @@ export async function runHostedAutonomy(
       : null;
     if (
       releaseRead?.ok && releaseRead.value.status === "found" &&
+      releaseRead.value.snapshot.hostedRuntimes.every((row) =>
+        row.execution === null
+      ) &&
+      releaseRead.value.snapshot.hostedRuntimes.some((row) =>
+        row.id === HOSTED_RUNTIME_ID
+      ) &&
+      !releaseRead.value.snapshot.hostedReleases.some((row) =>
+        row.phase !== "accepted" && row.phase !== "rolled_back"
+      ) &&
       read.ok && read.value.status === "found" && closed !== undefined &&
       closedCWaveNeedsRecovery(read.value.snapshot, closed.binding)
     ) {
