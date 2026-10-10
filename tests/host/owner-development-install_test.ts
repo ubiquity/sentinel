@@ -745,6 +745,12 @@ const CONCURRENCY_RETRY_REVISION =
 const CONCURRENCY_PLANNER_REVISION =
   "ddc98af7062b63e2b6b0f1e6b877e32f4675d442" as GitSha;
 const ROLLBACK_TARGET_GENERATION = 46;
+// The memory generation 68 revision and the staged learning generation 69
+// revision stay test-local exact literals, mirroring the production pins.
+const MEMORY_RUNTIME_REVISION =
+  "335727744517fab37fa9939da49366c9b315207b" as GitSha;
+const LEARNING_RUNTIME_REVISION =
+  "6db6166d23deddcf1894d493b25b4c1f4e616282" as GitSha;
 
 async function matrixRecoveryState() {
   const work = CLOSED_C_WAVE.cells.map((cell) =>
@@ -2513,6 +2519,78 @@ Deno.test(
     assert.equal(
       planOwnerDevelopmentInstall(waits[4], NOW).status,
       "no_change",
+    );
+  },
+);
+
+Deno.test(
+  "owner development install plan: generation 69 learning install follows a healthy 68 and rolls back once",
+  () => {
+    const memoryHealthy = healthyProof(MEMORY_RUNTIME_REVISION, 68, 141);
+    const learningInstall = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: MEMORY_RUNTIME_REVISION,
+          generation: 68,
+          healthyProof: memoryHealthy,
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(learningInstall.status, "install");
+    if (learningInstall.status !== "install") {
+      throw new Error("expected install");
+    }
+    assert.equal(learningInstall.move.priorRevision, MEMORY_RUNTIME_REVISION);
+    assert.equal(learningInstall.move.priorGeneration, 68);
+    assert.equal(learningInstall.move.nextRevision, LEARNING_RUNTIME_REVISION);
+    assert.equal(learningInstall.move.nextGeneration, 69);
+    assert.equal(
+      canonicalStringify(learningInstall.move.priorHealthyProof),
+      canonicalStringify(memoryHealthy),
+    );
+
+    // A failed generation 69 restores the recorded generation 68 revision
+    // exactly once at monotonic generation 70; the post-rollback pointer is
+    // then terminal.
+    const learningRollback = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: LEARNING_RUNTIME_REVISION,
+          generation: 69,
+          healthyProof: memoryHealthy,
+          executionProof: failedProof(LEARNING_RUNTIME_REVISION, 69, 142),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(learningRollback.status, "rollback");
+    if (learningRollback.status !== "rollback") {
+      throw new Error("expected rollback");
+    }
+    assert.equal(learningRollback.move.priorRevision, LEARNING_RUNTIME_REVISION);
+    assert.equal(learningRollback.move.priorGeneration, 69);
+    assert.equal(learningRollback.move.nextRevision, MEMORY_RUNTIME_REVISION);
+    assert.equal(learningRollback.move.nextGeneration, 70);
+    assert.equal(
+      canonicalStringify(learningRollback.move.priorHealthyProof),
+      canonicalStringify(memoryHealthy),
+    );
+
+    // Without the recorded generation 68 healthy proof the learning install
+    // waits instead of moving the pointer.
+    assert.equal(
+      planOwnerDevelopmentInstall(
+        releaseSnapshot({
+          runtime: runtimeRecord({
+            revision: MEMORY_RUNTIME_REVISION,
+            generation: 68,
+            healthyProof: null,
+          }),
+        }),
+        NOW,
+      ).status,
+      "waiting",
     );
   },
 );

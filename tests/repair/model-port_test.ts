@@ -553,8 +553,10 @@ Deno.test(
     const prompt = JSON.stringify(threadStart?.params ?? {});
     assert.ok(prompt.includes("REGRESSION SIGNAL"));
     assert.ok(prompt.includes("worked before, broken now"));
+    assert.ok(prompt.includes("version-controlled"));
+    assert.ok(prompt.includes("restoring or aligning"));
     assert.ok(prompt.includes("2 recorded failures now"));
-    assert.ok(prompt.includes(String(SHA3).slice(0, 12)));
+    assert.ok(prompt.includes(String(SHA3)));
   },
 );
 

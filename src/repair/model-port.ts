@@ -2366,19 +2366,25 @@ function buildPrompt(
     // back by yourself.
     parts.push(
       "REGRESSION SIGNAL — worked before, broken now: the following failure " +
-        "modes produced an accepted candidate at an OLDER runtime revision " +
-        "and now fail at the current revision. A change between those " +
-        "revisions likely regressed them; prefer restoring or aligning with " +
-        "the older working behavior and state which change window you " +
-        "believe regressed it:\n" +
+        "modes produced an accepted candidate at an OLDER revision and now " +
+        "fail at the current one. This work is version-controlled and each " +
+        "fact below records the exact older working revision, so the working " +
+        "behavior still exists in the history. When that history is present " +
+        "in this checkout, inspect the change window between the older " +
+        "revision and the current checkout before editing, prefer restoring " +
+        "or aligning with the older working behavior (a minimal revert of " +
+        "the change that regressed it) instead of re-implementing from " +
+        "scratch, and state which change window you believe regressed it. " +
+        "When the older revision belongs to the runtime rather than this " +
+        "checkout, treat the fact as evidence that the revision change is " +
+        "implicated, name it in your final response, and do not rewrite " +
+        "unrelated code:\n" +
         request.regressions
           .map((fact) =>
             `- ${fact.detail} — ${fact.failuresAtCurrentRevision} recorded ` +
             `failure${
               fact.failuresAtCurrentRevision === 1 ? "" : "s"
-            } now; succeeded at revision ${
-              String(fact.priorSuccessRevision).slice(0, 12)
-            }`
+            } now; succeeded at revision ${fact.priorSuccessRevision}`
           )
           .join("\n"),
     );

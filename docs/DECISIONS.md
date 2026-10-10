@@ -50,6 +50,14 @@ Numeric GitHub pagination aliases are accepted only after authenticating the sam
 
 Gateway unavailable diagnostics retain numeric HTTP status without response bodies, URLs, authentication headers or credentials. Error kind and fail-closed observation remain unchanged; the status alone does not establish a producer root cause.
 
+## Durable memory and self-healing
+
+Sentinel records machine-readable attempt memory and a deterministic lesson digest in the existing Git repair state; trusted writers own every write and model workers never write state. Bounded records carry the attempt fingerprint, the stage reached, a closed failure class, counts and the runtime revision. Unchanged replays of a recorded failure are refused with a precise reason, and the implementer prompt carries verified prior attempts, cross-task repository lessons and regression facts.
+
+The system is version-controlled and regression-aware: a recorded success stores the exact runtime revision that produced it, and a failure mode that previously succeeded at an older revision is reported as a regression (worked before, broken now) in the lesson digest and the implementer prompt, which must prefer restoring the older working behavior over re-implementing. Rollback authority stays with the owner-development install chain: a healthy proof moves generations, a failed candidate restores the recorded proven predecessor once, and no model, worker or recovery pass may pin, roll back or promote a runtime revision.
+
+Bounded self-upkeep passes defer instead of failing the run: exhausting a recovery pass's budget, absent custody or an unavailable producer is reported with an explicit bounded reason, writes nothing and lets prepare, matrix_plan and delivery continue. Only integrity faults (tampered, conflicting or changed custody) fail closed.
+
 ## Evidence, target release and local development
 
 Use fast module checks and directly affected production-consumer boundaries with fake external transports, temporary Git/state and injected clocks. Enforce a 300-second deadline on each local validation command. One named changed-lifecycle scenario is final local acceptance; whole-repository sweeps require a separate explicit request. [AGENTS.md](../AGENTS.md) defines observation, teardown and evidence rules.
