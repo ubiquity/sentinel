@@ -467,11 +467,14 @@ export interface HostedAutonomyPullV1 {
   mergeCommitSha: string | null;
   headSha: string | null;
   baseRef: string | null;
+  baseSha: string | null;
   author: string | null;
   /** Required only when recovering a historical cleared publication. */
   mergedBy?: string | null;
   parents: readonly string[];
   revisionOnBaseBranch: boolean;
+  /** The pull's own base commit is an ancestor of the merge revision. */
+  baseAncestorOfRevision: boolean;
 }
 
 export interface HostedAutonomyGitHubV1 {
@@ -1740,10 +1743,26 @@ interface HostedMergedDeliveryV1 {
  * The exact merged-delivery evidence a FOREIGN record's closure requires: the
  * pull is merged under a named merge commit, it is authored by a trusted
  * identity, it targets the record's own base branch, that commit has exactly
- * two parents equal to the recorded base and head, and the revision is
- * integrated into the recorded base branch. Any missing, unreadable or
- * mismatched fact yields null: an ambiguous merge is never evidence.
+ * two parents whose second one is the recorded head, the recorded base is
+ * either the first parent or a proven ancestor of the merge revision, and the
+ * revision is integrated into the recorded base branch. Any missing,
+ * unreadable or mismatched fact yields null: an ambiguous merge is never
+ * evidence.
  */
+function baseAndHeadAreMerged(
+  pull: HostedAutonomyPullV1,
+  base: string,
+  head: string,
+): boolean {
+  if (pull.parents.length !== 2 || !pull.parents.includes(head)) return false;
+  if (pull.parents.includes(base)) return true;
+  // The merge may land on a descendant of the reviewed base: the base branch
+  // can advance between the reviewed snapshot and a trusted external merge,
+  // so bind the recorded base by its own ancestry proof instead of parent
+  // equality. A divergent or unproven base is still refused.
+  return pull.baseSha === base && pull.baseAncestorOfRevision;
+}
+
 function verifiedMergedDelivery(
   record: HostedAutonomyRecordV1,
   pull: HostedAutonomyPullV1,
@@ -1761,12 +1780,7 @@ function verifiedMergedDelivery(
     return null;
   }
   if (pull.baseRef !== baseBranch) return null;
-  if (
-    pull.parents.length !== 2 ||
-    !pull.parents.includes(base) || !pull.parents.includes(head)
-  ) {
-    return null;
-  }
+  if (!baseAndHeadAreMerged(pull, base, head)) return null;
   if (!pull.revisionOnBaseBranch) return null;
   return { revision: pull.mergeCommitSha };
 }
@@ -3616,9 +3630,7 @@ export async function runHostedAutonomy(
     if (revision === null) revision = pull.mergeCommitSha;
     if (revision !== pull.mergeCommitSha) continue;
     if (
-      pull.parents.length !== 2 ||
-      !pull.parents.includes(base) || !pull.parents.includes(head) ||
-      !pull.revisionOnBaseBranch
+      !baseAndHeadAreMerged(pull, base, head) || !pull.revisionOnBaseBranch
     ) {
       actions.push(`delivery:${record.id}:merge_not_observed`);
       continue;
@@ -4086,6 +4098,7 @@ export function parseHostedAutonomyPull(
   const mergeCommitSha = obj["merge_commit_sha"];
   const headSha = head?.["sha"];
   const baseRef = base?.["ref"];
+  const baseSha = base?.["sha"];
   if (typeof headSha !== "string" || typeof baseRef !== "string") return null;
   if (merged && typeof mergeCommitSha !== "string") return null;
   return {
@@ -4095,12 +4108,14 @@ export function parseHostedAutonomyPull(
     mergeCommitSha: typeof mergeCommitSha === "string" ? mergeCommitSha : null,
     headSha,
     baseRef,
+    baseSha: typeof baseSha === "string" ? baseSha : null,
     author: typeof user?.["login"] === "string" ? String(user["login"]) : null,
     ...(obj["merged_by"] === undefined ? {} : {
       mergedBy: typeof merger?.["login"] === "string" ? merger["login"] : null,
     }),
     parents: [],
     revisionOnBaseBranch: false,
+    baseAncestorOfRevision: false,
   };
 }
 
@@ -4181,7 +4196,28 @@ export function createHostedAutonomyGitHub(
       compare,
       mergeCommitSha,
     );
-    return { ...parsed, parents, revisionOnBaseBranch };
+    // The reviewed base may have advanced before the merge landed (the owner
+    // merged PRs 890/892/894/895 as a stack on 2026-10-05), so the merge's
+    // first parent is not always the pull's own base commit. Prove the base
+    // ancestry instead of guessing it: the same compare shape with the pull's
+    // base commit as the left side.
+    let baseAncestorOfRevision = false;
+    if (parsed.baseSha !== null) {
+      const baseCompare = await request(
+        "GET",
+        `/repos/${scope}/compare/${parsed.baseSha}...${mergeCommitSha}`,
+      );
+      baseAncestorOfRevision = revisionIntegratedIntoBase(
+        baseCompare,
+        parsed.baseSha,
+      );
+    }
+    return {
+      ...parsed,
+      parents,
+      revisionOnBaseBranch,
+      baseAncestorOfRevision,
+    };
   }
 
   /**

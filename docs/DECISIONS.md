@@ -60,6 +60,8 @@ Bounded self-upkeep passes defer instead of failing the run: exhausting a recove
 
 A release request the trusted controller cancelled or marked failed is terminal delivery evidence: the affected delivery record is parked blocked with the recorded failure reason instead of waiting for release acceptance that can no longer exist.
 
+A trusted already-merged pull request is verified by its exact head binding plus the recorded base's proven ancestry, not by first-parent equality: the base branch may advance between the reviewed snapshot and an external trusted merge, and the merge is still the reviewed delivery. A divergent, unproven or differently-parented merge is refused.
+
 ## Evidence, target release and local development
 
 Use fast module checks and directly affected production-consumer boundaries with fake external transports, temporary Git/state and injected clocks. Enforce a 300-second deadline on each local validation command. One named changed-lifecycle scenario is final local acceptance; whole-repository sweeps require a separate explicit request. [AGENTS.md](../AGENTS.md) defines observation, teardown and evidence rules.

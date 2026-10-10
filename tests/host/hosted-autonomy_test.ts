@@ -582,9 +582,11 @@ function pullFacts(
     mergeCommitSha: MERGE,
     headSha: HEAD,
     baseRef: "development",
+    baseSha: BASE,
     author: "github-actions[bot]",
     parents: [BASE, HEAD],
     revisionOnBaseBranch: true,
+    baseAncestorOfRevision: false,
     ...overrides,
   };
 }
@@ -2814,9 +2816,11 @@ Deno.test(
       mergeCommitSha: null,
       headSha: HEAD,
       baseRef: "development",
+      baseSha: null,
       author: "github-actions[bot]",
       parents: [],
       revisionOnBaseBranch: false,
+      baseAncestorOfRevision: false,
     });
     const merged = parseHostedAutonomyPull({
       state: "closed",
@@ -2868,12 +2872,18 @@ Deno.test(
           merged: true,
           merge_commit_sha: MERGE,
           head: { sha: HEAD },
-          base: { ref: "development" },
+          base: { ref: "development", sha: BASE },
           user: { login: "github-actions[bot]" },
           number: 51,
         }
         : url.includes("/commits/")
         ? { parents: [{ sha: BASE }, { sha: HEAD }] }
+        : url.includes(`/compare/${BASE}...`)
+        ? {
+          status: "ahead",
+          base_commit: { sha: BASE },
+          merge_base_commit: { sha: BASE },
+        }
         : {
           status: "ahead",
           base_commit: { sha: MERGE },
@@ -2901,8 +2911,13 @@ Deno.test(
       assert.equal(afterMerge.mergeCommitSha, MERGE);
       assert.deepEqual([...afterMerge.parents], [BASE, HEAD]);
       assert.equal(afterMerge.revisionOnBaseBranch, true);
-      assert.equal(requests.length, 4);
+      assert.equal(afterMerge.baseSha, BASE);
+      assert.equal(afterMerge.baseAncestorOfRevision, true);
+      assert.equal(requests.length, 5);
       assert.ok(requests[3].includes("/repos/ubiquity/sentinel/compare/"));
+      assert.ok(
+        requests[4].includes(`/repos/ubiquity/sentinel/compare/${BASE}...`),
+      );
     } finally {
       globalThis.fetch = original;
     }
@@ -3246,6 +3261,66 @@ async function retirementClosureRig(merged = false, review = foreignReceipt()) {
       : foreign;
   return { rig, foreign, closedAt, checkedHeads, retiring, unrelated };
 }
+
+Deno.test(
+  "hosted autonomy: a trusted merge onto a descendant of the reviewed base closes the record",
+  async () => {
+    // The owner merged the bot's PRs 890/892/894/895 as a stack on 2026-10-05:
+    // each merge commit's first parent is the previous merge, not the reviewed
+    // base snapshot. The exact head binding plus the proven base ancestry still
+    // verify the delivery and close the record.
+    const stacked = (ancestry: boolean) =>
+      foreignPullFacts({
+        parents: [SHA1, HEAD],
+        baseAncestorOfRevision: ancestry,
+      });
+    const { rig } = await makeRig("autonomy-stacked-base", {
+      repair: repairSnapshot([foreignRecord()], [foreignReceipt()]),
+      pull: stacked(true),
+    });
+    const result = await run(rig);
+    assert.equal(result.status, "applied", JSON.stringify(result));
+    assert.equal(result.reason, "closed_issues");
+    assert.ok(
+      result.actions.includes(`delivery:${FOREIGN_TARGET}:foreign_merged`),
+      JSON.stringify(result),
+    );
+    assert.ok(result.actions.includes(`close:${FOREIGN_TARGET}:issue=120`));
+    const read = await rig.state.readRepair();
+    if (!read.ok || read.value.status !== "found") {
+      throw new Error("unreadable");
+    }
+    const record = read.value.snapshot.work.find((row) =>
+      row.id === FOREIGN_TARGET
+    );
+    assert.equal(record?.nextStep, "done");
+    await Deno.remove(rig.tmp, { recursive: true });
+
+    // Without the ancestry proof the same stacked merge stays unverified: the
+    // record is not closed.
+    const unproven = await makeRig("autonomy-stacked-unproven", {
+      repair: repairSnapshot([foreignRecord()], [foreignReceipt()]),
+      pull: stacked(false),
+    });
+    const refused = await run(unproven.rig);
+    assert.equal(refused.status, "skipped", JSON.stringify(refused));
+    assert.ok(
+      refused.actions.includes(
+        `delivery:${FOREIGN_TARGET}:merge_not_observed`,
+      ),
+    );
+    const afterRefusal = await unproven.rig.state.readRepair();
+    if (!afterRefusal.ok || afterRefusal.value.status !== "found") {
+      throw new Error("unreadable");
+    }
+    assert.equal(
+      afterRefusal.value.snapshot.work.find((row) => row.id === FOREIGN_TARGET)
+        ?.nextStep,
+      "delivery",
+    );
+    await Deno.remove(unproven.rig.tmp, { recursive: true });
+  },
+);
 
 Deno.test("hosted autonomy: verified retirement continues foreign closure on the new CAS head", async () => {
   const { rig, closedAt, checkedHeads, retiring, unrelated } =
