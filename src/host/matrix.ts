@@ -485,7 +485,7 @@ export async function planMatrixWave(
       }
       const config = configForRepository(deps, record.repository);
       return config !== null &&
-        isMatrixImplementationReadyV1(record, context.snapshot, config);
+        isMatrixImplementationReadyV1(record, context.snapshot, config, now);
     });
     if (nextId === undefined) break;
     attemptedIds.add(nextId);
@@ -494,7 +494,7 @@ export async function planMatrixWave(
     const config = configForRepository(deps, record.repository);
     if (config === null) continue;
     attempted++;
-    if (!isMatrixImplementationReadyV1(record, context.snapshot, config)) {
+    if (!isMatrixImplementationReadyV1(record, context.snapshot, config, now)) {
       notReady++;
       continue;
     }
