@@ -586,6 +586,22 @@ export const OWNER_DEVELOPMENT_INSTALL_LEARNING_PRIOR_GENERATION = 68;
 export const OWNER_DEVELOPMENT_INSTALL_LEARNING_REVISION =
   "6db6166d23deddcf1894d493b25b4c1f4e616282" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_LEARNING_GENERATION = 69;
+/**
+ * Versioned-recovery rung: the strengthened version-control regression
+ * guidance (the exact older working revision plus the explicit
+ * restore-over-reimplement instruction), the versioned-regression facts in the
+ * live learning digest, and the bounded deferral classification for an
+ * exhausted current-matrix history budget. Installed only after the recorded
+ * generation 69 healthy proof; a failed generation 70 candidate restores the
+ * recorded generation 69 revision once at monotonic generation 71, and that
+ * post-rollback pointer is terminal.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_VERSIONED_PRIOR_REVISION =
+  "6db6166d23deddcf1894d493b25b4c1f4e616282" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_VERSIONED_PRIOR_GENERATION = 69;
+export const OWNER_DEVELOPMENT_INSTALL_VERSIONED_REVISION =
+  "7f43cf0b93b82c521a55d3fae26996831dc8c27e" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_VERSIONED_GENERATION = 70;
 export interface OwnerMatrixRecoveryEvidenceV1 {
   candidate: GitSha;
   repairHead: GitSha;
@@ -2971,6 +2987,56 @@ export function planOwnerDevelopmentInstall(
     }
     return waiting(
       "the planner successor generation 60 healthy proof is not recorded",
+    );
+  }
+
+  // Versioned-recovery rung. Only a HEALTHY generation 69 record takes this
+  // branch; a failed 69 falls through to the learning rung's rollback below,
+  // so the two-stage rollback semantics stay exactly as recorded.
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_VERSIONED_PRIOR_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_VERSIONED_PRIOR_GENERATION &&
+    healthy !== null
+  ) {
+    return movePlan(
+      "install",
+      runtime,
+      OWNER_DEVELOPMENT_INSTALL_VERSIONED_REVISION,
+      OWNER_DEVELOPMENT_INSTALL_VERSIONED_GENERATION,
+      healthy,
+      "install the versioned-recovery runtime after its generation 69 healthy proof",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_VERSIONED_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_VERSIONED_GENERATION
+  ) {
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_VERSIONED_PRIOR_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_VERSIONED_PRIOR_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded generation 69 healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_VERSIONED_PRIOR_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed versioned-recovery runtime to its recorded proven predecessor",
+      );
+    }
+    if (healthy !== null) {
+      return noChange("the owner development installation is complete");
+    }
+    return waiting(
+      "the versioned-recovery generation 70 healthy proof is not recorded",
     );
   }
 

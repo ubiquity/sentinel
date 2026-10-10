@@ -751,6 +751,8 @@ const MEMORY_RUNTIME_REVISION =
   "335727744517fab37fa9939da49366c9b315207b" as GitSha;
 const LEARNING_RUNTIME_REVISION =
   "6db6166d23deddcf1894d493b25b4c1f4e616282" as GitSha;
+const VERSIONED_RUNTIME_REVISION =
+  "7f43cf0b93b82c521a55d3fae26996831dc8c27e" as GitSha;
 
 async function matrixRecoveryState() {
   const work = CLOSED_C_WAVE.cells.map((cell) =>
@@ -2595,6 +2597,93 @@ Deno.test(
       ).status,
       "waiting",
     );
+  },
+);
+
+Deno.test(
+  "owner development install plan: generation 70 versioned-recovery install follows a healthy 69 and rolls back once",
+  () => {
+    const learningHealthy = healthyProof(LEARNING_RUNTIME_REVISION, 69, 151);
+    const versionedInstall = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: LEARNING_RUNTIME_REVISION,
+          generation: 69,
+          healthyProof: learningHealthy,
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(versionedInstall.status, "install");
+    if (versionedInstall.status !== "install") {
+      throw new Error("expected install");
+    }
+    assert.equal(
+      versionedInstall.move.priorRevision,
+      LEARNING_RUNTIME_REVISION,
+    );
+    assert.equal(versionedInstall.move.priorGeneration, 69);
+    assert.equal(
+      versionedInstall.move.nextRevision,
+      VERSIONED_RUNTIME_REVISION,
+    );
+    assert.equal(versionedInstall.move.nextGeneration, 70);
+    assert.equal(
+      canonicalStringify(versionedInstall.move.priorHealthyProof),
+      canonicalStringify(learningHealthy),
+    );
+
+    // A failed generation 70 restores the recorded generation 69 revision
+    // once at monotonic generation 71.
+    const versionedRollback = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: VERSIONED_RUNTIME_REVISION,
+          generation: 70,
+          healthyProof: learningHealthy,
+          executionProof: failedProof(VERSIONED_RUNTIME_REVISION, 70, 152),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(versionedRollback.status, "rollback");
+    if (versionedRollback.status !== "rollback") {
+      throw new Error("expected rollback");
+    }
+    assert.equal(
+      versionedRollback.move.priorRevision,
+      VERSIONED_RUNTIME_REVISION,
+    );
+    assert.equal(versionedRollback.move.priorGeneration, 70);
+    assert.equal(
+      versionedRollback.move.nextRevision,
+      LEARNING_RUNTIME_REVISION,
+    );
+    assert.equal(versionedRollback.move.nextGeneration, 71);
+    assert.equal(
+      canonicalStringify(versionedRollback.move.priorHealthyProof),
+      canonicalStringify(learningHealthy),
+    );
+
+    // A failed generation 69 still falls through to the learning rung's own
+    // rollback, never to the versioned rung.
+    const learningFailed = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: LEARNING_RUNTIME_REVISION,
+          generation: 69,
+          healthyProof: healthyProof(MEMORY_RUNTIME_REVISION, 68, 153),
+          executionProof: failedProof(LEARNING_RUNTIME_REVISION, 69, 154),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(learningFailed.status, "rollback");
+    if (learningFailed.status !== "rollback") {
+      throw new Error("expected rollback");
+    }
+    assert.equal(learningFailed.move.nextRevision, MEMORY_RUNTIME_REVISION);
+    assert.equal(learningFailed.move.nextGeneration, 70);
   },
 );
 
