@@ -2568,7 +2568,10 @@ Deno.test(
     if (learningRollback.status !== "rollback") {
       throw new Error("expected rollback");
     }
-    assert.equal(learningRollback.move.priorRevision, LEARNING_RUNTIME_REVISION);
+    assert.equal(
+      learningRollback.move.priorRevision,
+      LEARNING_RUNTIME_REVISION,
+    );
     assert.equal(learningRollback.move.priorGeneration, 69);
     assert.equal(learningRollback.move.nextRevision, MEMORY_RUNTIME_REVISION);
     assert.equal(learningRollback.move.nextGeneration, 70);
