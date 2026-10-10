@@ -1358,6 +1358,12 @@ Deno.test("hosted runtime: early child failure diagnostic is sanitized, bounded 
       "error: Uncaught (in promise) Error: fixture abort",
       "    at main (file:///home/runner/work/sentinel/src/host/hosted-runtime.ts:42:7)",
       "    at async file:///home/runner/work/sentinel/src/repair/loop.ts:9:3",
+      // Code-owned basenames added after the 2026-10-10 uncaught repair
+      // failure: the innermost throw site must survive, not just the host path.
+      "    at async file:///home/runner/work/sentinel/src/repair/transitions.ts:5:7",
+      "    at async file:///home/runner/work/sentinel/src/repair/attempt-policy.ts:9:11",
+      // A basename that is not code-owned is still dropped entirely.
+      "    at async file:///home/runner/work/sentinel/src/secret/not-ours.ts:1:1",
       // Credential-shaped and unknown labels inside real `at ` frame shapes
       // must never be emitted as frame labels.
       `    at ${fakeSecret}:11:12`,
@@ -1401,6 +1407,8 @@ Deno.test("hosted runtime: early child failure diagnostic is sanitized, bounded 
     assert.deepEqual(early.frames, [
       "hosted-runtime.ts:42:7",
       "loop.ts:9:3",
+      "transitions.ts:5:7",
+      "attempt-policy.ts:9:11",
     ]);
     assert.equal(early.reasonCode, null);
     assert.equal(result.detail, HOSTED_RUNTIME_FAILED_DETAIL);
