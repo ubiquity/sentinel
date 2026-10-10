@@ -566,14 +566,34 @@ matrix_plan, matrix_cell, repair and delivery were skipped on every run.
   standard single rollback to the recorded generation 69 revision at
   generation 71.
 
+### Live verification — generation 70 healthy (2026-10-10 06:05 UTC)
+
+- Generation 70 installed from the staged rung and passed its bootstrap
+  verification:
+  `{"kind":"owner_development_install","status":"installed","action":"install","priorRevision":"6db6166d2…","priorGeneration":69,"candidateRevision":"7f43cf0…","candidateGeneration":70}`
+  in `prepare`, then
+  `lastHealthyProof: healthy, revision 7f43cf0…, generation 70, settled=true`
+  from run `38026017660`. The strengthened version-control prompt and the
+  `versionedRegressions` digest facts are therefore live in the runtime the
+  matrix cells execute.
+- The live maintenance entry emitted the learning digest:
+  `{"kind":"sentinel_memory_digest","records":2,"refused":0,"regressions":0,"resolved":0,"versionedRegressions":[]}`,
+  and the same pass applied bounded retirements and delivery dispositions.
+- Durable memory is populated by the live runtime: two `attempt_memory` families
+  for `issue-ubiquity-ai.ubq.fi-421` (distinct bases) each record `successes: 1`
+  with `lastSuccessRevision 3b6d3736…`; the recomputed `lessons/` view follows
+  them.
+- The install chain continues: the retained-recovery lane staged generation 71
+  (`7c3baee1`) and the bootstrap is running, i.e. healthy-proof generation moves
+  and their single bounded rollback are exercising on the live ref.
+
 ### Remaining follow-ups
 
-- The strengthened regression wording (exact older working revision plus the
-  explicit version-control restore instruction) and the `versionedRegressions`
-  digest facts are launcher code on `development`/`sentinel-supervisor`; the
-  live runtime revision `6db6166d2` carries the original regression signal. The
-  next runtime rung should pin a revision that contains the strengthened prompt,
-  with a green `test-local` check first.
-- If the current-matrix walk keeps exceeding its 180s bound it defers every run
-  instead of failing; a resumable scan position is the follow-up, owned with the
-  retained-recovery lane.
+- No live failure entry or refusal has been recorded yet (all settled attempts
+  succeeded). The loop breaker's live evidence will appear as soon as an
+  implementation attempt settles as failed; the same boundaries are already
+  covered by `tests/host/memory-loop-breaker_e2e_test.ts`, the planner gate test
+  and the retry-denial test.
+- If the current-matrix walk keeps exhausting its 60s bound, the maintenance
+  entry defers every run instead of failing; a resumable scan position is the
+  follow-up, owned with the retained-recovery lane.
