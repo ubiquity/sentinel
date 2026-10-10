@@ -753,6 +753,8 @@ const LEARNING_RUNTIME_REVISION =
   "6db6166d23deddcf1894d493b25b4c1f4e616282" as GitSha;
 const VERSIONED_RUNTIME_REVISION =
   "7f43cf0b93b82c521a55d3fae26996831dc8c27e" as GitSha;
+const CANCELLED_RELEASE_RUNTIME_REVISION =
+  "7c3baee145310141a666bd05360f4e03c56cfd04" as GitSha;
 
 async function matrixRecoveryState() {
   const work = CLOSED_C_WAVE.cells.map((cell) =>
@@ -2684,6 +2686,97 @@ Deno.test(
     }
     assert.equal(learningFailed.move.nextRevision, MEMORY_RUNTIME_REVISION);
     assert.equal(learningFailed.move.nextGeneration, 70);
+  },
+);
+
+Deno.test(
+  "owner development install plan: generation 71 cancelled-release settlement install follows a healthy 70 and rolls back once",
+  () => {
+    const versionedHealthy = healthyProof(VERSIONED_RUNTIME_REVISION, 70, 161);
+    const settlementInstall = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: VERSIONED_RUNTIME_REVISION,
+          generation: 70,
+          healthyProof: versionedHealthy,
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(settlementInstall.status, "install");
+    if (settlementInstall.status !== "install") {
+      throw new Error("expected install");
+    }
+    assert.equal(
+      settlementInstall.move.priorRevision,
+      VERSIONED_RUNTIME_REVISION,
+    );
+    assert.equal(settlementInstall.move.priorGeneration, 70);
+    assert.equal(
+      settlementInstall.move.nextRevision,
+      CANCELLED_RELEASE_RUNTIME_REVISION,
+    );
+    assert.equal(settlementInstall.move.nextGeneration, 71);
+    assert.equal(
+      canonicalStringify(settlementInstall.move.priorHealthyProof),
+      canonicalStringify(versionedHealthy),
+    );
+
+    // A failed generation 71 restores the recorded generation 70 revision
+    // once at monotonic generation 72.
+    const settlementRollback = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: CANCELLED_RELEASE_RUNTIME_REVISION,
+          generation: 71,
+          healthyProof: versionedHealthy,
+          executionProof: failedProof(
+            CANCELLED_RELEASE_RUNTIME_REVISION,
+            71,
+            162,
+          ),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(settlementRollback.status, "rollback");
+    if (settlementRollback.status !== "rollback") {
+      throw new Error("expected rollback");
+    }
+    assert.equal(
+      settlementRollback.move.priorRevision,
+      CANCELLED_RELEASE_RUNTIME_REVISION,
+    );
+    assert.equal(settlementRollback.move.priorGeneration, 71);
+    assert.equal(
+      settlementRollback.move.nextRevision,
+      VERSIONED_RUNTIME_REVISION,
+    );
+    assert.equal(settlementRollback.move.nextGeneration, 72);
+    assert.equal(
+      canonicalStringify(settlementRollback.move.priorHealthyProof),
+      canonicalStringify(versionedHealthy),
+    );
+
+    // A failed generation 70 still falls through to the versioned rung's own
+    // rollback, never to the settlement rung.
+    const versionedFailed = planOwnerDevelopmentInstall(
+      releaseSnapshot({
+        runtime: runtimeRecord({
+          revision: VERSIONED_RUNTIME_REVISION,
+          generation: 70,
+          healthyProof: healthyProof(LEARNING_RUNTIME_REVISION, 69, 163),
+          executionProof: failedProof(VERSIONED_RUNTIME_REVISION, 70, 164),
+        }),
+      }),
+      NOW,
+    );
+    assert.equal(versionedFailed.status, "rollback");
+    if (versionedFailed.status !== "rollback") {
+      throw new Error("expected rollback");
+    }
+    assert.equal(versionedFailed.move.nextRevision, LEARNING_RUNTIME_REVISION);
+    assert.equal(versionedFailed.move.nextGeneration, 71);
   },
 );
 

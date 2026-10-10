@@ -602,6 +602,20 @@ export const OWNER_DEVELOPMENT_INSTALL_VERSIONED_PRIOR_GENERATION = 69;
 export const OWNER_DEVELOPMENT_INSTALL_VERSIONED_REVISION =
   "7f43cf0b93b82c521a55d3fae26996831dc8c27e" as GitSha;
 export const OWNER_DEVELOPMENT_INSTALL_VERSIONED_GENERATION = 70;
+/**
+ * Cancelled-release settlement rung: the delivery observation parks a record
+ * whose release request the trusted controller cancelled or failed instead of
+ * waiting forever for release evidence that can no longer exist (the
+ * issue-ubiquity-sentinel-98 stall). Installed only after the recorded
+ * generation 70 healthy proof; a failed generation 71 candidate restores the
+ * recorded generation 70 revision once at monotonic generation 72.
+ */
+export const OWNER_DEVELOPMENT_INSTALL_CANCELLED_DELIVERY_PRIOR_REVISION =
+  "7f43cf0b93b82c521a55d3fae26996831dc8c27e" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_CANCELLED_DELIVERY_PRIOR_GENERATION = 70;
+export const OWNER_DEVELOPMENT_INSTALL_CANCELLED_DELIVERY_REVISION =
+  "7c3baee145310141a666bd05360f4e03c56cfd04" as GitSha;
+export const OWNER_DEVELOPMENT_INSTALL_CANCELLED_DELIVERY_GENERATION = 71;
 export interface OwnerMatrixRecoveryEvidenceV1 {
   candidate: GitSha;
   repairHead: GitSha;
@@ -2987,6 +3001,58 @@ export function planOwnerDevelopmentInstall(
     }
     return waiting(
       "the planner successor generation 60 healthy proof is not recorded",
+    );
+  }
+
+  // Cancelled-release settlement rung. Only a HEALTHY generation 70 record
+  // takes this branch; a failed 70 falls through to the versioned rung's own
+  // rollback below, so its two-stage rollback semantics stay exactly as
+  // recorded.
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_CANCELLED_DELIVERY_PRIOR_REVISION &&
+    generation ===
+      OWNER_DEVELOPMENT_INSTALL_CANCELLED_DELIVERY_PRIOR_GENERATION &&
+    healthy !== null
+  ) {
+    return movePlan(
+      "install",
+      runtime,
+      OWNER_DEVELOPMENT_INSTALL_CANCELLED_DELIVERY_REVISION,
+      OWNER_DEVELOPMENT_INSTALL_CANCELLED_DELIVERY_GENERATION,
+      healthy,
+      "install the cancelled-release settlement runtime after its generation 70 healthy proof",
+    );
+  }
+
+  if (
+    revision === OWNER_DEVELOPMENT_INSTALL_CANCELLED_DELIVERY_REVISION &&
+    generation === OWNER_DEVELOPMENT_INSTALL_CANCELLED_DELIVERY_GENERATION
+  ) {
+    if (failed !== null) {
+      const prior = healthyProofFor(
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_CANCELLED_DELIVERY_PRIOR_REVISION,
+        OWNER_DEVELOPMENT_INSTALL_CANCELLED_DELIVERY_PRIOR_GENERATION,
+      );
+      if (prior === null) {
+        return waiting(
+          "the recorded generation 70 healthy proof for the rollback is unavailable",
+        );
+      }
+      return movePlan(
+        "rollback",
+        runtime,
+        OWNER_DEVELOPMENT_INSTALL_CANCELLED_DELIVERY_PRIOR_REVISION,
+        runtime.generation + 1,
+        prior,
+        "roll back the failed cancelled-release settlement runtime to its recorded proven predecessor",
+      );
+    }
+    if (healthy !== null) {
+      return noChange("the owner development installation is complete");
+    }
+    return waiting(
+      "the cancelled-release settlement generation 71 healthy proof is not recorded",
     );
   }
 
