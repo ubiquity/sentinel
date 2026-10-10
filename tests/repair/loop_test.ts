@@ -9042,9 +9042,11 @@ Deno.test(
       assert.equal(record.nextStep, "review");
       // Recovery replaces the expired wait with the new PR's bounded review
       // observation; the old operation never owns that replacement.
-      assert.equal(record.wait?.reason, "review_pending");
-      assert.equal(record.wait?.since, T0);
-      assert.equal(record.wait?.until, T0 + 15 * 60_000);
+      assert.deepEqual(record.wait, {
+        reason: "review_pending",
+        since: T0,
+        until: T0 + 15 * 60_000,
+      }, "the stale wait is replaced by the bounded replacement wait");
       assert.equal(record.target.head, SHA3);
       assert.equal(
         rig.github.reviewRequestIdentities[0]?.prNumber,
