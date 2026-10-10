@@ -15,7 +15,7 @@ import {
 import { reservation, SHA1, T0, workRecord } from "../state/helpers.ts";
 
 const WORK_ID = "issue-ubiquity-ai.ubq.fi-1";
-const BASE_SHA = "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1";
+const BASE_SHA = SHA1;
 
 function testRelease(): unknown {
   return {
