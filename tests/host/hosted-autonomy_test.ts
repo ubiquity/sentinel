@@ -2894,6 +2894,7 @@ Deno.test(
 
     const original = globalThis.fetch;
     const requests: string[] = [];
+    let integrationCompareBytes = 0;
     globalThis.fetch = ((input: string | URL | Request) => {
       const url = String(input);
       requests.push(url);
@@ -2925,11 +2926,21 @@ Deno.test(
           base_commit: { sha: BASE },
           merge_base_commit: { sha: BASE },
         }
-        : {
-          status: "ahead",
-          base_commit: { sha: MERGE },
-          merge_base_commit: { sha: MERGE },
-        };
+        : (() => {
+          // A real integration compare embeds the whole commit/file gap and
+          // can exceed the ordinary 1 MiB response bound (2026-10-05 stacked
+          // merges: ~1.9 MB). It must still be read.
+          const payload = {
+            status: "ahead",
+            base_commit: { sha: MERGE },
+            merge_base_commit: { sha: MERGE },
+            files: Array.from({ length: 4000 }, () => ({
+              filename: "p".repeat(300),
+            })),
+          };
+          integrationCompareBytes = JSON.stringify(payload).length;
+          return payload;
+        })();
       return Promise.resolve(
         new Response(JSON.stringify(payload), { status: 200 }),
       );
@@ -2951,7 +2962,15 @@ Deno.test(
       assert.equal(afterMerge.merged, true);
       assert.equal(afterMerge.mergeCommitSha, MERGE);
       assert.deepEqual([...afterMerge.parents], [BASE, HEAD]);
-      assert.equal(afterMerge.revisionOnBaseBranch, true);
+      assert.equal(
+        afterMerge.revisionOnBaseBranch,
+        true,
+        `integration compare was ${integrationCompareBytes} bytes`,
+      );
+      assert.ok(
+        integrationCompareBytes > 1_048_576,
+        "the fixture must exceed the ordinary response bound",
+      );
       assert.equal(afterMerge.baseSha, BASE);
       assert.equal(afterMerge.baseAncestorOfRevision, true);
       assert.equal(requests.length, 5);

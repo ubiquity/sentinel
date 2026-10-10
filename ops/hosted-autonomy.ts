@@ -398,6 +398,14 @@ const API_BASE = "https://api.github.com";
 const REQUEST_TIMEOUT_MS = 30_000;
 const MAX_RESPONSE_BYTES = 1_048_576;
 /**
+ * Compare responses embed the whole commit and file gap between two revisions,
+ * so they legitimately exceed the ordinary bound: the 2026-10-05 stacked
+ * merges compared against a five-day-advanced branch at ~1.9 MB, and the
+ * rejected read silently read as "not integrated". The bound stays finite: a
+ * compare that cannot fit is still refused.
+ */
+const MAX_COMPARE_RESPONSE_BYTES = 8 * 1_048_576;
+/**
  * GitHub list pagination bound. Every list read that gates a delivery must be
  * COMPLETE: the reader walks pages until the response's own `total_count` is
  * covered, and a listing that promises more items than the bound can cover is
@@ -4144,6 +4152,7 @@ export function createHostedAutonomyGitHub(
     method: string,
     path: string,
     body?: Record<string, unknown>,
+    maxBytes: number = MAX_RESPONSE_BYTES,
   ): Promise<unknown | null> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -4161,7 +4170,7 @@ export function createHostedAutonomyGitHub(
       });
       if (response.status < 200 || response.status >= 300) return null;
       const text = await response.text();
-      if (text.length > MAX_RESPONSE_BYTES) return null;
+      if (text.length > maxBytes) return null;
       return JSON.parse(text);
     } catch {
       return null;
@@ -4200,6 +4209,8 @@ export function createHostedAutonomyGitHub(
     const compare = await request(
       "GET",
       `/repos/${scope}/compare/${mergeCommitSha}...${baseBranch}`,
+      undefined,
+      MAX_COMPARE_RESPONSE_BYTES,
     );
     revisionOnBaseBranch = revisionIntegratedIntoBase(
       compare,
@@ -4215,6 +4226,8 @@ export function createHostedAutonomyGitHub(
       const baseCompare = await request(
         "GET",
         `/repos/${scope}/compare/${parsed.baseSha}...${mergeCommitSha}`,
+        undefined,
+        MAX_COMPARE_RESPONSE_BYTES,
       );
       baseAncestorOfRevision = revisionIntegratedIntoBase(
         baseCompare,
