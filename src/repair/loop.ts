@@ -121,6 +121,7 @@ import {
   authorizingReceipt,
   classifyReviewTerminalDisposition,
   MERGE_WITHOUT_REVIEW_DETAIL,
+  TASK_ACCEPTANCE_ALREADY_SATISFIED_DETAIL,
   TASK_ACCEPTANCE_CONTEXT_DETAIL,
   TASK_ACCEPTANCE_DIGEST_DETAIL,
   TASK_ACCEPTANCE_MISMATCH_DETAIL,
@@ -637,6 +638,8 @@ export async function runRepairCycle(
   // skipped as over-cap.
   const orphanAttempted = new Set<string>();
   const missingTaskReviewAttempted = new Set<string>();
+  // One run-local re-observation per historical already-satisfied block.
+  const alreadySatisfiedAttempted = new Set<string>();
   // Intake is polled exactly once per run. A deferred (cooldown or bound)
   // iteration must never re-poll the sources: subsequent loop iterations reuse
   // the run-local deferral tracking instead of repeating intake reads.
@@ -956,6 +959,21 @@ export async function runRepairCycle(
       return { status: "state_error", detail: missingTaskReview.detail };
     }
     if (missingTaskReview?.kind === "progress") {
+      didWork = true;
+      steps++;
+      continue;
+    }
+
+    const alreadySatisfied = await recoverBlockedAlreadySatisfied(
+      deps,
+      context,
+      alreadySatisfiedAttempted,
+      deferred,
+    );
+    if (alreadySatisfied?.kind === "state_error") {
+      return { status: "state_error", detail: alreadySatisfied.detail };
+    }
+    if (alreadySatisfied?.kind === "progress") {
       didWork = true;
       steps++;
       continue;
@@ -5444,6 +5462,77 @@ async function recoverBlockedMissingTaskReview(
       context,
       record,
       observed.value.observation,
+      observed.value.operationKey,
+    );
+    if (result.kind === "deferred") {
+      deferred.add(record.id);
+      continue;
+    }
+    return result;
+  }
+  return null;
+}
+
+/**
+ * One run-local re-observation for the historical already-satisfied block: the
+ * pre-terminal code could only park an already_satisfied_at_base verdict as a
+ * terminal block, so the record is skipped by every lifecycle phase forever.
+ * The bridge consumes the EXACT standing review journal for the record's own
+ * published head -- the same bot-journal consumer the review stage uses -- and
+ * requires the fresh observation to still be a completed, resolved,
+ * already_satisfied_at_base verdict on that exact head before the ordinary
+ * review disposition runs. With the terminal forward path installed that
+ * disposition stages the guarded closure intent; a missing, unreadable,
+ * differently-headed, unresolved-finding-bearing or changed verdict leaves the
+ * record exactly as it was. Never a merge, release, receipt rewrite or manual
+ * state edit.
+ */
+async function recoverBlockedAlreadySatisfied(
+  deps: RepairCycleDepsV1,
+  context: LoopContextV1,
+  attempted: Set<string>,
+  deferred: Set<string>,
+): Promise<StepResultV1 | null> {
+  for (const record of context.snapshot.work) {
+    if (
+      record.nextStep !== "blocked" ||
+      record.blocker?.kind !== "other" ||
+      record.blocker.message !== TASK_ACCEPTANCE_ALREADY_SATISFIED_DETAIL ||
+      record.source.kind !== "issue" || record.intent !== null ||
+      record.wait !== null || record.target.pr === null ||
+      record.target.head === null || record.target.branch === null ||
+      record.counters.reviewRounds < 1 ||
+      !legacyDependenciesDone(context.snapshot, record) ||
+      attempted.has(record.id)
+    ) continue;
+    attempted.add(record.id);
+    const cooling = await checkGithubCooldown(
+      deps,
+      record.repository,
+      context.bounds,
+    );
+    if (cooling.kind === "state_error") return cooling;
+    if (cooling.kind === "deferred") continue;
+    const observed = await observeStandingReview(
+      deps,
+      record,
+      record.target.pr,
+      record.target.head,
+    );
+    if (!observed.ok) continue;
+    const observation = observed.value.observation;
+    if (
+      observation.status !== "completed" ||
+      observation.observedHead !== record.target.head ||
+      (observation.taskAcceptance?.verdict ?? null) !==
+        "already_satisfied_at_base" ||
+      observation.findings.some((finding) => !finding?.resolved)
+    ) continue;
+    const result = await applyObservedReview(
+      deps,
+      context,
+      record,
+      observation,
       observed.value.operationKey,
     );
     if (result.kind === "deferred") {

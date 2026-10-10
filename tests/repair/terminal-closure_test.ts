@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { RollingStartBudget } from "../../src/budget/mod.ts";
 import { portError, portOk } from "../../src/contracts/ports.ts";
-import { reviewTaskStatementDigest } from "../../src/contracts/review-receipt.ts";
+import {
+  reviewTaskStatementDigest,
+  TASK_ACCEPTANCE_ALREADY_SATISFIED_DETAIL,
+} from "../../src/contracts/review-receipt.ts";
 import { DurableGitHubCooldownGate } from "../../src/repair/github-cooldown.ts";
 import { runRepairCycle } from "../../src/repair/loop.ts";
 import { reviewOperationKey } from "../../src/repair/keys.ts";
@@ -157,4 +160,65 @@ Deno.test("terminal closure: task changed during retry blocks with preserved int
   assert.equal(context.state.repair!.work[0].nextStep, "blocked");
   assert.deepEqual(context.state.repair!.work[0].intent, intent);
   assert.equal(context.github.closures, 1);
+});
+
+function asHistoricalBlock(
+  context: Awaited<ReturnType<typeof rig>>,
+): void {
+  context.state.repair!.work[0] = {
+    ...context.state.repair!.work[0],
+    nextStep: "blocked",
+    blocker: {
+      kind: "other",
+      message: TASK_ACCEPTANCE_ALREADY_SATISFIED_DETAIL,
+      since: T0 + 3600_000,
+    },
+    intent: null,
+    wait: null,
+  };
+}
+
+Deno.test("terminal closure: historical already-satisfied block recovers through the standing journal", async () => {
+  const context = await rig();
+  asHistoricalBlock(context);
+  const outcome = await context.run();
+  assert.equal(outcome.status, "idle", JSON.stringify(outcome));
+  const record = context.state.repair!.work[0];
+  assert.equal(record.nextStep, "done");
+  assert.equal(record.blocker, null);
+  assert.equal(record.intent, null);
+  assert.equal(context.github.closures, 1);
+  assert.equal(context.state.repair!.reviews.length, 1);
+  assert.equal(context.github.calls.includes("merge"), false);
+  assert.equal(context.model.requests.length, 0);
+});
+
+Deno.test("terminal closure: historical block without a readable journal stays blocked", async () => {
+  const context = await rig();
+  asHistoricalBlock(context);
+  context.github.observeReview = () =>
+    Promise.resolve(portError("unavailable", "review transport unavailable"));
+  await context.run();
+  assert.equal(context.state.repair!.work[0].nextStep, "blocked");
+  assert.equal(context.github.closures, 0);
+  assert.equal(context.state.repair!.reviews.length, 0);
+});
+
+Deno.test("terminal closure: historical block with a changed verdict stays blocked", async () => {
+  const context = await rig();
+  asHistoricalBlock(context);
+  const key = reviewOperationKey(7, SHA2, 1);
+  const observation = context.github.reviewObservationsByKey.get(key);
+  assert(observation !== undefined);
+  assert(observation.taskAcceptance !== null);
+  context.github.reviewObservationsByKey.set(key, {
+    ...observation,
+    taskAcceptance: {
+      ...observation.taskAcceptance,
+      verdict: "fulfilled",
+    },
+  });
+  await context.run();
+  assert.equal(context.state.repair!.work[0].nextStep, "blocked");
+  assert.equal(context.github.closures, 0);
 });
