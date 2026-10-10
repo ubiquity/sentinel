@@ -14,8 +14,11 @@
  *
  * It is NOT a general maintenance framework and NOT a policy change: no
  * release state, receipt, evidence, review or candidate is written, and no
- * other record or reservation is modified. The core planner is pure so tests
- * run against real contract parsers without credentials.
+ * other record or reservation is modified. A bound reservation already
+ * settled `ambiguous` marks its entry consumed regardless of later record
+ * movement, so a re-run after the disposition reports `already_applied` and
+ * writes nothing. The core planner is pure so tests run against real contract
+ * parsers without credentials.
  *
  * Usage:
  *   deno run --allow-read --allow-write --allow-run=git,gh --allow-net=api.github.com \
@@ -153,9 +156,12 @@ export type HistoricalRetryPlanV1 =
   | { ok: false; refused: string };
 
 /**
- * Pure planner. Every bound record must still be the exact untouched retry
- * admission this disposition was authorized for; any deviation refuses the
- * whole batch so a moved, settled or unrelated state is never modified.
+ * Pure planner. A bound reservation already settled `ambiguous` marks its
+ * entry consumed: the bounded settle was applied and whatever the record does
+ * afterwards is a later admission, not this disposition's business. Every
+ * remaining entry must still be the exact untouched retry admission this
+ * disposition was authorized for; any deviation refuses the whole batch so a
+ * moved, settled or unrelated state is never modified.
  */
 export function planHistoricalRetryDisposition(
   snapshot: RepairStateSnapshotV1,
@@ -170,9 +176,27 @@ export function planHistoricalRetryDisposition(
     snapshot.work.map((record) => [String(record.id), record]),
   );
   const seen = new Set<string>();
+  const pending: HistoricalRetryBindingV1[] = [];
   for (const entry of binding) {
     if (seen.has(entry.id)) return { ok: false, refused: "duplicate binding" };
     seen.add(entry.id);
+    const reservations = snapshot.reservations.filter((row) =>
+      row.id === entry.reservationId
+    );
+    if (reservations.length !== 1) {
+      return { ok: false, refused: "bound reservation missing: " + entry.id };
+    }
+    const reservation = reservations[0];
+    if (
+      String(reservation.taskId) !== entry.id ||
+      reservation.purpose !== "retry"
+    ) {
+      return { ok: false, refused: "bound reservation changed: " + entry.id };
+    }
+    if (reservation.outcome === "ambiguous") continue;
+    if (reservation.outcome !== "reserved") {
+      return { ok: false, refused: "bound reservation changed: " + entry.id };
+    }
     const record = workById.get(entry.id);
     if (record === undefined) {
       return { ok: false, refused: "missing bound record: " + entry.id };
@@ -193,23 +217,13 @@ export function planHistoricalRetryDisposition(
     ) {
       return { ok: false, refused: "bound intent changed: " + entry.id };
     }
-    const reservations = snapshot.reservations.filter((row) =>
-      row.id === entry.reservationId
-    );
-    if (reservations.length !== 1) {
-      return { ok: false, refused: "bound reservation missing: " + entry.id };
-    }
-    const reservation = reservations[0];
-    if (
-      String(reservation.taskId) !== entry.id ||
-      reservation.outcome !== "reserved" ||
-      reservation.purpose !== "retry"
-    ) {
-      return { ok: false, refused: "bound reservation changed: " + entry.id };
-    }
+    pending.push(entry);
   }
-  const workIds = new Set(binding.map((entry) => entry.id));
-  const reservationIds = new Set(binding.map((entry) => entry.reservationId));
+  if (pending.length === 0) {
+    return { ok: true, snapshot, transitions: [] };
+  }
+  const workIds = new Set(pending.map((entry) => entry.id));
+  const reservationIds = new Set(pending.map((entry) => entry.reservationId));
   const work = snapshot.work.map((record) =>
     workIds.has(record.id)
       ? markBlocked(
@@ -239,7 +253,7 @@ export function planHistoricalRetryDisposition(
       work,
       reservations,
     },
-    transitions: binding.map((entry) => ({
+    transitions: pending.map((entry) => ({
       id: entry.id,
       reservationId: entry.reservationId,
     })),
@@ -294,25 +308,6 @@ export async function runHistoricalRetryDispositionMain(
     return 1;
   }
   const snapshot = repair.value.snapshot;
-  const alreadyApplied = HISTORICAL_RETRY_DISPOSITION_BINDING_V1.every(
-    (entry) => {
-      const record = snapshot.work.find((row) => String(row.id) === entry.id);
-      const reservation = snapshot.reservations.find((row) =>
-        row.id === entry.reservationId
-      );
-      return record?.nextStep === "blocked" &&
-        record.blocker?.message === HISTORICAL_RETRY_DISPOSITION_MESSAGE &&
-        reservation?.outcome === "ambiguous";
-    },
-  );
-  if (alreadyApplied) {
-    console.log(JSON.stringify({
-      kind: "historical_retry_disposition",
-      status: "already_applied",
-      transitions: HISTORICAL_RETRY_DISPOSITION_BINDING_V1.length,
-    }));
-    return 0;
-  }
   const planned = planHistoricalRetryDisposition(
     snapshot,
     HISTORICAL_RETRY_DISPOSITION_BINDING_V1,
@@ -325,6 +320,14 @@ export async function runHistoricalRetryDispositionMain(
       detail: planned.refused,
     }));
     return 1;
+  }
+  if (planned.transitions.length === 0) {
+    console.log(JSON.stringify({
+      kind: "historical_retry_disposition",
+      status: "already_applied",
+      transitions: HISTORICAL_RETRY_DISPOSITION_BINDING_V1.length,
+    }));
+    return 0;
   }
   const summary = {
     kind: "historical_retry_disposition",
