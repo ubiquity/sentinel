@@ -408,6 +408,22 @@ const LISTING_PAGE_SIZE = 100;
 const RUN_LISTING_PAGE_SIZE = 50;
 const MAX_LISTING_PAGES = 20;
 
+/**
+ * Exact bounded message the current-matrix history walk throws when its scan
+ * budget is exhausted. The walk itself stays fail-closed (nothing is written
+ * after the bound); the hosted entry point classifies this exact availability
+ * condition as a deferred, non-fatal result so one oversized history walk can
+ * never fail the maintenance job and skip prepare, matrix_plan and delivery.
+ */
+export const CURRENT_MATRIX_HISTORY_DEADLINE_MESSAGE =
+  "current matrix history deadline exhausted";
+
+/** True when a thrown autonomy error is that bounded availability condition. */
+export function isDeferredCurrentMatrixHistoryBudget(error: unknown): boolean {
+  return error instanceof Error &&
+    error.message === CURRENT_MATRIX_HISTORY_DEADLINE_MESSAGE;
+}
+
 export type HostedAutonomyReasonV1 =
   | "applied"
   | "no_change"
@@ -430,6 +446,7 @@ export type HostedAutonomyReasonV1 =
   | "readback_unverified"
   | "identity_rejected"
   | "historical_quarantine_incomplete"
+  | "deferred_matrix_history_budget"
   | "unexpected_failure";
 
 export interface HostedAutonomyResultV1 {
@@ -2489,22 +2506,13 @@ async function recoverHostedHistoricalC63(
   return { ingested: report.ingested, deferred: false };
 }
 
-/**
- * Bounded budget for the current-matrix release-history walk. The walk is
- * best-effort recovery: when the bound is exhausted the pass defers (no
- * writes, every other pass continues) instead of failing the maintenance job,
- * because a failing maintenance job skips prepare and blocks the entire
- * supervisor on every run while the release history keeps growing.
- */
-const CURRENT_MATRIX_HISTORY_DEADLINE_MS = 180_000;
-
 async function recoverHostedCurrentMatrix(
   deps: HostedAutonomyDepsV1,
   binding: ClosedCWaveBindingV1,
   onDeferred: () => void,
 ): Promise<HostedAutonomyResultV1 | null> {
   if (!deps.closedMatrix) return null;
-  const deadlineAt = deps.clock.now() + CURRENT_MATRIX_HISTORY_DEADLINE_MS;
+  const deadlineAt = deps.clock.now() + 60_000;
   const dedicated = new Set<string>([
     ...binding.cells.map((row) => row.reservationId),
     ...(deps.historicalMatrix
@@ -2566,15 +2574,7 @@ async function recoverHostedCurrentMatrix(
     let producer = current;
     while (true) {
       if (deps.clock.now() >= deadlineAt) {
-        // Availability, not integrity: defer the walk with an explicit,
-        // bounded reason so the maintenance pass still succeeds and the next
-        // dispatch can continue recovery from the current custody.
-        onDeferred();
-        console.log(JSON.stringify({
-          kind: "sentinel_current_matrix_deferred",
-          detail: "history deadline exhausted",
-        }));
-        return null;
+        throw new Error(CURRENT_MATRIX_HISTORY_DEADLINE_MESSAGE);
       }
       if (snapshots.has(producer.head)) {
         throw new Error("current matrix history cycle");
@@ -2670,7 +2670,7 @@ async function recoverHostedMatrixProducer(
 ): Promise<{ result: HostedAutonomyResultV1 | null; deferred: boolean }> {
   const checkDeadline = () => {
     if (deps.clock.now() >= deadlineAt) {
-      throw new Error("current matrix history deadline exhausted");
+      throw new Error(CURRENT_MATRIX_HISTORY_DEADLINE_MESSAGE);
     }
   };
   checkDeadline();
@@ -2699,7 +2699,7 @@ async function recoverHostedMatrixProducer(
   ) throw new Error("current matrix producer custody unavailable");
   const custody = async () => {
     if (deps.clock.now() >= deadlineAt) {
-      throw new Error("current matrix history deadline exhausted");
+      throw new Error(CURRENT_MATRIX_HISTORY_DEADLINE_MESSAGE);
     }
     const fresh = await deps.state.readRelease();
     checkDeadline();
@@ -4771,6 +4771,24 @@ export async function runHostedAutonomyMain(input?: {
       }
     }
   } catch (error) {
+    if (isDeferredCurrentMatrixHistoryBudget(error)) {
+      // Availability, not integrity: the walk wrote nothing after its bound,
+      // so report a bounded deferral and keep the maintenance job green.
+      console.log(JSON.stringify({
+        kind: "sentinel_current_matrix_deferred",
+        detail: CURRENT_MATRIX_HISTORY_DEADLINE_MESSAGE,
+      }));
+      result = {
+        kind: "hosted_autonomy",
+        status: "skipped",
+        reason: "deferred_matrix_history_budget",
+        beforeHead: null,
+        appliedHead: null,
+        actions: ["matrix-history:deferred"],
+        revisions: [],
+      };
+      return report(result);
+    }
     // Bounded diagnostic: only this codebase's own failure vocabulary is
     // echoed, so an external payload can never reach the log.
     if (error instanceof Error) {

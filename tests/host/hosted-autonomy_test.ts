@@ -95,6 +95,7 @@ import {
   createHostedAutonomyGitHub,
   createHostedClosedMatrixRecovery,
   createHostedHistoricalMatrixQuarantine,
+  CURRENT_MATRIX_HISTORY_DEADLINE_MESSAGE,
   HOSTED_AUTONOMY_MAX_RETRIES,
   HOSTED_AUTONOMY_MAX_REVIEW_ROUNDS,
   HOSTED_AUTONOMY_RETIRED,
@@ -102,6 +103,7 @@ import {
   hostedDeliveryKey,
   hostedIssueKey,
   hostedRepositoryKey,
+  isDeferredCurrentMatrixHistoryBudget,
   isHardAutonomyFailure,
   parseHostedAutonomyPull,
   planHostedClosures,
@@ -10255,5 +10257,29 @@ Deno.test(
       ).length,
       0,
     );
+  },
+);
+
+Deno.test(
+  "hosted autonomy: an exhausted current-matrix history budget classifies as a bounded deferral",
+  () => {
+    // The walk itself stays fail-closed and rejects; the hosted entry point
+    // is what converts this exact availability condition into a non-fatal
+    // deferral so one oversized history walk never fails the maintenance job
+    // and skips prepare, matrix_plan and delivery.
+    assert.equal(
+      isDeferredCurrentMatrixHistoryBudget(
+        new Error(CURRENT_MATRIX_HISTORY_DEADLINE_MESSAGE),
+      ),
+      true,
+    );
+    assert.equal(
+      isDeferredCurrentMatrixHistoryBudget(
+        new Error("current matrix history cycle"),
+      ),
+      false,
+    );
+    assert.equal(isDeferredCurrentMatrixHistoryBudget("exhausted"), false);
+    assert.equal(isDeferredCurrentMatrixHistoryBudget(undefined), false);
   },
 );
