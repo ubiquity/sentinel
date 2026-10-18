@@ -6,9 +6,12 @@ import type { HostedQueueCoordinatorDeps } from "./hosted-autonomy-queue-contrac
 import type { HostedAutonomyDepsV1 } from "./hosted-autonomy-types.ts";
 import {
   decideQueuePolicy,
+  hasCompleteQueueAuthorizationFacts,
+  hasQueueDeliveryProvenance,
   hasQueueIntentNamespace,
 } from "./hosted-autonomy-queue-policy.ts";
 import {
+  isDefinitelyNotSubmitted,
   parseQueueIntent,
   queueFailure,
   queueIntentBinding,
@@ -84,6 +87,35 @@ export async function reconcileQueueRecord(
   }
   let state = saved?.state ?? null;
   const entry = member.value.entry;
+  if (
+    state !== null && isDefinitelyNotSubmitted(state) && entry === null &&
+    !hasQueueDeliveryProvenance(record) &&
+    hasCompleteQueueAuthorizationFacts(auth.value.facts) &&
+    member.value.pull.head === binding.head &&
+    auth.value.facts.membership.status === "complete" &&
+    auth.value.facts.membership.value.entry === null &&
+    auth.value.facts.membership.value.mergedRevision === null &&
+    auth.value.facts.membership.value.pull.head === binding.head &&
+    canonicalStringify(auth.value.facts.membership.value.pull) ===
+      canonicalStringify(pull) &&
+    canonicalStringify(input.native.repository) ===
+      canonicalStringify(queue.repository) &&
+    input.native.baseRef === "development" &&
+    input.native.entries.every((item) =>
+      item.pull.number !== binding.pullRequest
+    ) &&
+    canonicalStringify(member.value.pull) === canonicalStringify(pull)
+  ) {
+    const cleared = {
+      ...record,
+      wait: null,
+      intent: null,
+      updatedAt: deps.clock.now(),
+    };
+    if (!await writer.update([cleared])) return stop();
+    writer.actions.push(`${tag}:not_submitted_reconciled`);
+    return ready();
+  }
   if (state?.stage === "dequeue_pending") {
     writer.actions.push(`${tag}:dequeue_pending_owner_action`);
     // Native absence alone cannot prove whether an earlier PR-scoped mutation ran.

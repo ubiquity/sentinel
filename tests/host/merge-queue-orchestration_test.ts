@@ -138,6 +138,37 @@ Deno.test("queue custody: ambiguous/crashed submission stays charged and never r
   assert.equal(canonicalStringify(f.state.repair!.reservations), charges);
 });
 
+Deno.test("queue admission: a definite preflight refusal is reconciled without refund", async () => {
+  const f = await orchestrationRig();
+  f.queue.config.mode = "on";
+  f.rules({ status: "complete", value: true });
+  let authorizations = 0;
+  const readAuthorization = f.queue.authorization.readAuthorization;
+  f.queue.authorization.readAuthorization = (request) => {
+    authorizations++;
+    if (authorizations === 2) f.auth.headCiGreen = false;
+    return readAuthorization(request);
+  };
+  const charges = canonicalStringify(f.state.repair!.reservations);
+  const first = await runHostedQueueCustody(f.deps, f.now() + 60000);
+  assert.equal(first.ready, true, first.actions.join(" "));
+  assert.equal(
+    parseQueueIntent(f.state.repair!.work[0])?.stage,
+    "not_submitted",
+  );
+  assert.equal(f.calls.includes("enqueue"), false);
+  const second = await runHostedQueueCustody(f.deps, f.now() + 60000);
+  assert.equal(second.ready, true, second.actions.join(" "));
+  assert.ok(
+    second.actions.some((action) =>
+      action.endsWith(":not_submitted_reconciled")
+    ),
+  );
+  assert.equal(f.state.repair!.work[0].intent, null);
+  assert.equal(f.state.repair!.work[0].wait, null);
+  assert.equal(canonicalStringify(f.state.repair!.reservations), charges);
+});
+
 Deno.test("queue custody: definitive refusals stop at three, preserving original admission age", async () => {
   const f = await orchestrationRig();
   f.queue.config.mode = "on";

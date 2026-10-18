@@ -3,7 +3,10 @@ import { canonicalStringify } from "../src/contracts/canonical.ts";
 import { hasTakeoverCustody } from "../src/github/existing-pr-takeover-provenance.ts";
 import type {
   QueueBinding,
+  QueueMembership,
   QueuePullIdentity,
+  QueueRead,
+  QueueSnapshot,
 } from "../src/github/merge-queue-types.ts";
 import type {
   QueueRecordOutcome,
@@ -15,7 +18,33 @@ import {
   type QueueIntentState,
 } from "./hosted-autonomy-queue-intent.ts";
 import { queueHold } from "./hosted-autonomy-queue-writer.ts";
-import { decideQueuePolicy } from "./hosted-autonomy-queue-policy.ts";
+import {
+  decideQueuePolicy,
+  hasCompleteQueueAuthorizationFacts,
+} from "./hosted-autonomy-queue-policy.ts";
+
+function hasConsistentNativeAbsence(
+  scan: QueueRead<QueueSnapshot>,
+  member: QueueRead<QueueMembership>,
+  authorizationMember: QueueRead<QueueMembership>,
+  repository: QueueBinding["repository"],
+  binding: QueueBinding,
+  pull: QueuePullIdentity,
+): boolean {
+  const absent = (observed: QueueRead<QueueMembership>): boolean =>
+    observed.status === "complete" && observed.value.entry === null &&
+    observed.value.mergedRevision === null &&
+    observed.value.pull.head === binding.head &&
+    canonicalStringify(observed.value.pull) === canonicalStringify(pull);
+  return scan.status === "complete" &&
+    canonicalStringify(scan.value.repository) ===
+      canonicalStringify(repository) &&
+    scan.value.baseRef === "development" &&
+    scan.value.entries.every((item) =>
+      item.pull.number !== binding.pullRequest
+    ) &&
+    absent(member) && absent(authorizationMember);
+}
 
 export async function submitQueueAdmission(
   input: QueueRecordPass,
@@ -57,6 +86,26 @@ export async function submitQueueAdmission(
     intent,
     updatedAt: deps.clock.now(),
   };
+  const markNotSubmitted = async (
+    reason: string,
+  ): Promise<QueueRecordOutcome> => {
+    const failure = queueFailure(
+      intent,
+      "not_submitted",
+      previous?.refusals ?? 0,
+      previous?.queueFailures ?? 0,
+      deps.clock.now(),
+      true,
+    );
+    record = {
+      ...record,
+      intent: failure,
+      updatedAt: deps.clock.now(),
+    };
+    if (!await writer.update([record])) return stop();
+    writer.actions.push(`${tag}:pre_effect_not_submitted:${reason}`);
+    return { ready: true, submitted: false };
+  };
   if (!await writer.update([record])) {
     writer.actions.push(`${tag}:intent_unverified`);
     return stop();
@@ -74,6 +123,34 @@ export async function submitQueueAdmission(
     deps.clock.now() >= input.deadline
   ) {
     writer.actions.push(`${tag}:pre_effect_observation_changed`);
+    if (
+      rules.status === "complete" && rules.value === false &&
+      scan.status === "complete" && member.status === "complete"
+    ) {
+      const authorization = await queue.authorization.readAuthorization({
+        snapshot: writer.observed.snapshot,
+        observedHead: writer.observed.head,
+        record,
+        binding,
+        queue: scan.value,
+      });
+      if (
+        authorization.status === "complete" &&
+        canonicalStringify(authorization.value.binding) ===
+          canonicalStringify(binding) &&
+        canonicalStringify(authorization.value.pull) ===
+          canonicalStringify(pull) &&
+        hasCompleteQueueAuthorizationFacts(authorization.value.facts) &&
+        hasConsistentNativeAbsence(
+          scan,
+          member,
+          authorization.value.facts.membership,
+          queue.repository,
+          binding,
+          pull,
+        )
+      ) return await markNotSubmitted("queue_disabled");
+    }
     return stop();
   }
   const auth = await queue.authorization.readAuthorization({
@@ -109,6 +186,18 @@ export async function submitQueueAdmission(
         "reason" in decision ? decision.reason : "refused"
       }`,
     );
+    const facts = auth.value.facts;
+    if (
+      decision.action === "hold" && hasCompleteQueueAuthorizationFacts(facts) &&
+      hasConsistentNativeAbsence(
+        scan,
+        member,
+        facts.membership,
+        queue.repository,
+        binding,
+        pull,
+      )
+    ) return await markNotSubmitted("authorization_refused");
     return { ready: true, submitted: false };
   }
   // A competing state writer between the readback and effect revokes this pass's authority.

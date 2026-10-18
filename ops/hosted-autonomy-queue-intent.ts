@@ -41,6 +41,18 @@ export interface QueueIntentState {
   queueFailures: number;
   admission: 0 | 1;
 }
+
+/**
+ * A first-admission unavailable result proves that this intent never reached
+ * the queue.  A re-entry or an earlier refusal carries durable queue history
+ * and must stay in custody even when its latest result was unavailable.
+ */
+export function isDefinitelyNotSubmitted(state: QueueIntentState): boolean {
+  return state.stage === "not_submitted" && state.admission === 0 &&
+    state.refusals === 0 && state.queueFailures === 0 &&
+    state.intent.requestId === null && state.intent.resultId === null;
+}
+
 /** Finite vocabulary: no raw text, arbitrary metadata, or embedded proof object. */
 export const QUEUE_FAILURE_DETAILS: ReadonlyMap<string, {
   stage: typeof STAGES[number];

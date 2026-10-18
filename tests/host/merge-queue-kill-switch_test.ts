@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { createHostedQueueCoordinator } from "../../ops/hosted-autonomy-queue-host.ts";
 import { runHostedQueueCustody } from "../../ops/hosted-autonomy-queue-pass.ts";
-import { createQueueIntent } from "../../ops/hosted-autonomy-queue-intent.ts";
+import type { HostedAutonomyGitHubV1 } from "../../ops/hosted-autonomy-types.ts";
+import {
+  createQueueIntent,
+  parseQueueIntent,
+} from "../../ops/hosted-autonomy-queue-intent.ts";
 import { parseRepairStateSnapshotV1 } from "../../src/contracts/state-snapshots.ts";
 import { composeLocalGitHub } from "../../src/host/local-github.ts";
 import {
@@ -106,6 +110,8 @@ async function factoryRig() {
   let activeRule = false;
   let member = false;
   let admissionReady = false;
+  let refuseAdmission = false;
+  let moveStateHeadBeforeAdmissionResponse = false;
   let enqueues = 0;
   const accepted = await authorityRig();
   const acceptedSource: Source = {
@@ -137,6 +143,8 @@ async function factoryRig() {
       );
       assert.equal(state.repair!.reservations[0].outcome, "ambiguous");
       enqueues++;
+      if (moveStateHeadBeforeAdmissionResponse) state.repairHead = SHA3;
+      if (refuseAdmission) return Promise.resolve(response({}, 403));
       return Promise.resolve(
         response(pendingWire({ merge_method: "merge" }), 202),
       );
@@ -290,6 +298,7 @@ async function factoryRig() {
   };
   return {
     facts,
+    github,
     state,
     clock,
     calls,
@@ -302,6 +311,12 @@ async function factoryRig() {
     readyForAdmission: () => {
       admissionReady = true;
       activeRule = true;
+    },
+    refuseAdmission: (value: boolean) => {
+      refuseAdmission = value;
+    },
+    moveStateHeadBeforeAdmissionResponse: (value: boolean) => {
+      moveStateHeadBeforeAdmissionResponse = value;
     },
     setRule: (value: boolean) => {
       activeRule = value;
@@ -544,4 +559,66 @@ Deno.test("actual coordinator factory switches off after a real HTTP admission a
     assert.deepEqual(rig.state.repair!.reservations, charged.reservations);
     assert.equal(restarted.config.proofActivated, true);
   }
+});
+
+Deno.test("actual native not-submitted admission reconciles after restart without refunding", async () => {
+  const rig = await factoryRig();
+  rig.readyForAdmission();
+  rig.refuseAdmission(true);
+  const beforeReservations = structuredClone(rig.state.repair!.reservations);
+  const first = await runHostedQueueCustody({
+    state: rig.state,
+    clock: rig.clock,
+    githubFor: () => rig.github as HostedAutonomyGitHubV1,
+    queue: rig.coordinator("on", rig.acceptedSource),
+  }, rig.clock.now() + 60000);
+  assert.equal(first.ready, true, first.actions.join(" "));
+  assert.equal(
+    parseQueueIntent(rig.state.repair!.work[0])?.stage,
+    "not_submitted",
+  );
+  const restarted = await runHostedQueueCustody({
+    state: rig.state,
+    clock: rig.clock,
+    githubFor: () => rig.github as HostedAutonomyGitHubV1,
+    queue: rig.coordinator("on", rig.acceptedSource),
+  }, rig.clock.now() + 60000);
+  assert.equal(restarted.ready, true, restarted.actions.join(" "));
+  assert.ok(
+    restarted.actions.some((action) =>
+      action.endsWith(":not_submitted_reconciled")
+    ),
+  );
+  assert.equal(rig.state.repair!.work[0].intent, null);
+  assert.equal(rig.state.repair!.work[0].wait, null);
+  assert.deepEqual(rig.state.repair!.reservations, beforeReservations);
+});
+
+Deno.test("late native not-submitted response with a moved state head keeps custody", async () => {
+  const rig = await factoryRig();
+  rig.readyForAdmission();
+  rig.refuseAdmission(true);
+  rig.moveStateHeadBeforeAdmissionResponse(true);
+  const beforeReservations = structuredClone(rig.state.repair!.reservations);
+  const first = await runHostedQueueCustody({
+    state: rig.state,
+    clock: rig.clock,
+    githubFor: () => rig.github as HostedAutonomyGitHubV1,
+    queue: rig.coordinator("on", rig.acceptedSource),
+  }, rig.clock.now() + 60000);
+  assert.equal(first.ready, false);
+  assert.equal(
+    parseQueueIntent(rig.state.repair!.work[0])?.stage,
+    "unresolved",
+  );
+  const restarted = await runHostedQueueCustody({
+    state: rig.state,
+    clock: rig.clock,
+    githubFor: () => rig.github as HostedAutonomyGitHubV1,
+    queue: rig.coordinator("on", rig.acceptedSource),
+  }, rig.clock.now() + 60000);
+  assert.equal(restarted.ready, true, restarted.actions.join(" "));
+  assert.equal(rig.state.repair!.work[0].intent !== null, true);
+  assert.equal(rig.state.repair!.work[0].wait?.until, null);
+  assert.deepEqual(rig.state.repair!.reservations, beforeReservations);
 });

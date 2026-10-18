@@ -112,6 +112,18 @@ export interface QueueAuthorizationFacts {
   reentry: boolean;
   failedQueueAdmissions: number;
 }
+
+/** Null authorization fields are incomplete evidence, never a refusal. */
+export function hasCompleteQueueAuthorizationFacts(
+  facts: QueueAuthorizationFacts,
+): boolean {
+  return facts.reviewAuthorized !== null && facts.latestReceiptId !== null &&
+    facts.taskDigest !== null && facts.optedOut !== null &&
+    facts.headCiGreen !== null && facts.workflowAccepted !== null &&
+    facts.rulesAccepted !== null && facts.exactPatch !== null &&
+    facts.pathsDisjoint !== null && facts.tipEligible !== null;
+}
+
 function sameBindingPull(
   facts: QueueAuthorizationFacts,
   membership: QueueMembership,
