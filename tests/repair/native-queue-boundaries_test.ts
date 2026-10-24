@@ -285,13 +285,24 @@ function assertHeld(
   rig: Rig,
   before: RepairStateSnapshotV1,
   allowReads = false,
+  transient = false,
 ) {
   const after = rig.state.repair!;
   const row = after.work[0];
+  const now = rig.clock.now();
+  const unavailableSince = before.work[0].wait?.reason === "unavailable"
+    ? before.work[0].wait.since
+    : now;
   assert.deepEqual(row, {
     ...before.work[0],
-    wait: { reason: "backoff", since: rig.clock.now(), until: null },
-    updatedAt: rig.clock.now(),
+    wait: transient
+      ? {
+        reason: "unavailable",
+        since: unavailableSince,
+        until: now + CHECK_POLL_MS,
+      }
+      : { reason: "backoff", since: now, until: null },
+    updatedAt: now,
   });
   for (
     const key of [
@@ -317,6 +328,7 @@ const boundaries: {
   name: string;
   record: () => WorkRecordV1;
   release?: boolean;
+  delivery?: boolean;
   run: (r: Rig) => Promise<unknown>;
 }[] = [
   {
@@ -389,6 +401,7 @@ const boundaries: {
   },
   {
     name: "book merged response",
+    delivery: true,
     record: () =>
       baseRecord({
         nextStep: "delivery",
@@ -405,6 +418,7 @@ const boundaries: {
     name: "accept release",
     record: () => baseRecord({ nextStep: "delivery" }),
     release: true,
+    delivery: true,
     run: (r) =>
       acceptRelease(r.deps, r.context, r.record, r.request, r.clock.now()),
   },
@@ -416,6 +430,7 @@ const boundaries: {
         intent: intent("issue_closure", baseRecord()),
       }),
     release: true,
+    delivery: true,
     run: (r) => retryClosure(r.deps, r.context, r.record),
   },
   {
@@ -427,6 +442,7 @@ const boundaries: {
     name: "resume delivery",
     record: () => baseRecord({ nextStep: "delivery" }),
     release: true,
+    delivery: true,
     run: (r) => executeDeliveryStep(r.deps, r.context, r.record),
   },
   {
@@ -455,6 +471,7 @@ const boundaries: {
         wait: { reason: "unavailable", since: T0, until: null },
       }),
     release: true,
+    delivery: true,
     run: (r) =>
       resumeDeferredRelease(r.deps, r.context, {
         attempted: new Set(),
@@ -463,7 +480,7 @@ const boundaries: {
   },
 ];
 
-Deno.test("native queue membership and unavailable observation preserve custody at runtime boundaries", async (t) => {
+Deno.test("native queue refusals preserve custody at runtime boundaries", async (t) => {
   for (const reason of ["member", "observation_unavailable"] as const) {
     for (const boundary of boundaries) {
       await t.step(`${reason}: ${boundary.name}`, async () => {
@@ -474,14 +491,19 @@ Deno.test("native queue membership and unavailable observation preserve custody 
         const before = structuredClone(rig.context.snapshot);
         const result = await boundary.run(rig);
         assert.deepEqual(result, { kind: "progress" });
-        assertHeld(rig, before);
+        assertHeld(
+          rig,
+          before,
+          false,
+          boundary.delivery || reason === "observation_unavailable",
+        );
         assert.equal(rig.inspections.length, 1);
       });
     }
   }
 });
 
-Deno.test("missing native queue capability cannot resume a target publication", async () => {
+Deno.test("missing native queue capability uses a bounded wait", async () => {
   const rig = harness(baseRecord(), "missing");
   const before = structuredClone(rig.context.snapshot);
   assert.deepEqual(
@@ -493,7 +515,7 @@ Deno.test("missing native queue capability cannot resume a target publication", 
     ),
     { kind: "progress" },
   );
-  assertHeld(rig, before);
+  assertHeld(rig, before, false, true);
 });
 
 Deno.test("direct implementation and review admission recheck custody immediately before reserving", async (t) => {
@@ -635,12 +657,12 @@ Deno.test("preactivation rule observation failure polls and resumes an existing 
   assert.equal(calls.http, 0);
 });
 
-Deno.test("activated proof policy keeps unknown rules in nonexpiring custody", async () => {
+Deno.test("activated proof policy polls unknown rules with a bounded wait", async () => {
   const rig = harness(baseRecord());
   const calls = transientRuleGuard(rig, true);
   const before = structuredClone(rig.state.repair!);
   await executeWorkStep(rig.deps, rig.context, rig.record);
-  assertHeld(rig, before);
+  assertHeld(rig, before, false, true);
   assert.deepEqual(calls, { rules: 1, queuePulls: 0, http: 0 });
 });
 

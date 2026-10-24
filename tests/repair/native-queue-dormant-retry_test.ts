@@ -500,7 +500,7 @@ Deno.test("a transient final-effect refusal cannot replace queue intent or prove
     queueRefusalIsTransient({
       detail: "native queue custody hold: observation_unavailable",
     }),
-    false,
+    true,
   );
 });
 

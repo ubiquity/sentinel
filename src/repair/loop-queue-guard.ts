@@ -4,7 +4,10 @@ import { hasQueueDeliveryProvenance } from "../github/queue-delivery-provenance.
 import { hasQueueIntentNamespace } from "../../ops/hosted-autonomy-queue-policy.ts";
 /** Final queue guards preserve original intent, candidate identity and charged accounting. */
 import { canonicalStringify } from "../contracts/canonical.ts";
-import type { NativeDeliveryDecision } from "../github/native-queue-guard.ts";
+import type {
+  NativeDeliveryDecision,
+  QueueGuardReason,
+} from "../github/native-queue-guard.ts";
 import type { GitSha } from "../contracts/brands.ts";
 import type { ReviewReceiptV1 } from "../contracts/review-receipt.ts";
 import type { WorkRecordV1 } from "../contracts/work-record.ts";
@@ -20,6 +23,22 @@ import type {
   RepairCycleDepsV1,
   StepResultV1,
 } from "./loop-types.ts";
+
+function queueGuardReasonIsTransient(reason: QueueGuardReason): boolean {
+  switch (reason) {
+    case "capability_missing":
+    case "rule_unavailable":
+    case "observation_unavailable":
+    case "inactive_observation_unavailable":
+      return true;
+    case "custody":
+    case "member":
+    case "identity_drift":
+    case "merged_head":
+    case "queue_required":
+      return false;
+  }
+}
 
 export async function holdQueueRecord(
   deps: RepairCycleDepsV1,
@@ -88,7 +107,9 @@ export async function guardQueueOperation(
     )
   ) return await guardQueueDelivery(deps, context, record);
   const guard = deps.github.nativeQueue;
-  if (guard === undefined) return await holdQueueRecord(deps, context, record);
+  if (guard === undefined) {
+    return await holdQueueRecord(deps, context, record, true);
+  }
   const result = await guard.inspect({
     record,
     operation,
@@ -99,8 +120,7 @@ export async function guardQueueOperation(
     deps,
     context,
     record,
-    result.reason === "rule_unavailable" ||
-      result.reason === "inactive_observation_unavailable",
+    queueGuardReasonIsTransient(result.reason),
   );
 }
 export async function guardQueueDelivery(
@@ -132,7 +152,7 @@ export async function guardQueueDelivery(
   if (
     deps.github.nativeQueue === undefined || exactReceipt === null ||
     exactRevision === undefined
-  ) return await holdQueueRecord(deps, context, record);
+  ) return await holdQueueRecord(deps, context, record, true);
   const proof = await deps.github.nativeQueue.proveDelivery({
     record,
     receipt: exactReceipt,
@@ -167,9 +187,7 @@ export async function guardQueueDelivery(
     deps,
     context,
     record,
-    proof.status === "unavailable" &&
-      (proof.reason === "rule_unavailable" ||
-        proof.reason === "inactive_observation_unavailable"),
+    proof.status === "unavailable",
   );
 }
 
@@ -179,7 +197,11 @@ export function queueEffectRefused(error: { detail: string }): boolean {
 }
 
 export function queueRefusalIsTransient(error: { detail: string }): boolean {
-  return error.detail === "native queue custody hold: rule_unavailable" ||
+  return error.detail === "native queue custody capability missing" ||
+    error.detail === "native queue custody hold: capability_missing" ||
+    error.detail === "native queue custody hold: rule_unavailable" ||
+    error.detail === "native queue custody hold: observation_unavailable" ||
     error.detail ===
-      "native queue custody hold: inactive_observation_unavailable";
+      "native queue custody hold: inactive_observation_unavailable" ||
+    error.detail === "native queue custody hold: queue_evidence_unavailable";
 }
