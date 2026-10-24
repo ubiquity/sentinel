@@ -54,7 +54,9 @@ export interface SelfObservationIssueV1 {
 }
 
 const SELF_DEFECT_JOBS = [
+  "quality",
   "test-local",
+  "test-shards",
   "maintenance",
   "prepare",
   "matrix_plan",
@@ -69,12 +71,24 @@ const SELF_DEFECT_JOBS = [
   "verify-artifact",
 ] as const;
 
+const SELF_DEFECT_TEST_SHARD_NAMES = [
+  "test-shards (modules)",
+  "test-shards (integration)",
+  "test-shards (host-1)",
+  "test-shards (host-2)",
+  "test-shards (host-3)",
+] as const;
+
 function safeWorkflow(value: string): string {
   return SELF_DEFECT_WORKFLOWS.includes(value) ? value : "unknown-workflow";
 }
 
 function safeJob(value: string): string {
-  return SELF_DEFECT_JOBS.some((job) => job === value) ? value : "unknown-job";
+  if (SELF_DEFECT_JOBS.some((job) => job === value)) return value;
+  // The Actions API appends a fixed matrix value to this logical job name.
+  return SELF_DEFECT_TEST_SHARD_NAMES.some((job) => job === value)
+    ? "test-shards"
+    : "unknown-job";
 }
 
 function keyOf(

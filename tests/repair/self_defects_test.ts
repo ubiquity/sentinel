@@ -59,6 +59,27 @@ Deno.test("self defects: normalization makes one class out of shifting values", 
   assert.equal(a.summary, "type error: TS2304");
 });
 
+Deno.test("self defects: CI job display names remain allowlisted", () => {
+  for (
+    const job of [
+      "quality",
+      "test-local",
+      "test-shards (modules)",
+      "test-shards (integration)",
+      "test-shards (host-1)",
+      "test-shards (host-2)",
+      "test-shards (host-3)",
+    ]
+  ) {
+    const signature = extractSelfFailureSignature("no useful log output\n", {
+      ...RUN,
+      job,
+    });
+    const expectedJob = job.startsWith("test-shards (") ? "test-shards" : job;
+    assert.equal(signature.key, `sentinel-ci:${expectedJob}:job:observed`);
+  }
+});
+
 Deno.test("self defects: assertion and generic error lines are extracted", () => {
   const assertion = extractSelfFailureSignature(
     "error: AssertionError: unexpected github calls: readRef, createPr\n",
